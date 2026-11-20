@@ -16,6 +16,10 @@ import {
   sessionCookieOptions,
 } from "@/lib/security/session-policy";
 
+function expireCookie(store: Awaited<ReturnType<typeof cookies>>, name: string): void {
+  store.set(name, "", { ...sessionCookieOptions, maxAge: 0 });
+}
+
 export async function establishAdminActivity(subject: string): Promise<void> {
   const store = await cookies();
   store.set(
@@ -29,7 +33,7 @@ export async function establishAdminActivity(subject: string): Promise<void> {
     }),
     { ...sessionCookieOptions, maxAge: adminAbsoluteSeconds },
   );
-  store.delete(factorResetCookie);
+  expireCookie(store, factorResetCookie);
 }
 
 export async function establishCustomerActivity(subject: string): Promise<void> {
@@ -62,9 +66,14 @@ export async function markAdminFactorReset(subject: string): Promise<void> {
   );
 }
 
+export async function clearAdminFactorResetCookie(): Promise<void> {
+  const store = await cookies();
+  expireCookie(store, factorResetCookie);
+}
+
 export async function clearActivityCookies(): Promise<void> {
   const store = await cookies();
-  store.delete(adminActivityCookie);
-  store.delete(customerActivityCookie);
-  store.delete(factorResetCookie);
+  expireCookie(store, adminActivityCookie);
+  expireCookie(store, customerActivityCookie);
+  expireCookie(store, factorResetCookie);
 }

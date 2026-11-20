@@ -19,7 +19,7 @@ class OperationFailure extends Error {}
 
 function authorizationMessage(error: unknown): ActionState {
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE")
-    return actionError("Confirma tu autenticador en Seguridad antes de hacer este cambio.");
+    return actionError("Confirma tu autenticador antes de aplicar este cambio.");
   if (error instanceof AdminAuthorizationError)
     return actionError("Tu sesión no está autorizada para esta operación.");
   return actionError("No pudimos completar la operación. Inténtalo de nuevo.");
@@ -105,7 +105,7 @@ export async function updateAdministratorAction(
     if (!canAssignAdminRole(session.profile.role, parsed.data.role))
       throw new OperationFailure("No puedes asignar ese rol.");
     const context = await getRequestSecurityContext();
-    await getDatabase().$transaction(async (tx) => {
+    const targetInfo = await getDatabase().$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('admin-role-membership'))`;
       const target = await tx.adminUser.findUnique({ where: { id: parsed.data.targetId } });
       if (!target || target.deletedAt || !isAdminRole(target.role))
@@ -146,7 +146,19 @@ export async function updateAdministratorAction(
           },
         },
       });
+      return { authUserId: target.authUserId, previousStatus: target.status };
     });
+
+    if (parsed.data.status === "SUSPENDED" || targetInfo.previousStatus === "SUSPENDED") {
+      const admin = createSupabaseAdminClient();
+      if (parsed.data.status === "SUSPENDED") {
+        await admin.auth.admin.updateUserById(targetInfo.authUserId, { ban_duration: "876000h" });
+        await admin.auth.admin.signOut(targetInfo.authUserId, "global");
+      } else if (parsed.data.status === "ACTIVE") {
+        await admin.auth.admin.updateUserById(targetInfo.authUserId, { ban_duration: "none" });
+      }
+    }
+
     revalidatePath("/admin/usuarios");
     return actionSuccess("Administrador actualizado y cambio registrado en auditoría.");
   } catch (error) {

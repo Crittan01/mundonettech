@@ -26,13 +26,20 @@ export function maskIdentifier(value: string | null | undefined): string {
   return value.length <= 8 ? "••••••••" : `${value.slice(0, 4)}••••${value.slice(-4)}`;
 }
 
+const sensitiveAuditKeyPattern =
+  /(?:email|phone|token|secret|password|credential|plaintext|code|hash|cookie|authorization|address|cedula|nit|ip|useragent)/i;
+
 export function sanitizeAuditValue(value: unknown, key = "", depth = 0): unknown {
-  if (/(?:email|phone|token|secret|password|credential|plaintext|code|hash)/i.test(key)) {
+  if (key && sensitiveAuditKeyPattern.test(key)) {
     return "[redactado]";
   }
   if (depth > 4) return "[truncado]";
   if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return value.toString();
   if (typeof value === "number") return Number.isFinite(value) ? value : "[inválido]";
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "[inválido]" : value.toISOString();
+  }
   if (typeof value === "string") return value.length > 300 ? `${value.slice(0, 297)}...` : value;
   if (Array.isArray(value)) {
     return value.slice(0, 30).map((item) => sanitizeAuditValue(item, key, depth + 1));

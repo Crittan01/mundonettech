@@ -5,11 +5,22 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 
 import { actionError, actionSuccess, type ActionState } from "@/lib/action-state";
+import { getDatabase } from "@/lib/db";
 import { establishCustomerActivity, clearActivityCookies } from "@/lib/security/activity-cookies";
 import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
 import { isPasswordCompromised } from "@/lib/security/hibp";
+import { getRequestSecurityContext, recordSecurityEvent } from "@/lib/security/request-context";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+
+async function safeRecordCustomerEvent(eventType: string): Promise<void> {
+  try {
+    const context = await getRequestSecurityContext();
+    await recordSecurityEvent(getDatabase(), { context, eventType });
+  } catch {
+    // Telemetry failure must not reveal account existence or mask primary error.
+  }
+}
 
 const emailSchema = z.string().trim().min(3).max(320).email();
 const passwordSchema = z.string().min(1).max(128);
@@ -149,8 +160,10 @@ export async function verifyCustomerOtpAction(
     token: parsed.data.code,
     type: parsed.data.mode,
   });
-  if (error || !data.user || !data.session)
+  if (error || !data.user || !data.session) {
+    await safeRecordCustomerEvent("CUSTOMER_OTP_FAILED");
     return actionError("El código no es válido o expiró. Solicita uno nuevo.");
+  }
   try {
     await synchronizeCustomerProfile(data.user.id, normalizeEmail(parsed.data.email));
     await establishCustomerActivity(data.user.id);
@@ -185,8 +198,10 @@ export async function resetCustomerPasswordAction(
     token: parsed.data.code,
     type: "recovery",
   });
-  if (error || !data.user || !data.session)
+  if (error || !data.user || !data.session) {
+    await safeRecordCustomerEvent("CUSTOMER_OTP_FAILED");
     return actionError("El código no es válido o expiró. Solicita uno nuevo.");
+  }
   const updated = await supabase.auth.updateUser({ password: parsed.data.password });
   if (updated.error) {
     await supabase.auth.signOut();

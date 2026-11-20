@@ -8,8 +8,54 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { initialActionState } from "@/lib/action-state";
+import {
+  regenerateAdminRecoveryCodesAction,
+  signOutAllAdminSessionsAction,
+  stepUpAdminAction,
+} from "@/lib/actions/admin-auth";
 import { initialMfaState } from "@/lib/security/mfa-state";
-import { regenerateAdminRecoveryCodesAction, stepUpAdminAction } from "@/lib/actions/admin-auth";
+
+export function StepUpPrompt({ factorId }: { factorId: string }) {
+  const [stepUp, stepUpAction, stepping] = useActionState(stepUpAdminAction, initialActionState);
+
+  if (stepUp.status === "success") {
+    return (
+      <p
+        className="rounded-lg border border-border bg-card p-4 text-sm text-foreground"
+        role="status"
+      >
+        {stepUp.message}
+      </p>
+    );
+  }
+
+  return (
+    <form action={stepUpAction} className="space-y-4 rounded-lg border border-border bg-card p-4">
+      <h2 className="font-semibold">Confirma tu identidad (step-up MFA)</h2>
+      <p className="text-sm text-muted-foreground">
+        Las acciones críticas exigen haber verificado tu autenticador en los últimos diez minutos.
+      </p>
+      <input type="hidden" name="factorId" value={factorId} />
+      <div className="space-y-2">
+        <Label htmlFor="step-up-code">Código actual del autenticador</Label>
+        <Input
+          id="step-up-code"
+          name="code"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          pattern="[0-9]{6}"
+          maxLength={6}
+          required
+          className="max-w-xs"
+        />
+      </div>
+      <FormMessage state={stepUp} />
+      <Button type="submit" disabled={stepping}>
+        {stepping ? "Confirmando…" : "Confirmar identidad"}
+      </Button>
+    </form>
+  );
+}
 
 export function SecurityManager({ factorId, recent }: { factorId: string; recent: boolean }) {
   const [stepUp, stepUpAction, stepping] = useActionState(stepUpAdminAction, initialActionState);
@@ -17,12 +63,19 @@ export function SecurityManager({ factorId, recent }: { factorId: string; recent
     regenerateAdminRecoveryCodesAction,
     initialMfaState,
   );
+  const [revokedAll, revokeAllAction, revokingAll] = useActionState(
+    signOutAllAdminSessionsAction,
+    initialActionState,
+  );
   const confirmed = recent || stepUp.status === "success";
   if (regenerated.recoveryCodes) return <RecoveryCodes codes={regenerated.recoveryCodes} />;
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {!confirmed ? (
-        <form action={stepUpAction} className="space-y-4 rounded-lg border border-border p-4">
+        <form
+          action={stepUpAction}
+          className="space-y-4 rounded-lg border border-border bg-card p-4"
+        >
           <h2 className="font-semibold">Confirma tu identidad</h2>
           <p className="text-sm text-muted-foreground">
             Han pasado más de diez minutos desde tu último segundo factor.
@@ -34,9 +87,11 @@ export function SecurityManager({ factorId, recent }: { factorId: string; recent
               id="step-up-code"
               name="code"
               inputMode="numeric"
+              autoComplete="one-time-code"
               pattern="[0-9]{6}"
               maxLength={6}
               required
+              className="max-w-xs"
             />
           </div>
           <FormMessage state={stepUp} />
@@ -45,19 +100,30 @@ export function SecurityManager({ factorId, recent }: { factorId: string; recent
           </Button>
         </form>
       ) : null}
-      {confirmed ? (
-        <section className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Regenerar revoca todos los códigos anteriores que no hayas usado.
-          </p>
-          <form action={regenerateAction}>
-            <Button type="submit" variant="outline" disabled={regenerating}>
-              {regenerating ? "Generando…" : "Regenerar códigos de recuperación"}
-            </Button>
-          </form>
-          <FormMessage state={regenerated} />
-        </section>
-      ) : null}
+      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+        <h2 className="text-lg font-semibold">Códigos de recuperación</h2>
+        <p className="text-sm text-muted-foreground">
+          Regenerar revoca todos los códigos anteriores que no hayas usado.
+        </p>
+        <form action={regenerateAction}>
+          <Button type="submit" variant="outline" disabled={!confirmed || regenerating}>
+            {regenerating ? "Generando…" : "Regenerar códigos de recuperación"}
+          </Button>
+        </form>
+        <FormMessage state={regenerated} />
+      </section>
+      <section className="space-y-3 rounded-xl border border-border bg-card p-5">
+        <h2 className="text-lg font-semibold">Cerrar todas las sesiones</h2>
+        <p className="text-sm text-muted-foreground">
+          Exige un segundo factor reciente y revoca también las demás sesiones activas de tu cuenta.
+        </p>
+        <form action={revokeAllAction}>
+          <Button variant="destructive" type="submit" disabled={!confirmed || revokingAll}>
+            {revokingAll ? "Cerrando sesiones…" : "Cerrar todas las sesiones"}
+          </Button>
+        </form>
+        <FormMessage state={revokedAll} />
+      </section>
     </div>
   );
 }

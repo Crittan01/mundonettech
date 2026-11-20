@@ -2,6 +2,8 @@ import { isAdminRole, maskEmail, type AdminRoleValue } from "@mundonettech/core"
 import Link from "next/link";
 
 import { AdministratorEditor, InviteAdministratorForm } from "@/components/admin/admin-user-forms";
+import { StepUpPrompt } from "@/components/admin/security-manager";
+import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -51,7 +53,14 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
       : {}),
   };
   const db = getDatabase();
-  const total = await db.adminUser.count({ where });
+  const [now, factors, total] = await Promise.all([
+    getDatabaseClock(db),
+    session.supabase.auth.mfa.listFactors(),
+    db.adminUser.count({ where }),
+  ]);
+  const verifiedFactor = factors.data?.totp.find((item) => item.status === "verified");
+  const recentMfa =
+    session.lastMfaAt !== null && now.getTime() - session.lastMfaAt.getTime() <= 10 * 60 * 1000;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(requestedPage, totalPages);
   const users = await db.adminUser.findMany({
@@ -73,6 +82,7 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
           Invitaciones, roles y estados protegidos por anillos y MFA reciente.
         </p>
       </div>
+      {!recentMfa && verifiedFactor ? <StepUpPrompt factorId={verifiedFactor.id} /> : null}
       <details className="rounded-xl border border-border bg-card">
         <summary className="cursor-pointer p-4 font-semibold">Invitar un administrador</summary>
         <div className="p-4 pt-0">

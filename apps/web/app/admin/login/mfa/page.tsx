@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 
-import { AuthShell } from "@/components/auth/auth-shell";
 import { AdminMfaForm } from "@/components/admin/admin-auth-forms";
+import { AuthShell } from "@/components/auth/auth-shell";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
 
@@ -24,12 +24,17 @@ export default async function AdminMfaPage() {
   ]);
   if (factors.error) throw new Error("Unable to list MFA factors.");
   const verified = factors.data.totp.find((factor) => factor.status === "verified");
+  const canUseRecoveryCode = Boolean(verified) || session.profile.mfaEnrolledAt !== null;
   return (
     <AuthShell
       title="Verifica tu identidad"
       description="El panel exige un segundo factor válido y una sesión reciente."
     >
-      <AdminMfaForm {...security} verifiedFactorId={verified?.id ?? null} />
+      <AdminMfaForm
+        {...security}
+        verifiedFactorId={verified?.id ?? null}
+        canUseRecoveryCode={canUseRecoveryCode}
+      />
     </AuthShell>
   );
 }

@@ -120,10 +120,15 @@ describe("F0.4 — PII minimization and password policy", () => {
     assert.equal(maskIdentifier("12345678"), "••••••••");
     const sanitized = sanitizeAuditValue({
       email: "raw@example.com",
-      nested: { token: "secret", safe: "ok" },
+      amountCents: 15990000n,
+      occurredAt: new Date("2026-11-20T18:00:00.000Z"),
+      nested: { token: "secret", cookie: "sb=1", safe: "ok" },
     });
     assert.equal(JSON.stringify(sanitized).includes("raw@example.com"), false);
     assert.equal(JSON.stringify(sanitized).includes("secret"), false);
+    assert.equal(sanitized.amountCents, "15990000");
+    assert.equal(sanitized.occurredAt, "2026-11-20T18:00:00.000Z");
+    assert.equal(sanitized.nested.cookie, "[redactado]");
     assert.equal(sanitized.nested.safe, "ok");
   });
 
@@ -256,15 +261,19 @@ describe("F0.4 — real HTTP HIBP and Turnstile adapters", () => {
   });
 });
 
-describe("F0.4 — edge security wiring", () => {
-  it("uses verified Supabase user lookup, nonce CSP, security headers and HMAC cookies", () => {
+describe("F0.4 — edge security and PPR storefront wiring", () => {
+  it("uses verified Supabase user lookup, PPR-compatible CSP, __Host- safe expiry, and static RootLayout", () => {
     const proxy = readFileSync("apps/web/proxy.ts", "utf8");
+    const rootLayout = readFileSync("apps/web/app/layout.tsx", "utf8");
     assert.match(proxy, /supabase\.auth\.getUser\(\)/);
     assert.match(proxy, /Content-Security-Policy/);
     assert.match(proxy, /Strict-Transport-Security/);
     assert.match(proxy, /refreshTimeoutToken/);
     assert.match(proxy, /frame-ancestors 'none'/);
     assert.match(proxy, /challenges\.cloudflare\.com/);
+    assert.match(proxy, /maxAge:\s*0/);
+    assert.doesNotMatch(proxy, /'strict-dynamic'/);
     assert.doesNotMatch(proxy, /getSession\(\)/);
+    assert.doesNotMatch(rootLayout, /connection\(\)/);
   });
 });

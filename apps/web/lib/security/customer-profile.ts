@@ -1,25 +1,58 @@
 import "server-only";
 
 import { normalizeEmail } from "@mundonettech/core";
-import type { Customer, PrismaClient } from "@mundonettech/db";
+import type { Customer, Prisma, PrismaClient } from "@mundonettech/db";
 
 import { getDatabase } from "@/lib/db";
+
+export async function syncCustomerProfileWithDb(
+  db: PrismaClient,
+  authUserId: string,
+  email: string,
+): Promise<Customer> {
+  const normalizedEmail = normalizeEmail(email);
+
+  return db.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`customer-sync:${normalizedEmail}`}))`;
+
+    const byAuthUser = await tx.customer.findFirst({
+      where: { authUserId, deletedAt: null },
+    });
+    if (byAuthUser) {
+      if (byAuthUser.status === "ANONYMIZED") {
+        throw new Error("La cuenta no está disponible.");
+      }
+      return tx.customer.update({
+        where: { id: byAuthUser.id },
+        data: { email: normalizedEmail, status: "ACTIVE" },
+      });
+    }
+
+    const byEmail = await tx.customer.findFirst({
+      where: { email: normalizedEmail, deletedAt: null },
+    });
+    if (byEmail) {
+      if (
+        byEmail.status === "ANONYMIZED" ||
+        (byEmail.authUserId && byEmail.authUserId !== authUserId)
+      ) {
+        throw new Error("La cuenta no está disponible.");
+      }
+      return tx.customer.update({
+        where: { id: byEmail.id },
+        data: { authUserId, status: "ACTIVE" },
+      });
+    }
+
+    return tx.customer.create({
+      data: { authUserId, email: normalizedEmail, status: "ACTIVE" },
+    });
+  });
+}
 
 export async function synchronizeCustomerProfile(
   authUserId: string,
   email: string,
 ): Promise<Customer> {
-  const normalizedEmail = normalizeEmail(email);
-  const db: PrismaClient = getDatabase();
-  const existing = await db.customer.findFirst({ where: { authUserId, deletedAt: null } });
-  if (existing) {
-    if (existing.status === "ANONYMIZED") throw new Error("La cuenta no está disponible.");
-    return db.customer.update({
-      where: { id: existing.id },
-      data: { email: normalizedEmail, status: "ACTIVE" },
-    });
-  }
-  return db.customer.create({
-    data: { authUserId, email: normalizedEmail, status: "ACTIVE" },
-  });
+  return syncCustomerProfileWithDb(getDatabase(), authUserId, email);
 }

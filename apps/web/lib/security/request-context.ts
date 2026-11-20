@@ -18,14 +18,43 @@ function digest(value: string): Uint8Array<ArrayBuffer> {
   return createHmac("sha256", getSecurityEventPepper()).update(value, "utf8").digest();
 }
 
+function isLoopbackSiteUrl(): boolean {
+  const raw = process.env.NEXT_PUBLIC_SITE_URL;
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw);
+    return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+  } catch {
+    return false;
+  }
+}
+
+function resolveVerifiedClientIp(requestHeaders: Headers): string {
+  if (process.env.VERCEL === "1") {
+    const vercelIp = ipAddress(requestHeaders)?.trim();
+    if (vercelIp && isIP(vercelIp)) return vercelIp;
+    throw new Error("A verified Vercel client IP is unavailable.");
+  }
+
+  if (process.env.TRUSTED_PROXY === "cloudflare") {
+    const cfRay = requestHeaders.get("cf-ray");
+    const cfIp = requestHeaders.get("cf-connecting-ip")?.trim();
+    if (cfRay && cfIp && isIP(cfIp)) return cfIp;
+    throw new Error("A verified Cloudflare client IP is unavailable.");
+  }
+
+  if (process.env.NODE_ENV !== "production" || isLoopbackSiteUrl()) {
+    return "127.0.0.1";
+  }
+
+  throw new Error(
+    "Verified client IP requires VERCEL=1 or TRUSTED_PROXY=cloudflare in production.",
+  );
+}
+
 export async function getRequestSecurityContext(): Promise<RequestSecurityContext> {
   const requestHeaders = await headers();
-  if (process.env.NODE_ENV === "production" && process.env.VERCEL !== "1") {
-    throw new Error("Verified client IP requires the trusted production platform.");
-  }
-  let clientIp = ipAddress(requestHeaders);
-  if (!clientIp && process.env.NODE_ENV !== "production") clientIp = "127.0.0.1";
-  if (!clientIp || !isIP(clientIp)) throw new Error("A verified client IP is unavailable.");
+  const clientIp = resolveVerifiedClientIp(requestHeaders);
   const userAgent = requestHeaders.get("user-agent");
   return {
     ipHash: digest(clientIp),

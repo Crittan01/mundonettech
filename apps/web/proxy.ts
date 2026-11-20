@@ -13,14 +13,14 @@ import {
   sessionCookieOptions,
 } from "@/lib/security/session-policy";
 
-function securityPolicy(nonce: string, supabaseUrl: string, isDevelopment: boolean): string {
+function securityPolicy(supabaseUrl: string, isDevelopment: boolean): string {
   const directives = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://challenges.cloudflare.com${isDevelopment ? " 'unsafe-eval'" : ""}`,
+    `script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com${isDevelopment ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
-    `connect-src 'self' ${supabaseUrl} https://challenges.cloudflare.com wss:`,
+    `connect-src 'self' ${supabaseUrl} https://challenges.cloudflare.com${isDevelopment ? " ws:" : ""}`,
     "frame-src https://challenges.cloudflare.com",
     "media-src 'self' blob: https:",
     "object-src 'none'",
@@ -46,11 +46,12 @@ function applyHeaders(response: NextResponse, csp: string, isDevelopment: boolea
   response.headers.set("Cross-Origin-Opener-Policy", "same-origin");
   response.headers.set("Cross-Origin-Resource-Policy", "same-origin");
   response.headers.set("Origin-Agent-Cluster", "?1");
-  if (!isDevelopment)
+  if (!isDevelopment) {
     response.headers.set(
       "Strict-Transport-Security",
       "max-age=63072000; includeSubDomains; preload",
     );
+  }
 }
 
 function loginRedirect(request: NextRequest, destination: string, reason: string): NextResponse {
@@ -64,11 +65,11 @@ function loginRedirect(request: NextRequest, destination: string, reason: string
 
 export async function proxy(request: NextRequest) {
   const isDevelopment = process.env.NODE_ENV === "development";
-  const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+  const requestNonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const config = getSupabasePublicConfig();
-  const csp = securityPolicy(nonce, config.url, isDevelopment);
+  const csp = securityPolicy(config.url, isDevelopment);
   const requestHeaders = new Headers(request.headers);
-  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set("x-nonce", requestNonce);
   requestHeaders.set("Content-Security-Policy", csp);
   let response = NextResponse.next({ request: { headers: requestHeaders } });
 
@@ -78,8 +79,12 @@ export async function proxy(request: NextRequest) {
         return request.cookies.getAll();
       },
       setAll(cookiesToSet) {
+        const priorCookies = response.cookies.getAll();
         for (const { name, value } of cookiesToSet) request.cookies.set(name, value);
         response = NextResponse.next({ request: { headers: requestHeaders } });
+        for (const cookie of priorCookies) {
+          response.cookies.set(cookie);
+        }
         for (const { name, value, options } of cookiesToSet) {
           response.cookies.set(name, value, options);
         }
@@ -121,7 +126,7 @@ export async function proxy(request: NextRequest) {
       }
     } catch {
       redirectResponse = loginRedirect(request, isAdmin ? "/admin/login" : "/ingresar", "timeout");
-      response.cookies.delete(cookieName);
+      response.cookies.set(cookieName, "", { ...sessionCookieOptions, maxAge: 0 });
     }
   }
 

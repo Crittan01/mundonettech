@@ -23,17 +23,14 @@
 - `[x]` ✅ **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
 - `[x]` ✅ **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:** `@mundonettech/config`, `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `standalone`, `'use cache'`), ESLint (`client-ip`, `sharp-safe`), guardas y tests negativos.
 - `[x]` ✅ **`F0.3` — PG 17 (`:54421..54424`) + Prisma + RLS + Bóveda `AES-256-GCM`:** 9 modelos base, cadena única DDL, `enforce_rls_on_new_table`, PostgREST revocado, `SKIP LOCKED`/idempotencia (`acquired`), AAD y `verify-security-posture`.
-- `[R]` **`F0.4` — Seguridad de Borde, Auth Cliente y Núcleo `/admin` con MFA `aal2`:**
-  - `proxy.ts` (CSP/headers, anti-race `@supabase/ssr`, timeout HMAC 30 min admin / 30 d cliente).
-  - Auth cliente (OTP 6 dígitos, HIBP k-anonymity, anti-enumeración, Turnstile).
-  - `/admin/login` + `/admin/login/mfa` (**TOTP `aal2` obligatorio** + códigos HMAC + `requireRecentMfa` ≤ 10 min) + RBAC 8 roles (3 anillos) + `pii-mask.ts` + `AdminShell` + `/admin/{usuarios,seguridad,auditoria}`.
+- `[x]` ✅ **`F0.4` — Borde `proxy.ts`, Auth Cliente y Núcleo `/admin` MFA `aal2`:** CSP/headers PPR, timeouts HMAC, OTP 6 dígitos + HIBP + Turnstile, TOTP `aal2` + códigos HMAC + step-up ≤ 10m, RBAC 8 roles (3 anillos), `pii-mask`, `AdminShell` y `SECURITY.md`.
 - `[ ]` **`F0.5` — Suite RLS Real, Vitest/Playwright Base, GitHub Actions PG 17 y `OPERATIONS.md`:**
-  - Suites contra PG 17 real (bloqueo anti-PRD + `EMAIL_SEND_DISABLED=1`), `rls-matrix`, smoke E2E y `ci.yml` en verde.
+  - Suites contra PG 17 real (bloqueo anti-PRD + `EMAIL_SEND_DISABLED=1`), `rls-matrix`, smoke E2E Playwright (`@axe-core`) y `.github/workflows/ci.yml` en verde + `docs/OPERATIONS.md`.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente bloque:** **`F0.4`** en rama `feat/f0-4-auth-admin-mfa` desde `develop`.
-- **Leer al iniciar:** `AGENTS.md`, `docs/{STATE,PLAN,ARCHITECTURE,DECISIONS}.md` y `packages/{db,core}/README.md`.
-- **Cierre dual `F0.4`:** Implementador entrega `proxy.ts` (CSP, anti-race `@supabase/ssr`, timeouts HMAC), Auth cliente (OTP 6 dígitos, HIBP, Turnstile), `/admin/login` + `/admin/login/mfa` (TOTP `aal2` + códigos HMAC + `requireRecentMfa` ≤ 10 min), RBAC 8 roles (3 anillos), `pii-mask.ts`, `AdminShell`, `/admin/{usuarios,seguridad,auditoria}` y `docs/SECURITY.md` en `[R]` con gates verdes; Auditor certifica `[x]` y fusiona en `develop`.
+- **Siguiente bloque:** **`F0.5`** en rama `feat/f0-5-ci-e2e-operations` desde `develop` (cierre de **Fase 0**).
+- **Leer al iniciar:** `AGENTS.md`, `docs/{STATE,PLAN,ARCHITECTURE,DECISIONS,SECURITY}.md` y `packages/{db,core}/README.md`.
+- **Cierre dual `F0.5`:** Implementador entrega guardas anti-PRD/`EMAIL_SEND_DISABLED=1`, suite `rls-matrix` sobre PG 17 real, smoke E2E Playwright (`:4110`) + `@axe-core` sin errores CSP en navegador real, `ci.yml` con servicio PG 17 y `docs/OPERATIONS.md` en `[R]`; Auditor valida CI en verde, compacta Fase 0 a `✅`, certifica `[x]` y fusiona en `develop`.

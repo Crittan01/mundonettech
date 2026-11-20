@@ -11,13 +11,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { initialActionState } from "@/lib/action-state";
-import { initialMfaState } from "@/lib/security/mfa-state";
 import {
   loginAdminAction,
   recoverAdminFactorAction,
   startAdminEnrollmentAction,
   verifyAdminMfaAction,
 } from "@/lib/actions/admin-auth";
+import { initialMfaState } from "@/lib/security/mfa-state";
 
 interface SecurityProps {
   siteKey: string;
@@ -125,8 +125,11 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
 }
 
 export function AdminMfaForm({
+  siteKey,
+  nonce,
   verifiedFactorId,
-}: SecurityProps & { verifiedFactorId: string | null }) {
+  canUseRecoveryCode,
+}: SecurityProps & { verifiedFactorId: string | null; canUseRecoveryCode: boolean }) {
   const router = useRouter();
   const [mode, setMode] = useState<"totp" | "recovery">("totp");
   const [enrollment, enrollAction, enrolling] = useActionState(
@@ -189,15 +192,7 @@ export function AdminMfaForm({
             {verifying ? "Verificando…" : "Verificar segundo factor"}
           </Button>
         </form>
-        {!verifiedFactorId ? (
-          <button
-            type="button"
-            className="text-sm text-primary underline"
-            onClick={() => setMode("recovery")}
-          >
-            ¿Perdiste tus códigos? Usa uno de recuperación
-          </button>
-        ) : (
+        {canUseRecoveryCode ? (
           <button
             type="button"
             className="text-sm text-primary underline"
@@ -205,8 +200,8 @@ export function AdminMfaForm({
           >
             {mode === "recovery" ? "Volver al autenticador" : "Usar un código de recuperación"}
           </button>
-        )}
-        {mode === "recovery" ? (
+        ) : null}
+        {canUseRecoveryCode && mode === "recovery" ? (
           <form action={recoveryAction} className="space-y-3 border-t border-border pt-4">
             <Label htmlFor="recoveryCode">Código de recuperación</Label>
             <Input
@@ -215,6 +210,12 @@ export function AdminMfaForm({
               autoComplete="off"
               required
               maxLength={40}
+            />
+            <TurnstileField
+              siteKey={siteKey}
+              nonce={nonce}
+              action="admin_recovery"
+              state={recovery}
             />
             <FormMessage state={recovery} />
             <Button type="submit" variant="outline" disabled={recovering}>
@@ -235,6 +236,39 @@ export function AdminMfaForm({
         </Button>
       </form>
       <FormMessage state={enrollment} />
+      {canUseRecoveryCode ? (
+        <>
+          <button
+            type="button"
+            className="text-sm text-primary underline"
+            onClick={() => setMode(mode === "recovery" ? "totp" : "recovery")}
+          >
+            {mode === "recovery" ? "Ocultar recuperación" : "Usar un código de recuperación"}
+          </button>
+          {mode === "recovery" ? (
+            <form action={recoveryAction} className="space-y-3 border-t border-border pt-4">
+              <Label htmlFor="recoveryCode">Código de recuperación</Label>
+              <Input
+                id="recoveryCode"
+                name="recoveryCode"
+                autoComplete="off"
+                required
+                maxLength={40}
+              />
+              <TurnstileField
+                siteKey={siteKey}
+                nonce={nonce}
+                action="admin_recovery"
+                state={recovery}
+              />
+              <FormMessage state={recovery} />
+              <Button type="submit" variant="outline" disabled={recovering}>
+                {recovering ? "Comprobando…" : "Restablecer autenticador"}
+              </Button>
+            </form>
+          ) : null}
+        </>
+      ) : null}
     </div>
   );
 }

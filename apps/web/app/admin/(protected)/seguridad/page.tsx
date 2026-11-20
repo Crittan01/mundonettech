@@ -1,8 +1,6 @@
-import { Button } from "@/components/ui/button";
 import { SecurityManager } from "@/components/admin/security-manager";
-import { signOutAllAdminSessionsAction } from "@/lib/actions/admin-auth";
-import { getDatabase } from "@/lib/db";
 import { getDatabaseClock } from "@/lib/database-clock";
+import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Seguridad administrativa" };
@@ -62,17 +60,6 @@ export default async function AdminSecurityPage() {
           No hay un autenticador verificado. Cierra sesión y completa el enrolamiento de nuevo.
         </p>
       )}
-      <section className="space-y-3">
-        <h2 className="text-xl font-semibold">Cerrar todas las sesiones</h2>
-        <p className="text-sm text-muted-foreground">
-          Exige un segundo factor reciente y revoca también las demás sesiones de tu cuenta.
-        </p>
-        <form action={signOutAllAdminSessionsAction}>
-          <Button variant="destructive" type="submit">
-            Cerrar todas las sesiones
-          </Button>
-        </form>
-      </section>
       <section>
         <h2 className="text-xl font-semibold">Tu actividad reciente</h2>
         {events.length ? (
