@@ -36,6 +36,6 @@
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente bloque:** **`F0.3`** en rama `feat/f0-3-db-rls-vault` desde `develop` (tras fusionar PR de `F0.2`).
+- **Siguiente bloque:** **`F0.3`** en rama `feat/f0-3-db-rls-vault` desde `develop`.
 - **Leer al iniciar:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` y `packages/db/README.md`.
-- **Cierre dual `F0.3`:** Implementador levanta PG 17 (`_mundonettech` `:54421..54424`), entrega migración única Prisma `BigInt` + RLS + `enforce_rls_on_new_table` + `REVOKE ALL` PostgREST + bóveda `AES-256-GCM` + `verify-security-posture` en `[R]` con `make check && pnpm test && pnpm build` en verde; Auditor certifica `[x]` en PR contra `develop`.
+- **Cierre dual `F0.3`:** Implementador levanta PG 17 (`_mundonettech` `:54421..54424`), entrega migración única Prisma `BigInt` + RLS + `enforce_rls_on_new_table` + `REVOKE ALL` PostgREST + bóveda `AES-256-GCM` + `verify-security-posture` en `[R]` con `make check && pnpm test && pnpm build` en verde; Auditor audita, certifica `[x]` y fusiona PR en `develop`.
