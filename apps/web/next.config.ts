@@ -11,6 +11,7 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: path.resolve(import.meta.dirname, "../.."),
   partialPrefetching: true,
   poweredByHeader: false,
+  reactStrictMode: true,
 };
 
 export default nextConfig;

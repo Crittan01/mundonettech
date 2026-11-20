@@ -19,7 +19,7 @@ export default defineConfig([
     "**/tmp/**",
   ]),
   {
-    files: ["**/*.{js,mjs,cjs}"],
+    files: ["**/*.{js,jsx,mjs,cjs}"],
     extends: [js.configs.recommended],
     languageOptions: {
       globals: {
@@ -31,7 +31,7 @@ export default defineConfig([
   ...nextVitals,
   ...nextTypeScript,
   {
-    files: ["**/*.{js,mjs,cjs,ts,tsx}"],
+    files: ["**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"],
     plugins: { foundation },
     rules: {
       "@next/next/no-html-link-for-pages": "off",
@@ -40,7 +40,7 @@ export default defineConfig([
     },
   },
   {
-    files: ["**/*.{ts,tsx}"],
+    files: ["**/*.{ts,tsx,mts,cts}"],
     rules: {
       "@typescript-eslint/no-explicit-any": "error",
     },

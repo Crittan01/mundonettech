@@ -1,9 +1,10 @@
 import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
+import type { ReactNode } from "react";
 
 import { storeConfig } from "@mundonettech/config/store";
 
-export async function StoreHeader() {
+export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }> = {}) {
   "use cache";
 
   cacheLife("max");
@@ -19,7 +20,10 @@ export async function StoreHeader() {
         >
           {storeConfig.name}
         </Link>
-        <span className="text-sm text-muted-foreground">{storeConfig.domain}</span>
+        <div className="flex items-center gap-4">
+          <span className="text-sm text-muted-foreground">{storeConfig.domain}</span>
+          {actions}
+        </div>
       </div>
     </header>
   );

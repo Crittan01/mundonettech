@@ -20,11 +20,8 @@
 
 ## 2. Fase Activa — Fase 0: Fundación, Seguridad Mandatoria y Shell Admin
 
-- `[x]` **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
-- `[R]` **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:**
-  - `pnpm-workspace.yaml`, `turbo.json`, `Makefile`, ESLint 9 flat (`--max-warnings 0`, guardas `client-ip` y `sharp-safe`), Prettier + Tailwind v4.
-  - `config/{store.config.ts,theme.config.ts}`, esqueletos `packages/{db,core,media,cms,integrations,legal-co}` y `apps/web` (`:4010`, `output: "standalone"`, `cacheComponents: true`, `(storefront)/layout.tsx`, tokens CSS semánticos *Tech Precision*).
-  - Guardas en `scripts/`: tope Nivel 0 (`≤ 13 KB`), higiene Git, anti-voseo `es-CO` y frontera `config/` ↔ `packages/`.
+- `[x]` ✅ **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
+- `[x]` ✅ **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:** `@mundonettech/config`, `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `standalone`, `'use cache'`), ESLint (`client-ip`, `sharp-safe`), guardas y tests negativos.
 - `[ ]` **`F0.3` — PostgreSQL 17 Local (Podman `:54421..54424`) + Prisma `BigInt` + RLS + Bóveda:**
   - `supabase/config.toml` aislado + **1 sola cadena de migraciones versionada** (`ADR-003`).
   - Modelos base en `packages/db/prisma/schema/` (`AdminUser`, `AdminRecoveryCode`, `AdminActionLog`, `SecurityEvent`, `Customer`, `Consent`, `IntegrationCredential` `AES-256-GCM`, `DomainOutbox`, `IdempotencyKey`) + trigger `enforce_rls_on_new_table` + `REVOKE ALL` PostgREST + `verify-security-posture`.
@@ -39,6 +36,6 @@
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente bloque:** **`F0.2`** en rama `feat/f0-2-monorepo-foundation` desde `develop`.
-- **Leer al iniciar:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md` y `docs/DECISIONS.md`.
-- **Cierre dual `F0.2`:** Implementador entrega en `[R]` con `make check && pnpm test && pnpm build` en verde (`:4010`); Auditor valida `git diff develop...HEAD`, corrige brechas y certifica `[x]` en PR contra `develop`.
+- **Siguiente bloque:** **`F0.3`** en rama `feat/f0-3-db-rls-vault` desde `develop` (tras fusionar PR de `F0.2`).
+- **Leer al iniciar:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` y `packages/db/README.md`.
+- **Cierre dual `F0.3`:** Implementador levanta PG 17 (`_mundonettech` `:54421..54424`), entrega migración única Prisma `BigInt` + RLS + `enforce_rls_on_new_table` + `REVOKE ALL` PostgREST + bóveda `AES-256-GCM` + `verify-security-posture` en `[R]` con `make check && pnpm test && pnpm build` en verde; Auditor certifica `[x]` en PR contra `develop`.
