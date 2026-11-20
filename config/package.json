@@ -16,6 +16,10 @@
     "./theme": {
       "types": "./dist/theme.config.d.ts",
       "import": "./dist/theme.config.js"
+    },
+    "./catalog": {
+      "types": "./dist/catalog-blueprint.d.ts",
+      "import": "./dist/catalog-blueprint.js"
     }
   },
   "scripts": {

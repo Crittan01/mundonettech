@@ -17,19 +17,21 @@ enum ConsentStatus {
 }
 
 model Customer {
-  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  authUserId     String?         @db.Uuid
-  email          String          @db.VarChar(320)
-  givenName      String?         @db.VarChar(100)
-  familyName     String?         @db.VarChar(100)
-  phoneE164      String?         @db.VarChar(16)
-  status         CustomerStatus  @default(GUEST)
-  loyaltyPoints  Int             @default(0)
-  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime        @default(now()) @updatedAt @db.Timestamptz(6)
-  deletedAt      DateTime?       @db.Timestamptz(6)
-  consents       Consent[]
-  securityEvents SecurityEvent[]
+  id                       String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authUserId               String?                   @db.Uuid
+  email                    String                    @db.VarChar(320)
+  givenName                String?                   @db.VarChar(100)
+  familyName               String?                   @db.VarChar(100)
+  phoneE164                String?                   @db.VarChar(16)
+  status                   CustomerStatus            @default(GUEST)
+  loyaltyPoints            Int                       @default(0)
+  createdAt                DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime                  @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt                DateTime?                 @db.Timestamptz(6)
+  consents                 Consent[]
+  securityEvents           SecurityEvent[]
+  wishlistItems            WishlistItem[]
+  backInStockSubscriptions BackInStockSubscription[]
 
   @@index([status, createdAt])
   @@index([deletedAt])

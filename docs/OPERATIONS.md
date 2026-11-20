@@ -53,15 +53,15 @@ El bootstrap valida política y HIBP, confirma correo y crea el primer `SUPERADM
 ```bash
 make check            # docs/Git/idioma/fronteras/anti-PRD, lint, Prettier y typecheck total (incl. Vitest/E2E)
 pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
-pnpm test:unit        # contratos Vitest de guardas anti-PRD y bloqueo runtime de correo
-pnpm test:integration # integración Node, concurrencia outbox/idempotencia y bóveda AES-256-GCM
-pnpm test:rls         # matriz autónoma sobre PG17 real (174 denegaciones bajo SAVEPOINT/ROLLBACK)
+pnpm test:unit        # contratos Vitest de guardas, GS1, árbol, redirects, atributos y blueprint
+pnpm test:integration # catálogo, RLS, concurrencia outbox/idempotencia y bóveda AES-256-GCM
+pnpm test:rls         # matriz autónoma sobre PG17 real (543 denegaciones bajo SAVEPOINT/ROLLBACK)
 pnpm build            # build productivo + empaquetado standalone completo
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
 ```
 
-En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 174 casos reales: 45 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 129 operaciones sobre `anon`, `authenticated` y `service_role` en las 9 tablas y 7 funciones RPC.
+En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 543 casos reales: 150 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 393 operaciones sobre `anon`, `authenticated` y `service_role` en las 30 tablas y 11 funciones RPC.
 
 Playwright arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`, recorre las rutas públicas, avisos de sesión/invitación, 404 semántico, redirecciones protegidas (`/admin/*`, `/admin/login/mfa`, `/mi-cuenta`), controles accesibles por teclado, listener `securitypolicyviolation` + cabeceras CSP/HSTS y auditoría `@axe-core` WCAG 2/2.1 A/AA. `test-results/`, `playwright-report/` y traces no se versionan.
 

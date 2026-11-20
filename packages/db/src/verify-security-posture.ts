@@ -12,6 +12,27 @@ const requiredTables = [
   "IntegrationCredential",
   "DomainOutbox",
   "IdempotencyKey",
+  "TaxGroup",
+  "Brand",
+  "Category",
+  "Collection",
+  "CollectionProduct",
+  "Product",
+  "OptionDefinition",
+  "OptionValue",
+  "ProductVariant",
+  "ProductVariantOption",
+  "ProductMedia",
+  "AttributeDefinition",
+  "CategoryAttribute",
+  "ProductAttributeValue",
+  "CompatibilityDevice",
+  "ProductCompatibility",
+  "Bundle",
+  "BundleItem",
+  "WishlistItem",
+  "BackInStockSubscription",
+  "UrlRedirect",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -26,6 +47,20 @@ const requiredConstraints = [
   "DomainOutbox_claim_consistent",
   "IdempotencyKey_requestHash_length",
   "SecurityEvent_dedupMinute_matches",
+  "TaxGroup_rateBps_valid",
+  "TaxGroup_uvt_treatment_valid",
+  "ProductVariant_price_nonnegative",
+  "ProductVariant_cost_nonnegative",
+  "ProductVariant_compare_order",
+  "ProductMedia_variant_product_fkey",
+  "ProductMedia_focal_valid",
+  "ProductMedia_frames_valid",
+  "ProductAttributeValue_exactly_one",
+  "Bundle_price_nonnegative",
+  "Bundle_discount_nonnegative",
+  "Bundle_discount_valid",
+  "BackInStockSubscription_status_timestamps",
+  "UrlRedirect_status_valid",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -33,6 +68,20 @@ const requiredPartialIndexes = [
   "Customer_email_active_key",
   "Customer_authUserId_active_key",
   "IntegrationCredential_provider_environment_accountName_key",
+  "Brand_slug_active_key",
+  "Category_slug_active_key",
+  "Collection_slug_active_key",
+  "Product_slug_active_key",
+  "ProductVariant_sku_active_key",
+  "ProductVariant_gtin_active_key",
+  "ProductVariant_ean_active_key",
+  "ProductVariant_one_default_active_key",
+  "ProductMedia_storageKey_active_key",
+  "AttributeDefinition_key_active_key",
+  "CompatibilityDevice_slug_active_key",
+  "Bundle_slug_active_key",
+  "BackInStockSubscription_variantId_email_active_key",
+  "UrlRedirect_fromPath_active_key",
 ] as const;
 const requiredSecurityTriggers = [
   "AdminActionLog_append_only",
@@ -43,6 +92,20 @@ const requiredSecurityTriggers = [
   "IntegrationCredential_immutable_identity",
   "SecurityEvent_append_only",
   "SecurityEvent_dedup_minute",
+  "Category_maintain_tree",
+  "ProductVariant_validate_identity",
+  "ProductVariantOption_validate",
+  "ProductAttributeValue_normalize",
+  "UrlRedirect_validate",
+  "Product_search_after_write",
+  "Brand_search_after_write",
+  "ProductVariant_search_after_write",
+  "ProductAttributeValue_search_after_write",
+  "AttributeDefinition_search_after_write",
+] as const;
+const requiredEventTriggers = [
+  "enforce_rls_on_new_table",
+  "revoke_postgrest_on_new_function",
 ] as const;
 
 export async function verifySecurityPosture(databaseUrl: string): Promise<string[]> {
@@ -244,11 +307,15 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
       );
     }
 
-    const trigger = await client.query<{ enabled: string }>(
-      "SELECT evtenabled AS enabled FROM pg_event_trigger WHERE evtname = 'enforce_rls_on_new_table'",
+    const eventTriggers = await client.query<{ name: string; enabled: string }>(
+      "SELECT evtname AS name, evtenabled AS enabled FROM pg_event_trigger WHERE evtname = ANY($1::text[])",
+      [requiredEventTriggers],
     );
-    if (trigger.rows[0]?.enabled !== "O") {
-      errors.push("The enforce_rls_on_new_table event trigger is missing or disabled.");
+    for (const requiredTrigger of requiredEventTriggers) {
+      const trigger = eventTriggers.rows.find((item) => item.name === requiredTrigger);
+      if (!trigger || trigger.enabled !== "O") {
+        errors.push(`Event trigger ${requiredTrigger} is missing or disabled.`);
+      }
     }
 
     const rowTriggers = await client.query<{ trigger_name: string; enabled: string }>(
@@ -280,8 +347,10 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
 
     const indexes = await client.query<{ index_name: string; index_definition: string }>(
       `SELECT indexname AS index_name, indexdef AS index_definition
-       FROM pg_indexes WHERE schemaname = 'public' AND indexname = ANY($1::text[])`,
-      [requiredPartialIndexes],
+       FROM pg_indexes
+       WHERE schemaname = 'public'
+         AND indexname = ANY($1::text[])`,
+      [[...requiredPartialIndexes, "Product_searchVector_idx"]],
     );
     for (const required of requiredPartialIndexes) {
       const index = indexes.rows.find((row) => row.index_name === required);
@@ -292,6 +361,12 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
       ) {
         errors.push(`Missing partial unique index ${required}.`);
       }
+    }
+    const searchGinIndex = indexes.rows.find(
+      (row) => row.index_name === "Product_searchVector_idx",
+    );
+    if (!searchGinIndex || !/USING gin/i.test(searchGinIndex.index_definition)) {
+      errors.push("Missing GIN full-text index Product_searchVector_idx.");
     }
 
     const migrations = await client.query<{ total: number; healthy: number }>(

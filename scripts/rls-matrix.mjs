@@ -5,6 +5,7 @@ import pg from "pg";
 
 import { acquireIsolatedTestDatabase } from "./lib/postgres-test-harness.mjs";
 import { assertSafeTestDatabase } from "./lib/test-environment.mjs";
+import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mjs";
 
 const expectedTables = [
   "AdminUser",
@@ -16,6 +17,7 @@ const expectedTables = [
   "IntegrationCredential",
   "DomainOutbox",
   "IdempotencyKey",
+  ...catalogTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -48,6 +50,22 @@ const rpcProbes = [
   {
     name: "purge_expired_idempotency_keys",
     sql: "SELECT public.purge_expired_idempotency_keys(1)",
+  },
+  {
+    name: "validate_gs1_check_digit",
+    sql: "SELECT public.validate_gs1_check_digit('5901234123457')",
+  },
+  {
+    name: "normalize_redirect_path",
+    sql: "SELECT public.normalize_redirect_path('/origen')",
+  },
+  {
+    name: "immutable_unaccent",
+    sql: "SELECT public.immutable_unaccent('táctil')",
+  },
+  {
+    name: "refresh_product_search_vector",
+    sql: "SELECT public.refresh_product_search_vector(NULL)",
   },
 ];
 
@@ -134,6 +152,8 @@ async function ensureMatrixFixtures(client) {
     [`matrix-${randomUUID()}`, randomBytes(32), randomBytes(32), randomBytes(32)],
   );
 
+  await seedCatalogFixture(client);
+
   for (const table of expectedTables) {
     const count = await client.query(`SELECT count(*)::int AS count FROM public."${table}"`);
     if ((count.rows[0]?.count ?? 0) < 1) {
@@ -180,6 +200,9 @@ export async function runRlsMatrix(databaseUrl) {
     await client.query(
       `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${grantedRole}`,
     );
+    await client.query(
+      `GRANT EXECUTE ON FUNCTION public.validate_gs1_check_digit(TEXT), public.normalize_redirect_path(TEXT) TO ${grantedRole}`,
+    );
 
     await client.query("BEGIN");
     try {
@@ -221,12 +244,17 @@ export async function runRlsMatrix(databaseUrl) {
           await client.query(`GRANT SELECT ON pg_temp.matrix_source TO ${grantedRole}`);
           await client.query(`SET ROLE ${grantedRole}`);
           let rlsDenied = false;
+          let denialError;
           try {
             await client.query(`INSERT INTO public."${table}" SELECT * FROM pg_temp.matrix_source`);
           } catch (error) {
+            denialError = error;
             rlsDenied = error?.code === "42501" && /row-level security/i.test(error?.message ?? "");
           }
-          if (!rlsDenied) throw new Error(`${table}: INSERT was not denied by RLS.`);
+          if (!rlsDenied)
+            throw new Error(
+              `${table}: INSERT was not denied by RLS. ${denialError?.code ?? "no-error"}: ${denialError?.message ?? "insert succeeded"}`,
+            );
         });
 
         for (const apiRole of dataApiRoles) {
@@ -262,6 +290,9 @@ export async function runRlsMatrix(databaseUrl) {
       await client.query("ROLLBACK").catch(() => undefined);
     }
   } finally {
+    await client
+      .query(`REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM ${grantedRole}`)
+      .catch(() => undefined);
     await client
       .query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${grantedRole}`)
       .catch(() => undefined);
