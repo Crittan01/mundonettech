@@ -4,23 +4,24 @@
 
 ## Fotografía ejecutiva
 
-- **Estado:** **Fase 0 en curso (`F0.1` completado → sigue `F0.2`)**.
-- **Dominio y operación:** `mundonettech.co` · Numeración de órdenes `MNT-YYYY-NNNN` · E-commerce retail y mayorista de tecnología, wearables, audio, energía y accesorios multimarca en Colombia.
-- **Régimen tributario:** inicia como **`NO_RESPONSABLE_IVA`** (próximo al umbral anual de `3.500 UVT`), con motor tributario dual (`NO_RESPONSABLE_IVA` ↔ `RESPONSABLE_IVA` + reglas UVT de tecnología + puerto de facturación electrónica DIAN) construido desde la base (`ADR-009`).
-- **Base documental y Git (`F0.1`):** repositorio Git inicializado en rama `develop`, `.gitignore` y `.gitleaks.toml` activos, arquitectura e invariantes técnicos definidos en `docs/`.
+- **Estado:** **Fase 0 en curso (`F0.1`–`F0.2` certificados → sigue `F0.3`)**.
+- **Operación:** `mundonettech.co` · Órdenes `MNT-YYYY-NNNN` · E-commerce retail y mayorista de tecnología, audio, energía y accesorios multimarca en Colombia.
+- **Régimen tributario:** inicia en **`NO_RESPONSABLE_IVA`** (vigilancia `3.500 UVT`), con motor dual (`NO_RESPONSABLE_IVA` ↔ `RESPONSABLE_IVA` + UVT tech + puerto DIAN) desde la base (`ADR-009`).
+- **Fundación (`F0.1`–`F0.2`):** monorepo `pnpm` + Turborepo en `:4010`, Next.js 16 (`standalone`, `cacheComponents`, `'use cache'`), tokens CSS semánticos *Tech Precision*, guardas CI y suite adversarial en verde.
 
 ## Topología de ambientes
 
 | Ambiente | URL / Puertos | Estado |
 | --- | --- | --- |
-| **LOCAL** | Next `:4010` (`:4110` E2E) · Supabase API `:54421` · PG 17 `:54422` · Studio `:54423` · Mailpit `:54424` | Pendiente de levantar en `F0.2` / `F0.3` |
+| **LOCAL** | Next `:4010` (`:4110` E2E) operativo · Supabase API `:54421` · PG 17 `:54422` · Studio `:54423` · Mailpit `:54424` | Web activa (`F0.2`); PG 17 local en `F0.3` |
 | **STG** | Rama `develop` → Preview + Supabase STG dedicado (aislamiento total de secretos respecto a PRD) | Por aprovisionar antes de cerrar Hito 1 |
 | **PRD** | Rama `production` → `https://mundonettech.co` + Supabase PRD + Cloudflare R2 | Por aprovisionar en `F4A.3` |
 
 ## Capacidades operativas construidas
 
 - **Gobernanza y arquitectura (`F0.1`):** ✅ `AGENTS.md`, `README.md`, `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
-- **Monorepo, BD, Seguridad/Admin, Catálogo, CMS, Checkout y Omnicanal (`F0.2`–`F6`):** pendientes según [`PLAN.md`](PLAN.md).
+- **Monorepo, Next.js 16 y Guardas CI (`F0.2`):** ✅ `@mundonettech/config` (`store`, `theme`), esqueletos `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `(storefront)` cacheado), ESLint 9 (`client-ip`, `sharp-safe`), guardas (`docs`, `git`, `language`, `boundaries`/tokens) y tests negativos.
+- **BD/RLS/Bóveda, Seguridad/Admin, Catálogo, CMS, Checkout y Omnicanal (`F0.3`–`F6`):** pendientes según [`PLAN.md`](PLAN.md).
 
 ## Pendientes externos de negocio (no bloquean Fase 0–2)
 

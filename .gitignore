@@ -16,6 +16,10 @@ build/
 .env.*
 !.env.example
 !apps/web/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Testing, Coverage & QA artifacts
 coverage/

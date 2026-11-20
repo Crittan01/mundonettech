@@ -1,0 +1,25 @@
+{
+  "name": "@mundonettech/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./store": {
+      "types": "./dist/store.config.d.ts",
+      "import": "./dist/store.config.js"
+    },
+    "./theme": {
+      "types": "./dist/theme.config.d.ts",
+      "import": "./dist/theme.config.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
