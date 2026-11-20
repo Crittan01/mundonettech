@@ -375,6 +375,13 @@ describe("F0.2 — Custom ESLint Security Rules (client-ip & sharp-safe)", () =>
     }
 
     assert.deepEqual(lintSnippet('headers.get("content-type");'), []);
+    assert.deepEqual(
+      lintSnippet(
+        'requestHeaders.get("cf-connecting-ip");',
+        path.join(repoRoot, "apps/web/lib/security/request-context.ts"),
+      ),
+      [],
+    );
   });
 
   it("restricts sharp exclusively to packages/media/src/sharp-safe.ts", () => {

@@ -46,6 +46,12 @@ const clientIp = {
     },
   },
   create(context) {
+    const cwd = context.cwd ?? process.cwd();
+    const relativePath = path.relative(cwd, context.filename).replaceAll("\\", "/");
+    if (relativePath === "apps/web/lib/security/request-context.ts") {
+      return {};
+    }
+
     return {
       CallExpression(node) {
         if (node.callee.type === "MemberExpression" && getPropertyName(node.callee) === "get") {

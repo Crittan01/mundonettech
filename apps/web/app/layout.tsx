@@ -8,17 +8,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(storeConfig.url),
-  title: {
-    default: storeConfig.name,
-    template: `%s | ${storeConfig.name}`,
-  },
+  title: { default: storeConfig.name, template: `%s | ${storeConfig.name}` },
   description: storeConfig.description,
   applicationName: storeConfig.name,
-  formatDetection: {
-    address: false,
-    email: false,
-    telephone: false,
-  },
+  formatDetection: { address: false, email: false, telephone: false },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

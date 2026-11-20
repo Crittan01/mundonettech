@@ -326,6 +326,24 @@ describe("F0.3 — relational integrity and immutable security records", () => {
     const second = await createAdmin({ email });
     assert.notEqual(second.id, first.id);
     await expectSqlViolation(createAdmin({ email }), "23505");
+
+    // Guest customer (authUserId = null) upgrades cleanly to ACTIVE without P2002 collision
+    const guestEmail = `guest-${randomUUID()}@example.test`;
+    const guest = await prisma.customer.create({
+      data: { email: guestEmail, status: "GUEST" },
+    });
+    assert.equal(guest.authUserId, null);
+    const linkedAuthId = randomUUID();
+    const upgraded = await prisma.$transaction(async (tx) => {
+      const found = await tx.customer.findFirst({ where: { email: guestEmail, deletedAt: null } });
+      return tx.customer.update({
+        where: { id: found.id },
+        data: { authUserId: linkedAuthId, status: "ACTIVE" },
+      });
+    });
+    assert.equal(upgraded.id, guest.id);
+    assert.equal(upgraded.authUserId, linkedAuthId);
+    assert.equal(upgraded.status, "ACTIVE");
   });
 
   it("validates emails, E.164 phones, names, timestamps, and non-negative loyalty points", async () => {

@@ -11,6 +11,10 @@
       "dependsOn": ["^build"],
       "persistent": true
     },
+    "@mundonettech/db#typecheck": {
+      "dependsOn": ["build"],
+      "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.next/**"]
+    },
     "typecheck": {
       "dependsOn": ["^build"],
       "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.next/**"]
