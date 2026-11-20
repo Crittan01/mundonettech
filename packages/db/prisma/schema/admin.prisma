@@ -1,0 +1,126 @@
+enum AdminRole {
+  SUPERADMIN
+  OPERATIONS_MANAGER
+  STORE_MANAGER
+  INVENTORY_BUYER
+  FULFILLMENT
+  CUSTOMER_SUPPORT
+  FINANCE_ANALYST
+  CMS_EDITOR
+}
+
+enum AdminUserStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+}
+
+enum IntegrationEnvironment {
+  LOCAL
+  STG
+  PRD
+}
+
+model AdminUser {
+  id             String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authUserId     String                  @db.Uuid
+  email          String                  @db.VarChar(320)
+  displayName    String                  @db.VarChar(120)
+  role           AdminRole
+  status         AdminUserStatus         @default(INVITED)
+  mfaEnrolledAt  DateTime?               @db.Timestamptz(6)
+  lastSignInAt   DateTime?               @db.Timestamptz(6)
+  createdAt      DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime                @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?               @db.Timestamptz(6)
+  recoveryCodes  AdminRecoveryCode[]
+  initiatedLogs  AdminActionLog[]        @relation("AdminActionActor")
+  targetedLogs   AdminActionLog[]        @relation("AdminActionTarget")
+  securityEvents SecurityEvent[]
+  credentials    IntegrationCredential[] @relation("CredentialCreator")
+  rotations      IntegrationCredential[] @relation("CredentialRotator")
+
+  @@index([role, status])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@map("AdminUser")
+}
+
+model AdminRecoveryCode {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  adminUserId String    @db.Uuid
+  codeHash    Bytes     @db.ByteA
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6)
+  expiresAt   DateTime  @db.Timestamptz(6)
+  consumedAt  DateTime? @db.Timestamptz(6)
+  adminUser   AdminUser @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@unique([adminUserId, codeHash])
+  @@index([adminUserId, expiresAt, consumedAt])
+  @@map("AdminRecoveryCode")
+}
+
+model AdminActionLog {
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorAdminUserId  String     @db.Uuid
+  targetAdminUserId String?    @db.Uuid
+  action            String     @db.VarChar(100)
+  targetType        String     @db.VarChar(100)
+  targetId          String?    @db.VarChar(255)
+  requestId         String?    @db.Uuid
+  ipHash            Bytes?     @db.ByteA
+  userAgentHash     Bytes?     @db.ByteA
+  metadata          Json       @default("{}") @db.JsonB
+  selfDealing       Boolean    @default(false)
+  createdAt         DateTime   @default(now()) @db.Timestamptz(6)
+  actor             AdminUser  @relation("AdminActionActor", fields: [actorAdminUserId], references: [id], onDelete: Restrict)
+  target            AdminUser? @relation("AdminActionTarget", fields: [targetAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([actorAdminUserId, createdAt])
+  @@index([targetAdminUserId, createdAt])
+  @@index([selfDealing, createdAt])
+  @@index([requestId])
+  @@map("AdminActionLog")
+}
+
+model SecurityEvent {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  adminUserId   String?    @db.Uuid
+  customerId    String?    @db.Uuid
+  eventType     String     @db.VarChar(100)
+  ipHash        Bytes      @db.ByteA
+  userAgentHash Bytes?     @db.ByteA
+  metadata      Json       @default("{}") @db.JsonB
+  occurredAt    DateTime   @default(now()) @db.Timestamptz(6)
+  dedupMinute   DateTime   @default(now()) @db.Timestamptz(6)
+  adminUser     AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+  customer      Customer?  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  @@unique([eventType, ipHash, dedupMinute])
+  @@index([adminUserId, occurredAt])
+  @@index([customerId, occurredAt])
+  @@map("SecurityEvent")
+}
+
+model IntegrationCredential {
+  id                       String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider                 String                 @db.VarChar(100)
+  environment              IntegrationEnvironment
+  accountName              String                 @db.VarChar(120)
+  keyVersion               Int
+  nonce                    Bytes                  @db.ByteA
+  ciphertext               Bytes                  @db.ByteA
+  authTag                  Bytes                  @db.ByteA
+  createdByAdminUserId     String                 @db.Uuid
+  lastRotatedByAdminUserId String?                @db.Uuid
+  createdAt                DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  revokedAt                DateTime?              @db.Timestamptz(6)
+  createdBy                AdminUser              @relation("CredentialCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  lastRotatedBy            AdminUser?             @relation("CredentialRotator", fields: [lastRotatedByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([environment, revokedAt])
+  @@index([environment, createdAt, id])
+  @@index([createdByAdminUserId, createdAt])
+  @@map("IntegrationCredential")
+}

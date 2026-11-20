@@ -10,6 +10,7 @@ dist/
 build/
 .turbo/
 *.tsbuildinfo
+packages/db/src/generated/
 
 # Environment & Secrets (NEVER commit secrets; only *.example is allowed)
 .env

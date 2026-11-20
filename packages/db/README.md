@@ -1,3 +1,22 @@
 # `@mundonettech/db`
 
-Contendrá el cliente Prisma multi-file, la cadena única de migraciones y las invariantes PostgreSQL/RLS. Los modelos y la configuración de Supabase se implementan en `F0.3`; este bloque solo fija el paquete compilable y sus fronteras.
+Fuente única del esquema PostgreSQL 17 y cliente Prisma 7 ESM con adaptador `pg`. Los archivos `prisma/schema/*.prisma` definen los modelos; `prisma/migrations/` contiene la única cadena DDL versionada (`CHECK`, índices únicos parciales, funciones, triggers y RLS).
+
+## Operación y primitivas exportadas
+
+```bash
+make db-start       # Supabase local + prisma migrate deploy
+make db-validate    # valida el esquema multi-file
+make db-verify      # compila y verifica PG17, RLS, políticas, privilegios, triggers y HTTP PostgREST
+make db-stop        # detiene solo contenedores _mundonettech conservando el volumen
+```
+
+- `createDatabaseClient()`: valida URL PostgreSQL, acota el pool, aplica `statement_timeout` e `idle_in_transaction_session_timeout` (15 s por defecto) y libera el pool en `$disconnect()`.
+- Primitivas atómicas compatibles con `PrismaClient` y `Prisma.TransactionClient`: `consumeAdminRecoveryCode`, `claimDomainOutbox`, `completeDomainOutbox`, `retryDomainOutbox`, `acquireIdempotencyKey` (retorna `acquired: boolean` para distinguir al ganador de carrera frente a duplicados concurrentes o replays), `completeIdempotencyKey` y `purgeExpiredIdempotencyKeys`.
+- `verifySecurityPosture()`: verifica PG 17, ausencia de `BYPASSRLS` en `anon`/`authenticated`, RLS habilitada/forzada en todas las tablas, cero políticas RLS expuestas a `PUBLIC` o Data API, revocación sobre esquema/tablas/vistas/secuencias/funciones, trigger DDL `enforce_rls_on_new_table` (que además revoca privilegios al crear tablas), triggers de inmutabilidad y salud de `_prisma_migrations`.
+
+## Invariantes
+
+- 100 % RLS *deny-by-default* y PostgREST revocado incluso para `service_role`.
+- `AdminActionLog` (con detección automática de `selfDealing` por `targetAdminUserId` o `AdminUser`), `SecurityEvent` (deduplicado por minuto UTC) y `Consent` son *append-only*; `AdminRecoveryCode` e `IntegrationCredential` bloquean mutación de identidad o reversión de consumo/revocación por trigger.
+- Claves naturales con `deletedAt` usan índices únicos parciales (`ADR-004`) y todo monto monetario usa `BigInt` en centavos COP con `CHECK >= 0` (`ADR-002`), validados por guarda CI.

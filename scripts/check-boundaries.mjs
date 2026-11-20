@@ -16,6 +16,12 @@ const commentMarkerPattern = /\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g;
 const incompleteTagPattern = /\b(?:TODO|FIXME|HACK|XXX)\b/;
 const notImplementedThrowPattern =
   /\bthrow\s+new\s+\w*Error\(\s*["'`][^"'`]*(?:not\s+implemented|pendiente|todo|stub)\b/giu;
+const prismaModelBlockPattern = /\bmodel\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([\s\S]*?)\n\}/g;
+const monetaryFieldNamePattern =
+  /(?:Cents$|^(?:price|unitPrice|compareAtPrice|cost|unitCost|subtotal|total|discount|tax|shippingFee|amount|refundAmount|balance|creditAmount)$)/;
+const floatMoneyNamePattern =
+  /(?:price|cost|amount|subtotal|total|tax|discount|fee|refund|credit|balance|revenue|cents)/i;
+const softDeleteNaturalKeyPattern = /^(?:slug|sku|code|fromPath|email|authUserId)$/;
 
 function staticModuleText(node) {
   if (!node) return null;
@@ -200,6 +206,74 @@ export function findIncompleteCodeViolations(file, text) {
   return errors;
 }
 
+export function findPrismaSchemaViolations(file, text) {
+  if (!file.endsWith(".prisma")) return [];
+  const errors = [];
+
+  for (const modelMatch of text.matchAll(prismaModelBlockPattern)) {
+    const modelName = modelMatch[1];
+    const body = modelMatch[2] ?? "";
+    const bodyStart = (modelMatch.index ?? 0) + modelMatch[0].indexOf(body);
+    const hasDeletedAt = /^\s*deletedAt\s+DateTime\?/m.test(body);
+    const lines = body.split(/\r\n|\r|\n/);
+    let offset = 0;
+
+    for (const rawLine of lines) {
+      const trimmed = rawLine.trim();
+      const lineIndex = bodyStart + offset;
+      offset += rawLine.length + 1;
+
+      if (!trimmed || trimmed.startsWith("//")) continue;
+
+      if (trimmed.startsWith("@@unique")) {
+        if (hasDeletedAt) {
+          const colsMatch = /@@unique\(\s*\[([^\]]+)\]/.exec(trimmed);
+          const cols = (colsMatch?.[1] ?? "")
+            .split(",")
+            .map((col) => col.trim().replace(/\([^)]*\)/g, ""));
+          if (cols.some((col) => softDeleteNaturalKeyPattern.test(col))) {
+            errors.push(
+              `${file}:${lineNumberAt(text, lineIndex)}: model ${modelName} has deletedAt; declare partial unique index WHERE "deletedAt" IS NULL in SQL migration instead of @@unique (ADR-004).`,
+            );
+          }
+        }
+        continue;
+      }
+
+      if (trimmed.startsWith("@@")) continue;
+
+      const fieldMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(\?|\[\])?(.*)$/.exec(
+        trimmed,
+      );
+      if (!fieldMatch) continue;
+      const [, fieldName = "", fieldType = "", , attributes = ""] = fieldMatch;
+
+      if (
+        (monetaryFieldNamePattern.test(fieldName) && fieldType !== "BigInt") ||
+        ((fieldType === "Float" || fieldType === "Decimal") &&
+          floatMoneyNamePattern.test(fieldName) &&
+          !/(?:Rate|Ratio|Percent|Score)$/i.test(fieldName))
+      ) {
+        errors.push(
+          `${file}:${lineNumberAt(text, lineIndex)}: monetary field ${modelName}.${fieldName} must use BigInt COP cents instead of ${fieldType} (ADR-002).`,
+        );
+      }
+
+      if (
+        hasDeletedAt &&
+        softDeleteNaturalKeyPattern.test(fieldName) &&
+        /\B@unique\b/.test(attributes)
+      ) {
+        errors.push(
+          `${file}:${lineNumberAt(text, lineIndex)}: soft-deletable ${modelName}.${fieldName} must use a SQL partial unique index WHERE "deletedAt" IS NULL instead of @unique (ADR-004).`,
+        );
+      }
+    }
+  }
+
+  return errors;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const root = process.cwd();
   const allFiles = repositoryFiles();
@@ -218,6 +292,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const text = readFileSync(file, "utf8");
     errors.push(...findBoundaryViolations(file, text, root));
     errors.push(...findIncompleteCodeViolations(file, text));
+    errors.push(...findPrismaSchemaViolations(file, text));
   }
 
   for (const file of manifestFiles) {

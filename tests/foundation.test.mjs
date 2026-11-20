@@ -11,6 +11,7 @@ import {
   findBoundaryViolations,
   findIncompleteCodeViolations,
   findManifestBoundaryViolations,
+  findPrismaSchemaViolations,
   findTokenColorViolations,
 } from "../scripts/check-boundaries.mjs";
 import { level0ByteBudget, validateDocs } from "../scripts/check-docs.mjs";
@@ -259,6 +260,39 @@ describe("F0.2 — Boundary and Semantic Token Guards (ADR-001)", () => {
       ).length,
       2,
     );
+  });
+
+  it("enforces ADR-002 BigInt monetary columns and ADR-004 soft-delete partial indexes in Prisma schemas", () => {
+    const validSchema = `
+model ProductVariant {
+  id         String    @id @db.Uuid
+  sku        String    @db.VarChar(80)
+  priceCents BigInt
+  costCents  BigInt
+  deletedAt  DateTime? @db.Timestamptz(6)
+}
+`;
+    assert.deepEqual(
+      findPrismaSchemaViolations("packages/db/prisma/schema/catalog.prisma", validSchema),
+      [],
+    );
+
+    const invalidSchema = `
+model BadProduct {
+  id         String    @id @db.Uuid
+  slug       String    @unique
+  priceCents Int
+  taxAmount  Decimal
+  deletedAt  DateTime? @db.Timestamptz(6)
+
+  @@unique([slug])
+}
+`;
+    const violations = findPrismaSchemaViolations(
+      "packages/db/prisma/schema/catalog.prisma",
+      invalidSchema,
+    );
+    assert.equal(violations.length, 4);
   });
 });
 

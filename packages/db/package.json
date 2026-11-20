@@ -11,7 +11,19 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "db:migrate": "prisma migrate deploy",
+    "db:validate": "prisma validate",
+    "typecheck": "prisma generate && tsc -p tsconfig.json --noEmit",
+    "verify-security-posture": "node dist/verify-security-posture.js"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "prisma": "7.10.1"
   }
 }
