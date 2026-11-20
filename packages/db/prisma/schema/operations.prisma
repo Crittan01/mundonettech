@@ -1,0 +1,47 @@
+enum IdempotencyStatus {
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+model DomainOutbox {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventType        String    @db.VarChar(120)
+  aggregateType    String    @db.VarChar(100)
+  aggregateId      String    @db.VarChar(128)
+  deduplicationKey String    @db.VarChar(255)
+  payload          Json      @db.JsonB
+  occurredAt       DateTime  @default(now()) @db.Timestamptz(6)
+  availableAt      DateTime  @default(now()) @db.Timestamptz(6)
+  claimedAt        DateTime? @db.Timestamptz(6)
+  claimedBy        String?   @db.VarChar(120)
+  claimExpiresAt   DateTime? @db.Timestamptz(6)
+  processedAt      DateTime? @db.Timestamptz(6)
+  attempts         Int       @default(0)
+  lastError        String?   @db.VarChar(2000)
+
+  @@unique([deduplicationKey])
+  @@index([processedAt, availableAt, claimExpiresAt])
+  @@index([aggregateType, aggregateId, occurredAt])
+  @@map("DomainOutbox")
+}
+
+model IdempotencyKey {
+  id             String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  scope          String            @db.VarChar(120)
+  keyHash        Bytes             @db.ByteA
+  subjectHash    Bytes             @db.ByteA
+  requestHash    Bytes             @db.ByteA
+  status         IdempotencyStatus @default(PROCESSING)
+  responseStatus Int?
+  resultType     String?           @db.VarChar(100)
+  resultId       String?           @db.VarChar(255)
+  createdAt      DateTime          @default(now()) @db.Timestamptz(6)
+  expiresAt      DateTime          @db.Timestamptz(6)
+  completedAt    DateTime?         @db.Timestamptz(6)
+
+  @@unique([scope, keyHash])
+  @@index([expiresAt, status])
+  @@index([subjectHash, createdAt])
+  @@map("IdempotencyKey")
+}

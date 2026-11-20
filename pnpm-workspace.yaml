@@ -2,3 +2,7 @@ packages:
   - "apps/*"
   - "config"
   - "packages/*"
+allowBuilds:
+  "@prisma/client": true
+  "@prisma/engines": true
+  prisma: true

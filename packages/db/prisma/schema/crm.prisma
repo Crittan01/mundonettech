@@ -1,0 +1,58 @@
+enum CustomerStatus {
+  GUEST
+  ACTIVE
+  ANONYMIZED
+}
+
+enum ConsentPurpose {
+  DATA_PROCESSING
+  MARKETING_EMAIL
+  MARKETING_SMS
+  ANALYTICS
+}
+
+enum ConsentStatus {
+  GRANTED
+  REVOKED
+}
+
+model Customer {
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authUserId     String?         @db.Uuid
+  email          String          @db.VarChar(320)
+  givenName      String?         @db.VarChar(100)
+  familyName     String?         @db.VarChar(100)
+  phoneE164      String?         @db.VarChar(16)
+  status         CustomerStatus  @default(GUEST)
+  loyaltyPoints  Int             @default(0)
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime        @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime?       @db.Timestamptz(6)
+  consents       Consent[]
+  securityEvents SecurityEvent[]
+
+  @@index([status, createdAt])
+  @@index([deletedAt])
+  @@map("Customer")
+}
+
+model Consent {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId    String         @db.Uuid
+  purpose       ConsentPurpose
+  status        ConsentStatus
+  source        String         @db.VarChar(100)
+  policyVersion String         @db.VarChar(50)
+  proofHash     Bytes          @db.ByteA
+  ipHash        Bytes?         @db.ByteA
+  userAgentHash Bytes?         @db.ByteA
+  revokesId     String?        @db.Uuid
+  occurredAt    DateTime       @default(now()) @db.Timestamptz(6)
+  customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  revokes       Consent?       @relation("ConsentRevocation", fields: [revokesId], references: [id], onDelete: Restrict)
+  revokedBy     Consent?       @relation("ConsentRevocation")
+
+  @@unique([revokesId])
+  @@index([customerId, purpose, occurredAt])
+  @@map("Consent")
+}

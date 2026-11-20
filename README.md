@@ -12,13 +12,16 @@ Plataforma de comercio electrónico **100 % productiva** de tecnología, wearabl
 
 ## Desarrollo local
 
-Requisitos: Node.js 22, pnpm 11 y GNU Make.
+Requisitos: Node.js 22, pnpm 11, GNU Make, Podman rootless y su socket de usuario activo.
 
 ```bash
 pnpm install
+make db-start
 make dev
 make check && pnpm test && pnpm build
 ```
+
+`make db-start` levanta Supabase/PostgreSQL 17 y aplica la cadena Prisma. Verifica la postura con `make db-verify`, consulta servicios con `make db-status` y detén solo los contenedores del proyecto con `make db-stop` (conserva el volumen). Las pruebas usan otro PostgreSQL 17 desechable en `:54428`.
 
 Los guardas de documentación, higiene Git, español de Colombia y fronteras del monorepo se ejecutan con `make guards`.
 
@@ -27,7 +30,7 @@ Los guardas de documentación, higiene Git, español de Colombia y fronteras del
 | Servicio local | Puerto | Propósito |
 | --- | --- | --- |
 | Next.js dev / start | `:4010` (`:4110` E2E) | Storefront, Checkout, Mi Cuenta, Admin y APIs |
-| Supabase API (Kong) | `:54421` | Auth SSR y Storage local (`project_id = "mundonettech"`) |
+| Supabase API (Kong) | `:54421` | Auth SSR y API local; PostgREST sin privilegios sobre `public` |
 | PostgreSQL 17 | `:54422` | Instancia local en Podman rootless |
 | Supabase Studio | `:54423` | Consola local de base de datos |
 | Mailpit | `:54424` | Bandeja local para códigos OTP y correos de prueba |

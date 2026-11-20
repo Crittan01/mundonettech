@@ -22,7 +22,7 @@
 
 - `[x]` ✅ **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
 - `[x]` ✅ **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:** `@mundonettech/config`, `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `standalone`, `'use cache'`), ESLint (`client-ip`, `sharp-safe`), guardas y tests negativos.
-- `[ ]` **`F0.3` — PostgreSQL 17 Local (Podman `:54421..54424`) + Prisma `BigInt` + RLS + Bóveda:**
+- `[R]` **`F0.3` — PostgreSQL 17 Local (Podman `:54421..54424`) + Prisma `BigInt` + RLS + Bóveda:**
   - `supabase/config.toml` aislado + **1 sola cadena de migraciones versionada** (`ADR-003`).
   - Modelos base en `packages/db/prisma/schema/` (`AdminUser`, `AdminRecoveryCode`, `AdminActionLog`, `SecurityEvent`, `Customer`, `Consent`, `IntegrationCredential` `AES-256-GCM`, `DomainOutbox`, `IdempotencyKey`) + trigger `enforce_rls_on_new_table` + `REVOKE ALL` PostgREST + `verify-security-posture`.
 - `[ ]` **`F0.4` — Seguridad de Borde, Auth Cliente y Núcleo `/admin` con MFA `aal2`:**
