@@ -69,14 +69,24 @@ enum SubscriptionStatus {
   CANCELLED
 }
 
+enum TaxTreatment {
+  STANDARD
+  EXEMPT
+  EXCLUDED
+  UVT_THRESHOLD_EXCLUDED
+}
+
 model TaxGroup {
-  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code      String    @unique @db.VarChar(40)
-  rateBps   Int
-  uvtLimit  Int?
-  createdAt DateTime  @default(now()) @db.Timestamptz(6)
-  updatedAt DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
-  products  Product[]
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code            String       @unique @db.VarChar(40)
+  name            String       @db.VarChar(120)
+  treatment       TaxTreatment @default(STANDARD)
+  rateBps         Int
+  uvtLimit        Int?
+  aboveUvtRateBps Int?
+  createdAt       DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime     @default(now()) @updatedAt @db.Timestamptz(6)
+  products        Product[]
 
   @@map("TaxGroup")
 }
@@ -253,6 +263,7 @@ model ProductVariant {
   subscriptions       BackInStockSubscription[]
   productMedias       ProductMedia[]
 
+  @@unique([id, productId])
   @@index([productId, status])
   @@index([mpn])
   @@index([deletedAt])
@@ -450,7 +461,7 @@ model BackInStockSubscription {
   customer          Customer?          @relation(fields: [customerId], references: [id], onDelete: Cascade)
   variant           ProductVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
 
-  @@unique([variantId, email])
+  @@index([variantId, email])
   @@index([status, variantId])
   @@map("BackInStockSubscription")
 }

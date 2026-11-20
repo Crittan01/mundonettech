@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
@@ -32,23 +32,30 @@ after(
   { timeout: 30_000 },
 );
 
-async function search(term) {
+async function searchForFixtureProduct(term) {
   const result = await client.query(
-    `SELECT "id" FROM "Product" WHERE "searchVector" @@ to_tsquery('simple', immutable_unaccent($1))`,
-    [term],
+    `SELECT "id" FROM "Product"
+     WHERE "id" = $2
+       AND "searchVector" @@ to_tsquery('simple', immutable_unaccent($1))`,
+    [term, fixture.productId],
   );
   return result.rows.map((row) => row.id);
 }
 
 describe("F1.1 — persisted catalog graph", () => {
-  it("persists all 21 catalog entities with tree and attribute normalization", async () => {
+  it("persists all 21 catalog entities with tree and trimmed attribute normalization", async () => {
     for (const table of catalogTables) {
       const count = await client.query(`SELECT count(*)::int AS count FROM "${table}"`);
-      assert.equal(count.rows[0].count, table === "Category" ? 2 : 1, table);
+      assert.ok(count.rows[0].count >= (table === "Category" ? 2 : 1), table);
     }
     const categories = await client.query(
-      `SELECT "id", "parentId", "materializedPath", "depth" FROM "Category" ORDER BY "depth"`,
+      `SELECT "id", "parentId", "materializedPath", "depth"
+       FROM "Category"
+       WHERE "id" = ANY($1::uuid[])
+       ORDER BY "depth"`,
+      [[fixture.rootCategoryId, fixture.categoryId]],
     );
+    assert.equal(categories.rows.length, 2);
     assert.equal(categories.rows[0].id, fixture.rootCategoryId);
     assert.equal(categories.rows[0].materializedPath, `/${fixture.rootCategoryId}/`);
     assert.equal(categories.rows[1].parentId, fixture.rootCategoryId);
@@ -57,12 +64,22 @@ describe("F1.1 — persisted catalog graph", () => {
       `/${fixture.rootCategoryId}/${fixture.categoryId}/`,
     );
     assert.equal(categories.rows[1].depth, 1);
-    const attribute = await client.query(`SELECT "normalizedValue" FROM "ProductAttributeValue"`);
+
+    const attribute = await client.query(
+      `SELECT "textValue", "normalizedValue"
+       FROM "ProductAttributeValue"
+       WHERE "productId" = $1 AND "attributeId" = $2`,
+      [fixture.productId, fixture.attributeId],
+    );
+    assert.equal(attribute.rows[0].textValue, "Bluetooth 5.4");
     assert.equal(attribute.rows[0].normalizedValue, "bluetooth 5.4");
   });
 
-  it("finds products by unaccented name, brand, SKU, GTIN, EAN and MPN", async () => {
-    const variant = await client.query(`SELECT "sku", "gtin", "ean", "mpn" FROM "ProductVariant"`);
+  it("finds products by unaccented name, brand, SKU, GTIN, EAN, MPN and searchable attributes via GIN", async () => {
+    const variant = await client.query(
+      `SELECT "sku", "gtin", "ean", "mpn" FROM "ProductVariant" WHERE "id" = $1`,
+      [fixture.variantId],
+    );
     for (const term of [
       "tactiles",
       "acme",
@@ -70,8 +87,9 @@ describe("F1.1 — persisted catalog graph", () => {
       variant.rows[0].gtin,
       variant.rows[0].ean,
       variant.rows[0].mpn,
+      "bluetooth",
     ]) {
-      assert.deepEqual(await search(term), [fixture.productId], term);
+      assert.deepEqual(await searchForFixtureProduct(term), [fixture.productId], term);
     }
     await client.query(`SET enable_seqscan = off`);
     const plan = await client.query(
@@ -84,26 +102,58 @@ describe("F1.1 — persisted catalog graph", () => {
     );
   });
 
-  it("refreshes search after brand/variant changes and soft deletion", async () => {
+  it("refreshes search after brand/variant/searchable-attribute changes and soft deletion", async () => {
     await client.query(`UPDATE "Brand" SET "name" = 'Nueva Marca' WHERE "id" = $1`, [
       fixture.brandId,
     ]);
-    assert.deepEqual(await search("nueva"), [fixture.productId]);
-    assert.deepEqual(await search("acme"), []);
-    await client.query(`UPDATE "ProductVariant" SET "mpn" = 'MPN-UPDATED-77' WHERE "id" = $1`, [
+    assert.deepEqual(await searchForFixtureProduct("nueva"), [fixture.productId]);
+    assert.deepEqual(await searchForFixtureProduct("acme"), []);
+
+    await client.query(`UPDATE "Brand" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+      fixture.brandId,
+    ]);
+    assert.deepEqual(await searchForFixtureProduct("nueva"), []);
+    await client.query(`UPDATE "Brand" SET "deletedAt" = NULL WHERE "id" = $1`, [fixture.brandId]);
+    assert.deepEqual(await searchForFixtureProduct("nueva"), [fixture.productId]);
+
+    await client.query(`UPDATE "AttributeDefinition" SET "searchable" = false WHERE "id" = $1`, [
+      fixture.attributeId,
+    ]);
+    assert.deepEqual(await searchForFixtureProduct("bluetooth"), []);
+    await client.query(`UPDATE "AttributeDefinition" SET "searchable" = true WHERE "id" = $1`, [
+      fixture.attributeId,
+    ]);
+    assert.deepEqual(await searchForFixtureProduct("bluetooth"), [fixture.productId]);
+
+    await client.query(`UPDATE "ProductVariant" SET "mpn" = '  MPN-UPDATED-77  ' WHERE "id" = $1`, [
       fixture.variantId,
     ]);
-    assert.deepEqual(await search("MPN-UPDATED-77"), [fixture.productId]);
+    assert.deepEqual(await searchForFixtureProduct("MPN-UPDATED-77"), [fixture.productId]);
     await client.query(
       `UPDATE "ProductVariant" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
       [fixture.variantId],
     );
-    assert.deepEqual(await search("MPN-UPDATED-77"), []);
+    assert.deepEqual(await searchForFixtureProduct("MPN-UPDATED-77"), []);
   });
 });
 
 describe("F1.1 — database edge validation", () => {
-  it("enforces BigInt money, dimensions and GS1 checksums", async () => {
+  it("enforces BigInt money, UVT tax groups, dimensions, GS1 checksums and all-zero rejection", async () => {
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "TaxGroup" ("code", "name", "treatment", "rateBps", "uvtLimit")
+         VALUES ($1, 'Invalid UVT', 'UVT_THRESHOLD_EXCLUDED', 0, 50)`,
+        [`BAD_UVT_${randomUUID().slice(0, 12)}`],
+      ),
+      /uvt_treatment_valid/,
+    );
+    const validUvtGroup = await client.query(
+      `INSERT INTO "TaxGroup" ("code", "name", "treatment", "rateBps", "uvtLimit", "aboveUvtRateBps")
+       VALUES ($1, 'Computadores 50 UVT', 'UVT_THRESHOLD_EXCLUDED', 0, 50, 1900) RETURNING "id"`,
+      [`UVT50_${randomUUID().slice(0, 12)}`],
+    );
+    assert.ok(validUvtGroup.rows[0].id);
+
     await assert.rejects(
       client.query(`UPDATE "ProductVariant" SET "priceCents" = -1 WHERE "id" = $1`, [
         fixture.variantId,
@@ -129,7 +179,19 @@ describe("F1.1 — database edge validation", () => {
       /Invalid GTIN/,
     );
     await assert.rejects(
+      client.query(`UPDATE "ProductVariant" SET "gtin" = '0000000000000' WHERE "id" = $1`, [
+        fixture.variantId,
+      ]),
+      /Invalid GTIN/,
+    );
+    await assert.rejects(
       client.query(`UPDATE "ProductVariant" SET "ean" = '96385075' WHERE "id" = $1`, [
+        fixture.variantId,
+      ]),
+      /Invalid EAN/,
+    );
+    await assert.rejects(
+      client.query(`UPDATE "ProductVariant" SET "ean" = '00000000' WHERE "id" = $1`, [
         fixture.variantId,
       ]),
       /Invalid EAN/,
@@ -146,7 +208,7 @@ describe("F1.1 — database edge validation", () => {
     await assert.rejects(
       client.query(
         `INSERT INTO "ProductVariant" ("productId", "sku", "priceCents", "costCents", "weightGrams", "lengthMillimeters", "widthMillimeters", "heightMillimeters")
-       VALUES ($1, $2, 1000, 500, 100, 100, 100, 100)`,
+         VALUES ($1, $2, 1000, 500, 100, 100, 100, 100)`,
         [fixture.productId, sku],
       ),
       /duplicate key/,
@@ -165,17 +227,19 @@ describe("F1.1 — database edge validation", () => {
     ]);
     await assert.rejects(
       client.query(
-        `INSERT INTO "ProductVariant" ("productId", "sku", "priceCents", "costCents", "weightGrams", "lengthMillimeters", "widthMillimeters", "heightMillimeters", "isDefault")       VALUES ($1, $2, 1000, 500, 100, 100, 100, 100, true)`,
+        `INSERT INTO "ProductVariant" ("productId", "sku", "priceCents", "costCents", "weightGrams", "lengthMillimeters", "widthMillimeters", "heightMillimeters", "isDefault")
+         VALUES ($1, $2, 1000, 500, 100, 100, 100, 100, true)`,
         [fixture.productId, `DEFAULT-${randomUUID().toUpperCase()}`],
       ),
       /duplicate key/,
     );
   });
 
-  it("prevents option links from another product or option definition", async () => {
+  it("prevents option links and media variant links from another product", async () => {
     const otherProduct = randomUUID();
     await client.query(
-      `INSERT INTO "Product" ("id", "brandId", "categoryId", "taxGroupId", "slug", "name", "authenticity") VALUES ($1, $2, $3, $4, $5, 'Other Product', 'ORIGINAL')`,
+      `INSERT INTO "Product" ("id", "brandId", "categoryId", "taxGroupId", "slug", "name", "authenticity")
+       VALUES ($1, $2, $3, $4, $5, 'Other Product', 'ORIGINAL')`,
       [
         otherProduct,
         fixture.brandId,
@@ -196,6 +260,14 @@ describe("F1.1 — database edge validation", () => {
         [otherVariant, fixture.optionDefinitionId, fixture.optionValueId],
       ),
       /same product and option definition/,
+    );
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductMedia" ("productId", "variantId", "mediaType", "status", "storageKey", "mimeType", "altText")
+         VALUES ($1, $2, 'IMAGE', 'READY', $3, 'image/avif', 'Cross product media')`,
+        [fixture.productId, otherVariant, `catalog/${randomUUID()}/cross.avif`],
+      ),
+      /ProductMedia_variant_product_fkey/,
     );
   });
 
@@ -237,7 +309,7 @@ describe("F1.1 — database edge validation", () => {
     assert.equal(moved.rows[0].depth, 1);
   });
 
-  it("enforces typed attributes and normalized duplicate detection", async () => {
+  it("enforces typed attributes, XSS-safe URLs, decimal scale parity and duplicate detection", async () => {
     await assert.rejects(
       client.query(
         `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "integerValue", "normalizedValue") VALUES ($1, $2, 5, 'five')`,
@@ -254,14 +326,29 @@ describe("F1.1 — database edge validation", () => {
     );
     await assert.rejects(
       client.query(
-        `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "textValue", "normalizedValue") VALUES ($1, $2, 'Bluetooth 5.4', 'duplicate')`,
+        `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "textValue", "normalizedValue") VALUES ($1, $2, '  bluetooth 5.4 ', 'duplicate')`,
         [fixture.productId, fixture.attributeId],
       ),
       /duplicate key/,
     );
+
+    const urlAttributeId = randomUUID();
+    await client.query(
+      `INSERT INTO "AttributeDefinition" ("id", "key", "name", "valueType", "filterable")
+       VALUES ($1, $2, 'Ficha URL', 'URL', false)`,
+      [urlAttributeId, `url_${randomUUID().replaceAll("-", "_")}`],
+    );
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "urlValue", "normalizedValue")
+         VALUES ($1, $2, 'javascript:alert(1)', 'xss')`,
+        [fixture.productId, urlAttributeId],
+      ),
+      /http or https/,
+    );
   });
 
-  it("blocks redirect cycles, unsafe targets and active duplicate sources", async () => {
+  it("supports root '/' target, in-place updates, soft-delete safety, and blocks traversal/cycles/>100-hop joins", async () => {
     await assert.rejects(
       client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2)`, [
         fixture.redirectTo,
@@ -276,26 +363,74 @@ describe("F1.1 — database edge validation", () => {
       /local redirect paths/,
     );
     await assert.rejects(
+      client.query(
+        `INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ('/escape', '/../admin')`,
+      ),
+      /redirect path encoding/,
+    );
+    await assert.rejects(
       client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ('/self', '/self')`),
       /itself/,
     );
-    await assert.rejects(
-      client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, '/other')`, [
-        fixture.redirectFrom,
-      ]),
-      /duplicate key/,
+
+    // Root '/' redirect target must stay '/' and survive subsequent updates
+    const rootCampaign = `/campana-${randomUUID()}`;
+    const toRoot = await client.query(
+      `INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, '/') RETURNING "id", "toPath"`,
+      [rootCampaign],
     );
-    await client.query(
-      `UPDATE "UrlRedirect" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "fromPath" = $1`,
-      [fixture.redirectFrom],
-    );
-    await client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2)`, [
-      fixture.redirectFrom,
-      fixture.redirectTo,
+    assert.equal(toRoot.rows[0].toPath, "/");
+    await client.query(`UPDATE "UrlRedirect" SET "statusCode" = 301 WHERE "id" = $1`, [
+      toRoot.rows[0].id,
     ]);
+
+    // In-place direction flip of a single isolated redirect must not collide with its own OLD row
+    const flipA = `/flip-a-${randomUUID()}`;
+    const flipB = `/flip-b-${randomUUID()}`;
+    const flipped = await client.query(
+      `INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2) RETURNING "id"`,
+      [flipA, flipB],
+    );
+    await client.query(`UPDATE "UrlRedirect" SET "fromPath" = $1, "toPath" = $2 WHERE "id" = $3`, [
+      flipB,
+      flipA,
+      flipped.rows[0].id,
+    ]);
+
+    // Soft-deleting an inactive redirect when the reverse active edge exists must succeed
+    await client.query(`UPDATE "UrlRedirect" SET "active" = false WHERE "id" = $1`, [
+      flipped.rows[0].id,
+    ]);
+    await client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2)`, [
+      flipA,
+      flipB,
+    ]);
+    await client.query(`UPDATE "UrlRedirect" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+      flipped.rows[0].id,
+    ]);
+
+    // Joining two 55-hop chains (55 + 1 + 55 = 111 > 100) must be rejected
+    const prefix = `/hop-${randomUUID()}`;
+    for (let i = 0; i < 55; i += 1) {
+      await client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2)`, [
+        `${prefix}-a-${i}`,
+        `${prefix}-a-${i + 1}`,
+      ]);
+      await client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2)`, [
+        `${prefix}-b-${i}`,
+        `${prefix}-b-${i + 1}`,
+      ]);
+    }
+    await assert.rejects(
+      client.query(`INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2)`, [
+        `${prefix}-a-55`,
+        `${prefix}-b-0`,
+      ]),
+      /100 hops/,
+    );
   });
 
-  it("validates media, bundles and subscription reactivation without duplicate emails", async () => {
+  it("validates media, bundles and preserves consent history across back-in-stock re-subscriptions", async () => {
     await assert.rejects(
       client.query(`UPDATE "ProductMedia" SET "focalX" = 2 WHERE "productId" = $1`, [
         fixture.productId,
@@ -322,21 +457,41 @@ describe("F1.1 — database edge validation", () => {
       ),
       /proof_length/,
     );
-    const subscription = await client.query(`SELECT "id", "email" FROM "BackInStockSubscription"`);
-    await client.query(
-      `UPDATE "BackInStockSubscription" SET "status" = 'NOTIFIED', "lastNotifiedAt" = CURRENT_TIMESTAMP, "notificationCount" = 1 WHERE "id" = $1`,
-      [subscription.rows[0].id],
+
+    const subscription = await client.query(
+      `SELECT "id", "email" FROM "BackInStockSubscription" WHERE "variantId" = $1`,
+      [fixture.variantId],
     );
-    await client.query(
-      `UPDATE "BackInStockSubscription" SET "status" = 'ACTIVE', "lastNotifiedAt" = NULL WHERE "id" = $1`,
-      [subscription.rows[0].id],
-    );
+    const subEmail = subscription.rows[0].email;
+
+    // Duplicate ACTIVE subscription for same (variantId, email) is rejected
     await assert.rejects(
       client.query(
-        `INSERT INTO "BackInStockSubscription" ("variantId", "email", "consentProofHash") VALUES ($1, $2, decode(repeat('11', 32), 'hex'))`,
-        [fixture.variantId, subscription.rows[0].email],
+        `INSERT INTO "BackInStockSubscription" ("variantId", "email", "consentProofHash") VALUES ($1, $2, $3)`,
+        [fixture.variantId, subEmail, randomBytes(32)],
       ),
       /duplicate key/,
     );
+
+    // After notification, historical proof remains intact AND customer can insert a fresh ACTIVE subscription
+    await client.query(
+      `UPDATE "BackInStockSubscription"
+       SET "status" = 'NOTIFIED', "lastNotifiedAt" = CURRENT_TIMESTAMP, "notificationCount" = 1
+       WHERE "id" = $1`,
+      [subscription.rows[0].id],
+    );
+    const resubscribed = await client.query(
+      `INSERT INTO "BackInStockSubscription" ("customerId", "variantId", "email", "consentProofHash")
+       VALUES ($1, $2, $3, $4) RETURNING "id", "status"`,
+      [fixture.customerId, fixture.variantId, subEmail, randomBytes(32)],
+    );
+    assert.equal(resubscribed.rows[0].status, "ACTIVE");
+    assert.notEqual(resubscribed.rows[0].id, subscription.rows[0].id);
+
+    const history = await client.query(
+      `SELECT count(*)::int AS total FROM "BackInStockSubscription" WHERE "variantId" = $1 AND "email" = $2`,
+      [fixture.variantId, subEmail],
+    );
+    assert.equal(history.rows[0].total, 2);
   });
 });

@@ -1,6 +1,6 @@
 # `@mundonettech/core`
 
-Servicios puros y compartidos, sin identidad comercial ni dependencias de aplicación. El dinero usa `BigInt` en centavos COP cuando se implementen operaciones monetarias.
+Servicios puros y compartidos, sin identidad comercial ni dependencias de aplicación. El dinero usa `BigInt` en centavos COP.
 
 Contratos actuales:
 
@@ -10,4 +10,4 @@ Contratos actuales:
 - Verificación Cloudflare Turnstile con acción/hostname y errores cerrados.
 - Tokens HMAC-SHA256 de actividad para admin/cliente/reset, validación de sujeto/tipo, idle y expiración absoluta, y renovación deslizante sin extender el límite absoluto.
 - Compuerta de correo saliente (`isOutboundEmailDisabled`, `assertOutboundEmailAllowed`, `OutboundEmailDisabledError`) para bloquear despachos externos cuando `EMAIL_SEND_DISABLED=1` está activo.
-- GS1/EAN/UPC, normalización SKU, rutas de categorías N-niveles, redirects locales anti-ciclos, atributos tipados y dinero `BigInt` en centavos COP.
+- Catálogo y redirecciones: validación GS1 (`isValidGs1`, `assertValidGs1`) y EAN-8/13 (`isValidEan`, `assertValidEan`) rechazando ceros ficticios, normalización SKU, rutas de árbol N-niveles (`buildCategoryPath`, `categoryDepth`, `assertCategoryMove`), grafo de redirecciones locales anti-ciclos y tope global de 100 saltos (`normalizeRedirectPath`, `redirectChain`, `assertRedirectAllowed`), atributos tipados en paridad exacta con PostgreSQL 17 y validación monetaria `BigInt` (`assertCatalogMoney`).

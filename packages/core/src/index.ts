@@ -28,7 +28,14 @@ export {
   isOutboundEmailDisabled,
   OutboundEmailDisabledError,
 } from "./outbound-email.js";
-export { normalizeGs1, isValidGs1, assertValidGs1, normalizeSku } from "./gs1.js";
+export {
+  normalizeGs1,
+  isValidGs1,
+  isValidEan,
+  assertValidGs1,
+  assertValidEan,
+  normalizeSku,
+} from "./gs1.js";
 export { buildCategoryPath, categoryDepth, assertCategoryMove } from "./catalog-tree.js";
 export {
   normalizeRedirectPath,

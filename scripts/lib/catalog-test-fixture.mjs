@@ -2,6 +2,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 
 function validGs1(length) {
   const digits = Array.from(randomBytes(length), (byte) => byte % 10);
+  if (digits.slice(0, -1).every((digit) => digit === 0)) {
+    digits[0] = 5;
+  }
   let sum = 0;
   for (let index = length - 2; index >= 0; index -= 1) {
     sum += digits[index] * ((length - index) % 2 === 0 ? 3 : 1);
@@ -50,10 +53,11 @@ export async function seedCatalogFixture(client) {
   const bundleId = randomUUID();
   const customerId = randomUUID();
 
-  await client.query(`INSERT INTO "TaxGroup" ("id", "code", "rateBps") VALUES ($1, $2, 1900)`, [
-    taxGroupId,
-    `T_${suffix}`,
-  ]);
+  await client.query(
+    `INSERT INTO "TaxGroup" ("id", "code", "name", "treatment", "rateBps")
+     VALUES ($1, $2, 'IVA general 19 %', 'STANDARD', 1900)`,
+    [taxGroupId, `T_${suffix}`],
+  );
   await client.query(`INSERT INTO "Brand" ("id", "slug", "name") VALUES ($1, $2, 'Acme Audio')`, [
     brandId,
     `brand-${suffix}`,
@@ -104,7 +108,7 @@ export async function seedCatalogFixture(client) {
     [productId, variantId, `catalog/${suffix}/image.avif`],
   );
   await client.query(
-    `INSERT INTO "AttributeDefinition" ("id", "key", "name", "valueType", "filterable") VALUES ($1, $2, 'Conectividad', 'TEXT', true)`,
+    `INSERT INTO "AttributeDefinition" ("id", "key", "name", "valueType", "filterable", "searchable") VALUES ($1, $2, 'Conectividad', 'TEXT', true, true)`,
     [attributeId, `connectivity_${suffix.replaceAll("-", "_")}`],
   );
   await client.query(
@@ -112,7 +116,7 @@ export async function seedCatalogFixture(client) {
     [categoryId, attributeId],
   );
   await client.query(
-    `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "textValue", "normalizedValue") VALUES ($1, $2, 'Bluetooth 5.4', 'pending')`,
+    `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "textValue", "normalizedValue") VALUES ($1, $2, '  Bluetooth 5.4  ', 'pending')`,
     [productId, attributeId],
   );
   await client.query(

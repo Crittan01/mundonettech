@@ -31,12 +31,18 @@ CREATE TYPE "CompatibilityFit" AS ENUM ('EXACT', 'ADAPTER', 'NOT_COMPATIBLE');
 -- CreateEnum
 CREATE TYPE "SubscriptionStatus" AS ENUM ('ACTIVE', 'NOTIFIED', 'CANCELLED');
 
+-- CreateEnum
+CREATE TYPE "TaxTreatment" AS ENUM ('STANDARD', 'EXEMPT', 'EXCLUDED', 'UVT_THRESHOLD_EXCLUDED');
+
 -- CreateTable
 CREATE TABLE "TaxGroup" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "code" VARCHAR(40) NOT NULL,
+    "name" VARCHAR(120) NOT NULL,
+    "treatment" "TaxTreatment" NOT NULL DEFAULT 'STANDARD',
     "rateBps" INTEGER NOT NULL,
     "uvtLimit" INTEGER,
+    "aboveUvtRateBps" INTEGER,
     "createdAt" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -411,6 +417,9 @@ CREATE UNIQUE INDEX "OptionDefinition_productId_key_key" ON "OptionDefinition"("
 CREATE UNIQUE INDEX "OptionValue_optionDefinitionId_value_key" ON "OptionValue"("optionDefinitionId", "value");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "ProductVariant_id_productId_key" ON "ProductVariant"("id", "productId");
+
+-- CreateIndex
 CREATE INDEX "ProductVariant_productId_status_idx" ON "ProductVariant"("productId", "status");
 
 -- CreateIndex
@@ -480,10 +489,10 @@ CREATE INDEX "WishlistItem_variantId_idx" ON "WishlistItem"("variantId");
 CREATE UNIQUE INDEX "WishlistItem_customerId_variantId_key" ON "WishlistItem"("customerId", "variantId");
 
 -- CreateIndex
-CREATE INDEX "BackInStockSubscription_status_variantId_idx" ON "BackInStockSubscription"("status", "variantId");
+CREATE INDEX "BackInStockSubscription_variantId_email_idx" ON "BackInStockSubscription"("variantId", "email");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "BackInStockSubscription_variantId_email_key" ON "BackInStockSubscription"("variantId", "email");
+CREATE INDEX "BackInStockSubscription_status_variantId_idx" ON "BackInStockSubscription"("status", "variantId");
 
 -- CreateIndex
 CREATE INDEX "UrlRedirect_active_deletedAt_idx" ON "UrlRedirect"("active", "deletedAt");
@@ -531,6 +540,9 @@ ALTER TABLE "ProductMedia" ADD CONSTRAINT "ProductMedia_productId_fkey" FOREIGN 
 ALTER TABLE "ProductMedia" ADD CONSTRAINT "ProductMedia_variantId_fkey" FOREIGN KEY ("variantId") REFERENCES "ProductVariant"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "ProductMedia" ADD CONSTRAINT "ProductMedia_variant_product_fkey" FOREIGN KEY ("variantId", "productId") REFERENCES "ProductVariant"("id", "productId") MATCH SIMPLE ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "CategoryAttribute" ADD CONSTRAINT "CategoryAttribute_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "Category"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
@@ -574,7 +586,13 @@ ALTER TABLE "BackInStockSubscription" ADD CONSTRAINT "BackInStockSubscription_va
 ALTER TABLE "TaxGroup"
   ADD CONSTRAINT "TaxGroup_rateBps_valid" CHECK ("rateBps" BETWEEN 0 AND 10000),
   ADD CONSTRAINT "TaxGroup_uvtLimit_valid" CHECK ("uvtLimit" IS NULL OR "uvtLimit" > 0),
-  ADD CONSTRAINT "TaxGroup_code_not_blank" CHECK ("code" = btrim("code") AND char_length("code") > 0);
+  ADD CONSTRAINT "TaxGroup_code_not_blank" CHECK ("code" = btrim("code") AND char_length("code") > 0),
+  ADD CONSTRAINT "TaxGroup_name_not_blank" CHECK ("name" = btrim("name") AND char_length("name") > 0),
+  ADD CONSTRAINT "TaxGroup_uvt_treatment_valid" CHECK (
+    ("treatment" = 'STANDARD' AND "rateBps" > 0 AND "uvtLimit" IS NULL AND "aboveUvtRateBps" IS NULL) OR
+    ("treatment" IN ('EXEMPT', 'EXCLUDED') AND "rateBps" = 0 AND "uvtLimit" IS NULL AND "aboveUvtRateBps" IS NULL) OR
+    ("treatment" = 'UVT_THRESHOLD_EXCLUDED' AND "rateBps" = 0 AND "uvtLimit" IS NOT NULL AND "uvtLimit" > 0 AND "aboveUvtRateBps" IS NOT NULL AND "aboveUvtRateBps" BETWEEN 1 AND 10000)
+  );
 
 ALTER TABLE "Brand"
   ADD CONSTRAINT "Brand_slug_valid" CHECK ("slug" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
@@ -614,6 +632,7 @@ ALTER TABLE "OptionValue"
 
 ALTER TABLE "ProductVariant"
   ADD CONSTRAINT "ProductVariant_sku_valid" CHECK ("sku" ~ '^[A-Z0-9][A-Z0-9._-]{1,63}$'),
+  ADD CONSTRAINT "ProductVariant_mpn_not_blank" CHECK ("mpn" IS NULL OR ("mpn" = btrim("mpn") AND char_length("mpn") > 0)),
   ADD CONSTRAINT "ProductVariant_price_nonnegative" CHECK ("priceCents" >= 0),
   ADD CONSTRAINT "ProductVariant_cost_nonnegative" CHECK ("costCents" >= 0),
   ADD CONSTRAINT "ProductVariant_compare_nonnegative" CHECK ("compareAtPriceCents" IS NULL OR "compareAtPriceCents" >= 0),
@@ -688,7 +707,7 @@ ALTER TABLE "BackInStockSubscription"
 ALTER TABLE "UrlRedirect"
   ADD CONSTRAINT "UrlRedirect_status_valid" CHECK ("statusCode" IN (301, 302, 307, 308));
 
--- Soft-delete-compatible natural identities
+-- Soft-delete and active-state compatible natural identities
 CREATE UNIQUE INDEX "Brand_slug_active_key" ON "Brand"("slug") WHERE "deletedAt" IS NULL;
 CREATE UNIQUE INDEX "Category_slug_active_key" ON "Category"("slug") WHERE "deletedAt" IS NULL;
 CREATE UNIQUE INDEX "Collection_slug_active_key" ON "Collection"("slug") WHERE "deletedAt" IS NULL;
@@ -701,6 +720,7 @@ CREATE UNIQUE INDEX "ProductMedia_storageKey_active_key" ON "ProductMedia"("stor
 CREATE UNIQUE INDEX "AttributeDefinition_key_active_key" ON "AttributeDefinition"("key") WHERE "deletedAt" IS NULL;
 CREATE UNIQUE INDEX "CompatibilityDevice_slug_active_key" ON "CompatibilityDevice"("slug") WHERE "deletedAt" IS NULL;
 CREATE UNIQUE INDEX "Bundle_slug_active_key" ON "Bundle"("slug") WHERE "deletedAt" IS NULL;
+CREATE UNIQUE INDEX "BackInStockSubscription_variantId_email_active_key" ON "BackInStockSubscription"("variantId", "email") WHERE "status" = 'ACTIVE';
 CREATE UNIQUE INDEX "UrlRedirect_fromPath_active_key" ON "UrlRedirect"("fromPath") WHERE "deletedAt" IS NULL;
 
 -- GS1 and category trees
@@ -713,7 +733,9 @@ DECLARE
   digit_value INTEGER;
   expected INTEGER;
 BEGIN
-  IF normalized !~ '^[0-9]+$' OR char_length(normalized) NOT IN (8, 12, 13, 14, 18) THEN RETURN false; END IF;
+  IF normalized !~ '^[0-9]+$' OR normalized ~ '^0+$' OR char_length(normalized) NOT IN (8, 12, 13, 14, 18) THEN
+    RETURN false;
+  END IF;
   FOR index_value IN REVERSE char_length(normalized) - 1..1 LOOP
     digit_value := ascii(substr(normalized, index_value, 1)) - 48;
     sum_value := sum_value + digit_value * CASE WHEN (char_length(normalized) - index_value) % 2 = 1 THEN 3 ELSE 1 END;
@@ -727,11 +749,18 @@ CREATE FUNCTION "validate_variant_identity"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   NEW."sku" := upper(btrim(NEW."sku"));
-  IF NEW."sku" !~ '^[A-Z0-9][A-Z0-9._-]{1,63}$' THEN RAISE EXCEPTION 'Invalid SKU' USING ERRCODE = '23514'; END IF;
+  IF NEW."sku" !~ '^[A-Z0-9][A-Z0-9._-]{1,63}$' THEN
+    RAISE EXCEPTION 'Invalid SKU' USING ERRCODE = '23514';
+  END IF;
   NEW."gtin" := NULLIF(regexp_replace(NEW."gtin", '[\s-]', '', 'g'), '');
   NEW."ean" := NULLIF(regexp_replace(NEW."ean", '[\s-]', '', 'g'), '');
-  IF NEW."gtin" IS NOT NULL AND NOT validate_gs1_check_digit(NEW."gtin") THEN RAISE EXCEPTION 'Invalid GTIN' USING ERRCODE = '23514'; END IF;
-  IF NEW."ean" IS NOT NULL AND (char_length(NEW."ean") NOT IN (8, 13) OR NOT validate_gs1_check_digit(NEW."ean")) THEN RAISE EXCEPTION 'Invalid EAN' USING ERRCODE = '23514'; END IF;
+  NEW."mpn" := NULLIF(btrim(NEW."mpn"), '');
+  IF NEW."gtin" IS NOT NULL AND NOT validate_gs1_check_digit(NEW."gtin") THEN
+    RAISE EXCEPTION 'Invalid GTIN' USING ERRCODE = '23514';
+  END IF;
+  IF NEW."ean" IS NOT NULL AND (char_length(NEW."ean") NOT IN (8, 13) OR NOT validate_gs1_check_digit(NEW."ean")) THEN
+    RAISE EXCEPTION 'Invalid EAN' USING ERRCODE = '23514';
+  END IF;
   RETURN NEW;
 END;
 $$;
@@ -744,10 +773,14 @@ DECLARE
   parent_row "Category";
   child_count INTEGER;
 BEGIN
-  IF NEW."parentId" = NEW."id" THEN RAISE EXCEPTION 'Category cannot be its own parent' USING ERRCODE = '23514'; END IF;
+  IF NEW."parentId" = NEW."id" THEN
+    RAISE EXCEPTION 'Category cannot be its own parent' USING ERRCODE = '23514';
+  END IF;
   IF NEW."parentId" IS NOT NULL THEN
     SELECT * INTO parent_row FROM "Category" WHERE "id" = NEW."parentId" AND "deletedAt" IS NULL FOR UPDATE;
-    IF parent_row."id" IS NULL THEN RAISE EXCEPTION 'Category parent is missing or deleted' USING ERRCODE = '23514'; END IF;
+    IF parent_row."id" IS NULL THEN
+      RAISE EXCEPTION 'Category parent is missing or deleted' USING ERRCODE = '23514';
+    END IF;
     IF TG_OP = 'UPDATE' AND parent_row."materializedPath" LIKE OLD."materializedPath" || '%' THEN
       RAISE EXCEPTION 'Category cannot move below its descendant' USING ERRCODE = '23514';
     END IF;
@@ -759,11 +792,15 @@ BEGIN
   END IF;
   IF TG_OP = 'UPDATE' AND OLD."parentId" IS DISTINCT FROM NEW."parentId" THEN
     SELECT count(*) INTO child_count FROM "Category" WHERE "parentId" = OLD."id" AND "deletedAt" IS NULL;
-    IF child_count > 0 THEN RAISE EXCEPTION 'Subtree moves require moving descendants first' USING ERRCODE = '23514'; END IF;
+    IF child_count > 0 THEN
+      RAISE EXCEPTION 'Subtree moves require moving descendants first' USING ERRCODE = '23514';
+    END IF;
   END IF;
   IF TG_OP = 'UPDATE' AND NEW."deletedAt" IS NOT NULL AND OLD."deletedAt" IS NULL THEN
     SELECT count(*) INTO child_count FROM "Category" WHERE "parentId" = NEW."id" AND "deletedAt" IS NULL;
-    IF child_count > 0 THEN RAISE EXCEPTION 'Cannot delete a category with active descendants' USING ERRCODE = '23514'; END IF;
+    IF child_count > 0 THEN
+      RAISE EXCEPTION 'Cannot delete a category with active descendants' USING ERRCODE = '23514';
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -797,7 +834,21 @@ DECLARE
   attribute_type "AttributeValueType";
 BEGIN
   SELECT "valueType" INTO attribute_type FROM "AttributeDefinition" WHERE "id" = NEW."attributeId" AND "deletedAt" IS NULL;
-  IF attribute_type IS NULL THEN RAISE EXCEPTION 'Attribute definition is missing or deleted' USING ERRCODE = '23514'; END IF;
+  IF attribute_type IS NULL THEN
+    RAISE EXCEPTION 'Attribute definition is missing or deleted' USING ERRCODE = '23514';
+  END IF;
+  IF NEW."textValue" IS NOT NULL THEN
+    NEW."textValue" := btrim(NEW."textValue");
+    IF char_length(NEW."textValue") = 0 THEN
+      RAISE EXCEPTION 'Text attribute value cannot be blank' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  IF NEW."urlValue" IS NOT NULL THEN
+    NEW."urlValue" := btrim(NEW."urlValue");
+    IF NEW."urlValue" !~* '^https?://[^[:space:]\x00-\x1f\x7f]+$' THEN
+      RAISE EXCEPTION 'URL attribute value must use http or https without control or whitespace characters' USING ERRCODE = '23514';
+    END IF;
+  END IF;
   IF (attribute_type = 'TEXT' AND NEW."textValue" IS NULL) OR
      (attribute_type = 'INTEGER' AND NEW."integerValue" IS NULL) OR
      (attribute_type = 'DECIMAL' AND NEW."decimalValue" IS NULL) OR
@@ -807,8 +858,12 @@ BEGIN
     RAISE EXCEPTION 'Attribute value does not match its definition type' USING ERRCODE = '23514';
   END IF;
   NEW."normalizedValue" := lower(COALESCE(
-    NEW."textValue", NEW."integerValue"::text, trim_scale(NEW."decimalValue")::text,
-    NEW."booleanValue"::text, NEW."urlValue", NEW."jsonValue"::text
+    NEW."textValue",
+    NEW."integerValue"::text,
+    CASE WHEN trim_scale(NEW."decimalValue") = 0 THEN '0' ELSE trim_scale(NEW."decimalValue")::text END,
+    NEW."booleanValue"::text,
+    NEW."urlValue",
+    NEW."jsonValue"::text
   ));
   RETURN NEW;
 END;
@@ -820,37 +875,75 @@ FOR EACH ROW EXECUTE FUNCTION "normalize_product_attribute_value"();
 CREATE FUNCTION "normalize_redirect_path"(value TEXT) RETURNS TEXT
 LANGUAGE plpgsql IMMUTABLE AS $$
 BEGIN
-  IF value IS NULL OR value <> btrim(value) OR char_length(value) > 2048 OR
+  IF value IS NULL OR value <> btrim(value) OR char_length(value) = 0 OR char_length(value) > 2048 OR
      value !~ '^/' OR value LIKE '//%' OR value ~ '[?#\\]' OR position('//' IN value) > 0 THEN
     RAISE EXCEPTION 'Only trimmed, unambiguous local redirect paths are allowed' USING ERRCODE = '23514';
   END IF;
   IF value ~* '%(?:2f|2e|0[0-9a-f]|1[0-9a-f]|7f)' OR value ~ '[\x00-\x1f\x7f]' OR
+     ('/' || trim(BOTH '/' FROM value) || '/') ~ '/\.\.?/' OR
      position('%' IN regexp_replace(value, '%[0-9A-Fa-f]{2}', '', 'g')) > 0 THEN
     RAISE EXCEPTION 'Unsafe or non-canonical redirect path encoding' USING ERRCODE = '23514';
   END IF;
-  RETURN regexp_replace(value, '/+$', '');
+  RETURN CASE WHEN value = '/' THEN '/' ELSE regexp_replace(value, '/+$', '') END;
 END;
 $$;
 
 CREATE FUNCTION "validate_url_redirect"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
-  cycle_found BOOLEAN;
-  maximum_hops INTEGER;
+  cycle_found BOOLEAN := false;
+  outgoing_hops INTEGER := 0;
+  incoming_hops INTEGER := 0;
 BEGIN
   NEW."fromPath" := normalize_redirect_path(NEW."fromPath");
   NEW."toPath" := normalize_redirect_path(NEW."toPath");
-  IF NEW."fromPath" = NEW."toPath" THEN RAISE EXCEPTION 'Redirect cannot target itself' USING ERRCODE = '23514'; END IF;
-  WITH RECURSIVE chain(path, hops) AS (
-    SELECT NEW."toPath", 1
+  IF NEW."fromPath" = NEW."toPath" THEN
+    RAISE EXCEPTION 'Redirect cannot target itself' USING ERRCODE = '23514';
+  END IF;
+
+  IF NOT NEW."active" OR NEW."deletedAt" IS NOT NULL THEN
+    RETURN NEW;
+  END IF;
+
+  WITH RECURSIVE forward_chain(path, hops) AS (
+    SELECT NEW."toPath", 0
     UNION ALL
-    SELECT redirect."toPath", chain.hops + 1
-    FROM "UrlRedirect" redirect JOIN chain ON redirect."fromPath" = chain.path
-    WHERE redirect."active" AND redirect."deletedAt" IS NULL AND chain.hops < 100
+    SELECT redirect."toPath", forward_chain.hops + 1
+    FROM "UrlRedirect" redirect
+    JOIN forward_chain ON redirect."fromPath" = forward_chain.path
+    WHERE redirect."active"
+      AND redirect."deletedAt" IS NULL
+      AND redirect."id" <> NEW."id"
+      AND forward_chain.path <> NEW."fromPath"
+      AND forward_chain.hops <= 100
   )
-  SELECT COALESCE(bool_or(path = NEW."fromPath"), false), COALESCE(max(hops), 1)
-  INTO cycle_found, maximum_hops FROM chain;
-  IF cycle_found OR maximum_hops >= 100 THEN RAISE EXCEPTION 'Redirect cycle or chain over 100 hops' USING ERRCODE = '23514'; END IF;
+  SELECT COALESCE(bool_or(path = NEW."fromPath"), false), COALESCE(max(hops), 0)
+  INTO cycle_found, outgoing_hops
+  FROM forward_chain;
+
+  IF cycle_found THEN
+    RAISE EXCEPTION 'Redirect cycle detected' USING ERRCODE = '23514';
+  END IF;
+
+  WITH RECURSIVE backward_chain(path, hops) AS (
+    SELECT NEW."fromPath", 0
+    UNION ALL
+    SELECT redirect."fromPath", backward_chain.hops + 1
+    FROM "UrlRedirect" redirect
+    JOIN backward_chain ON redirect."toPath" = backward_chain.path
+    WHERE redirect."active"
+      AND redirect."deletedAt" IS NULL
+      AND redirect."id" <> NEW."id"
+      AND backward_chain.hops <= 100
+  )
+  SELECT COALESCE(max(hops), 0)
+  INTO incoming_hops
+  FROM backward_chain;
+
+  IF (incoming_hops + 1 + outgoing_hops) > 100 THEN
+    RAISE EXCEPTION 'Redirect chain exceeds 100 hops' USING ERRCODE = '23514';
+  END IF;
+
   RETURN NEW;
 END;
 $$;
@@ -884,17 +977,33 @@ $$;
 CREATE FUNCTION "refresh_product_search_vector"(p_product_id UUID) RETURNS void
 LANGUAGE sql VOLATILE AS $$
   WITH brand_text AS (
-    SELECT brand."name" AS text FROM "Brand" brand WHERE brand."id" = (SELECT "brandId" FROM "Product" WHERE "id" = p_product_id)
+    SELECT brand."name" AS text
+    FROM "Brand" brand
+    WHERE brand."id" = (SELECT "brandId" FROM "Product" WHERE "id" = p_product_id)
+      AND brand."deletedAt" IS NULL
   ), variant_text AS (
-    SELECT string_agg(variant."sku" || ' ' || COALESCE(variant."gtin", '') || ' ' ||
-      COALESCE(variant."ean", '') || ' ' || COALESCE(variant."mpn", ''), ' ') AS text
-    FROM "ProductVariant" variant WHERE variant."productId" = p_product_id AND variant."deletedAt" IS NULL
+    SELECT string_agg(
+      variant."sku" || ' ' || COALESCE(variant."gtin", '') || ' ' ||
+      COALESCE(variant."ean", '') || ' ' || COALESCE(variant."mpn", ''),
+      ' '
+    ) AS text
+    FROM "ProductVariant" variant
+    WHERE variant."productId" = p_product_id
+      AND variant."deletedAt" IS NULL
+  ), attribute_text AS (
+    SELECT string_agg(pav."normalizedValue", ' ') AS text
+    FROM "ProductAttributeValue" pav
+    JOIN "AttributeDefinition" ad ON ad."id" = pav."attributeId"
+    WHERE pav."productId" = p_product_id
+      AND ad."searchable" = true
+      AND ad."deletedAt" IS NULL
   )
   UPDATE "Product" product
   SET "searchVector" =
-    setweight(to_tsvector('simple', immutable_unaccent(product."name" || ' ' || COALESCE(product."shortDescription", ''))), 'A') ||
-    setweight(to_tsvector('simple', immutable_unaccent(COALESCE((SELECT text FROM brand_text), ''))), 'B') ||
-    setweight(to_tsvector('simple', immutable_unaccent(COALESCE((SELECT text FROM variant_text), ''))), 'C')
+    setweight(to_tsvector('simple', public.immutable_unaccent(product."name" || ' ' || COALESCE(product."shortDescription", ''))), 'A') ||
+    setweight(to_tsvector('simple', public.immutable_unaccent(COALESCE((SELECT text FROM brand_text), ''))), 'B') ||
+    setweight(to_tsvector('simple', public.immutable_unaccent(COALESCE((SELECT text FROM variant_text), ''))), 'C') ||
+    setweight(to_tsvector('simple', public.immutable_unaccent(COALESCE((SELECT text FROM attribute_text), ''))), 'D')
   WHERE product."id" = p_product_id;
 $$;
 
@@ -925,7 +1034,10 @@ FOR EACH ROW EXECUTE FUNCTION "brand_search_after_write"();
 CREATE FUNCTION "variant_search_after_write"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  IF TG_OP = 'DELETE' THEN PERFORM refresh_product_search_vector(OLD."productId"); RETURN OLD; END IF;
+  IF TG_OP = 'DELETE' THEN
+    PERFORM refresh_product_search_vector(OLD."productId");
+    RETURN OLD;
+  END IF;
   PERFORM refresh_product_search_vector(NEW."productId");
   RETURN NEW;
 END;
@@ -933,13 +1045,43 @@ $$;
 CREATE TRIGGER "ProductVariant_search_after_write" AFTER INSERT OR UPDATE OR DELETE ON "ProductVariant"
 FOR EACH ROW EXECUTE FUNCTION "variant_search_after_write"();
 
+CREATE FUNCTION "product_attribute_search_after_write"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    PERFORM refresh_product_search_vector(OLD."productId");
+    RETURN OLD;
+  END IF;
+  PERFORM refresh_product_search_vector(NEW."productId");
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER "ProductAttributeValue_search_after_write" AFTER INSERT OR UPDATE OR DELETE ON "ProductAttributeValue"
+FOR EACH ROW EXECUTE FUNCTION "product_attribute_search_after_write"();
+
+CREATE FUNCTION "attribute_definition_search_after_write"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  product_id UUID;
+BEGIN
+  FOR product_id IN SELECT DISTINCT "productId" FROM "ProductAttributeValue" WHERE "attributeId" = NEW."id" LOOP
+    PERFORM refresh_product_search_vector(product_id);
+  END LOOP;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER "AttributeDefinition_search_after_write" AFTER UPDATE OF "searchable", "deletedAt" ON "AttributeDefinition"
+FOR EACH ROW EXECUTE FUNCTION "attribute_definition_search_after_write"();
+
 CREATE INDEX "Product_searchVector_idx" ON "Product" USING GIN("searchVector");
 
 
--- These validators only read referenced rows; target writes still execute RLS as the caller.
+-- Cross-table relational validators and searchVector maintenance run with fixed search_path while target writes retain caller RLS.
 ALTER FUNCTION "maintain_category_tree"() SECURITY DEFINER SET search_path = pg_catalog, public;
 ALTER FUNCTION "validate_variant_option"() SECURITY DEFINER SET search_path = pg_catalog, public;
 ALTER FUNCTION "normalize_product_attribute_value"() SECURITY DEFINER SET search_path = pg_catalog, public;
+ALTER FUNCTION "validate_url_redirect"() SECURITY DEFINER SET search_path = pg_catalog, public;
+ALTER FUNCTION "refresh_product_search_vector"(UUID) SECURITY DEFINER SET search_path = pg_catalog, public;
 
 
 -- Enforce deny-by-default for every future public function as well.

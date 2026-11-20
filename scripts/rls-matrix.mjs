@@ -51,6 +51,22 @@ const rpcProbes = [
     name: "purge_expired_idempotency_keys",
     sql: "SELECT public.purge_expired_idempotency_keys(1)",
   },
+  {
+    name: "validate_gs1_check_digit",
+    sql: "SELECT public.validate_gs1_check_digit('5901234123457')",
+  },
+  {
+    name: "normalize_redirect_path",
+    sql: "SELECT public.normalize_redirect_path('/origen')",
+  },
+  {
+    name: "immutable_unaccent",
+    sql: "SELECT public.immutable_unaccent('táctil')",
+  },
+  {
+    name: "refresh_product_search_vector",
+    sql: "SELECT public.refresh_product_search_vector(NULL)",
+  },
 ];
 
 async function verifySchemaCoverage(client) {
@@ -274,6 +290,9 @@ export async function runRlsMatrix(databaseUrl) {
       await client.query("ROLLBACK").catch(() => undefined);
     }
   } finally {
+    await client
+      .query(`REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM ${grantedRole}`)
+      .catch(() => undefined);
     await client
       .query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${grantedRole}`)
       .catch(() => undefined);

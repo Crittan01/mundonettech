@@ -4,23 +4,24 @@
 
 ## Fotografía ejecutiva
 
-- **Estado:** **Fase 0 certificada (`F0.1`–`F0.5` ✅) → inicia Fase 1 (`F1.1` Catálogo Tech)**.
+- **Estado:** **Fase 1 en curso (`F1.1` certificado ✅ → sigue `F1.2` Media 360°/3D)**.
 - **Operación:** `mundonettech.co` · Órdenes `MNT-YYYY-NNNN` · Retail/mayorista tech multimarca en CO.
-- **Régimen tributario:** inicia en **`NO_RESPONSABLE_IVA`** (`3.500 UVT`), con motor dual (`NO_RESPONSABLE_IVA` ↔ `RESPONSABLE_IVA` + UVT tech + DIAN — `ADR-009`).
-- **Fundación (`F0.1`–`F0.5`):** Next.js 16 standalone (`:4010`/`:4110`, `proxy.ts`, `'use cache'`), PG 17 (`:54421..54428`), RLS *deny-by-default* (174 casos), bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` **MFA TOTP `aal2`** + RBAC 8 roles + PII mask y CI PG 17 + Playwright/`@axe-core` en verde.
+- **Régimen tributario:** inicia en **`NO_RESPONSABLE_IVA`** (`3.500 UVT`), con motor dual (`NO_RESPONSABLE_IVA` ↔ `RESPONSABLE_IVA` + topes `50`/`22` UVT tech + DIAN — `ADR-009`).
+- **Base activa (`F0` + `F1.1`):** Next.js 16 standalone (`:4010`/`:4110`, `'use cache'`), PG 17 (`30` tablas con RLS *deny-by-default* y `543` casos), bóveda `AES-256-GCM`, Auth/Admin MFA `aal2` + RBAC 8 roles y dominio de catálogo tech (`catalog.prisma` + `@mundonettech/core` + `catalog-blueprint.ts`).
 
 ## Topología de ambientes
 
 | Ambiente | URL / Puertos | Estado |
 | --- | --- | --- |
-| **LOCAL** | Next `:4010` (`:4110` E2E) · API `:54421` · PG 17 `:54422` (`:54428` tests) · Studio `:54423` · Mailpit `:54424` | Operativo y certificado (`F0.1`–`F0.5`) |
+| **LOCAL** | Next `:4010` (`:4110` E2E) · API `:54421` · PG 17 `:54422` (`:54428` tests) · Studio `:54423` · Mailpit `:54424` | Operativo y certificado (`F0.1`–`F1.1`) |
 | **STG** | Rama `develop` → Preview + Supabase STG dedicado (secretos aislados de PRD) | Por aprovisionar antes de cerrar Hito 1 |
 | **PRD** | Rama `production` → `https://mundonettech.co` + Supabase PRD + Cloudflare R2 | Por aprovisionar en `F4A.3` |
 
 ## Capacidades operativas construidas
 
-- **Fase 0 cerrada (`F0.1`–`F0.5`):** ✅ Gobernanza viva, `@mundonettech/config`, `packages/*`, `apps/web` standalone (`'use cache'`), 9 modelos Prisma 7 en PG 17, `enforce_rls_on_new_table`, PostgREST revocado, `SKIP LOCKED`/idempotencia (`acquired`), bóveda `AES-256-GCM`, `proxy.ts` (CSP/HSTS/HMAC), Auth cliente OTP/HIBP/Turnstile, `/admin` MFA TOTP `aal2` + códigos HMAC + step-up ≤ 10m + RBAC 8 roles + `pii-mask`, bloqueo anti-PRD/`EMAIL_SEND_DISABLED=1`, `rls-matrix` (174 casos), Vitest/Playwright/`@axe-core`, `ci.yml` y `docs/{SECURITY,OPERATIONS}.md`.
-- **Fases `F1`–`F6`:** pendientes según [`PLAN.md`](PLAN.md) (siguiente bloque: **`F1.1`**).
+- **Fase 0 cerrada (`F0.1`–`F0.5`):** ✅ Gobernanza, Next.js 16 standalone (`'use cache'`), PG 17 + RLS + Bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` MFA `aal2` + RBAC 8 roles + `pii-mask` y CI PG 17/Playwright/axe.
+- **Catálogo Tech (`F1.1`):** ✅ `catalog-blueprint.ts` (marcas, árbol tech, atributos, dispositivos y grupos IVA/UVT `50`/`22`), `21` modelos en `catalog.prisma` (`BigInt` COP, GS1/EAN, `Category` N-niveles, `tsvector` GIN + `immutable_unaccent`, FK `(variantId, productId)` en `ProductMedia`, `BackInStockSubscription` re-suscribible y `UrlRedirect` ≤ 100 saltos) y `rls-matrix` (`543` casos).
+- **Bloques `F1.2`–`F6`:** pendientes según [`PLAN.md`](PLAN.md) (siguiente: **`F1.2`**).
 
 ## Pendientes externos de negocio (no bloquean Fase 1–2)
 
