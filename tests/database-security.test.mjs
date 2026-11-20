@@ -29,6 +29,7 @@ import {
   createCredentialKeyRing,
   IntegrationCredentialVault,
 } from "../packages/integrations/dist/index.js";
+import { assertSafeTestDatabase, assertSafeTestProcess } from "../scripts/lib/test-environment.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const containerName = "f03-security-test_mundonettech";
@@ -142,32 +143,40 @@ async function insertOutbox(key = randomUUID()) {
 
 before(
   async () => {
-    const existing = run("podman", ["container", "exists", containerName]);
-    if (existing.status === 0) {
-      throw new Error(`Refusing to replace existing test container ${containerName}.`);
-    }
+    assertSafeTestProcess();
+    const externalDatabaseUrl = process.env.TEST_DATABASE_URL;
+    if (externalDatabaseUrl) {
+      databaseUrl = externalDatabaseUrl;
+      assertSafeTestDatabase(databaseUrl, { ci: process.env.CI === "true" });
+    } else {
+      const existing = run("podman", ["container", "exists", containerName]);
+      if (existing.status === 0) {
+        throw new Error(`Refusing to replace existing test container ${containerName}.`);
+      }
 
-    const password = randomBytes(32).toString("hex");
-    const started = run("podman", [
-      "run",
-      "--detach",
-      "--rm",
-      "--pull=missing",
-      "--name",
-      containerName,
-      "--env",
-      `POSTGRES_PASSWORD=${password}`,
-      "--env",
-      "POSTGRES_DB=security_test",
-      "--publish",
-      "127.0.0.1:54428:5432",
-      "docker.io/library/postgres:17.12-alpine",
-    ]);
-    if (started.status !== 0) {
-      throw new Error(`Unable to start PostgreSQL 17 test container: ${started.stderr}`);
+      const password = randomBytes(32).toString("hex");
+      const started = run("podman", [
+        "run",
+        "--detach",
+        "--rm",
+        "--pull=missing",
+        "--name",
+        containerName,
+        "--env",
+        `POSTGRES_PASSWORD=${password}`,
+        "--env",
+        "POSTGRES_DB=security_test",
+        "--publish",
+        "127.0.0.1:54428:5432",
+        "docker.io/library/postgres:17.12-alpine",
+      ]);
+      if (started.status !== 0) {
+        throw new Error(`Unable to start PostgreSQL 17 test container: ${started.stderr}`);
+      }
+      containerId = started.stdout.trim();
+      databaseUrl = `postgresql://postgres:${encodeURIComponent(password)}@127.0.0.1:54428/security_test`;
+      assertSafeTestDatabase(databaseUrl);
     }
-    containerId = started.stdout.trim();
-    databaseUrl = `postgresql://postgres:${encodeURIComponent(password)}@127.0.0.1:54428/security_test`;
 
     try {
       await connectWhenReady(databaseUrl);
@@ -1126,5 +1135,15 @@ describe("F0.3 — persisted integration credential vault", () => {
       }),
       TypeError,
     );
+  });
+});
+
+describe("F0.5 — complete RLS operation matrix over persisted fixtures", () => {
+  it("denies SELECT/INSERT/UPDATE/DELETE on all nine tables despite explicit SQL grants", async () => {
+    const { runRlsMatrix } = await import("../scripts/rls-matrix.mjs");
+    const summary = await runRlsMatrix(databaseUrl);
+    assert.equal(summary.tables, 9);
+    assert.equal(summary.operations, 36);
+    assert.ok(summary.results.every((result) => result.passed));
   });
 });

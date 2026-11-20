@@ -24,7 +24,7 @@
 - `[x]` ✅ **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:** `@mundonettech/config`, `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `standalone`, `'use cache'`), ESLint (`client-ip`, `sharp-safe`), guardas y tests negativos.
 - `[x]` ✅ **`F0.3` — PG 17 (`:54421..54424`) + Prisma + RLS + Bóveda `AES-256-GCM`:** 9 modelos base, cadena única DDL, `enforce_rls_on_new_table`, PostgREST revocado, `SKIP LOCKED`/idempotencia (`acquired`), AAD y `verify-security-posture`.
 - `[x]` ✅ **`F0.4` — Borde `proxy.ts`, Auth Cliente y Núcleo `/admin` MFA `aal2`:** CSP/headers PPR, timeouts HMAC, OTP 6 dígitos + HIBP + Turnstile, TOTP `aal2` + códigos HMAC + step-up ≤ 10m, RBAC 8 roles (3 anillos), `pii-mask`, `AdminShell` y `SECURITY.md`.
-- `[ ]` **`F0.5` — Suite RLS Real, Vitest/Playwright Base, GitHub Actions PG 17 y `OPERATIONS.md`:**
+- `[R]` **`F0.5` — Suite RLS Real, Vitest/Playwright Base, GitHub Actions PG 17 y `OPERATIONS.md`:**
   - Suites contra PG 17 real (bloqueo anti-PRD + `EMAIL_SEND_DISABLED=1`), `rls-matrix`, smoke E2E Playwright (`@axe-core`) y `.github/workflows/ci.yml` en verde + `docs/OPERATIONS.md`.
 
 ---

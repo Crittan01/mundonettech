@@ -1,6 +1,6 @@
 PNPM ?= pnpm
 
-.PHONY: install dev build check test lint format format-check typecheck guards clean-tmp db-start db-stop db-status db-migrate db-validate db-verify
+.PHONY: install dev build check test test-unit test-integration test-rls test-e2e lint format format-check typecheck guards clean-tmp db-start db-stop db-status db-migrate db-validate db-verify
 
 install:
 	$(PNPM) install --frozen-lockfile
@@ -16,6 +16,18 @@ check:
 
 test:
 	$(PNPM) test
+
+test-unit:
+	$(PNPM) test:unit
+
+test-integration:
+	$(PNPM) test:integration
+
+test-rls:
+	$(PNPM) test:rls
+
+test-e2e:
+	$(PNPM) test:e2e
 
 lint:
 	$(PNPM) lint

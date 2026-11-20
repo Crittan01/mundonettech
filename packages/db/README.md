@@ -20,3 +20,4 @@ make db-stop        # detiene solo contenedores _mundonettech conservando el vol
 - 100 % RLS *deny-by-default* y PostgREST revocado incluso para `service_role`.
 - `AdminActionLog` (con detección automática de `selfDealing` por `targetAdminUserId` o `AdminUser`), `SecurityEvent` (deduplicado por minuto UTC) y `Consent` son *append-only*; `AdminRecoveryCode` e `IntegrationCredential` bloquean mutación de identidad o reversión de consumo/revocación por trigger.
 - Claves naturales con `deletedAt` usan índices únicos parciales (`ADR-004`) y todo monto monetario usa `BigInt` en centavos COP con `CHECK >= 0` (`ADR-002`), validados por guarda CI.
+- `pnpm test:rls`: matriz de 36 operaciones RLS denegadas sobre las nueve tablas con filas reales; `NODE_ENV=test`, `EMAIL_SEND_DISABLED=1` y URLs anti-PRD son obligatorias en todas las suites. Operación completa en `docs/OPERATIONS.md`.
