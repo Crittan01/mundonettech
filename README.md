@@ -21,7 +21,9 @@ make dev
 make check && pnpm test && pnpm build
 ```
 
-`make db-start` levanta Supabase/PostgreSQL 17 y aplica la cadena Prisma. Verifica la postura con `make db-verify`, consulta servicios con `make db-status` y detén solo los contenedores del proyecto con `make db-stop` (conserva el volumen). Las pruebas usan otro PostgreSQL 17 desechable en `:54428`.
+`make db-start` levanta Supabase/PostgreSQL 17, aplica la cadena Prisma y crea `apps/web/.env.local` solo si no existe. Verifica la postura con `make db-verify`, consulta servicios con `make db-status` y detén solo los contenedores del proyecto con `make db-stop` (conserva el volumen). Las pruebas usan otro PostgreSQL 17 desechable en `:54428`.
+
+El primer acceso administrativo se crea con `pnpm admin:bootstrap` y las variables documentadas en [`docs/SECURITY.md`](docs/SECURITY.md). El flujo exige contraseña validada por HIBP, correo confirmado y enrolamiento TOTP `aal2`; nunca uses semillas o credenciales de demostración.
 
 Los guardas de documentación, higiene Git, español de Colombia y fronteras del monorepo se ejecutan con `make guards`.
 

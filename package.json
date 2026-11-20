@@ -9,14 +9,15 @@
   },
   "scripts": {
     "build": "turbo run build",
+    "admin:bootstrap": "node scripts/bootstrap-admin.mjs",
     "check": "pnpm guards && pnpm lint && pnpm format:check && pnpm typecheck",
     "db:migrate": "pnpm --filter @mundonettech/db db:migrate",
-    "db:start": "node scripts/supabase-local.mjs start && pnpm db:migrate",
+    "db:start": "node scripts/supabase-local.mjs start && pnpm db:migrate && node scripts/local-development-env.mjs",
     "db:status": "node scripts/supabase-local.mjs status",
     "db:stop": "node scripts/supabase-local.mjs stop",
     "db:validate": "pnpm --filter @mundonettech/db db:validate",
     "db:verify": "pnpm --filter @mundonettech/db verify-security-posture && node scripts/verify-local-stack.mjs",
-    "dev": "turbo run dev",
+    "dev": "node scripts/local-development-env.mjs && turbo run dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "guard:boundaries": "node scripts/check-boundaries.mjs",
@@ -25,11 +26,13 @@
     "guard:language": "node scripts/check-language.mjs",
     "guards": "pnpm guard:docs && pnpm guard:git && pnpm guard:language && pnpm guard:boundaries",
     "lint": "eslint . --max-warnings 0",
-    "test": "turbo run build --filter=@mundonettech/config --filter=@mundonettech/db --filter=@mundonettech/integrations && node --test tests/*.test.mjs",
-    "typecheck": "turbo run typecheck"
+    "test": "turbo run build --filter=@mundonettech/config --filter=@mundonettech/core --filter=@mundonettech/db --filter=@mundonettech/integrations && node --test tests/*.test.mjs",
+    "typecheck": "turbo run typecheck",
+    "web:verify": "node scripts/verify-web-security.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "@supabase/supabase-js": "2.119.2",
     "@types/node": "^22.0.0",
     "eslint": "9.39.5",
     "eslint-config-next": "16.4.6",

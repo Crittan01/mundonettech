@@ -23,7 +23,7 @@
 - `[x]` ✅ **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
 - `[x]` ✅ **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:** `@mundonettech/config`, `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `standalone`, `'use cache'`), ESLint (`client-ip`, `sharp-safe`), guardas y tests negativos.
 - `[x]` ✅ **`F0.3` — PG 17 (`:54421..54424`) + Prisma + RLS + Bóveda `AES-256-GCM`:** 9 modelos base, cadena única DDL, `enforce_rls_on_new_table`, PostgREST revocado, `SKIP LOCKED`/idempotencia (`acquired`), AAD y `verify-security-posture`.
-- `[ ]` **`F0.4` — Seguridad de Borde, Auth Cliente y Núcleo `/admin` con MFA `aal2`:**
+- `[R]` **`F0.4` — Seguridad de Borde, Auth Cliente y Núcleo `/admin` con MFA `aal2`:**
   - `proxy.ts` (CSP/headers, anti-race `@supabase/ssr`, timeout HMAC 30 min admin / 30 d cliente).
   - Auth cliente (OTP 6 dígitos, HIBP k-anonymity, anti-enumeración, Turnstile).
   - `/admin/login` + `/admin/login/mfa` (**TOTP `aal2` obligatorio** + códigos HMAC + `requireRecentMfa` ≤ 10 min) + RBAC 8 roles (3 anillos) + `pii-mask.ts` + `AdminShell` + `/admin/{usuarios,seguridad,auditoria}`.
