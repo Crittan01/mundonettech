@@ -267,7 +267,7 @@ describe("F1.1 — database edge validation", () => {
          VALUES ($1, $2, 'IMAGE', 'READY', $3, 'image/avif', 'Cross product media')`,
         [fixture.productId, otherVariant, `catalog/${randomUUID()}/cross.avif`],
       ),
-      /ProductMedia_variant_product_fkey/,
+      /ProductMedia_variantId_productId_fkey/,
     );
   });
 
@@ -493,5 +493,38 @@ describe("F1.1 — database edge validation", () => {
       [fixture.variantId, subEmail],
     );
     assert.equal(history.rows[0].total, 2);
+  });
+});
+
+describe("F1.2 — persisted SPIN_360 and poster assets", () => {
+  it("persists ordered frame keys and enforces count and poster uniqueness", async () => {
+    const frames = [`spin/${randomUUID()}/001.avif`, `spin/${randomUUID()}/002.avif`];
+    const posterKey = `spin/${randomUUID()}/poster.avif`;
+    await client.query(
+      `UPDATE "ProductMedia" SET "mediaType" = 'SPIN_360', "frameCount" = 2, "frames" = $1::jsonb, "posterKey" = $2 WHERE "productId" = $3`,
+      [JSON.stringify(frames), posterKey, fixture.productId],
+    );
+    const saved = await client.query(
+      `SELECT "frames", "frameCount", "posterKey" FROM "ProductMedia" WHERE "productId" = $1`,
+      [fixture.productId],
+    );
+    assert.deepEqual(saved.rows[0].frames, frames);
+    assert.equal(saved.rows[0].frameCount, 2);
+    assert.equal(saved.rows[0].posterKey, posterKey);
+    await assert.rejects(
+      client.query(`UPDATE "ProductMedia" SET "frames" = $1::jsonb WHERE "productId" = $2`, [
+        JSON.stringify([frames[0]]),
+        fixture.productId,
+      ]),
+      /frames_valid/,
+    );
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText", "posterKey")
+       VALUES ($1, 'IMAGE', 'READY', $2, 'image/avif', 'Duplicate poster', $3)`,
+        [fixture.productId, `other/${randomUUID()}/image.avif`, posterKey],
+      ),
+      /duplicate key/,
+    );
   });
 });

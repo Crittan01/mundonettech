@@ -22,7 +22,7 @@
 
 - `[x]` ✅ **Fase 0 cerrada (`F0.1`–`F0.5`):** Gobernanza, Next.js 16 standalone (`'use cache'`), PG 17 + RLS *deny-by-default* + Bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` MFA `aal2` + RBAC 8 roles + `pii-mask` y CI PG 17/Playwright/axe.
 - `[x]` ✅ **`F1.1` — Esquema y Dominio de Catálogo Tech (`catalog.prisma` + `@mundonettech/core` + `config/catalog-blueprint.ts`):** 21 modelos PG 17 (`TaxGroup` UVT `50`/`22`, `Category` N-niveles, `ProductVariant` `BigInt` + GS1/EAN, `AttributeDefinition`/`ProductAttributeValue`, `CompatibilityDevice`, `Bundle`, `BackInStockSubscription`, `UrlRedirect` ≤ 100 saltos, `tsvector` GIN + `immutable_unaccent`) y `rls-matrix` (`543` casos).
-- `[ ]` **`F1.2` — Pipeline Multimedia y Activos 360°/3D (`packages/media` + `ProductMedia`):** `sharp-safe` (magic bytes sin SVG, límite píxeles, `ispe` HEIC, purga EXIF), AVIF/WebP en R2 (`unoptimized: true`), `SPIN_360` y `MODEL_3D`/AR *lazy* (`ADR-007`).
+- `[R]` **`F1.2` — Pipeline Multimedia y Activos 360°/3D (`packages/media` + `ProductMedia`):** `sharp-safe` (magic bytes sin SVG, límite píxeles, `ispe` HEIC, purga EXIF), AVIF/WebP en R2 (`unoptimized: true`), `SPIN_360` y `MODEL_3D`/AR *lazy* (`ADR-007`).
 - `[ ]` **`F1.3` — Inventario Multi-Bodega, Proveedores/WAC e Importador CSV (`inventory.prisma`):** `StockLocation`, `StockLevel` (`safetyStock` efectivo + locks ordenados anti-deadlock `40P01` — `ADR-013`), `SerializedUnit`, `InventoryLedger`, `Supplier`/`PurchaseOrder` (WAC) y CSV seguro.
 - `[ ]` **`F1.4` — `CatalogService` Único (`'use cache'`), Storefront PDP/PLP/Comparador y Admin:** búsqueda/facetas indexadas, `ProductCard` única, comparador, PDP, vistas `/admin` RBAC+MFA, seed canónico y E2E Playwright/`@axe-core`.
 
