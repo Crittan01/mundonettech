@@ -1,0 +1,39 @@
+{
+  "name": "mundonettech",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "check": "pnpm guards && pnpm lint && pnpm format:check && pnpm typecheck",
+    "dev": "turbo run dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "guard:boundaries": "node scripts/check-boundaries.mjs",
+    "guard:docs": "node scripts/check-docs.mjs",
+    "guard:git": "node scripts/check-git-hygiene.mjs",
+    "guard:language": "node scripts/check-language.mjs",
+    "guards": "pnpm guard:docs && pnpm guard:git && pnpm guard:language && pnpm guard:boundaries",
+    "lint": "eslint . --max-warnings 0",
+    "test": "node --test",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@types/node": "^22.0.0",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.4.6",
+    "eslint-config-prettier": "^10.1.1",
+    "globals": "^16.4.0",
+    "prettier": "3.10.1",
+    "prettier-plugin-tailwindcss": "0.8.1",
+    "tailwindcss": "4.3.5",
+    "turbo": "2.11.13",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.46.4"
+  }
+}

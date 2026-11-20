@@ -10,6 +10,18 @@ Plataforma de comercio electrónico **100 % productiva** de tecnología, wearabl
 - **Medios y Respaldos:** Cloudflare R2 (`$0` egress; derivados AVIF/WebP + Spin 360° + modelos 3D PBR/AR `.glb`/`.usdz` + respaldos diarios cifrados GPG AES-256 en streaming).
 - **Operación Comercial en Colombia:** Wompi + Contraentrega (COD) + Transferencia verificada con MFA, Aveonline + Mensajería Flex local, Resend (puerto `EmailProvider`), Mercado Libre `MCO` + Meta CAPI, cumplimiento Ley 1480/2439 + Ley 1581 + Motor Tributario Dual IVA / DIAN.
 
+## Desarrollo local
+
+Requisitos: Node.js 22, pnpm 11 y GNU Make.
+
+```bash
+pnpm install
+make dev
+make check && pnpm test && pnpm build
+```
+
+Los guardas de documentación, higiene Git, español de Colombia y fronteras del monorepo se ejecutan con `make guards`.
+
 ## Puertos de desarrollo local
 
 | Servicio local | Puerto | Propósito |

@@ -21,7 +21,7 @@
 ## 2. Fase Activa — Fase 0: Fundación, Seguridad Mandatoria y Shell Admin
 
 - `[x]` **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
-- `[ ]` **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:**
+- `[R]` **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:**
   - `pnpm-workspace.yaml`, `turbo.json`, `Makefile`, ESLint 9 flat (`--max-warnings 0`, guardas `client-ip` y `sharp-safe`), Prettier + Tailwind v4.
   - `config/{store.config.ts,theme.config.ts}`, esqueletos `packages/{db,core,media,cms,integrations,legal-co}` y `apps/web` (`:4010`, `output: "standalone"`, `cacheComponents: true`, `(storefront)/layout.tsx`, tokens CSS semánticos *Tech Precision*).
   - Guardas en `scripts/`: tope Nivel 0 (`≤ 13 KB`), higiene Git, anti-voseo `es-CO` y frontera `config/` ↔ `packages/`.
