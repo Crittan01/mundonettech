@@ -5,9 +5,9 @@
 ## Fotografía ejecutiva
 
 - **Estado:** **Fase 0 en curso (`F0.1`–`F0.2` certificados → sigue `F0.3`)**.
-- **Operación:** `mundonettech.co` · Órdenes `MNT-YYYY-NNNN` · E-commerce retail y mayorista de tecnología, audio, energía y accesorios multimarca en Colombia.
-- **Régimen tributario:** inicia en **`NO_RESPONSABLE_IVA`** (vigilancia `3.500 UVT`), con motor dual (`NO_RESPONSABLE_IVA` ↔ `RESPONSABLE_IVA` + UVT tech + puerto DIAN) desde la base (`ADR-009`).
-- **Fundación (`F0.1`–`F0.2`):** monorepo `pnpm` + Turborepo en `:4010`, Next.js 16 (`standalone`, `cacheComponents`, `'use cache'`), tokens CSS semánticos *Tech Precision*, guardas CI y suite adversarial en verde.
+- **Operación:** `mundonettech.co` · Órdenes `MNT-YYYY-NNNN` · Retail y mayorista de tecnología y accesorios multimarca en CO.
+- **Régimen tributario:** inicia en **`NO_RESPONSABLE_IVA`** (`3.500 UVT`), con motor dual (`NO_RESPONSABLE_IVA` ↔ `RESPONSABLE_IVA` + UVT tech + puerto DIAN — `ADR-009`).
+- **Fundación (`F0.1`–`F0.2`):** monorepo `pnpm` + Turborepo (`:4010`), Next.js 16 (`standalone`, `cacheComponents`, `'use cache'`), tokens *Tech Precision* y guardas CI en verde.
 
 ## Topología de ambientes
 
