@@ -170,7 +170,7 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
     const migrations = await admin.query(
       "SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL",
     );
-    assert.equal(migrations.rows.length, 3);
+    assert.equal(migrations.rows.length, 4);
   });
 
   it("forces RLS on every application table and denies rows even with SQL grants", async () => {

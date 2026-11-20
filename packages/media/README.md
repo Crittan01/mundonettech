@@ -1,33 +1,22 @@
 # `@mundonettech/media`
 
-Pipeline multimedia productivo para Cloudflare R2 y visores 360°/3D/AR de carga diferida. Solo `src/sharp-safe.ts` puede importar `sharp`; el resto del monorepo consume las funciones exportadas por este paquete.
+Pipeline multimedia productivo para Cloudflare R2 y visores 360°/3D/AR de carga diferida. Solo `src/sharp-safe.ts` puede importar `sharp` (regla ESLint `foundation/sharp-safe`); los componentes cliente se exponen además en `@mundonettech/media/viewers` sin dependencias de servidor (`sharp`, `@aws-sdk/*`, `yauzl` ni `node:*`).
 
-## Imágenes
+## Seguridad e Imágenes (`sharp-safe`)
 
-- `inspectImageMagic()` exige magic bytes JPEG, PNG, WebP, AVIF o HEIC. Rechaza SVG y formatos desconocidos, limita la entrada a 20 MiB, 40 millones de píxeles y 12 000 píxeles por lado, y comprueba recursivamente la caja `ispe` de AVIF/HEIC antes de decodificar.
-- `processImageSafely()` vuelve a verificar las dimensiones decodificadas, auto-rota la orientación y genera AVIF y WebP en sRGB. Elimina EXIF, IPTC, XMP y GPS, y verifica los metadatos de cada salida.
-- Los anchos solicitados se deduplican, no amplían la imagen y siempre incluyen el ancho original. Los anchos deben ser enteros entre 32 y 8192 píxeles; los valores predeterminados son 480, 768, 1280 y 1920.
+- En `sharp-safe.ts`, `sharp.block({ operation: ["VipsForeignLoad"] })` + `sharp.unblock(...)` restringe `libvips` en C exclusivamente a `JpegBuffer`, `PngBuffer`, `WebpBuffer` y `HeifBuffer`, bloqueando SVG, PDF, TIFF, GIF, Magick, JP2K, Raw y todo cargador `*File`.
+- `inspectImageMagic()` verifica magic bytes JPEG, PNG (`IHDR`), WebP (`VP8X`), AVIF y HEIC (`ftyp` + `compatible_brands` + caja estándar `ispe` con profundidad y conteo acotados), limitando entradas a 20 MiB, 40 MP y 12 000 px por lado antes de decodificar.
+- `processImageSafely()` decodifica una sola página (`pages: 1`), valida coincidencia de formato, corrige ejes transpuestos por orientación EXIF (`5..8`) antes de deduplicar anchos `[480, 768, 1280, 1920]` + ancho original sin ampliar (`32..8192` px), convierte a sRGB en AVIF y WebP, purga EXIF/IPTC/XMP/Photoshop/GPS y reverifica cada derivado.
 
 ## Persistencia en R2
 
-`R2MediaStorage` usa el AWS SDK compatible con S3, `region: auto` y *path-style*. Exige HTTPS salvo endpoints loopback para pruebas, valida bucket y metadatos, sube hasta 8 MiB con `PutObject` y archivos mayores con multipart de 8 MiB. `publicBaseUrl` es opcional; las credenciales deben llegar desde la configuración segura del ambiente, nunca desde el navegador.
+`R2MediaStorage` usa AWS SDK S3 (`region: auto`, *path-style*), exige HTTPS salvo loopback en pruebas, sube objetos `<= 8 MiB` con `PutObject` y mayores con multipart de 8 MiB (`leavePartsOnError: false`). `storeImageDerivatives()`, `storeSpin360()` (`2..120` frames) y `storeModel3d()` validan prefijos antes de decodificar, generan claves SHA-256 inmutables y ejecutan rollback completo ante fallos parciales (propagando `AggregateError` con todas las causas si falla también el borrado).
 
-`storeImageDerivatives()`, `storeSpin360()` y `storeModel3d()` generan claves normalizadas con SHA-256 del original y cache inmutable. Si un paso falla, eliminan los objetos ya escritos; si también falla la limpieza, propagan un `AggregateError` con ambas causas. La reanudación de una secuencia interrumpida vuelve a escribir las mismas claves dirigidas por contenido.
+## Modelos 3D/AR y Visores (`@mundonettech/media/viewers`)
 
-```ts
-const derivatives = await storeImageDerivatives(storage, input, "products/<product-id>", [
-  480, 768, 1280,
-]);
-const frames = await storeSpin360(storage, orderedFrames, "products/<product-id>/spin");
-const model = await storeModel3d(storage, glb, "glb", "products/<product-id>/model");
-```
-
-## Modelos y visores
-
-- `validateGlb()` admite GLB 2 con JSON y un único chunk BIN; exige recursos embebidos y rangos de buffers/vistas válidos, con máximo 50 MiB.
-- `validateUsdz()` recorre y descomprime en streaming un ZIP de máximo 25 MiB. Exige exactamente un payload USDA/USDC, permite texturas PNG/JPEG, bloquea cifrado, traversal, tipos desconocidos y desbordes de tamaño, cantidad o ratio de compresión.
-- `Spin360` renderiza solo el frame actual, permite arrastre, teclado y botones, y precarga el vecino bajo interacción. Requiere de 2 a 120 frames en el pipeline y muestra estados de carga y error accesibles.
-- `Model3d` no carga `@google/model-viewer`, GLB ni USDZ hasta que el usuario pulsa «Explorar en 3D». Incluye poster, reintento y AR con `ios-src` cuando existe USDZ.
-- Los componentes usan `next/image` con `unoptimized`, ya que este paquete genera previamente los derivados responsivos. Las URL públicas deben estar permitidas por la configuración de imágenes del consumidor.
-
-`ProductMedia.frames` conserva el arreglo ordenado de derivados para `SPIN_360` y PostgreSQL exige que su longitud coincida con `frameCount`. `posterKey` identifica de forma única el poster activo; la FK compuesta `(variantId, productId)` impide asociar medios a una variante de otro producto.
+- `validateGlb()` exige GLB 2.0 (`asset.version` `2.x`), alineación de 4 bytes en `JSON`/`BIN`, cero `uri` externas en todo el árbol JSON, rechazo de `KHR_draco_mesh_compression`/`EXT_meshopt_compression` (sin decodificadores WASM externos bajo CSP) y vistas/accesores/texturas embebidas válidas (`<= 50 MiB`).
+- `validateUsdz()` inspecciona en streaming archivos `.usdz` (`<= 25 MiB`, `<= 100 MiB` descomprimido, ratio `<= 200`): exige etapa raíz `.usdc`/`.usda` como primera entrada, bloquea cifrado, *symlinks* ZIP, rutas ocultas/traversal o archivos sin extensión, y verifica magic bytes reales en cada textura embebida.
+- `buildPictureSources()` y `buildSpinFrames()` transforman derivados almacenados en `<source type="image/avif">` + `<source type="image/webp">` con URLs validadas (`isSafeMediaUrl`).
+- `Spin360` renderiza solo el frame activo (`next/image` `unoptimized`), soporta arrastre, botones y teclado completo (`ArrowLeft`/`Down`, `ArrowRight`/`Up`, `Home`, `End`), mantiene regiones `status`/`alert` fuera de `role="slider"` y precarga vecinos deduplicados.
+- `Model3d` difiere `@google/model-viewer`, `.glb` y `.usdz` hasta pulsar «Explorar en 3D», incluye *timeout*, reintento, retorno a poster y AR (`webxr`/`scene-viewer` + `quick-look` con `ios-src`).
+- En PostgreSQL 17, `ProductMedia` exige longitud `2..120` y elementos válidos en `frames` (`SPIN_360`), claves seguras sin traversal, `usdzKey` exclusiva de `MODEL_3D` e índices únicos parciales activos sobre `storageKey`, `posterKey` y `usdzKey`.

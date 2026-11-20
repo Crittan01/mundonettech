@@ -2,7 +2,7 @@ import { refreshTimeoutToken } from "@mundonettech/core";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { getSessionHmacSecret, getSupabasePublicConfig } from "@/lib/env";
+import { getPublicMediaOrigin, getSessionHmacSecret, getSupabasePublicConfig } from "@/lib/env";
 import {
   adminAbsoluteSeconds,
   adminActivityCookie,
@@ -13,14 +13,18 @@ import {
   sessionCookieOptions,
 } from "@/lib/security/session-policy";
 
-function securityPolicy(supabaseUrl: string, isDevelopment: boolean): string {
+function securityPolicy(
+  supabaseUrl: string,
+  mediaOrigin: string | null,
+  isDevelopment: boolean,
+): string {
   const directives = [
     "default-src 'self'",
     `script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com${isDevelopment ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
-    `connect-src 'self' ${supabaseUrl} https://challenges.cloudflare.com${isDevelopment ? " ws:" : ""}`,
+    `connect-src 'self' blob: ${supabaseUrl}${mediaOrigin ? ` ${mediaOrigin}` : ""} https://challenges.cloudflare.com${isDevelopment ? " ws:" : ""}`,
     "frame-src https://challenges.cloudflare.com",
     "media-src 'self' blob: https:",
     "object-src 'none'",
@@ -67,7 +71,8 @@ export async function proxy(request: NextRequest) {
   const isDevelopment = process.env.NODE_ENV === "development";
   const requestNonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const config = getSupabasePublicConfig();
-  const csp = securityPolicy(config.url, isDevelopment);
+  const mediaOrigin = getPublicMediaOrigin();
+  const csp = securityPolicy(config.url, mediaOrigin, isDevelopment);
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", requestNonce);
   requestHeaders.set("Content-Security-Policy", csp);

@@ -1,15 +1,40 @@
 "use client";
 
 import ImageModule from "next/image.js";
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 
-const Image = (ImageModule as unknown as { default: typeof ImageModule }).default;
-import { useRef, useState, type PointerEvent } from "react";
+import {
+  isSafeMediaUrl,
+  isSafeSrcSet,
+  type PictureSource,
+  type SpinFrame,
+} from "./responsive-sources.js";
 
-export interface SpinFrame {
-  src: string;
-  srcSet?: string;
-  width: number;
-  height: number;
+const Image = (
+  typeof ImageModule === "object" && ImageModule !== null && "default" in ImageModule
+    ? (ImageModule as { default: unknown }).default
+    : ImageModule
+) as typeof import("next/image").default;
+
+export type { PictureSource, SpinFrame };
+
+function isValidFrame(frame: SpinFrame): boolean {
+  if (
+    !Number.isSafeInteger(frame.width) ||
+    !Number.isSafeInteger(frame.height) ||
+    frame.width < 1 ||
+    frame.height < 1 ||
+    !isSafeMediaUrl(frame.src)
+  ) {
+    return false;
+  }
+  if (frame.srcSet !== undefined && !isSafeSrcSet(frame.srcSet)) return false;
+  if (frame.sources !== undefined) {
+    for (const source of frame.sources) {
+      if (!isSafeSrcSet(source.srcSet)) return false;
+    }
+  }
+  return true;
 }
 
 export function Spin360({
@@ -26,87 +51,163 @@ export function Spin360({
   const [error, setError] = useState(false);
   const startX = useRef<number | null>(null);
   const lastStep = useRef(0);
-  if (frames.length < 2) return <p role="alert">La secuencia 360° no está disponible.</p>;
-  const frame = frames[current]!;
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const prefetchedUrls = useRef<Set<string>>(new Set());
 
-  function move(direction: number): void {
-    setCurrent((index) => (index + direction + frames.length) % frames.length);
+  const validFrames = useMemo(
+    () => frames.length >= 2 && frames.length <= 120 && frames.every(isValidFrame),
+    [frames],
+  );
+
+  const safeIndex = validFrames ? current % frames.length : 0;
+  const frame = validFrames ? frames[safeIndex]! : null;
+
+  useEffect(() => {
+    const img = imageRef.current;
+    if (!img || !frame) return;
+    if (img.complete) {
+      if (img.naturalWidth > 0) {
+        setLoaded(true);
+        setError(false);
+      }
+    }
+  }, [frame, safeIndex]);
+
+  if (!validFrames || !frame) {
+    return <p role="alert">La secuencia 360° no está disponible.</p>;
+  }
+
+  function selectFrame(nextIndex: number): void {
+    const normalized = ((nextIndex % frames.length) + frames.length) % frames.length;
+    if (normalized === safeIndex) return;
+    setCurrent(normalized);
     setLoaded(false);
     setError(false);
   }
-  function prefetch(direction: number): void {
-    const next = frames[(current + direction + frames.length) % frames.length]!;
-    const image = new window.Image();
-    image.src = next.src;
-    if (next.srcSet) image.srcset = next.srcSet;
+
+  function move(direction: number): void {
+    selectFrame(safeIndex + direction);
   }
+
+  function prefetchNeighbor(offset: number): void {
+    if (typeof window === "undefined") return;
+    const candidate =
+      frames[(((safeIndex + offset) % frames.length) + frames.length) % frames.length];
+    if (!candidate || prefetchedUrls.current.has(candidate.src)) return;
+    prefetchedUrls.current.add(candidate.src);
+    const preload = new window.Image();
+    const preferredSrcSet = candidate.sources?.[0]?.srcSet ?? candidate.srcSet;
+    if (preferredSrcSet) preload.srcset = preferredSrcSet;
+    preload.src = candidate.src;
+  }
+
+  function prefetchAdjacent(primaryDirection: number): void {
+    prefetchNeighbor(primaryDirection);
+    prefetchNeighbor(-primaryDirection);
+  }
+
   function pointerDown(event: PointerEvent<HTMLDivElement>): void {
     startX.current = event.clientX;
     lastStep.current = 0;
-    event.currentTarget.setPointerCapture(event.pointerId);
+    if (typeof event.currentTarget.setPointerCapture === "function") {
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Synthetic pointer events without active hardware pointerId remain functional.
+      }
+    }
   }
+
   function pointerMove(event: PointerEvent<HTMLDivElement>): void {
     if (startX.current === null) return;
     const step = Math.trunc((event.clientX - startX.current) / 24);
     const difference = step - lastStep.current;
     if (difference !== 0) {
-      move(-Math.sign(difference));
+      const direction = -Math.sign(difference);
+      move(direction);
+      prefetchNeighbor(direction);
       lastStep.current = step;
     }
   }
 
   return (
     <figure className={className}>
-      <div
-        role="slider"
-        tabIndex={0}
-        aria-label={alt}
-        aria-valuemin={1}
-        aria-valuemax={frames.length}
-        aria-valuenow={current + 1}
-        aria-valuetext={`Vista ${current + 1} de ${frames.length}`}
-        className="relative cursor-grab touch-pan-y overflow-hidden rounded-xl border border-border bg-secondary focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
-        onPointerDown={pointerDown}
-        onPointerMove={pointerMove}
-        onPointerUp={() => {
-          startX.current = null;
-          prefetch(1);
-        }}
-        onPointerCancel={() => {
-          startX.current = null;
-        }}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowLeft") {
-            event.preventDefault();
-            move(-1);
-            prefetch(-1);
-          }
-          if (event.key === "ArrowRight") {
-            event.preventDefault();
-            move(1);
-            prefetch(1);
-          }
-        }}
-      >
-        <picture>
-          {frame.srcSet ? <source srcSet={frame.srcSet} /> : null}
-          <Image
-            key={frame.src}
-            src={frame.src}
-            alt={`${alt}, vista ${current + 1}`}
-            width={frame.width}
-            height={frame.height}
-            unoptimized
-            loading="lazy"
-            draggable={false}
-            onLoad={() => setLoaded(true)}
-            onError={() => setError(true)}
-            className="h-auto w-full select-none"
-          />
-        </picture>
+      <div className="relative overflow-hidden rounded-xl border border-border bg-secondary">
+        <div
+          role="slider"
+          tabIndex={0}
+          aria-label={alt}
+          aria-valuemin={1}
+          aria-valuemax={frames.length}
+          aria-valuenow={safeIndex + 1}
+          aria-valuetext={`Vista ${safeIndex + 1} de ${frames.length}`}
+          className="cursor-grab touch-pan-y focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none active:cursor-grabbing"
+          onPointerDown={pointerDown}
+          onPointerMove={pointerMove}
+          onPointerUp={() => {
+            startX.current = null;
+            prefetchAdjacent(1);
+          }}
+          onPointerCancel={() => {
+            startX.current = null;
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+              event.preventDefault();
+              move(-1);
+              prefetchAdjacent(-1);
+            } else if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+              event.preventDefault();
+              move(1);
+              prefetchAdjacent(1);
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              selectFrame(0);
+              prefetchAdjacent(1);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              selectFrame(frames.length - 1);
+              prefetchAdjacent(-1);
+            }
+          }}
+        >
+          <picture>
+            {frame.sources?.map((source) => (
+              <source
+                key={`${source.type ?? "default"}-${source.srcSet}`}
+                srcSet={source.srcSet}
+                {...(source.type ? { type: source.type } : {})}
+                {...((source.sizes ?? frame.sizes) ? { sizes: source.sizes ?? frame.sizes } : {})}
+              />
+            ))}
+            {!frame.sources && frame.srcSet ? (
+              <source srcSet={frame.srcSet} {...(frame.sizes ? { sizes: frame.sizes } : {})} />
+            ) : null}
+            <Image
+              ref={imageRef}
+              src={frame.src}
+              alt={`${alt}, vista ${safeIndex + 1}`}
+              width={frame.width}
+              height={frame.height}
+              unoptimized
+              loading="lazy"
+              decoding="async"
+              draggable={false}
+              onLoad={() => {
+                setLoaded(true);
+                setError(false);
+              }}
+              onError={() => {
+                setError(true);
+                setLoaded(false);
+              }}
+              className="h-auto w-full select-none"
+            />
+          </picture>
+        </div>
         {!loaded && !error ? (
           <p
-            className="absolute inset-x-0 bottom-0 bg-background/80 p-2 text-center text-sm"
+            className="pointer-events-none absolute inset-x-0 bottom-0 bg-background/85 p-2 text-center text-sm text-foreground"
             role="status"
           >
             Cargando vista…
@@ -114,7 +215,7 @@ export function Spin360({
         ) : null}
         {error ? (
           <p
-            className="absolute inset-0 flex items-center justify-center bg-background p-4 text-center"
+            className="absolute inset-0 flex items-center justify-center bg-background p-4 text-center text-foreground"
             role="alert"
           >
             No pudimos cargar esta vista.
@@ -126,23 +227,23 @@ export function Spin360({
           type="button"
           onClick={() => {
             move(-1);
-            prefetch(-1);
+            prefetchAdjacent(-1);
           }}
-          className="rounded-md border border-border px-3 py-2"
+          className="min-h-11 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           aria-label="Vista anterior"
         >
           Anterior
         </button>
         <figcaption className="text-center text-sm text-muted-foreground">
-          Arrastra o usa las flechas · {current + 1}/{frames.length}
+          Arrastra o usa las flechas · {safeIndex + 1}/{frames.length}
         </figcaption>
         <button
           type="button"
           onClick={() => {
             move(1);
-            prefetch(1);
+            prefetchAdjacent(1);
           }}
-          className="rounded-md border border-border px-3 py-2"
+          className="min-h-11 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
           aria-label="Vista siguiente"
         >
           Siguiente

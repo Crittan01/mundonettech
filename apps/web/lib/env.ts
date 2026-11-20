@@ -47,3 +47,21 @@ export function getTurnstileKeys(): { siteKey: string; secretKey: string } {
   if (!siteKey || !secretKey) throw new Error("Cloudflare Turnstile keys are required.");
   return { siteKey, secretKey };
 }
+
+export function getPublicMediaOrigin(): string | null {
+  const raw = process.env.NEXT_PUBLIC_MEDIA_BASE_URL?.trim();
+  if (!raw) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("NEXT_PUBLIC_MEDIA_BASE_URL must be a valid URL.");
+  }
+  const isLoopback = ["127.0.0.1", "localhost", "[::1]", "::1"].includes(
+    parsed.hostname.toLowerCase(),
+  );
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLoopback)) {
+    throw new Error("NEXT_PUBLIC_MEDIA_BASE_URL requires HTTPS outside loopback.");
+  }
+  return parsed.origin;
+}

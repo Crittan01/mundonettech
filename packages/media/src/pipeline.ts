@@ -1,7 +1,7 @@
 import { processImageSafely, type ImageDerivative } from "./sharp-safe.js";
 import { validateGlb, validateUsdz } from "./model-safety.js";
 import { R2MediaStorage, type StoredObject } from "./r2-storage.js";
-import { contentAddressedKey } from "./storage-keys.js";
+import { contentAddressedKey, normalizeStoragePrefix } from "./storage-keys.js";
 
 export interface StoredImageDerivative extends StoredObject {
   format: "avif" | "webp";
@@ -13,9 +13,11 @@ async function removeObjects(
   storage: R2MediaStorage,
   objects: readonly { key: string }[],
 ): Promise<void> {
+  if (objects.length === 0) return;
   const results = await Promise.allSettled(objects.map((object) => storage.delete(object.key)));
-  if (results.some((result) => result.status === "rejected"))
+  if (results.some((result) => result.status === "rejected")) {
     throw new Error("Failed to clean all partial media uploads.");
+  }
 }
 
 async function failWithCleanup(
@@ -26,7 +28,9 @@ async function failWithCleanup(
   try {
     await removeObjects(storage, objects);
   } catch (cleanupError) {
-    throw new AggregateError([error, cleanupError], "Media upload and cleanup both failed.");
+    const causes =
+      error instanceof AggregateError ? [...error.errors, cleanupError] : [error, cleanupError];
+    throw new AggregateError(causes, "Media upload and cleanup both failed.");
   }
   throw error;
 }
@@ -37,6 +41,7 @@ export async function storeImageDerivatives(
   prefix: string,
   widths?: readonly number[],
 ): Promise<StoredImageDerivative[]> {
+  const safePrefix = normalizeStoragePrefix(prefix);
   const processed = await processImageSafely(input, { ...(widths ? { widths } : {}) });
   const stored: StoredImageDerivative[] = [];
   try {
@@ -44,7 +49,7 @@ export async function storeImageDerivatives(
       const object = await storeDerivative(
         storage,
         derivative,
-        contentAddressedKey(prefix, input, `${derivative.width}.${derivative.format}`),
+        contentAddressedKey(safePrefix, input, `${derivative.width}.${derivative.format}`),
       );
       stored.push({
         ...object,
@@ -73,8 +78,10 @@ export async function storeSpin360(
   prefix: string,
   widths?: readonly number[],
 ): Promise<{ frame: number; derivatives: StoredImageDerivative[] }[]> {
-  if (frames.length < 2 || frames.length > 120)
+  const safePrefix = normalizeStoragePrefix(prefix);
+  if (frames.length < 2 || frames.length > 120) {
     throw new RangeError("SPIN_360 requires between 2 and 120 frames.");
+  }
   const completed: { frame: number; derivatives: StoredImageDerivative[] }[] = [];
   try {
     for (let index = 0; index < frames.length; index += 1) {
@@ -82,7 +89,7 @@ export async function storeSpin360(
       const derivatives = await storeImageDerivatives(
         storage,
         frame,
-        `${prefix}/frame-${String(index + 1).padStart(3, "0")}`,
+        `${safePrefix}/frame-${String(index + 1).padStart(3, "0")}`,
         widths,
       );
       completed.push({ frame: index, derivatives });
@@ -103,10 +110,11 @@ export async function storeModel3d(
   kind: "glb" | "usdz",
   prefix: string,
 ): Promise<StoredObject> {
+  const safePrefix = normalizeStoragePrefix(prefix);
   if (kind === "glb") validateGlb(input);
   else await validateUsdz(input);
   return storage.put({
-    key: contentAddressedKey(prefix, input, `model.${kind}`),
+    key: contentAddressedKey(safePrefix, input, `model.${kind}`),
     body: input,
     contentType: kind === "glb" ? "model/gltf-binary" : "model/vnd.usdz+zip",
   });
