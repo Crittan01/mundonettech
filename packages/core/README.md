@@ -10,3 +10,4 @@ Contratos actuales:
 - Verificación Cloudflare Turnstile con acción/hostname y errores cerrados.
 - Tokens HMAC-SHA256 de actividad para admin/cliente/reset, validación de sujeto/tipo, idle y expiración absoluta, y renovación deslizante sin extender el límite absoluto.
 - Compuerta de correo saliente (`isOutboundEmailDisabled`, `assertOutboundEmailAllowed`, `OutboundEmailDisabledError`) para bloquear despachos externos cuando `EMAIL_SEND_DISABLED=1` está activo.
+- GS1/EAN/UPC, normalización SKU, rutas de categorías N-niveles, redirects locales anti-ciclos, atributos tipados y dinero `BigInt` en centavos COP.

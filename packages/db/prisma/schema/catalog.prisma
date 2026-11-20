@@ -1,0 +1,470 @@
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum ProductAuthenticity {
+  ORIGINAL
+  CERTIFIED_COMPATIBLE
+  OEM
+}
+
+enum RetractPolicy {
+  STANDARD
+  LEGAL_EXCEPTION_REVIEW
+}
+
+enum VariantStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CollectionStatus {
+  DRAFT
+  SCHEDULED
+  ACTIVE
+  ARCHIVED
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+  SPIN_360
+  MODEL_3D
+  GAUSSIAN_SPLAT
+}
+
+enum MediaStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum OptionDisplayType {
+  SELECT
+  SWATCH
+  PILL
+}
+
+enum AttributeValueType {
+  TEXT
+  INTEGER
+  DECIMAL
+  BOOLEAN
+  URL
+  JSON
+}
+
+enum CompatibilityFit {
+  EXACT
+  ADAPTER
+  NOT_COMPATIBLE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  NOTIFIED
+  CANCELLED
+}
+
+model TaxGroup {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code      String    @unique @db.VarChar(40)
+  rateBps   Int
+  uvtLimit  Int?
+  createdAt DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  products  Product[]
+
+  @@map("TaxGroup")
+}
+
+model Brand {
+  id          String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug        String                @db.VarChar(120)
+  name        String                @db.VarChar(120)
+  description String?               @db.VarChar(500)
+  logoKey     String?               @db.VarChar(500)
+  createdAt   DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt   DateTime?             @db.Timestamptz(6)
+  products    Product[]
+  devices     CompatibilityDevice[]
+
+  @@index([name])
+  @@index([deletedAt])
+  @@map("Brand")
+}
+
+model Category {
+  id                  String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  parentId            String?             @db.Uuid
+  slug                String              @db.VarChar(120)
+  name                String              @db.VarChar(120)
+  description         String?             @db.VarChar(500)
+  materializedPath    String              @db.VarChar(2048)
+  depth               Int
+  externalCategoryMap Json                @default("{}") @db.JsonB
+  position            Int                 @default(0)
+  createdAt           DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt           DateTime?           @db.Timestamptz(6)
+  parent              Category?           @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children            Category[]          @relation("CategoryTree")
+  products            Product[]
+  attributes          CategoryAttribute[]
+
+  @@unique([materializedPath])
+  @@index([parentId, position])
+  @@index([deletedAt])
+  @@map("Category")
+}
+
+model Collection {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug        String              @db.VarChar(120)
+  name        String              @db.VarChar(160)
+  description String?             @db.VarChar(1000)
+  status      CollectionStatus    @default(DRAFT)
+  startsAt    DateTime?           @db.Timestamptz(6)
+  endsAt      DateTime?           @db.Timestamptz(6)
+  createdAt   DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt   DateTime?           @db.Timestamptz(6)
+  items       CollectionProduct[]
+
+  @@index([status, startsAt, endsAt])
+  @@index([deletedAt])
+  @@map("Collection")
+}
+
+model CollectionProduct {
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  collectionId String     @db.Uuid
+  productId    String     @db.Uuid
+  position     Int        @default(0)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(6)
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@unique([collectionId, productId])
+  @@unique([collectionId, position])
+  @@index([productId])
+  @@map("CollectionProduct")
+}
+
+model Product {
+  id                String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  brandId           String                   @db.Uuid
+  categoryId        String                   @db.Uuid
+  taxGroupId        String                   @db.Uuid
+  slug              String                   @db.VarChar(160)
+  name              String                   @db.VarChar(200)
+  shortDescription  String?                  @db.VarChar(500)
+  description       String?                  @db.Text
+  status            ProductStatus            @default(DRAFT)
+  authenticity      ProductAuthenticity
+  retractPolicy     RetractPolicy            @default(STANDARD)
+  warrantyMonths    Int                      @default(0)
+  trackSerial       Boolean                  @default(false)
+  seoTitle          String?                  @db.VarChar(200)
+  seoDescription    String?                  @db.VarChar(300)
+  searchVector      Unsupported("tsvector")?
+  createdAt         DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime                 @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt         DateTime?                @db.Timestamptz(6)
+  brand             Brand                    @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  category          Category                 @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  taxGroup          TaxGroup                 @relation(fields: [taxGroupId], references: [id], onDelete: Restrict)
+  collectionItems   CollectionProduct[]
+  optionDefinitions OptionDefinition[]
+  variants          ProductVariant[]
+  media             ProductMedia[]
+  attributeValues   ProductAttributeValue[]
+  compatibility     ProductCompatibility[]
+
+  @@index([status, deletedAt, updatedAt])
+  @@index([brandId, status])
+  @@index([categoryId, status])
+  @@index([taxGroupId])
+  @@index([searchVector], type: Gin)
+  @@index([deletedAt])
+  @@map("Product")
+}
+
+model OptionDefinition {
+  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId    String                 @db.Uuid
+  key          String                 @db.VarChar(80)
+  name         String                 @db.VarChar(120)
+  displayType  OptionDisplayType      @default(SELECT)
+  position     Int                    @default(0)
+  createdAt    DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  product      Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
+  values       OptionValue[]
+  variantLinks ProductVariantOption[]
+
+  @@unique([productId, key])
+  @@map("OptionDefinition")
+}
+
+model OptionValue {
+  id                 String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  optionDefinitionId String                 @db.Uuid
+  value              String                 @db.VarChar(120)
+  label              String                 @db.VarChar(120)
+  hexColor           String?                @db.VarChar(7)
+  position           Int                    @default(0)
+  createdAt          DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  optionDefinition   OptionDefinition       @relation(fields: [optionDefinitionId], references: [id], onDelete: Cascade)
+  variantLinks       ProductVariantOption[]
+
+  @@unique([optionDefinitionId, value])
+  @@map("OptionValue")
+}
+
+model ProductVariant {
+  id                  String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId           String                    @db.Uuid
+  sku                 String                    @db.VarChar(64)
+  priceCents          BigInt
+  costCents           BigInt
+  compareAtPriceCents BigInt?
+  gtin                String?                   @db.VarChar(18)
+  ean                 String?                   @db.VarChar(13)
+  mpn                 String?                   @db.VarChar(64)
+  weightGrams         Int
+  lengthMillimeters   Int
+  widthMillimeters    Int
+  heightMillimeters   Int
+  isDefault           Boolean                   @default(false)
+  status              VariantStatus             @default(ACTIVE)
+  createdAt           DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime                  @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt           DateTime?                 @db.Timestamptz(6)
+  product             Product                   @relation(fields: [productId], references: [id], onDelete: Restrict)
+  optionLinks         ProductVariantOption[]
+  bundleItems         BundleItem[]
+  wishlistItems       WishlistItem[]
+  subscriptions       BackInStockSubscription[]
+  productMedias       ProductMedia[]
+
+  @@index([productId, status])
+  @@index([mpn])
+  @@index([deletedAt])
+  @@map("ProductVariant")
+}
+
+model ProductVariantOption {
+  id                 String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  variantId          String           @db.Uuid
+  optionDefinitionId String           @db.Uuid
+  optionValueId      String           @db.Uuid
+  createdAt          DateTime         @default(now()) @db.Timestamptz(6)
+  variant            ProductVariant   @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  optionDefinition   OptionDefinition @relation(fields: [optionDefinitionId], references: [id], onDelete: Cascade)
+  optionValue        OptionValue      @relation(fields: [optionValueId], references: [id], onDelete: Restrict)
+
+  @@unique([variantId, optionDefinitionId])
+  @@unique([variantId, optionValueId])
+  @@index([optionValueId])
+  @@map("ProductVariantOption")
+}
+
+model ProductMedia {
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId  String          @db.Uuid
+  variantId  String?         @db.Uuid
+  mediaType  MediaType
+  status     MediaStatus     @default(PENDING)
+  storageKey String          @db.VarChar(500)
+  mimeType   String          @db.VarChar(100)
+  altText    String          @db.VarChar(250)
+  width      Int?
+  height     Int?
+  focalX     Float?
+  focalY     Float?
+  frameCount Int?
+  usdzKey    String?         @db.VarChar(500)
+  hotspots   Json            @default("[]") @db.JsonB
+  position   Int             @default(0)
+  createdAt  DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime        @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt  DateTime?       @db.Timestamptz(6)
+  product    Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant    ProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([productId, position])
+  @@index([variantId])
+  @@index([deletedAt])
+  @@map("ProductMedia")
+}
+
+model AttributeDefinition {
+  id         String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  key        String                  @db.VarChar(80)
+  name       String                  @db.VarChar(120)
+  valueType  AttributeValueType
+  unit       String?                 @db.VarChar(30)
+  filterable Boolean                 @default(true)
+  searchable Boolean                 @default(false)
+  createdAt  DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime                @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt  DateTime?               @db.Timestamptz(6)
+  categories CategoryAttribute[]
+  values     ProductAttributeValue[]
+
+  @@index([filterable, deletedAt])
+  @@map("AttributeDefinition")
+}
+
+model CategoryAttribute {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  categoryId  String              @db.Uuid
+  attributeId String              @db.Uuid
+  required    Boolean             @default(false)
+  position    Int                 @default(0)
+  category    Category            @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  attribute   AttributeDefinition @relation(fields: [attributeId], references: [id], onDelete: Restrict)
+
+  @@unique([categoryId, attributeId])
+  @@unique([categoryId, position])
+  @@map("CategoryAttribute")
+}
+
+model ProductAttributeValue {
+  id              String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId       String              @db.Uuid
+  attributeId     String              @db.Uuid
+  textValue       String?             @db.VarChar(500)
+  integerValue    BigInt?
+  decimalValue    Decimal?            @db.Decimal(30, 10)
+  booleanValue    Boolean?
+  urlValue        String?             @db.VarChar(2048)
+  jsonValue       Json?
+  normalizedValue String              @db.VarChar(2048)
+  createdAt       DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  product         Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  attribute       AttributeDefinition @relation(fields: [attributeId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, attributeId, normalizedValue])
+  @@index([attributeId, normalizedValue])
+  @@map("ProductAttributeValue")
+}
+
+model CompatibilityDevice {
+  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  brandId      String                 @db.Uuid
+  slug         String                 @db.VarChar(160)
+  model        String                 @db.VarChar(160)
+  generation   String?                @db.VarChar(80)
+  externalCode String?                @db.VarChar(120)
+  createdAt    DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt    DateTime?              @db.Timestamptz(6)
+  brand        Brand                  @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  products     ProductCompatibility[]
+
+  @@index([brandId, model])
+  @@index([deletedAt])
+  @@map("CompatibilityDevice")
+}
+
+model ProductCompatibility {
+  id        String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  productId String              @db.Uuid
+  deviceId  String              @db.Uuid
+  fit       CompatibilityFit
+  notes     String?             @db.VarChar(500)
+  createdAt DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  product   Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  device    CompatibilityDevice @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, deviceId])
+  @@index([deviceId, fit])
+  @@map("ProductCompatibility")
+}
+
+model Bundle {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug          String        @db.VarChar(160)
+  name          String        @db.VarChar(200)
+  description   String?       @db.VarChar(1000)
+  status        ProductStatus @default(DRAFT)
+  priceCents    BigInt?
+  discountCents BigInt        @default(0)
+  createdAt     DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime      @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt     DateTime?     @db.Timestamptz(6)
+  items         BundleItem[]
+
+  @@index([status, deletedAt])
+  @@map("Bundle")
+}
+
+model BundleItem {
+  id        String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  bundleId  String         @db.Uuid
+  variantId String         @db.Uuid
+  quantity  Int
+  createdAt DateTime       @default(now()) @db.Timestamptz(6)
+  bundle    Bundle         @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@unique([bundleId, variantId])
+  @@index([variantId])
+  @@map("BundleItem")
+}
+
+model WishlistItem {
+  id         String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId String         @db.Uuid
+  variantId  String         @db.Uuid
+  createdAt  DateTime       @default(now()) @db.Timestamptz(6)
+  customer   Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  variant    ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, variantId])
+  @@index([variantId])
+  @@map("WishlistItem")
+}
+
+model BackInStockSubscription {
+  id                String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId        String?            @db.Uuid
+  variantId         String             @db.Uuid
+  email             String             @db.VarChar(320)
+  consentProofHash  Bytes              @db.ByteA
+  status            SubscriptionStatus @default(ACTIVE)
+  notificationCount Int                @default(0)
+  subscribedAt      DateTime           @default(now()) @db.Timestamptz(6)
+  lastNotifiedAt    DateTime?          @db.Timestamptz(6)
+  cancelledAt       DateTime?          @db.Timestamptz(6)
+  updatedAt         DateTime           @default(now()) @updatedAt @db.Timestamptz(6)
+  customer          Customer?          @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  variant           ProductVariant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([variantId, email])
+  @@index([status, variantId])
+  @@map("BackInStockSubscription")
+}
+
+model UrlRedirect {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fromPath   String    @db.VarChar(2048)
+  toPath     String    @db.VarChar(2048)
+  statusCode Int       @default(308)
+  active     Boolean   @default(true)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt  DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt  DateTime? @db.Timestamptz(6)
+
+  @@index([active, deletedAt])
+  @@map("UrlRedirect")
+}

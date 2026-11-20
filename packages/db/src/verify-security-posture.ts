@@ -12,6 +12,27 @@ const requiredTables = [
   "IntegrationCredential",
   "DomainOutbox",
   "IdempotencyKey",
+  "TaxGroup",
+  "Brand",
+  "Category",
+  "Collection",
+  "CollectionProduct",
+  "Product",
+  "OptionDefinition",
+  "OptionValue",
+  "ProductVariant",
+  "ProductVariantOption",
+  "ProductMedia",
+  "AttributeDefinition",
+  "CategoryAttribute",
+  "ProductAttributeValue",
+  "CompatibilityDevice",
+  "ProductCompatibility",
+  "Bundle",
+  "BundleItem",
+  "WishlistItem",
+  "BackInStockSubscription",
+  "UrlRedirect",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -33,6 +54,19 @@ const requiredPartialIndexes = [
   "Customer_email_active_key",
   "Customer_authUserId_active_key",
   "IntegrationCredential_provider_environment_accountName_key",
+  "Brand_slug_active_key",
+  "Category_slug_active_key",
+  "Collection_slug_active_key",
+  "Product_slug_active_key",
+  "ProductVariant_sku_active_key",
+  "ProductVariant_gtin_active_key",
+  "ProductVariant_ean_active_key",
+  "ProductVariant_one_default_active_key",
+  "ProductMedia_storageKey_active_key",
+  "AttributeDefinition_key_active_key",
+  "CompatibilityDevice_slug_active_key",
+  "Bundle_slug_active_key",
+  "UrlRedirect_fromPath_active_key",
 ] as const;
 const requiredSecurityTriggers = [
   "AdminActionLog_append_only",
@@ -43,6 +77,15 @@ const requiredSecurityTriggers = [
   "IntegrationCredential_immutable_identity",
   "SecurityEvent_append_only",
   "SecurityEvent_dedup_minute",
+  "Category_maintain_tree",
+  "ProductVariant_validate_identity",
+  "ProductVariantOption_validate",
+  "ProductAttributeValue_normalize",
+  "UrlRedirect_validate",
+] as const;
+const requiredEventTriggers = [
+  "enforce_rls_on_new_table",
+  "revoke_postgrest_on_new_function",
 ] as const;
 
 export async function verifySecurityPosture(databaseUrl: string): Promise<string[]> {
@@ -244,11 +287,15 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
       );
     }
 
-    const trigger = await client.query<{ enabled: string }>(
-      "SELECT evtenabled AS enabled FROM pg_event_trigger WHERE evtname = 'enforce_rls_on_new_table'",
+    const eventTriggers = await client.query<{ name: string; enabled: string }>(
+      "SELECT evtname AS name, evtenabled AS enabled FROM pg_event_trigger WHERE evtname = ANY($1::text[])",
+      [requiredEventTriggers],
     );
-    if (trigger.rows[0]?.enabled !== "O") {
-      errors.push("The enforce_rls_on_new_table event trigger is missing or disabled.");
+    for (const requiredTrigger of requiredEventTriggers) {
+      const trigger = eventTriggers.rows.find((item) => item.name === requiredTrigger);
+      if (!trigger || trigger.enabled !== "O") {
+        errors.push(`Event trigger ${requiredTrigger} is missing or disabled.`);
+      }
     }
 
     const rowTriggers = await client.query<{ trigger_name: string; enabled: string }>(
