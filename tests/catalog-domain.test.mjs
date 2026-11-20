@@ -267,7 +267,7 @@ describe("F1.1 — database edge validation", () => {
          VALUES ($1, $2, 'IMAGE', 'READY', $3, 'image/avif', 'Cross product media')`,
         [fixture.productId, otherVariant, `catalog/${randomUUID()}/cross.avif`],
       ),
-      /ProductMedia_variant_product_fkey/,
+      /ProductMedia_variantId_productId_fkey/,
     );
   });
 
@@ -493,5 +493,133 @@ describe("F1.1 — database edge validation", () => {
       [fixture.variantId, subEmail],
     );
     assert.equal(history.rows[0].total, 2);
+  });
+});
+
+describe("F1.2 — persisted SPIN_360, MODEL_3D USDZ and storage key hardening", () => {
+  it("persists ordered frame keys and enforces count, element types, MIME, USDZ, and safe key invariants", async () => {
+    const frames = [`spin/${randomUUID()}/001.avif`, `spin/${randomUUID()}/002.avif`];
+    const posterKey = `spin/${randomUUID()}/poster.avif`;
+    await client.query(
+      `UPDATE "ProductMedia" SET "mediaType" = 'SPIN_360', "frameCount" = 2, "frames" = $1::jsonb, "posterKey" = $2 WHERE "productId" = $3`,
+      [JSON.stringify(frames), posterKey, fixture.productId],
+    );
+    const saved = await client.query(
+      `SELECT "frames", "frameCount", "posterKey" FROM "ProductMedia" WHERE "productId" = $1`,
+      [fixture.productId],
+    );
+    assert.deepEqual(saved.rows[0].frames, frames);
+    assert.equal(saved.rows[0].frameCount, 2);
+    assert.equal(saved.rows[0].posterKey, posterKey);
+
+    // Reject count mismatch, >120 frames, and empty/null elements in SPIN_360 frames
+    await assert.rejects(
+      client.query(`UPDATE "ProductMedia" SET "frames" = $1::jsonb WHERE "productId" = $2`, [
+        JSON.stringify([frames[0]]),
+        fixture.productId,
+      ]),
+      /frames_valid/,
+    );
+    await assert.rejects(
+      client.query(
+        `UPDATE "ProductMedia" SET "frameCount" = 121, "frames" = $1::jsonb WHERE "productId" = $2`,
+        [
+          JSON.stringify(Array.from({ length: 121 }, (_, idx) => `spin/f-${idx}.avif`)),
+          fixture.productId,
+        ],
+      ),
+      /frames_valid/,
+    );
+    await assert.rejects(
+      client.query(
+        `UPDATE "ProductMedia" SET "frames" = '["" , "ok"]'::jsonb WHERE "productId" = $1`,
+        [fixture.productId],
+      ),
+      /frames_valid/,
+    );
+    await assert.rejects(
+      client.query(
+        `UPDATE "ProductMedia" SET "frames" = '[null, "ok"]'::jsonb WHERE "productId" = $1`,
+        [fixture.productId],
+      ),
+      /frames_valid/,
+    );
+
+    // Duplicate active posterKey rejected
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText", "posterKey")
+         VALUES ($1, 'IMAGE', 'READY', $2, 'image/avif', 'Duplicate poster', $3)`,
+        [fixture.productId, `other/${randomUUID()}/image.avif`, posterKey],
+      ),
+      /duplicate key/,
+    );
+
+    // Non-SPIN_360 rejects zero/negative frameCount, invalid MIME, path traversal keys, and usdzKey on IMAGE
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText", "frameCount")
+         VALUES ($1, 'IMAGE', 'READY', $2, 'image/avif', 'Invalid zero frameCount', 0)`,
+        [fixture.productId, `other/${randomUUID()}/zero.avif`],
+      ),
+      /frames_valid/,
+    );
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText")
+         VALUES ($1, 'IMAGE', 'READY', $2, 'invalid-mime', 'Bad mime')`,
+        [fixture.productId, `other/${randomUUID()}/mime.avif`],
+      ),
+      /mime_valid/,
+    );
+    for (const badKey of [
+      "../escape.avif",
+      "/leading.avif",
+      "trailing/",
+      "a//b.avif",
+      "a\\b.avif",
+    ]) {
+      await assert.rejects(
+        client.query(
+          `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText")
+           VALUES ($1, 'IMAGE', 'READY', $2, 'image/avif', 'Traversal key')`,
+          [fixture.productId, badKey],
+        ),
+        /keys_safe/,
+      );
+    }
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText", "usdzKey")
+         VALUES ($1, 'IMAGE', 'READY', $2, 'image/avif', 'USDZ on IMAGE', $3)`,
+        [fixture.productId, `other/${randomUUID()}/img.avif`, `models/${randomUUID()}/ar.usdz`],
+      ),
+      /usdzKey_valid/,
+    );
+
+    // MODEL_3D enforces active usdzKey uniqueness and allows reuse after soft-delete
+    const usdzKey = `models/${randomUUID()}/model.usdz`;
+    const first3d = await client.query(
+      `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText", "usdzKey")
+       VALUES ($1, 'MODEL_3D', 'READY', $2, 'model/gltf-binary', '3D Model', $3) RETURNING "id"`,
+      [fixture.productId, `models/${randomUUID()}/model.glb`, usdzKey],
+    );
+    await assert.rejects(
+      client.query(
+        `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText", "usdzKey")
+         VALUES ($1, 'MODEL_3D', 'READY', $2, 'model/gltf-binary', 'Duplicate USDZ', $3)`,
+        [fixture.productId, `models/${randomUUID()}/second.glb`, usdzKey],
+      ),
+      /duplicate key/,
+    );
+    await client.query(
+      `UPDATE "ProductMedia" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+      [first3d.rows[0].id],
+    );
+    await client.query(
+      `INSERT INTO "ProductMedia" ("productId", "mediaType", "status", "storageKey", "mimeType", "altText", "usdzKey")
+       VALUES ($1, 'MODEL_3D', 'READY', $2, 'model/gltf-binary', 'Recreated USDZ', $3)`,
+      [fixture.productId, `models/${randomUUID()}/recreated.glb`, usdzKey],
+    );
   });
 });

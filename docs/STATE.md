@@ -4,10 +4,10 @@
 
 ## Fotografía ejecutiva
 
-- **Estado:** **Fase 1 en curso (`F1.1` certificado ✅ → sigue `F1.2` Media 360°/3D)**.
+- **Estado:** **Fase 1 en curso (`F1.1`–`F1.2` certificados ✅ → sigue `F1.3` Inventario WAC)**.
 - **Operación:** `mundonettech.co` · Órdenes `MNT-YYYY-NNNN` · Retail/mayorista tech multimarca en CO.
 - **Régimen tributario:** inicia en **`NO_RESPONSABLE_IVA`** (`3.500 UVT`), con motor dual (`NO_RESPONSABLE_IVA` ↔ `RESPONSABLE_IVA` + topes `50`/`22` UVT tech + DIAN — `ADR-009`).
-- **Base activa (`F0` + `F1.1`):** Next.js 16 standalone (`:4010`/`:4110`, `'use cache'`), PG 17 (`30` tablas con RLS *deny-by-default* y `543` casos), bóveda `AES-256-GCM`, Auth/Admin MFA `aal2` + RBAC 8 roles y dominio de catálogo tech (`catalog.prisma` + `@mundonettech/core` + `catalog-blueprint.ts`).
+- **Base activa (`F0`–`F1.2`):** Next.js 16 standalone (`:4010`/`:4110`, `'use cache'`), PG 17 (`30` tablas RLS *deny-by-default*, `543` casos), bóveda `AES-256-GCM`, Auth/Admin MFA `aal2` + RBAC 8 roles, catálogo tech (`catalog.prisma` + `@mundonettech/core`) y `@mundonettech/media` (R2 + 360°/3D/AR *lazy*).
 
 ## Topología de ambientes
 
@@ -20,8 +20,8 @@
 ## Capacidades operativas construidas
 
 - **Fase 0 cerrada (`F0.1`–`F0.5`):** ✅ Gobernanza, Next.js 16 standalone (`'use cache'`), PG 17 + RLS + Bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` MFA `aal2` + RBAC 8 roles + `pii-mask` y CI PG 17/Playwright/axe.
-- **Catálogo Tech (`F1.1`):** ✅ `catalog-blueprint.ts` (marcas, árbol tech, atributos, dispositivos y grupos IVA/UVT `50`/`22`), `21` modelos en `catalog.prisma` (`BigInt` COP, GS1/EAN, `Category` N-niveles, `tsvector` GIN + `immutable_unaccent`, FK `(variantId, productId)` en `ProductMedia`, `BackInStockSubscription` re-suscribible y `UrlRedirect` ≤ 100 saltos) y `rls-matrix` (`543` casos).
-- **Bloques `F1.2`–`F6`:** pendientes según [`PLAN.md`](PLAN.md) (siguiente: **`F1.2`**).
+- **Catálogo y Media (`F1.1`–`F1.2`):** ✅ `21` modelos en `catalog.prisma` (`BigInt` COP, GS1/EAN, `Category` N-niveles, `tsvector` GIN + `immutable_unaccent`, `ProductMedia` con `frames`/`posterKey`/`usdzKey` endurecidos y `rls-matrix` `543` casos) + `@mundonettech/media` (`sharp-safe` con allowlist `libvips`, `ispe`/EXIF, AVIF/WebP en R2 con rollback y visores `Spin360`/`Model3d` *lazy* WCAG AA).
+- **Bloques `F1.3`–`F6`:** pendientes según [`PLAN.md`](PLAN.md) (siguiente: **`F1.3`**).
 
 ## Pendientes externos de negocio (no bloquean Fase 1–2)
 

@@ -9,6 +9,7 @@
     "vitest.config.ts",
     "e2e/**/*.ts",
     "tests/vitest/**/*.ts",
+    "tests/helpers/*.d.mts",
     "scripts/lib/*.d.mts"
   ]
 }
