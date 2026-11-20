@@ -1,6 +1,6 @@
 # Plan Maestro Vivo — MundoNetTech (`mundonettech.co`)
 
-> **Workboard vivo de Nivel 0 (≤ 160 líneas).** Expande **solo la fase activa**; al cerrar una fase, sus sub-bloques se compactan a 1 línea `✅`. Especificación técnica completa en [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> **Workboard vivo de Nivel 0 (≤ 160 lín.).** Estados: `[ ]` pendiente · `[R]` implementado (en auditoría) · `[x]` certificado. Expande solo la fase activa; compacta fases cerradas a 1 línea `✅`. Detalle en [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## 1. Mapa Ejecutivo de Hitos y Fases
 
@@ -39,6 +39,6 @@
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente bloque:** **`F0.2`** (Monorepo `pnpm` + Turborepo + Next.js 16 + `config/` + `packages/*` + guardas de `make check`).
+- **Siguiente bloque:** **`F0.2`** en rama `feat/f0-2-monorepo-foundation` desde `develop`.
 - **Leer al iniciar:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md` y `docs/DECISIONS.md`.
-- **Criterio de cierre `F0.2`:** `make check && pnpm test && pnpm build` en verde sobre `:4010`.
+- **Cierre dual `F0.2`:** Implementador entrega en `[R]` con `make check && pnpm test && pnpm build` en verde (`:4010`); Auditor valida `git diff develop...HEAD`, corrige brechas y certifica `[x]` en PR contra `develop`.

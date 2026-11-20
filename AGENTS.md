@@ -23,11 +23,10 @@
    - **Cero arqueología:** prohibido apilar bitácoras fechadas o carpetas `_archive/`. La historia vive en `git log`. Los documentos describen **únicamente el presente** y se actualizan en el sitio.
    - `packages/db/prisma/schema/*.prisma` es la única fuente de verdad de tablas y columnas.
 
-## 3. Protocolo obligatorio de inicio y cierre de cada sesión
+## 3. Flujo Dual Obligatorio (Implementador → Auditor/Certificador)
 
-- **Al iniciar sesión:** lee `AGENTS.md` → `docs/STATE.md` → `docs/PLAN.md` + `git status` y `git log -5`. Ejecuta solo el bloque acordado (`FX.Y`).
-- **Antes de cerrar sesión:**
-  1. Deja en verde `make check && pnpm test` (+ `pnpm build` si tocaste rutas, configuración o `proxy.ts`).
-  2. Actualiza `docs/STATE.md` y `docs/PLAN.md` (compacta a 1 línea `✅` cualquier fase cerrada y escribe el **Handoff exacto** para la siguiente sesión).
-  3. Registra en `docs/DECISIONS.md` cualquier decisión arquitectónica nueva (`3–6` líneas).
-  4. Ramas protegidas previstas: `develop` (STG) y `production` (PRD); prohibido force-push o versionar secretos/archivos temporales.
+- **Estados en `docs/PLAN.md`:** `[ ]` Pendiente · **`[R]`** Implementado (listo para auditoría) · **`[x]`** Auditado y certificado.
+- **Inicio de toda sesión:** lee `AGENTS.md` → `docs/STATE.md` → `docs/PLAN.md` + `git status` y `git log -5`. Trabaja solo el bloque acordado (`FX.Y`) sobre una rama creada desde `develop` (ej. `feat/f0-2-...`).
+- **Agente Implementador:** construye el 100 % de `FX.Y`, deja en verde `make check && pnpm test` (+ `pnpm build` si toca rutas, config o `proxy.ts`), registra decisiones nuevas en `docs/DECISIONS.md` (`3–6` lín.), marca `FX.Y` como **`[R]`** en `docs/PLAN.md` y hace commit en su rama (**nunca marca `[x]` ni fusiona a `develop`**).
+- **Agente Auditor/Certificador:** revisa de forma adversarial `git diff develop...HEAD` contra `ARCHITECTURE.md` y `DECISIONS.md` (seguridad, RLS/MFA `aal2`, `BigInt`, concurrencia, Next 16 `'use cache'`, frontera `config/` ↔ `packages/` y tests negativos), corrige en el sitio cualquier brecha, reejecuta todos los gates, pasa `FX.Y` de `[R]` a **`[x]`**, actualiza `docs/STATE.md` + Handoff en `docs/PLAN.md` (compactando a 1 línea `✅` fases cerradas) y sube/actualiza el PR contra `develop`.
+- **Ramas protegidas:** `develop` (STG) y `production` (PRD); prohibido push directo, force-push o versionar secretos/archivos temporales.
