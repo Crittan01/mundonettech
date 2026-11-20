@@ -6,6 +6,8 @@ import { PrismaClient } from "./generated/client.js";
 export interface DatabaseClientOptions {
   databaseUrl: string;
   maxConnections?: number;
+  statementTimeoutMs?: number;
+  idleInTransactionSessionTimeoutMs?: number;
   ssl?: pg.PoolConfig["ssl"];
 }
 
@@ -25,9 +27,24 @@ function parseDatabaseUrl(value: string): URL {
   return url;
 }
 
+function assertTimeout(value: number, name: string): number {
+  if (!Number.isInteger(value) || value < 250 || value > 120_000) {
+    throw new RangeError(`${name} must be an integer between 250 and 120000 milliseconds.`);
+  }
+  return value;
+}
+
 export function createDatabaseClient(options: DatabaseClientOptions): PrismaClient {
   const databaseUrl = parseDatabaseUrl(options.databaseUrl);
   const maxConnections = options.maxConnections ?? 10;
+  const statementTimeoutMs = assertTimeout(
+    options.statementTimeoutMs ?? 15_000,
+    "statementTimeoutMs",
+  );
+  const idleInTransactionSessionTimeoutMs = assertTimeout(
+    options.idleInTransactionSessionTimeoutMs ?? 15_000,
+    "idleInTransactionSessionTimeoutMs",
+  );
 
   if (!Number.isInteger(maxConnections) || maxConnections < 1 || maxConnections > 50) {
     throw new RangeError("maxConnections must be an integer between 1 and 50.");
@@ -38,6 +55,8 @@ export function createDatabaseClient(options: DatabaseClientOptions): PrismaClie
     max: maxConnections,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
+    statement_timeout: statementTimeoutMs,
+    idle_in_transaction_session_timeout: idleInTransactionSessionTimeoutMs,
     application_name: "backend",
     ...(options.ssl === undefined ? {} : { ssl: options.ssl }),
   });

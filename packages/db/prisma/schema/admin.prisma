@@ -120,6 +120,7 @@ model IntegrationCredential {
   lastRotatedBy            AdminUser?             @relation("CredentialRotator", fields: [lastRotatedByAdminUserId], references: [id], onDelete: Restrict)
 
   @@index([environment, revokedAt])
+  @@index([environment, createdAt, id])
   @@index([createdByAdminUserId, createdAt])
   @@map("IntegrationCredential")
 }

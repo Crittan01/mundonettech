@@ -1,23 +1,22 @@
 # `@mundonettech/db`
 
-Fuente única del esquema PostgreSQL 17 y cliente Prisma 7 ESM con adaptador `pg`. Los archivos `prisma/schema/*.prisma` definen los modelos base; `prisma/migrations/` contiene la única cadena DDL versionada, incluidos `CHECK`, índices parciales, funciones, triggers y RLS.
+Fuente única del esquema PostgreSQL 17 y cliente Prisma 7 ESM con adaptador `pg`. Los archivos `prisma/schema/*.prisma` definen los modelos; `prisma/migrations/` contiene la única cadena DDL versionada (`CHECK`, índices únicos parciales, funciones, triggers y RLS).
 
-## Operación
+## Operación y primitivas exportadas
 
 ```bash
 make db-start       # Supabase local + prisma migrate deploy
 make db-validate    # valida el esquema multi-file
-make db-verify      # compila y verifica PG17, RLS, privilegios y migraciones
-make db-stop        # conserva los datos locales
+make db-verify      # compila y verifica PG17, RLS, políticas, privilegios, triggers y HTTP PostgREST
+make db-stop        # detiene solo contenedores _mundonettech conservando el volumen
 ```
 
-`createDatabaseClient()` exige una URL PostgreSQL válida, limita el pool y cierra el pool propio al ejecutar `$disconnect()`. `verifySecurityPosture()` comprueba las nueve tablas, RLS habilitada/forzada, revocación de `anon`/`authenticated`/`service_role` y `PUBLIC`, trigger de tablas nuevas, restricciones, índices y salud de migraciones.
+- `createDatabaseClient()`: valida URL PostgreSQL, acota el pool, aplica `statement_timeout` e `idle_in_transaction_session_timeout` (15 s por defecto) y libera el pool en `$disconnect()`.
+- Primitivas atómicas compatibles con `PrismaClient` y `Prisma.TransactionClient`: `consumeAdminRecoveryCode`, `claimDomainOutbox`, `completeDomainOutbox`, `retryDomainOutbox`, `acquireIdempotencyKey` (retorna `acquired: boolean` para distinguir al ganador de carrera frente a duplicados concurrentes o replays), `completeIdempotencyKey` y `purgeExpiredIdempotencyKeys`.
+- `verifySecurityPosture()`: verifica PG 17, ausencia de `BYPASSRLS` en `anon`/`authenticated`, RLS habilitada/forzada en todas las tablas, cero políticas RLS expuestas a `PUBLIC` o Data API, revocación sobre esquema/tablas/vistas/secuencias/funciones, trigger DDL `enforce_rls_on_new_table` (que además revoca privilegios al crear tablas), triggers de inmutabilidad y salud de `_prisma_migrations`.
 
 ## Invariantes
 
-- No hay políticas de lectura pública: toda tabla de aplicación es *deny-by-default*, incluso para su propietario no privilegiado. El acceso de backend se mantiene separado de PostgREST.
-- `AdminActionLog`, `SecurityEvent` y `Consent` son *append-only*. Los códigos de recuperación almacenan 32 bytes HMAC y se consumen atómicamente.
-- `DomainOutbox` usa `FOR UPDATE SKIP LOCKED`, arrendamiento con expiración y reintentos acotados. `IdempotencyKey` almacena solo hashes, valida sujeto/payload y serializa adquisiciones concurrentes.
-- Las identidades naturales con borrado lógico usan índices únicos parciales. Los importes futuros deben declararse `BigInt` en centavos COP y contar con `CHECK >= 0`.
-
-`pnpm test` aplica esta cadena sobre PostgreSQL 17 real en un contenedor desechable y ejecuta pruebas positivas, negativas y de concurrencia. Las migraciones ya aplicadas no se editan; los cambios posteriores crean una nueva migración en la misma cadena.
+- 100 % RLS *deny-by-default* y PostgREST revocado incluso para `service_role`.
+- `AdminActionLog` (con detección automática de `selfDealing` por `targetAdminUserId` o `AdminUser`), `SecurityEvent` (deduplicado por minuto UTC) y `Consent` son *append-only*; `AdminRecoveryCode` e `IntegrationCredential` bloquean mutación de identidad o reversión de consumo/revocación por trigger.
+- Claves naturales con `deletedAt` usan índices únicos parciales (`ADR-004`) y todo monto monetario usa `BigInt` en centavos COP con `CHECK >= 0` (`ADR-002`), validados por guarda CI.

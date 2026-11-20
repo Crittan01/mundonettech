@@ -6,12 +6,24 @@ import { fileURLToPath } from "node:url";
 
 import pg from "pg";
 
-import { createDatabaseClient, IntegrationEnvironment } from "../packages/db/dist/index.js";
+import {
+  acquireIdempotencyKey,
+  claimDomainOutbox,
+  completeDomainOutbox,
+  completeIdempotencyKey,
+  consumeAdminRecoveryCode,
+  createDatabaseClient,
+  IdempotencyStatus,
+  IntegrationEnvironment,
+  purgeExpiredIdempotencyKeys,
+  retryDomainOutbox,
+} from "../packages/db/dist/index.js";
 import { verifySecurityPosture } from "../packages/db/dist/verify-security-posture.js";
 import {
   CredentialAlreadyExistsError,
   CredentialConflictError,
   CredentialCursorError,
+  CredentialDecryptionError,
   CredentialNotFoundError,
   CredentialRevokedError,
   createCredentialKeyRing,
@@ -291,6 +303,12 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
       await admin.query(`GRANT SELECT, INSERT ON "RlsTriggerProbe" TO ${probeRole}`);
       const visible = await withProbe((client) => client.query('SELECT * FROM "RlsTriggerProbe"'));
       assert.deepEqual(visible.rows, []);
+
+      await admin.query(
+        'CREATE POLICY "leak_probe" ON "RlsTriggerProbe" FOR SELECT TO anon USING (true)',
+      );
+      const policyErrors = await verifySecurityPosture(databaseUrl);
+      assert.ok(policyErrors.some((msg) => msg.includes("leak_probe")));
     } finally {
       await admin.query('DROP TABLE IF EXISTS "RlsTriggerProbe"');
     }
@@ -374,6 +392,30 @@ describe("F0.3 — relational integrity and immutable security records", () => {
       codeHash,
     ]);
     assert.equal(repeated.rows[0].consumed, false);
+    await expectSqlViolation(
+      admin.query(
+        'UPDATE "AdminRecoveryCode" SET "consumedAt" = NULL WHERE "adminUserId" = $1 AND "codeHash" = $2',
+        [actor.id, codeHash],
+      ),
+      "55000",
+    );
+
+    const typedCodeHash = randomBytes(32);
+    await admin.query(
+      `INSERT INTO "AdminRecoveryCode" ("adminUserId", "codeHash", "expiresAt")
+       VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '10 minutes')`,
+      [actor.id, typedCodeHash],
+    );
+    assert.equal(
+      await prisma.$transaction((tx) =>
+        consumeAdminRecoveryCode(tx, { adminUserId: actor.id, codeHash: typedCodeHash }),
+      ),
+      true,
+    );
+    assert.equal(
+      await consumeAdminRecoveryCode(prisma, { adminUserId: actor.id, codeHash: typedCodeHash }),
+      false,
+    );
 
     await admin.query(
       `INSERT INTO "AdminRecoveryCode" ("adminUserId", "codeHash", "createdAt", "expiresAt")
@@ -401,6 +443,15 @@ describe("F0.3 — relational integrity and immutable security records", () => {
       [actor.id],
     );
     assert.equal(inserted.rows[0].selfDealing, true);
+    const implicitSelfTarget = await admin.query(
+      `INSERT INTO "AdminActionLog" (
+         "actorAdminUserId", "action", "targetType", "targetId", "metadata"
+       ) VALUES ($1, 'PROFILE_EDITED', 'AdminUser', $2, '{}'::jsonb)
+       RETURNING "selfDealing", "targetAdminUserId"`,
+      [actor.id, actor.id],
+    );
+    assert.equal(implicitSelfTarget.rows[0].selfDealing, true);
+    assert.equal(implicitSelfTarget.rows[0].targetAdminUserId, actor.id);
     await expectSqlViolation(
       admin.query('UPDATE "AdminActionLog" SET "selfDealing" = false WHERE "id" = $1', [
         inserted.rows[0].id,
@@ -532,6 +583,10 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
       ]);
       assert.equal(acquired[0].rows[0].id, acquired[1].rows[0].id);
       assert.equal(acquired[0].rows[0].status, "PROCESSING");
+      assert.deepEqual([acquired[0].rows[0].acquired, acquired[1].rows[0].acquired].sort(), [
+        false,
+        true,
+      ]);
     } finally {
       await Promise.all([first.end(), second.end()]);
     }
@@ -576,9 +631,45 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
     ]);
     assert.equal(replay.rows[0].status, "SUCCEEDED");
     assert.equal(replay.rows[0].responseStatus, 200);
+    assert.equal(replay.rows[0].acquired, false);
+
+    const typedScope = `typed-${randomUUID()}`;
+    const typedKey = randomBytes(32);
+    const typedSubject = randomBytes(32);
+    const typedReq = randomBytes(32);
+    const winner = await acquireIdempotencyKey(prisma, {
+      scope: typedScope,
+      keyHash: typedKey,
+      subjectHash: typedSubject,
+      requestHash: typedReq,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    assert.equal(winner.acquired, true);
+    const duplicate = await acquireIdempotencyKey(prisma, {
+      scope: typedScope,
+      keyHash: typedKey,
+      subjectHash: typedSubject,
+      requestHash: typedReq,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    assert.equal(duplicate.acquired, false);
+    assert.equal(duplicate.status, IdempotencyStatus.PROCESSING);
+    assert.equal(
+      await completeIdempotencyKey(prisma, {
+        scope: typedScope,
+        keyHash: typedKey,
+        subjectHash: typedSubject,
+        requestHash: typedReq,
+        status: IdempotencyStatus.SUCCEEDED,
+        responseStatus: 201,
+        resultType: "Order",
+        resultId: randomUUID(),
+      }),
+      true,
+    );
   });
 
-  it("rejects expired idempotency keys instead of silently reusing completed results", async () => {
+  it("rejects expired idempotency keys and purges expired entries safely", async () => {
     const scope = `expired-${randomUUID()}`;
     const keyHash = randomBytes(32);
     const subjectHash = randomBytes(32);
@@ -599,6 +690,16 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
       ]),
       "23505",
     );
+    const purged = await purgeExpiredIdempotencyKeys(prisma, { limit: 100 });
+    assert.ok(purged >= 1);
+    const reacquired = await acquireIdempotencyKey(prisma, {
+      scope,
+      keyHash,
+      subjectHash,
+      requestHash,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    assert.equal(reacquired.acquired, true);
   });
 
   it("claims disjoint outbox batches under concurrency and completes only with the owner", async () => {
@@ -704,6 +805,34 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
     assert.equal(reclaimed.rows[0].id, expiringId);
     assert.equal(reclaimed.rows[0].attempts, 2);
     await admin.query("SELECT complete_domain_outbox($1, 'lease-b', $2)", [expiringId, afterLease]);
+
+    const typedOutboxId = await insertOutbox();
+    const typedClaimed = await claimDomainOutbox(prisma, { workerId: "typed-worker", limit: 10 });
+    assert.ok(typedClaimed.some((item) => item.id === typedOutboxId));
+    assert.equal(
+      await retryDomainOutbox(prisma, {
+        id: typedOutboxId,
+        workerId: "typed-worker",
+        availableAt: new Date(Date.now() + 30_000),
+        error: "transient timeout",
+      }),
+      true,
+    );
+    const retryReady = new Date(Date.now() + 60_000);
+    const reclaimedTyped = await claimDomainOutbox(prisma, {
+      workerId: "typed-worker",
+      limit: 10,
+      now: retryReady,
+    });
+    assert.ok(reclaimedTyped.some((item) => item.id === typedOutboxId));
+    assert.equal(
+      await completeDomainOutbox(prisma, {
+        id: typedOutboxId,
+        workerId: "typed-worker",
+        now: retryReady,
+      }),
+      true,
+    );
   });
 
   it("enforces outbox payload, claim, and attempt invariants", async () => {
@@ -733,11 +862,15 @@ describe("F0.3 — persisted integration credential vault", () => {
     const actor = await createAdmin();
     const provider = `provider-${randomUUID()}`;
     const plaintext = encoder.encode('{"token":"persisted-test-secret"}');
+    const requestId = randomUUID();
+    const ipHash = randomBytes(32);
+    const userAgentHash = randomBytes(32);
     const created = await vault.create({
       provider,
       accountName: "primary",
       plaintext,
       actorAdminUserId: actor.id,
+      audit: { requestId, ipHash, userAgentHash },
     });
 
     for (const secretField of ["nonce", "ciphertext", "authTag"]) {
@@ -771,12 +904,23 @@ describe("F0.3 — persisted integration credential vault", () => {
 
     const revoked = await vault.revoke(created.id, actor.id);
     assert.ok(revoked.revokedAt instanceof Date);
+    await expectSqlViolation(
+      admin.query('UPDATE "IntegrationCredential" SET "revokedAt" = NULL WHERE "id" = $1', [
+        created.id,
+      ]),
+      "55000",
+    );
     const audit = await admin.query(
-      `SELECT "actorAdminUserId", "action", "metadata" FROM "AdminActionLog"
+      `SELECT "actorAdminUserId", "action", "requestId", "ipHash", "userAgentHash", "metadata"
+       FROM "AdminActionLog"
        WHERE "targetType" = 'IntegrationCredential' AND "targetId" = $1`,
       [created.id],
     );
     assert.equal(audit.rows.length, 3);
+    const createdAudit = audit.rows.find((row) => row.action === "INTEGRATION_CREDENTIAL_CREATED");
+    assert.equal(createdAudit.requestId, requestId);
+    assert.deepEqual(Buffer.from(createdAudit.ipHash), ipHash);
+    assert.deepEqual(Buffer.from(createdAudit.userAgentHash), userAgentHash);
     assert.deepEqual(audit.rows.map((row) => row.action).sort(), [
       "INTEGRATION_CREDENTIAL_CREATED",
       "INTEGRATION_CREDENTIAL_REVOKED",
@@ -798,6 +942,29 @@ describe("F0.3 — persisted integration credential vault", () => {
       plaintext,
       actorAdminUserId: actor.id,
     });
+    await expectSqlViolation(
+      admin.query('UPDATE "IntegrationCredential" SET "provider" = $1 WHERE "id" = $2', [
+        "tampered-provider",
+        recreated.id,
+      ]),
+      "55000",
+    );
+    // Even if triggers were bypassed by superuser session_replication_role, AAD rejects provider mismatch:
+    await admin.query("BEGIN");
+    await admin.query("SET LOCAL session_replication_role = 'replica'");
+    await admin.query('UPDATE "IntegrationCredential" SET "provider" = $1 WHERE "id" = $2', [
+      "tampered-provider",
+      recreated.id,
+    ]);
+    await admin.query("COMMIT");
+    await assert.rejects(vault.reveal(recreated.id), CredentialDecryptionError);
+    await admin.query("BEGIN");
+    await admin.query("SET LOCAL session_replication_role = 'replica'");
+    await admin.query('UPDATE "IntegrationCredential" SET "provider" = $1 WHERE "id" = $2', [
+      provider,
+      recreated.id,
+    ]);
+    await admin.query("COMMIT");
     assert.notEqual(recreated.id, created.id);
     const listed = await vault.list({ limit: 100 });
     assert.equal(

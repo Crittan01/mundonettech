@@ -55,6 +55,12 @@ export class CredentialCursorError extends Error {
 
 export type CredentialDescriptor = Omit<IntegrationCredential, "nonce" | "ciphertext" | "authTag">;
 
+export interface CredentialAuditContext {
+  readonly requestId?: string;
+  readonly ipHash?: Uint8Array;
+  readonly userAgentHash?: Uint8Array;
+}
+
 function descriptor(record: IntegrationCredential): CredentialDescriptor {
   return {
     id: record.id,
@@ -88,18 +94,47 @@ function validateIdentity(provider: string, accountName: string, actorId: string
   assertUuid(actorId, "actorAdminUserId");
 }
 
+function normalizeAuditBytes(
+  value: Uint8Array | undefined,
+  field: string,
+): Uint8Array<ArrayBuffer> | null {
+  if (value === undefined) return null;
+  if (!(value instanceof Uint8Array) || value.length !== 32) {
+    throw new TypeError(`${field} must be a 32-byte Uint8Array.`);
+  }
+  return Buffer.from(value);
+}
+
+function validateAuditContext(audit?: CredentialAuditContext): {
+  requestId: string | null;
+  ipHash: Uint8Array<ArrayBuffer> | null;
+  userAgentHash: Uint8Array<ArrayBuffer> | null;
+} {
+  if (audit?.requestId !== undefined) assertUuid(audit.requestId, "requestId");
+  return {
+    requestId: audit?.requestId ?? null,
+    ipHash: normalizeAuditBytes(audit?.ipHash, "ipHash"),
+    userAgentHash: normalizeAuditBytes(audit?.userAgentHash, "userAgentHash"),
+  };
+}
+
 async function writeAudit(
   tx: Prisma.TransactionClient,
   action: string,
   actorAdminUserId: string,
   record: IntegrationCredential,
+  audit?: CredentialAuditContext,
 ): Promise<void> {
+  const normalizedAudit = validateAuditContext(audit);
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId,
       action,
       targetType: "IntegrationCredential",
       targetId: record.id,
+      requestId: normalizedAudit.requestId,
+      ipHash: normalizedAudit.ipHash,
+      userAgentHash: normalizedAudit.userAgentHash,
       metadata: {
         provider: record.provider,
         environment: record.environment,
@@ -121,12 +156,16 @@ export class IntegrationCredentialVault {
     accountName: string;
     plaintext: Uint8Array;
     actorAdminUserId: string;
+    audit?: CredentialAuditContext;
   }): Promise<CredentialDescriptor> {
     validateIdentity(options.provider, options.accountName, options.actorAdminUserId);
+    validateAuditContext(options.audit);
     const credentialId = randomUUID();
     const sealed = encryptIntegrationCredential({
       credentialId,
       environment: this.ring.environment,
+      provider: options.provider,
+      accountName: options.accountName,
       plaintext: options.plaintext,
       ring: this.ring,
     });
@@ -146,7 +185,13 @@ export class IntegrationCredentialVault {
             createdByAdminUserId: options.actorAdminUserId,
           },
         });
-        await writeAudit(tx, "INTEGRATION_CREDENTIAL_CREATED", options.actorAdminUserId, record);
+        await writeAudit(
+          tx,
+          "INTEGRATION_CREDENTIAL_CREATED",
+          options.actorAdminUserId,
+          record,
+          options.audit,
+        );
         return descriptor(record);
       });
     } catch (error) {
@@ -168,16 +213,26 @@ export class IntegrationCredentialVault {
 
   async reveal(id: string): Promise<Uint8Array> {
     const record = await this.activeRecord(id);
-    return decryptIntegrationCredential({ ...record, credentialId: record.id }, this.ring);
+    return decryptIntegrationCredential(
+      {
+        ...record,
+        credentialId: record.id,
+        provider: record.provider,
+        accountName: record.accountName,
+      },
+      this.ring,
+    );
   }
 
   async rotate(options: {
     credentialId: string;
     plaintext: Uint8Array;
     actorAdminUserId: string;
+    audit?: CredentialAuditContext;
   }): Promise<CredentialDescriptor> {
     assertUuid(options.credentialId, "credentialId");
     assertUuid(options.actorAdminUserId, "actorAdminUserId");
+    validateAuditContext(options.audit);
 
     return this.db.$transaction(async (tx) => {
       const existing = await tx.integrationCredential.findUnique({
@@ -191,6 +246,8 @@ export class IntegrationCredentialVault {
       const sealed = encryptIntegrationCredential({
         credentialId: existing.id,
         environment: existing.environment,
+        provider: existing.provider,
+        accountName: existing.accountName,
         plaintext: options.plaintext,
         ring: this.ring,
       });
@@ -210,7 +267,13 @@ export class IntegrationCredentialVault {
       const updated = await tx.integrationCredential.findUniqueOrThrow({
         where: { id: existing.id },
       });
-      await writeAudit(tx, "INTEGRATION_CREDENTIAL_ROTATED", options.actorAdminUserId, updated);
+      await writeAudit(
+        tx,
+        "INTEGRATION_CREDENTIAL_ROTATED",
+        options.actorAdminUserId,
+        updated,
+        options.audit,
+      );
       return descriptor(updated);
     });
   }
@@ -218,9 +281,11 @@ export class IntegrationCredentialVault {
   async reencryptWithActiveKey(
     credentialId: string,
     actorAdminUserId: string,
+    audit?: CredentialAuditContext,
   ): Promise<CredentialDescriptor> {
     assertUuid(credentialId, "credentialId");
     assertUuid(actorAdminUserId, "actorAdminUserId");
+    validateAuditContext(audit);
 
     return this.db.$transaction(async (tx) => {
       const existing = await tx.integrationCredential.findUnique({ where: { id: credentialId } });
@@ -230,7 +295,12 @@ export class IntegrationCredentialVault {
       if (existing.revokedAt) throw new CredentialRevokedError();
 
       const sealed = reencryptIntegrationCredential(
-        { ...existing, credentialId: existing.id },
+        {
+          ...existing,
+          credentialId: existing.id,
+          provider: existing.provider,
+          accountName: existing.accountName,
+        },
         this.ring,
       );
       const result = await tx.integrationCredential.updateMany({
@@ -248,14 +318,19 @@ export class IntegrationCredentialVault {
       const updated = await tx.integrationCredential.findUniqueOrThrow({
         where: { id: existing.id },
       });
-      await writeAudit(tx, "INTEGRATION_CREDENTIAL_REENCRYPTED", actorAdminUserId, updated);
+      await writeAudit(tx, "INTEGRATION_CREDENTIAL_REENCRYPTED", actorAdminUserId, updated, audit);
       return descriptor(updated);
     });
   }
 
-  async revoke(credentialId: string, actorAdminUserId: string): Promise<CredentialDescriptor> {
+  async revoke(
+    credentialId: string,
+    actorAdminUserId: string,
+    audit?: CredentialAuditContext,
+  ): Promise<CredentialDescriptor> {
     assertUuid(credentialId, "credentialId");
     assertUuid(actorAdminUserId, "actorAdminUserId");
+    validateAuditContext(audit);
 
     return this.db.$transaction(async (tx) => {
       const existing = await tx.integrationCredential.findUnique({ where: { id: credentialId } });
@@ -275,7 +350,7 @@ export class IntegrationCredentialVault {
       const updated = await tx.integrationCredential.findUniqueOrThrow({
         where: { id: existing.id },
       });
-      await writeAudit(tx, "INTEGRATION_CREDENTIAL_REVOKED", actorAdminUserId, updated);
+      await writeAudit(tx, "INTEGRATION_CREDENTIAL_REVOKED", actorAdminUserId, updated, audit);
       return descriptor(updated);
     });
   }

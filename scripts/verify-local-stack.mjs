@@ -28,32 +28,52 @@ async function expectOk(name, url, headers) {
   console.log(`${name}: HTTP ${response.status}.`);
 }
 
+async function expectRestDenied(roleLabel, apiUrl, key, tableName) {
+  const headers = { apikey: key, Authorization: `Bearer ${key}` };
+  const rest = await fetch(`${apiUrl}/rest/v1/${tableName}?select=*`, { headers });
+  const restBody = await rest.text();
+  if (![401, 403].includes(rest.status) || !restBody.includes("42501")) {
+    throw new Error(
+      `PostgREST (${roleLabel}) must deny ${tableName} with SQLSTATE 42501; received ${rest.status}: ${restBody}`,
+    );
+  }
+  console.log(
+    `PostgREST ${tableName} (${roleLabel}): HTTP ${rest.status}, SQLSTATE 42501 (denied).`,
+  );
+}
+
 const status = localStatus();
 const apiUrl = variable(status, "API_URL") ?? "http://127.0.0.1:54421";
-const apiKey =
+const anonKey =
   variable(status, "ANON_KEY") ??
   variable(status, "PUBLISHABLE_KEY") ??
   variable(status, "SUPABASE_ANON_KEY");
-if (!apiKey) throw new Error("Local publishable API key is unavailable.");
+const serviceRoleKey =
+  variable(status, "SERVICE_ROLE_KEY") ??
+  variable(status, "SECRET_KEY") ??
+  variable(status, "SUPABASE_SERVICE_ROLE_KEY");
+if (!anonKey) throw new Error("Local publishable API key is unavailable.");
+if (!serviceRoleKey) throw new Error("Local service role API key is unavailable.");
 
-const database = new pg.Client({
-  connectionString: "postgresql://postgres:postgres@127.0.0.1:54422/postgres",
-});
+const databaseUrl =
+  process.env.DATABASE_URL ??
+  variable(status, "DB_URL") ??
+  "postgresql://postgres:postgres@127.0.0.1:54422/postgres";
+
+const database = new pg.Client({ connectionString: databaseUrl });
 await database.connect();
 await database.query("NOTIFY pgrst, 'reload schema'");
 await database.end();
 await new Promise((resolve) => setTimeout(resolve, 1_000));
 
-const headers = { apikey: apiKey, Authorization: `Bearer ${apiKey}` };
-const rest = await fetch(`${apiUrl}/rest/v1/AdminUser?select=id`, { headers });
-const restBody = await rest.text();
-if (![401, 403].includes(rest.status) || !restBody.includes("42501")) {
-  throw new Error(
-    `PostgREST must deny AdminUser with SQLSTATE 42501; received ${rest.status}: ${restBody}`,
-  );
-}
-console.log(`PostgREST AdminUser: HTTP ${rest.status}, SQLSTATE 42501 (denied).`);
+await expectRestDenied("anon", apiUrl, anonKey, "AdminUser");
+await expectRestDenied("anon", apiUrl, anonKey, "IntegrationCredential");
+await expectRestDenied("service_role", apiUrl, serviceRoleKey, "AdminUser");
+await expectRestDenied("service_role", apiUrl, serviceRoleKey, "IntegrationCredential");
 
-await expectOk("Supabase Auth", `${apiUrl}/auth/v1/health`, headers);
+await expectOk("Supabase Auth", `${apiUrl}/auth/v1/health`, {
+  apikey: anonKey,
+  Authorization: `Bearer ${anonKey}`,
+});
 await expectOk("Supabase Studio", "http://127.0.0.1:54423");
 await expectOk("Mailpit", "http://127.0.0.1:54424");

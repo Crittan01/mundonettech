@@ -212,6 +212,9 @@ CREATE UNIQUE INDEX "SecurityEvent_eventType_ipHash_dedupMinute_key" ON "Securit
 CREATE INDEX "IntegrationCredential_environment_revokedAt_idx" ON "IntegrationCredential"("environment", "revokedAt");
 
 -- CreateIndex
+CREATE INDEX "IntegrationCredential_environment_createdAt_id_idx" ON "IntegrationCredential"("environment", "createdAt", "id");
+
+-- CreateIndex
 CREATE INDEX "IntegrationCredential_createdByAdminUserId_createdAt_idx" ON "IntegrationCredential"("createdByAdminUserId", "createdAt");
 
 -- CreateIndex
@@ -448,11 +451,60 @@ FOR EACH ROW EXECUTE FUNCTION "prevent_append_only_mutation"();
 CREATE TRIGGER "Consent_append_only" BEFORE UPDATE OR DELETE ON "Consent"
 FOR EACH ROW EXECUTE FUNCTION "prevent_append_only_mutation"();
 
+CREATE FUNCTION "enforce_recovery_code_immutability"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD."consumedAt" IS NOT NULL THEN
+    RAISE EXCEPTION 'consumed recovery codes are immutable' USING ERRCODE = '55000';
+  END IF;
+  IF NEW."adminUserId" IS DISTINCT FROM OLD."adminUserId" OR
+     NEW."codeHash" IS DISTINCT FROM OLD."codeHash" OR
+     NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR
+     NEW."expiresAt" IS DISTINCT FROM OLD."expiresAt" OR
+     NEW."consumedAt" IS NULL THEN
+    RAISE EXCEPTION 'recovery code identity is immutable and updates may only consume it'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER "AdminRecoveryCode_immutable_consumption" BEFORE UPDATE ON "AdminRecoveryCode"
+FOR EACH ROW EXECUTE FUNCTION "enforce_recovery_code_immutability"();
+
+CREATE FUNCTION "enforce_integration_credential_immutability"() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF OLD."revokedAt" IS NOT NULL THEN
+    RAISE EXCEPTION 'revoked integration credentials are immutable' USING ERRCODE = '55000';
+  END IF;
+  IF NEW."id" IS DISTINCT FROM OLD."id" OR
+     NEW."provider" IS DISTINCT FROM OLD."provider" OR
+     NEW."environment" IS DISTINCT FROM OLD."environment" OR
+     NEW."accountName" IS DISTINCT FROM OLD."accountName" OR
+     NEW."createdByAdminUserId" IS DISTINCT FROM OLD."createdByAdminUserId" OR
+     NEW."createdAt" IS DISTINCT FROM OLD."createdAt" THEN
+    RAISE EXCEPTION 'integration credential identity is immutable' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER "IntegrationCredential_immutable_identity" BEFORE UPDATE ON "IntegrationCredential"
+FOR EACH ROW EXECUTE FUNCTION "enforce_integration_credential_immutability"();
+
 CREATE FUNCTION "set_admin_action_self_dealing"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  NEW."selfDealing" := NEW."targetAdminUserId" IS NOT NULL AND
-    NEW."actorAdminUserId" = NEW."targetAdminUserId";
+  IF NEW."targetAdminUserId" IS NULL AND NEW."targetType" = 'AdminUser' AND
+     NEW."targetId" IS NOT NULL AND NEW."targetId" = NEW."actorAdminUserId"::text THEN
+    NEW."targetAdminUserId" := NEW."actorAdminUserId";
+  END IF;
+  NEW."selfDealing" := COALESCE(
+    (NEW."targetAdminUserId" IS NOT NULL AND NEW."actorAdminUserId" = NEW."targetAdminUserId") OR
+    (NEW."targetType" = 'AdminUser' AND NEW."targetId" IS NOT NULL AND NEW."targetId" = NEW."actorAdminUserId"::text),
+    FALSE
+  );
   RETURN NEW;
 END;
 $$;
@@ -463,7 +515,7 @@ FOR EACH ROW EXECUTE FUNCTION "set_admin_action_self_dealing"();
 CREATE FUNCTION "set_security_event_dedup_minute"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  NEW."dedupMinute" := date_trunc('minute', NEW."occurredAt");
+  NEW."dedupMinute" := date_trunc('minute', NEW."occurredAt", 'UTC');
   RETURN NEW;
 END;
 $$;
@@ -472,7 +524,7 @@ CREATE TRIGGER "SecurityEvent_dedup_minute" BEFORE INSERT ON "SecurityEvent"
 FOR EACH ROW EXECUTE FUNCTION "set_security_event_dedup_minute"();
 ALTER TABLE "SecurityEvent"
   ADD CONSTRAINT "SecurityEvent_dedupMinute_matches" CHECK (
-    "dedupMinute" = date_trunc('minute', "occurredAt")
+    "dedupMinute" = date_trunc('minute', "occurredAt", 'UTC')
   );
 
 CREATE FUNCTION "validate_consent_revocation"() RETURNS trigger
@@ -609,11 +661,28 @@ CREATE FUNCTION "acquire_idempotency_key"(
   p_key_hash BYTEA,
   p_subject_hash BYTEA,
   p_request_hash BYTEA,
-  p_expires_at TIMESTAMPTZ
-) RETURNS "IdempotencyKey"
+  p_expires_at TIMESTAMPTZ,
+  p_now TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+) RETURNS TABLE (
+  "id" UUID,
+  "scope" VARCHAR(120),
+  "keyHash" BYTEA,
+  "subjectHash" BYTEA,
+  "requestHash" BYTEA,
+  "status" "IdempotencyStatus",
+  "responseStatus" INTEGER,
+  "resultType" VARCHAR(100),
+  "resultId" VARCHAR(255),
+  "createdAt" TIMESTAMPTZ(6),
+  "expiresAt" TIMESTAMPTZ(6),
+  "completedAt" TIMESTAMPTZ(6),
+  "acquired" BOOLEAN
+)
 LANGUAGE plpgsql VOLATILE AS $$
+#variable_conflict use_column
 DECLARE
   result "IdempotencyKey";
+  attempt INTEGER;
 BEGIN
   IF p_scope IS NULL OR p_scope <> btrim(p_scope) OR char_length(p_scope) NOT BETWEEN 1 AND 120 THEN
     RAISE EXCEPTION 'idempotency scope must be trimmed and contain between 1 and 120 characters';
@@ -622,31 +691,69 @@ BEGIN
      octet_length(p_request_hash) <> 32 THEN
     RAISE EXCEPTION 'idempotency hashes must contain exactly 32 bytes';
   END IF;
-  IF p_expires_at <= CURRENT_TIMESTAMP THEN
+  IF p_expires_at <= p_now THEN
     RAISE EXCEPTION 'idempotency expiration must be in the future';
   END IF;
 
-  INSERT INTO "IdempotencyKey" (
-    "scope", "keyHash", "subjectHash", "requestHash", "expiresAt"
-  ) VALUES (p_scope, p_key_hash, p_subject_hash, p_request_hash, p_expires_at)
-  ON CONFLICT ("scope", "keyHash") DO NOTHING
-  RETURNING * INTO result;
+  FOR attempt IN 1..3 LOOP
+    result := NULL;
 
-  IF result."id" IS NOT NULL THEN RETURN result; END IF;
+    INSERT INTO "IdempotencyKey" (
+      "scope", "keyHash", "subjectHash", "requestHash", "createdAt", "expiresAt"
+    ) VALUES (p_scope, p_key_hash, p_subject_hash, p_request_hash, p_now, p_expires_at)
+    ON CONFLICT ("scope", "keyHash") DO NOTHING
+    RETURNING * INTO result;
 
-  SELECT * INTO result
-  FROM "IdempotencyKey"
-  WHERE "scope" = p_scope AND "keyHash" = p_key_hash
-  FOR UPDATE;
+    IF result."id" IS NOT NULL THEN
+      RETURN QUERY SELECT
+        result."id",
+        result."scope",
+        result."keyHash",
+        result."subjectHash",
+        result."requestHash",
+        result."status",
+        result."responseStatus",
+        result."resultType",
+        result."resultId",
+        result."createdAt",
+        result."expiresAt",
+        result."completedAt",
+        TRUE;
+      RETURN;
+    END IF;
 
-  IF result."subjectHash" <> p_subject_hash OR result."requestHash" <> p_request_hash THEN
-    RAISE EXCEPTION 'idempotency key was already used with a different payload' USING ERRCODE = '23505';
-  END IF;
-  IF result."expiresAt" <= CURRENT_TIMESTAMP THEN
-    RAISE EXCEPTION 'expired idempotency keys cannot be reused' USING ERRCODE = '23505';
-  END IF;
+    SELECT * INTO result
+    FROM "IdempotencyKey" AS ik
+    WHERE ik."scope" = p_scope AND ik."keyHash" = p_key_hash
+    FOR UPDATE;
 
-  RETURN result;
+    IF result."id" IS NOT NULL THEN
+      IF result."subjectHash" <> p_subject_hash OR result."requestHash" <> p_request_hash THEN
+        RAISE EXCEPTION 'idempotency key was already used with a different payload' USING ERRCODE = '23505';
+      END IF;
+      IF result."expiresAt" <= p_now THEN
+        RAISE EXCEPTION 'expired idempotency keys cannot be reused' USING ERRCODE = '23505';
+      END IF;
+
+      RETURN QUERY SELECT
+        result."id",
+        result."scope",
+        result."keyHash",
+        result."subjectHash",
+        result."requestHash",
+        result."status",
+        result."responseStatus",
+        result."resultType",
+        result."resultId",
+        result."createdAt",
+        result."expiresAt",
+        result."completedAt",
+        FALSE;
+      RETURN;
+    END IF;
+  END LOOP;
+
+  RAISE EXCEPTION 'unable to acquire idempotency key due to concurrent purge' USING ERRCODE = '40001';
 END;
 $$;
 
@@ -704,6 +811,35 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION "purge_expired_idempotency_keys"(
+  p_limit INTEGER DEFAULT 500,
+  p_now TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+) RETURNS INTEGER
+LANGUAGE plpgsql VOLATILE AS $$
+DECLARE
+  deleted_count INTEGER;
+BEGIN
+  IF p_limit NOT BETWEEN 1 AND 5000 THEN
+    RAISE EXCEPTION 'purge batch size must be between 1 and 5000';
+  END IF;
+
+  WITH expired AS (
+    SELECT "id"
+    FROM "IdempotencyKey"
+    WHERE "expiresAt" <= p_now
+    ORDER BY "expiresAt", "id"
+    FOR UPDATE SKIP LOCKED
+    LIMIT p_limit
+  )
+  DELETE FROM "IdempotencyKey" AS ik
+  USING expired
+  WHERE ik."id" = expired."id";
+
+  GET DIAGNOSTICS deleted_count = ROW_COUNT;
+  RETURN deleted_count;
+END;
+$$;
+
 -- Deny-by-default Data API and row security
 DO $$
 DECLARE
@@ -746,6 +882,10 @@ BEGIN
     IF command.object_identity !~ '(^|\.)"?_prisma_migrations"?$' THEN
       EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', command.object_identity);
       EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', command.object_identity);
+      EXECUTE format(
+        'REVOKE ALL ON TABLE %s FROM PUBLIC, anon, authenticated, service_role',
+        command.object_identity
+      );
     END IF;
   END LOOP;
 END;
@@ -757,9 +897,9 @@ EXECUTE FUNCTION "enforce_rls_on_new_table"();
 
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 REVOKE ALL ON SCHEMA public FROM anon, authenticated, service_role;
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon, authenticated, service_role;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated, service_role;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated, service_role;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC, anon, authenticated, service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC, anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON FUNCTIONS FROM PUBLIC, anon, authenticated, service_role;

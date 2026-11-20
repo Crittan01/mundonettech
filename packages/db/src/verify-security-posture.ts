@@ -14,6 +14,7 @@ const requiredTables = [
   "IdempotencyKey",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
+const nonBypassRoles = ["anon", "authenticated"] as const;
 const requiredConstraints = [
   "AdminRecoveryCode_codeHash_length",
   "AdminActionLog_metadata_object",
@@ -24,6 +25,7 @@ const requiredConstraints = [
   "IntegrationCredential_authTag_length",
   "DomainOutbox_claim_consistent",
   "IdempotencyKey_requestHash_length",
+  "SecurityEvent_dedupMinute_matches",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -31,6 +33,16 @@ const requiredPartialIndexes = [
   "Customer_email_active_key",
   "Customer_authUserId_active_key",
   "IntegrationCredential_provider_environment_accountName_key",
+] as const;
+const requiredSecurityTriggers = [
+  "AdminActionLog_append_only",
+  "AdminActionLog_self_dealing",
+  "AdminRecoveryCode_immutable_consumption",
+  "Consent_append_only",
+  "Consent_validate_revocation",
+  "IntegrationCredential_immutable_identity",
+  "SecurityEvent_append_only",
+  "SecurityEvent_dedup_minute",
 ] as const;
 
 export async function verifySecurityPosture(databaseUrl: string): Promise<string[]> {
@@ -49,6 +61,22 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
       Number(versionRow.server_version_num) >= 180000
     ) {
       errors.push(`PostgreSQL 17 is required; found ${versionRow?.server_version ?? "unknown"}.`);
+    }
+
+    const roleFlags = await client.query<{
+      role_name: string;
+      rolsuper: boolean;
+      rolbypassrls: boolean;
+    }>(
+      `SELECT rolname AS role_name, rolsuper, rolbypassrls
+       FROM pg_roles WHERE rolname = ANY($1::text[])`,
+      [nonBypassRoles],
+    );
+    for (const role of nonBypassRoles) {
+      const row = roleFlags.rows.find((item) => item.role_name === role);
+      if (!row || row.rolsuper || row.rolbypassrls) {
+        errors.push(`Role ${role} must exist without SUPERUSER or BYPASSRLS.`);
+      }
     }
 
     const tables = await client.query<{
@@ -80,6 +108,31 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
       }
     }
 
+    const exposedPolicies = await client.query<{
+      table_name: string;
+      policy_name: string;
+    }>(
+      `SELECT cls.relname AS table_name, pol.polname AS policy_name
+       FROM pg_policy pol
+       JOIN pg_class cls ON cls.oid = pol.polrelid
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       WHERE ns.nspname = 'public'
+         AND (
+           pol.polroles = '{0}'::oid[] OR
+           EXISTS (
+             SELECT 1 FROM pg_roles r
+             WHERE r.oid = ANY(pol.polroles)
+               AND r.rolname = ANY($1::text[])
+           )
+         )`,
+      [dataApiRoles],
+    );
+    for (const row of exposedPolicies.rows) {
+      errors.push(
+        `Policy ${row.policy_name} on ${row.table_name} exposes public schema data to PUBLIC or Data API roles.`,
+      );
+    }
+
     const schemaPrivileges = await client.query<{
       role_name: string;
       has_usage: boolean;
@@ -98,12 +151,12 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
       }
     }
 
-    const tablePrivileges = await client.query<{
+    const relationPrivileges = await client.query<{
       role_name: string;
-      table_name: string;
+      relation_name: string;
       privilege: string;
     }>(
-      `SELECT role.rolname AS role_name, cls.relname AS table_name, privilege
+      `SELECT role.rolname AS role_name, cls.relname AS relation_name, privilege
        FROM pg_roles role
        CROSS JOIN pg_class cls
        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
@@ -111,12 +164,35 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
          'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'
        ]) AS privilege
        WHERE role.rolname = ANY($1::text[])
-         AND ns.nspname = 'public' AND cls.relkind IN ('r', 'p')
+         AND ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f')
          AND has_table_privilege(role.oid, cls.oid, privilege)`,
       [dataApiRoles],
     );
-    for (const row of tablePrivileges.rows) {
-      errors.push(`PostgREST role ${row.role_name} retains ${row.privilege} on ${row.table_name}.`);
+    for (const row of relationPrivileges.rows) {
+      errors.push(
+        `PostgREST role ${row.role_name} retains ${row.privilege} on ${row.relation_name}.`,
+      );
+    }
+
+    const sequencePrivileges = await client.query<{
+      role_name: string;
+      sequence_name: string;
+      privilege: string;
+    }>(
+      `SELECT role.rolname AS role_name, cls.relname AS sequence_name, privilege
+       FROM pg_roles role
+       CROSS JOIN pg_class cls
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       CROSS JOIN LATERAL unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) AS privilege
+       WHERE role.rolname = ANY($1::text[])
+         AND ns.nspname = 'public' AND cls.relkind = 'S'
+         AND has_sequence_privilege(role.oid, cls.oid, privilege)`,
+      [dataApiRoles],
+    );
+    for (const row of sequencePrivileges.rows) {
+      errors.push(
+        `PostgREST role ${row.role_name} retains ${row.privilege} on sequence ${row.sequence_name}.`,
+      );
     }
 
     const functionPrivileges = await client.query<{ role_name: string; function_name: string }>(
@@ -135,6 +211,7 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
 
     const publicPrivileges = await client.query<{
       schema_usage: boolean;
+      relation_name: string | null;
       function_name: string | null;
     }>(
       `SELECT EXISTS (
@@ -143,6 +220,13 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
          WHERE ns.nspname = 'public' AND acl.grantee = 0
            AND acl.privilege_type IN ('USAGE', 'CREATE')
        ) AS schema_usage,
+       (SELECT cls.relname FROM pg_class cls
+        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+        WHERE ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+          AND EXISTS (
+            SELECT 1 FROM aclexplode(cls.relacl) AS acl
+            WHERE acl.grantee = 0
+          ) LIMIT 1) AS relation_name,
        (SELECT proc.proname FROM pg_proc proc
         JOIN pg_namespace ns ON ns.oid = proc.pronamespace
         WHERE ns.nspname = 'public' AND (
@@ -153,9 +237,10 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
         ) LIMIT 1) AS function_name`,
     );
     const publicRow = publicPrivileges.rows[0];
-    if (publicRow?.schema_usage || publicRow?.function_name) {
+    if (publicRow?.schema_usage || publicRow?.relation_name || publicRow?.function_name) {
+      const target = publicRow.relation_name ?? publicRow.function_name;
       errors.push(
-        `PUBLIC retains schema usage or function execution${publicRow.function_name ? ` (${publicRow.function_name})` : ""}.`,
+        `PUBLIC retains schema, relation, or function privileges${target ? ` (${target})` : ""}.`,
       );
     }
 
@@ -164,6 +249,22 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
     );
     if (trigger.rows[0]?.enabled !== "O") {
       errors.push("The enforce_rls_on_new_table event trigger is missing or disabled.");
+    }
+
+    const rowTriggers = await client.query<{ trigger_name: string; enabled: string }>(
+      `SELECT tg.tgname AS trigger_name, tg.tgenabled AS enabled
+       FROM pg_trigger tg
+       JOIN pg_class cls ON cls.oid = tg.tgrelid
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       WHERE ns.nspname = 'public' AND NOT tg.tgisinternal
+         AND tg.tgname = ANY($1::text[])`,
+      [requiredSecurityTriggers],
+    );
+    for (const requiredTrigger of requiredSecurityTriggers) {
+      const row = rowTriggers.rows.find((item) => item.trigger_name === requiredTrigger);
+      if (!row || row.enabled !== "O") {
+        errors.push(`Security trigger ${requiredTrigger} is missing or disabled.`);
+      }
     }
 
     const constraints = await client.query<{ constraint_name: string }>(

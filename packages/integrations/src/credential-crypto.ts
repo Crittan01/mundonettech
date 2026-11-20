@@ -7,6 +7,7 @@ const nonceBytes = 12;
 const authTagBytes = 16;
 const maximumPlaintextBytes = 64 * 1024;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const providerPattern = /^[a-z][a-z0-9._-]{0,99}$/;
 
 export class CredentialKeyRingError extends Error {
   constructor(message: string) {
@@ -31,6 +32,8 @@ export interface CredentialKeyRing {
 export interface SealedCredential {
   readonly credentialId: string;
   readonly environment: IntegrationEnvironment;
+  readonly provider?: string;
+  readonly accountName?: string;
   readonly keyVersion: number;
   readonly nonce: Uint8Array<ArrayBuffer>;
   readonly ciphertext: Uint8Array<ArrayBuffer>;
@@ -52,6 +55,21 @@ function assertEnvironment(value: string): asserts value is IntegrationEnvironme
 function assertCredentialId(value: string): void {
   if (!uuidPattern.test(value)) {
     throw new TypeError("credentialId must be a canonical UUID.");
+  }
+}
+
+function assertIdentityContext(provider?: string, accountName?: string): void {
+  if ((provider === undefined) !== (accountName === undefined)) {
+    throw new TypeError("provider and accountName must both be provided or both omitted.");
+  }
+  if (provider !== undefined && !providerPattern.test(provider)) {
+    throw new TypeError("provider must be a lowercase identifier of at most 100 characters.");
+  }
+  if (
+    accountName !== undefined &&
+    (accountName.trim() !== accountName || accountName.length < 1 || accountName.length > 120)
+  ) {
+    throw new TypeError("accountName must be trimmed and contain between 1 and 120 characters.");
   }
 }
 
@@ -141,10 +159,21 @@ export function loadCredentialKeyRing(
   });
 }
 
-function associatedData(credentialId: string, environment: IntegrationEnvironment): Buffer {
+function associatedData(
+  credentialId: string,
+  environment: IntegrationEnvironment,
+  provider?: string,
+  accountName?: string,
+): Buffer {
   assertCredentialId(credentialId);
   assertEnvironment(environment);
-  return Buffer.from(`integration-credential/v1/${environment}/${credentialId}`, "utf8");
+  assertIdentityContext(provider, accountName);
+
+  const suffix =
+    provider !== undefined && accountName !== undefined
+      ? `/${provider}/${encodeURIComponent(accountName)}`
+      : "";
+  return Buffer.from(`integration-credential/v1/${environment}/${credentialId}${suffix}`, "utf8");
 }
 
 function validatePlaintext(plaintext: Uint8Array): Buffer {
@@ -165,13 +194,20 @@ function keyForVersion(ring: CredentialKeyRing, version: number): Uint8Array {
 export function encryptIntegrationCredential(options: {
   credentialId?: string;
   environment: IntegrationEnvironment;
+  provider?: string;
+  accountName?: string;
   plaintext: Uint8Array;
   ring: CredentialKeyRing;
 }): SealedCredential {
   if (options.environment !== options.ring.environment) throw new CredentialDecryptionError();
 
   const credentialId = options.credentialId ?? randomUUID();
-  const aad = associatedData(credentialId, options.environment);
+  const aad = associatedData(
+    credentialId,
+    options.environment,
+    options.provider,
+    options.accountName,
+  );
   const plaintext = validatePlaintext(options.plaintext);
   const nonce = randomBytes(nonceBytes);
 
@@ -190,6 +226,9 @@ export function encryptIntegrationCredential(options: {
     return {
       credentialId,
       environment: options.environment,
+      ...(options.provider !== undefined && options.accountName !== undefined
+        ? { provider: options.provider, accountName: options.accountName }
+        : {}),
       keyVersion: options.ring.activeVersion,
       nonce,
       ciphertext,
@@ -222,7 +261,12 @@ export function decryptIntegrationCredential(
   record: EncryptedCredentialRecord,
   ring: CredentialKeyRing,
 ): Uint8Array {
-  validateEncryptedRecord(record);
+  try {
+    validateEncryptedRecord(record);
+    assertIdentityContext(record.provider, record.accountName);
+  } catch {
+    throw new CredentialDecryptionError();
+  }
   if (record.environment !== ring.environment) throw new CredentialDecryptionError();
 
   try {
@@ -232,9 +276,12 @@ export function decryptIntegrationCredential(
       record.nonce,
       { authTagLength: authTagBytes },
     );
-    decipher.setAAD(associatedData(record.credentialId, record.environment), {
-      plaintextLength: record.ciphertext.length,
-    });
+    decipher.setAAD(
+      associatedData(record.credentialId, record.environment, record.provider, record.accountName),
+      {
+        plaintextLength: record.ciphertext.length,
+      },
+    );
     decipher.setAuthTag(record.authTag);
     return Buffer.concat([decipher.update(record.ciphertext), decipher.final()]);
   } catch {
@@ -252,6 +299,9 @@ export function reencryptIntegrationCredential(
     return encryptIntegrationCredential({
       credentialId: record.credentialId,
       environment: record.environment,
+      ...(record.provider !== undefined && record.accountName !== undefined
+        ? { provider: record.provider, accountName: record.accountName }
+        : {}),
       plaintext,
       ring,
     });

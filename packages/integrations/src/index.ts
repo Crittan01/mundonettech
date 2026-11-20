@@ -20,4 +20,4 @@ export {
   CredentialRevokedError,
   IntegrationCredentialVault,
 } from "./credential-vault.js";
-export type { CredentialDescriptor } from "./credential-vault.js";
+export type { CredentialAuditContext, CredentialDescriptor } from "./credential-vault.js";

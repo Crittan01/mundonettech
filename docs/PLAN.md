@@ -22,9 +22,7 @@
 
 - `[x]` ✅ **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
 - `[x]` ✅ **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:** `@mundonettech/config`, `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `standalone`, `'use cache'`), ESLint (`client-ip`, `sharp-safe`), guardas y tests negativos.
-- `[R]` **`F0.3` — PostgreSQL 17 Local (Podman `:54421..54424`) + Prisma `BigInt` + RLS + Bóveda:**
-  - `supabase/config.toml` aislado + **1 sola cadena de migraciones versionada** (`ADR-003`).
-  - Modelos base en `packages/db/prisma/schema/` (`AdminUser`, `AdminRecoveryCode`, `AdminActionLog`, `SecurityEvent`, `Customer`, `Consent`, `IntegrationCredential` `AES-256-GCM`, `DomainOutbox`, `IdempotencyKey`) + trigger `enforce_rls_on_new_table` + `REVOKE ALL` PostgREST + `verify-security-posture`.
+- `[x]` ✅ **`F0.3` — PG 17 (`:54421..54424`) + Prisma + RLS + Bóveda `AES-256-GCM`:** 9 modelos base, cadena única DDL, `enforce_rls_on_new_table`, PostgREST revocado, `SKIP LOCKED`/idempotencia (`acquired`), AAD y `verify-security-posture`.
 - `[ ]` **`F0.4` — Seguridad de Borde, Auth Cliente y Núcleo `/admin` con MFA `aal2`:**
   - `proxy.ts` (CSP/headers, anti-race `@supabase/ssr`, timeout HMAC 30 min admin / 30 d cliente).
   - Auth cliente (OTP 6 dígitos, HIBP k-anonymity, anti-enumeración, Turnstile).
@@ -36,6 +34,6 @@
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente bloque:** **`F0.3`** en rama `feat/f0-3-db-rls-vault` desde `develop`.
-- **Leer al iniciar:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` y `packages/db/README.md`.
-- **Cierre dual `F0.3`:** Implementador levanta PG 17 (`_mundonettech` `:54421..54424`), entrega migración única Prisma `BigInt` + RLS + `enforce_rls_on_new_table` + `REVOKE ALL` PostgREST + bóveda `AES-256-GCM` + `verify-security-posture` en `[R]` con `make check && pnpm test && pnpm build` en verde; Auditor audita, certifica `[x]` y fusiona PR en `develop`.
+- **Siguiente bloque:** **`F0.4`** en rama `feat/f0-4-auth-admin-mfa` desde `develop`.
+- **Leer al iniciar:** `AGENTS.md`, `docs/{STATE,PLAN,ARCHITECTURE,DECISIONS}.md` y `packages/{db,core}/README.md`.
+- **Cierre dual `F0.4`:** Implementador entrega `proxy.ts` (CSP, anti-race `@supabase/ssr`, timeouts HMAC), Auth cliente (OTP 6 dígitos, HIBP, Turnstile), `/admin/login` + `/admin/login/mfa` (TOTP `aal2` + códigos HMAC + `requireRecentMfa` ≤ 10 min), RBAC 8 roles (3 anillos), `pii-mask.ts`, `AdminShell`, `/admin/{usuarios,seguridad,auditoria}` y `docs/SECURITY.md` en `[R]` con gates verdes; Auditor certifica `[x]` y fusiona en `develop`.

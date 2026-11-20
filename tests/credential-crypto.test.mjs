@@ -71,6 +71,28 @@ describe("F0.3 — AES-256-GCM credential cryptography", () => {
         CredentialDecryptionError,
       );
     }
+
+    const identityBound = seal({ provider: "wompi", accountName: "primary-co" });
+    assert.equal(
+      decoder.decode(decryptIntegrationCredential(identityBound, ring())),
+      '{"accessToken":"test-only-secret"}',
+    );
+    assert.throws(
+      () => decryptIntegrationCredential({ ...identityBound, provider: "resend" }, ring()),
+      CredentialDecryptionError,
+    );
+    assert.throws(
+      () => decryptIntegrationCredential({ ...identityBound, accountName: "secondary" }, ring()),
+      CredentialDecryptionError,
+    );
+    assert.throws(
+      () =>
+        decryptIntegrationCredential(
+          { ...identityBound, provider: undefined, accountName: undefined },
+          ring(),
+        ),
+      CredentialDecryptionError,
+    );
   });
 
   it("isolates key rings by environment and rejects unknown or incorrect keys", () => {

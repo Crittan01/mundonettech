@@ -22,4 +22,14 @@ export type {
   IntegrationCredential,
   SecurityEvent,
 } from "./generated/client.js";
+export {
+  acquireIdempotencyKey,
+  claimDomainOutbox,
+  completeDomainOutbox,
+  completeIdempotencyKey,
+  consumeAdminRecoveryCode,
+  purgeExpiredIdempotencyKeys,
+  retryDomainOutbox,
+} from "./primitives.js";
+export type { AcquiredIdempotencyKey, DatabaseExecutor } from "./primitives.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";
