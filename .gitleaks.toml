@@ -1,0 +1,16 @@
+title = "MundoNetTech Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Safe placeholders in example files and test fixtures"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''\.test\.ts$''',
+  '''\.spec\.ts$''',
+]
+regexes = [
+  '''(pub_test_|prv_test_|test_integrity_|test_events_|1x00000000000000000000AA)''',
+]
+

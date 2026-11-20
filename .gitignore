@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build & Framework outputs
+.next/
+out/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+
+# Environment & Secrets (NEVER commit secrets; only *.example is allowed)
+.env
+.env.*
+!.env.example
+!apps/web/.env.example
+
+# Testing, Coverage & QA artifacts
+coverage/
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+
+# Local scratch, logs, dumps & temporary files (NEVER version scratch)
+tmp/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+*.sql.gz
+*.dump
+*.gpg
+*.tar.gz
+*.zip
+
+# OS & Editor local files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.code-workspace
+*.swp
+*.swo
+
