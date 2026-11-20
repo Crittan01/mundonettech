@@ -16,4 +16,3 @@ export default function AdminRootLayout({ children }: Readonly<{ children: React
     </Suspense>
   );
 }
-

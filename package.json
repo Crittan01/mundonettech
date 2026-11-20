@@ -24,14 +24,21 @@
     "guard:docs": "node scripts/check-docs.mjs",
     "guard:git": "node scripts/check-git-hygiene.mjs",
     "guard:language": "node scripts/check-language.mjs",
-    "guards": "pnpm guard:docs && pnpm guard:git && pnpm guard:language && pnpm guard:boundaries",
+    "guard:test-env": "NODE_ENV=test EMAIL_SEND_DISABLED=1 node scripts/check-test-env.mjs",
+    "guards": "pnpm guard:docs && pnpm guard:git && pnpm guard:language && pnpm guard:boundaries && pnpm guard:test-env",
     "lint": "eslint . --max-warnings 0",
-    "test": "turbo run build --filter=@mundonettech/config --filter=@mundonettech/core --filter=@mundonettech/db --filter=@mundonettech/integrations && node --test tests/*.test.mjs",
-    "typecheck": "turbo run typecheck",
+    "test": "pnpm guard:test-env && turbo run build --filter=@mundonettech/config --filter=@mundonettech/core --filter=@mundonettech/db --filter=@mundonettech/integrations && pnpm test:unit && pnpm test:integration",
+    "test:e2e": "pnpm guard:test-env && EMAIL_SEND_DISABLED=1 turbo run build --filter=@mundonettech/web && EMAIL_SEND_DISABLED=1 playwright test",
+    "test:integration": "NODE_ENV=test EMAIL_SEND_DISABLED=1 node --test tests/*.test.mjs",
+    "test:rls": "NODE_ENV=test EMAIL_SEND_DISABLED=1 node scripts/rls-matrix.mjs",
+    "test:unit": "NODE_ENV=test EMAIL_SEND_DISABLED=1 vitest run",
+    "typecheck": "turbo run typecheck && tsc -p tsconfig.json --noEmit",
     "web:verify": "node scripts/verify-web-security.mjs"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
     "@eslint/js": "9.39.5",
+    "@playwright/test": "^1.65.1",
     "@supabase/supabase-js": "2.119.2",
     "@types/node": "^22.0.0",
     "eslint": "9.39.5",
@@ -45,6 +52,7 @@
     "tailwindcss": "4.3.5",
     "turbo": "2.11.13",
     "typescript": "5.9.3",
-    "typescript-eslint": "^8.46.4"
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^5.1.1"
   }
 }

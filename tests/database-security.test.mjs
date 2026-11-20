@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { after, before, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import pg from "pg";
 
@@ -29,8 +27,8 @@ import {
   createCredentialKeyRing,
   IntegrationCredentialVault,
 } from "../packages/integrations/dist/index.js";
+import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
 
-const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const containerName = "f03-security-test_mundonettech";
 const probeRole = "f03_rls_probe";
 const encoder = new TextEncoder();
@@ -47,44 +45,12 @@ const tables = [
   "IdempotencyKey",
 ];
 
-let containerId;
+let harness;
 let databaseUrl;
 let admin;
 let prisma;
 let keyRing;
 let vault;
-
-function run(command, args, options = {}) {
-  return spawnSync(command, args, {
-    encoding: "utf8",
-    maxBuffer: 10 * 1024 * 1024,
-    ...options,
-  });
-}
-
-async function delay(milliseconds) {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function connectWhenReady(url) {
-  let lastError;
-
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    const client = new pg.Client({ connectionString: url, connectionTimeoutMillis: 1_000 });
-    try {
-      await client.connect();
-      await client.query("SELECT 1");
-      await client.end();
-      return;
-    } catch (error) {
-      lastError = error;
-      await client.end().catch(() => undefined);
-      await delay(250);
-    }
-  }
-
-  throw lastError ?? new Error("PostgreSQL test container did not become ready.");
-}
 
 async function withProbe(callback) {
   const client = new pg.Client({ connectionString: databaseUrl });
@@ -142,49 +108,13 @@ async function insertOutbox(key = randomUUID()) {
 
 before(
   async () => {
-    const existing = run("podman", ["container", "exists", containerName]);
-    if (existing.status === 0) {
-      throw new Error(`Refusing to replace existing test container ${containerName}.`);
-    }
-
-    const password = randomBytes(32).toString("hex");
-    const started = run("podman", [
-      "run",
-      "--detach",
-      "--rm",
-      "--pull=missing",
-      "--name",
-      containerName,
-      "--env",
-      `POSTGRES_PASSWORD=${password}`,
-      "--env",
-      "POSTGRES_DB=security_test",
-      "--publish",
-      "127.0.0.1:54428:5432",
-      "docker.io/library/postgres:17.12-alpine",
-    ]);
-    if (started.status !== 0) {
-      throw new Error(`Unable to start PostgreSQL 17 test container: ${started.stderr}`);
-    }
-    containerId = started.stdout.trim();
-    databaseUrl = `postgresql://postgres:${encodeURIComponent(password)}@127.0.0.1:54428/security_test`;
+    harness = await acquireIsolatedTestDatabase({ containerName, port: 54428 });
+    databaseUrl = harness.databaseUrl;
 
     try {
-      await connectWhenReady(databaseUrl);
-      const migrated = run(
-        "pnpm",
-        ["--filter", "@mundonettech/db", "exec", "prisma", "migrate", "deploy"],
-        {
-          cwd: repositoryRoot,
-          env: { ...process.env, DATABASE_URL: databaseUrl },
-        },
-      );
-      if (migrated.status !== 0) {
-        throw new Error(`Unable to apply migrations: ${migrated.stdout}\n${migrated.stderr}`);
-      }
-
       admin = new pg.Client({ connectionString: databaseUrl });
       await admin.connect();
+      await admin.query(`DROP ROLE IF EXISTS ${probeRole}`);
       await admin.query(`CREATE ROLE ${probeRole} NOLOGIN NOBYPASSRLS`);
       await admin.query(`GRANT USAGE ON SCHEMA public TO ${probeRole}`);
       await admin.query(
@@ -202,8 +132,12 @@ before(
       });
       vault = new IntegrationCredentialVault(prisma, keyRing);
     } catch (error) {
-      if (containerId) run("podman", ["stop", "--time", "5", containerId]);
-      containerId = undefined;
+      if (admin) {
+        await admin.query(`DROP ROLE IF EXISTS ${probeRole}`).catch(() => undefined);
+        await admin.end().catch(() => undefined);
+      }
+      await harness.stop();
+      harness = undefined;
       throw error;
     }
   },
@@ -213,10 +147,16 @@ before(
 after(
   async () => {
     if (prisma) await prisma.$disconnect();
-    if (admin) await admin.end();
-    if (containerId) {
-      const stopped = run("podman", ["stop", "--time", "5", containerId]);
-      if (stopped.status !== 0) throw new Error(`Unable to stop test container: ${stopped.stderr}`);
+    if (admin) {
+      await admin
+        .query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${probeRole}`)
+        .catch(() => undefined);
+      await admin.query(`REVOKE ALL ON SCHEMA public FROM ${probeRole}`).catch(() => undefined);
+      await admin.query(`DROP ROLE IF EXISTS ${probeRole}`).catch(() => undefined);
+      await admin.end();
+    }
+    if (harness) {
+      await harness.stop();
     }
   },
   { timeout: 30_000 },
@@ -768,16 +708,17 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
   });
 
   it("supports bounded retries and reclaiming expired leases without double processing", async () => {
+    const baseNow = new Date((await admin.query("SELECT CURRENT_TIMESTAMP AS now")).rows[0].now);
     const retryId = await insertOutbox();
     const claimed = await admin.query("SELECT * FROM claim_domain_outbox('retry-worker', 1)");
     assert.equal(claimed.rows[0].id, retryId);
     await assert.rejects(
       admin.query("SELECT retry_domain_outbox($1, 'retry-worker', $2, 'failed') AS retried", [
         retryId,
-        new Date(Date.now() + 25 * 60 * 60 * 1000),
+        new Date(baseNow.getTime() + 25 * 60 * 60 * 1000),
       ]),
     );
-    const availableAt = new Date(Date.now() + 60 * 60 * 1000);
+    const availableAt = new Date(baseNow.getTime() + 60 * 60 * 1000);
     assert.equal(
       (
         await admin.query(
@@ -792,7 +733,7 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
       0,
     );
 
-    const future = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const future = new Date(baseNow.getTime() + 2 * 60 * 60 * 1000);
     const reclaimedRetry = await admin.query(
       "SELECT * FROM claim_domain_outbox('other-worker', 10, $1)",
       [future],
@@ -809,8 +750,9 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
       true,
     );
 
+    const leaseBase = new Date((await admin.query("SELECT CURRENT_TIMESTAMP AS now")).rows[0].now);
     const expiringId = await insertOutbox();
-    const now = new Date(Date.now() + 1_000);
+    const now = new Date(leaseBase.getTime() + 1_000);
     await admin.query("SELECT * FROM claim_domain_outbox('lease-a', 1, $1)", [now]);
     assert.equal(
       (await admin.query("SELECT * FROM claim_domain_outbox('lease-b', 1, $1)", [now])).rows.length,
@@ -824,6 +766,7 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
     assert.equal(reclaimed.rows[0].attempts, 2);
     await admin.query("SELECT complete_domain_outbox($1, 'lease-b', $2)", [expiringId, afterLease]);
 
+    const typedBase = new Date((await admin.query("SELECT CURRENT_TIMESTAMP AS now")).rows[0].now);
     const typedOutboxId = await insertOutbox();
     const typedClaimed = await claimDomainOutbox(prisma, { workerId: "typed-worker", limit: 10 });
     assert.ok(typedClaimed.some((item) => item.id === typedOutboxId));
@@ -831,12 +774,12 @@ describe("F0.3 — idempotency and outbox concurrency", () => {
       await retryDomainOutbox(prisma, {
         id: typedOutboxId,
         workerId: "typed-worker",
-        availableAt: new Date(Date.now() + 30_000),
+        availableAt: new Date(typedBase.getTime() + 30_000),
         error: "transient timeout",
       }),
       true,
     );
-    const retryReady = new Date(Date.now() + 60_000);
+    const retryReady = new Date(typedBase.getTime() + 60_000);
     const reclaimedTyped = await claimDomainOutbox(prisma, {
       workerId: "typed-worker",
       limit: 10,
@@ -1126,5 +1069,18 @@ describe("F0.3 — persisted integration credential vault", () => {
       }),
       TypeError,
     );
+  });
+});
+
+describe("F0.5 — complete RLS and Data API matrix over persisted fixtures", () => {
+  it("denies all 174 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
+    const { runRlsMatrix } = await import("../scripts/rls-matrix.mjs");
+    const summary = await runRlsMatrix(databaseUrl);
+    assert.equal(summary.tables, 9);
+    assert.equal(summary.functions, 7);
+    assert.equal(summary.rlsOperations, 45);
+    assert.equal(summary.dataApiOperations, 129);
+    assert.equal(summary.operations, 174);
+    assert.ok(summary.results.every((result) => result.passed));
   });
 });

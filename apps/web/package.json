@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "next build",
-    "dev": "next dev --port 4010",
-    "start": "next start --port 4010",
-    "start:e2e": "next start --port 4110",
+    "build": "next build && node scripts/prepare-standalone.mjs",
+    "dev": "next dev --hostname 127.0.0.1 --port 4010",
+    "start": "PORT=4010 HOSTNAME=127.0.0.1 node --env-file-if-exists=.env.local .next/standalone/apps/web/server.js",
+    "start:e2e": "PORT=4110 HOSTNAME=127.0.0.1 node --env-file-if-exists=.env.local .next/standalone/apps/web/server.js",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {

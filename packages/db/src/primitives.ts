@@ -46,6 +46,12 @@ function assertValidDate(value: Date, field: string): void {
   }
 }
 
+function resolveOptionalNow(now: Date | undefined): Date | null {
+  if (now === undefined) return null;
+  assertValidDate(now, "now");
+  return now;
+}
+
 export async function consumeAdminRecoveryCode(
   db: DatabaseExecutor,
   options: {
@@ -56,11 +62,14 @@ export async function consumeAdminRecoveryCode(
 ): Promise<boolean> {
   assertUuid(options.adminUserId, "adminUserId");
   const codeHash = assertSha256Bytes(options.codeHash, "codeHash");
-  const now = options.now ?? new Date();
-  assertValidDate(now, "now");
+  const now = resolveOptionalNow(options.now);
 
   const rows = await db.$queryRaw<Array<{ consumed: boolean }>>`
-    SELECT consume_admin_recovery_code(${options.adminUserId}::uuid, ${codeHash}, ${now}) AS consumed
+    SELECT consume_admin_recovery_code(
+      ${options.adminUserId}::uuid,
+      ${codeHash},
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
+    ) AS consumed
   `;
   return rows[0]?.consumed === true;
 }
@@ -77,11 +86,14 @@ export async function claimDomainOutbox(
   if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100) {
     throw new RangeError("limit must be an integer between 1 and 100.");
   }
-  const now = options.now ?? new Date();
-  assertValidDate(now, "now");
+  const now = resolveOptionalNow(options.now);
 
   return db.$queryRaw<DomainOutbox[]>`
-    SELECT * FROM claim_domain_outbox(${options.workerId}, ${options.limit}::int, ${now})
+    SELECT * FROM claim_domain_outbox(
+      ${options.workerId},
+      ${options.limit}::int,
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
+    )
   `;
 }
 
@@ -95,11 +107,14 @@ export async function completeDomainOutbox(
 ): Promise<boolean> {
   assertUuid(options.id, "id");
   assertTrimmedRange(options.workerId, "workerId", 120);
-  const now = options.now ?? new Date();
-  assertValidDate(now, "now");
+  const now = resolveOptionalNow(options.now);
 
   const rows = await db.$queryRaw<Array<{ completed: boolean }>>`
-    SELECT complete_domain_outbox(${options.id}::uuid, ${options.workerId}, ${now}) AS completed
+    SELECT complete_domain_outbox(
+      ${options.id}::uuid,
+      ${options.workerId},
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
+    ) AS completed
   `;
   return rows[0]?.completed === true;
 }
@@ -118,8 +133,7 @@ export async function retryDomainOutbox(
   assertTrimmedRange(options.workerId, "workerId", 120);
   assertTrimmedRange(options.error, "error", 2000);
   assertValidDate(options.availableAt, "availableAt");
-  const now = options.now ?? new Date();
-  assertValidDate(now, "now");
+  const now = resolveOptionalNow(options.now);
 
   const rows = await db.$queryRaw<Array<{ retried: boolean }>>`
     SELECT retry_domain_outbox(
@@ -127,7 +141,7 @@ export async function retryDomainOutbox(
       ${options.workerId},
       ${options.availableAt},
       ${options.error},
-      ${now}
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
     ) AS retried
   `;
   return rows[0]?.retried === true;
@@ -149,8 +163,7 @@ export async function acquireIdempotencyKey(
   const subjectHash = assertSha256Bytes(options.subjectHash, "subjectHash");
   const requestHash = assertSha256Bytes(options.requestHash, "requestHash");
   assertValidDate(options.expiresAt, "expiresAt");
-  const now = options.now ?? new Date();
-  assertValidDate(now, "now");
+  const now = resolveOptionalNow(options.now);
 
   const rows = await db.$queryRaw<AcquiredIdempotencyKey[]>`
     SELECT * FROM acquire_idempotency_key(
@@ -159,7 +172,7 @@ export async function acquireIdempotencyKey(
       ${subjectHash},
       ${requestHash},
       ${options.expiresAt},
-      ${now}
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
     )
   `;
   const row = rows[0];
@@ -196,8 +209,7 @@ export async function completeIdempotencyKey(
   if (!Number.isInteger(options.responseStatus)) {
     throw new TypeError("responseStatus must be an integer HTTP status.");
   }
-  const now = options.now ?? new Date();
-  assertValidDate(now, "now");
+  const now = resolveOptionalNow(options.now);
   const resultType = options.resultType ?? null;
   const resultId = options.resultId ?? null;
 
@@ -211,7 +223,7 @@ export async function completeIdempotencyKey(
       ${options.responseStatus}::int,
       ${resultType},
       ${resultId},
-      ${now}
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
     ) AS completed
   `;
   return rows[0]?.completed === true;
@@ -228,11 +240,13 @@ export async function purgeExpiredIdempotencyKeys(
   if (!Number.isInteger(limit) || limit < 1 || limit > 5000) {
     throw new RangeError("limit must be an integer between 1 and 5000.");
   }
-  const now = options.now ?? new Date();
-  assertValidDate(now, "now");
+  const now = resolveOptionalNow(options.now);
 
   const rows = await db.$queryRaw<Array<{ purged: number }>>`
-    SELECT purge_expired_idempotency_keys(${limit}::int, ${now}) AS purged
+    SELECT purge_expired_idempotency_keys(
+      ${limit}::int,
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
+    ) AS purged
   `;
   return rows[0]?.purged ?? 0;
 }

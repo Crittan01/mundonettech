@@ -6,8 +6,8 @@
 
 | Hito | Fase | Alcance resumido | Estado |
 | --- | --- | --- | :---: |
-| **Hito 1 — Go-Live** | **Fase 0 — Fundación, Seguridad y Shell Admin** | Gobernanza (`F0.1`), Monorepo Next 16 (`F0.2`), PG 17 + Prisma `BigInt` + RLS + Bóveda + Outbox (`F0.3`), Auth + Login Admin + **MFA `aal2`** + RBAC 8 roles + PII mask (`F0.4`), CI/Gates (`F0.5`). | `[/]` |
-| **Hito 1** | **Fase 1 — Catálogo Tech, Media 360°/3D e Inventario WAC** | `F1.1` Marcas, Categorías N-niveles, Colecciones, Atributos/Facetas (`ADR-008`), GTIN/EAN, Compatibilidad y Bundles · `F1.2` `packages/media` (R2 + AVIF/WebP + Spin 360° + 3D/AR lazy) · `F1.3` Multi-bodega (`safetyStock` efectivo + orden determinista de locks) + Proveedores/WAC + Importador CSV · `F1.4` `CatalogService` único (`'use cache'`), Comparador, PDP, Admin y seed. | `[ ]` |
+| **Hito 1 — Go-Live** | **Fase 0 — Fundación, Seguridad y Shell Admin** | Gobernanza (`F0.1`), Monorepo Next 16 (`F0.2`), PG 17 + Prisma `BigInt` + RLS + Bóveda + Outbox (`F0.3`), Auth + Login Admin + **MFA `aal2`** + RBAC 8 roles + PII mask (`F0.4`), CI/Gates (`F0.5`). | `[x]` |
+| **Hito 1** | **Fase 1 — Catálogo Tech, Media 360°/3D e Inventario WAC** | `F1.1` Marcas, Categorías N-niveles, Colecciones, Atributos/Facetas (`ADR-008`), GTIN/EAN, Compatibilidad y Bundles · `F1.2` `packages/media` (R2 + AVIF/WebP + Spin 360° + 3D/AR lazy) · `F1.3` Multi-bodega (`safetyStock` efectivo + orden determinista de locks) + Proveedores/WAC + Importador CSV · `F1.4` `CatalogService` único (`'use cache'`), Comparador, PDP, Admin y seed. | `[/]` |
 | **Hito 1** | **Fase 2 — CMS v3, SEO y Legal CO** | `F2.1` Bloques componibles Zod + `StoreSettings` separados + versionado/programación + Mediateca R2 · `F2.2` Live Edit en `<Suspense>` + SERP · `F2.3` `packages/legal-co` (8 docs, Ley 1480/2439 retracto + festivos CO, Ley 1581) + `UrlRedirect` + JSON-LD + Sitemap + Merchant XML (`Brand`/`GTIN`). | `[ ]` |
 | **Hito 1** | **Fase 3 — Carrito, Checkout, IVA Dual, Pagos y Logística** | `F3.1` `CartService` (revalidación precios, `WholesaleTier` multi-variante, Bundles, Cupones `BigInt`, Venta Asistida `/pagar/[token]`) · `F3.2` Checkout DANE/Click&Collect + IVA Dual/UVT + `OrderReceipt` (`ADR-010`) + `Shipment`/`OrderRefund` 1:N + `DomainOutbox` · `F3.3` Bóveda `/admin/integraciones` + `PaymentProvider` (`refund()`, Wompi, COD, Transferencia MFA, `StoreCredit`) · `F3.4` Aveonline *pick & pack* asíncrono + Claim Idempotente + multi-bulto + Flex local + Resend/Svix + puerto DIAN. | `[ ]` |
 | **Hito 1** | **Fase 4A — Operación, RMA/Seriales y Lanzamiento** | `F4A.1` `/admin/{hoy,dashboard,pedidos,finanzas}` (cuadre total de `OrderRefund`) + Vigilancia `3.500 UVT` · `F4A.2` `/mi-cuenta/*` + Posventa 2FA `/pedido/[token]` + RMA (Retracto parcial, Cambios, Garantía con `SerializedUnit` Serial/IMEI) + PQR SLA + Reseñas con FK · `F4A.3` OWASP + Playwright E2E + `@axe-core` + Lighthouse ≥ 95 + k6 + **Go-Live `mundonettech.co`**. | `[ ]` |
@@ -18,19 +18,18 @@
 
 ---
 
-## 2. Fase Activa — Fase 0: Fundación, Seguridad Mandatoria y Shell Admin
+## 2. Fase Activa — Fase 1: Catálogo Tech, Media 360°/3D e Inventario WAC
 
-- `[x]` ✅ **`F0.1` — Gobernanza, higiene Git y arquitectura viva:** `.gitignore`, `.gitleaks.toml`, `AGENTS.md`, `README.md` y `docs/{INDEX,STATE,PLAN,ARCHITECTURE,DECISIONS}.md`.
-- `[x]` ✅ **`F0.2` — Monorepo `pnpm` + Turborepo + Next.js 16 + Tokens Semánticos + Guardas CI:** `@mundonettech/config`, `packages/{db,core,media,cms,integrations,legal-co}`, `apps/web` (`:4010`, `standalone`, `'use cache'`), ESLint (`client-ip`, `sharp-safe`), guardas y tests negativos.
-- `[x]` ✅ **`F0.3` — PG 17 (`:54421..54424`) + Prisma + RLS + Bóveda `AES-256-GCM`:** 9 modelos base, cadena única DDL, `enforce_rls_on_new_table`, PostgREST revocado, `SKIP LOCKED`/idempotencia (`acquired`), AAD y `verify-security-posture`.
-- `[x]` ✅ **`F0.4` — Borde `proxy.ts`, Auth Cliente y Núcleo `/admin` MFA `aal2`:** CSP/headers PPR, timeouts HMAC, OTP 6 dígitos + HIBP + Turnstile, TOTP `aal2` + códigos HMAC + step-up ≤ 10m, RBAC 8 roles (3 anillos), `pii-mask`, `AdminShell` y `SECURITY.md`.
-- `[ ]` **`F0.5` — Suite RLS Real, Vitest/Playwright Base, GitHub Actions PG 17 y `OPERATIONS.md`:**
-  - Suites contra PG 17 real (bloqueo anti-PRD + `EMAIL_SEND_DISABLED=1`), `rls-matrix`, smoke E2E Playwright (`@axe-core`) y `.github/workflows/ci.yml` en verde + `docs/OPERATIONS.md`.
+- `[x]` ✅ **Fase 0 cerrada (`F0.1`–`F0.5`):** Gobernanza, Next.js 16 standalone (`'use cache'`), PG 17 + RLS *deny-by-default* + Bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` MFA `aal2` + RBAC 8 roles + `pii-mask` y CI PG 17/Playwright/axe.
+- `[ ]` **`F1.1` — Esquema y Dominio de Catálogo Tech (`catalog.prisma` + `@mundonettech/core` + `config/catalog-blueprint.ts`):** Marcas, Categorías N-niveles (`materializedPath`), Colecciones, Variantes `BigInt` (`gtin`/`ean` GS1, `mpn`), Atributos/Facetas (`ADR-008`), Compatibilidad, Bundles, `UrlRedirect` anti-bucles, índices parciales (`ADR-004`) y `tsvector` + `immutable_unaccent`.
+- `[ ]` **`F1.2` — Pipeline Multimedia y Activos 360°/3D (`packages/media` + `ProductMedia`):** `sharp-safe` (magic bytes sin SVG, límite píxeles, `ispe` HEIC, purga EXIF), AVIF/WebP en R2 (`unoptimized: true`), `SPIN_360` y `MODEL_3D`/AR *lazy* (`ADR-007`).
+- `[ ]` **`F1.3` — Inventario Multi-Bodega, Proveedores/WAC e Importador CSV (`inventory.prisma`):** `StockLocation`, `StockLevel` (`safetyStock` efectivo + locks ordenados anti-deadlock `40P01` — `ADR-013`), `SerializedUnit`, `InventoryLedger`, `Supplier`/`PurchaseOrder` (WAC) y CSV seguro.
+- `[ ]` **`F1.4` — `CatalogService` Único (`'use cache'`), Storefront PDP/PLP/Comparador y Admin:** búsqueda/facetas indexadas, `ProductCard` única, comparador, PDP, vistas `/admin` RBAC+MFA, seed canónico y E2E Playwright/`@axe-core`.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente bloque:** **`F0.5`** en rama `feat/f0-5-ci-e2e-operations` desde `develop` (cierre de **Fase 0**).
-- **Leer al iniciar:** `AGENTS.md`, `docs/{STATE,PLAN,ARCHITECTURE,DECISIONS,SECURITY}.md` y `packages/{db,core}/README.md`.
-- **Cierre dual `F0.5`:** Implementador entrega guardas anti-PRD/`EMAIL_SEND_DISABLED=1`, suite `rls-matrix` sobre PG 17 real, smoke E2E Playwright (`:4110`) + `@axe-core` sin errores CSP en navegador real, `ci.yml` con servicio PG 17 y `docs/OPERATIONS.md` en `[R]`; Auditor valida CI en verde, compacta Fase 0 a `✅`, certifica `[x]` y fusiona en `develop`.
+- **Siguiente bloque:** **`F1.1`** en rama `feat/f1-1-catalog-domain-schema` desde `develop` (inicio de **Fase 1**).
+- **Leer al iniciar:** `AGENTS.md`, `docs/{STATE,PLAN,ARCHITECTURE,DECISIONS}.md`, `config/store.config.ts` y `packages/{db,core}/README.md`.
+- **Cierre dual `F1.1`:** Implementador entrega `config/catalog-blueprint.ts`, `catalog.prisma` + migración PG 17 (`BigInt` `CHECK >= 0`, índices `ADR-004`, `tsvector` + `immutable_unaccent`, RLS), validadores GS1/árbol/`UrlRedirect` en `@mundonettech/core` y `rls-matrix` en `[R]`; Auditor certifica `[x]` y fusiona en `develop`.
