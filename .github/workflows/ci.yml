@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      CI: true
+      CI: "true"
       EMAIL_SEND_DISABLED: "1"
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54422/postgres
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54422/postgres
@@ -63,11 +63,22 @@ jobs:
         run: pnpm db:validate && pnpm db:migrate
       - name: Static checks and typecheck
         run: make check
-      - name: Unit, integration and RLS matrix tests
-        run: pnpm test && pnpm test:rls
-      - name: Production build
+      - name: Unit, integration, posture and RLS matrix tests
+        run: pnpm test && pnpm --filter @mundonettech/db verify-security-posture && pnpm test:rls
+      - name: Production standalone build
         run: pnpm build
-      - name: Install Chromium
-        run: pnpm exec playwright install chromium
+      - name: Install Chromium with system dependencies
+        run: pnpm exec playwright install --with-deps chromium
       - name: Playwright and accessibility smoke
         run: pnpm test:e2e
+      - name: Verify clean repository tree
+        run: test -z "$(git status --porcelain)"
+      - name: Upload Playwright diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

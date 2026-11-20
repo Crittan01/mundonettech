@@ -6,7 +6,7 @@
 
 - Node.js 22, pnpm 11.0.9, GNU Make y Podman rootless con socket de usuario activo.
 - No se instalan herramientas globales ni se usan `sudo`, `corepack` global o procesos de otros proyectos.
-- Puertos reservados: Next `:4010`, E2E `:4110`, Supabase API `:54421`, PostgreSQL `:54422`, Studio `:54423`, Mailpit `:54424`, SMTP/POP3 `:54425/:54426`, PostgreSQL desechable de tests `:54428`.
+- Puertos reservados en loopback (`127.0.0.1`): Next `:4010`, E2E `:4110`, Supabase API `:54421`, PostgreSQL `:54422`, Studio `:54423`, Mailpit `:54424`, SMTP/POP3 `:54425/:54426`, PostgreSQL desechable de tests `:54428`.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -32,7 +32,7 @@ Configura mediante el gestor de secretos correspondiente:
 | `TURNSTILE_EXPECTED_HOSTNAME` | Host esperado fuera de desarrollo; STG debe sobrescribirlo. |
 | `INTEGRATION_CREDENTIAL_KEYS_*` | Llaveros AES independientes `LOCAL`/`STG`/`PRD`. |
 
-`EMAIL_SEND_DISABLED=1` y `NODE_ENV=test` son obligatorios solo para pruebas. Nunca se configuran así en STG/PRD. Las pruebas rechazan hosts remotos, nombres de BD `prod/prd/production`, puertos inesperados y cualquier ejecución sin bloqueo de correo saliente. Mailpit es la única bandeja local.
+`EMAIL_SEND_DISABLED=1` y `NODE_ENV=test` son obligatorios para pruebas y nunca se activan en STG/PRD. Tanto las guardas de entorno como el runtime (`@mundonettech/core` y acciones de Auth/Admin) bloquean despachos de correo saliente cuando `EMAIL_SEND_DISABLED=1` está presente, y rechazan hosts remotos (`DATABASE_URL`, `DIRECT_URL`, `NEXT_PUBLIC_SUPABASE_URL`), banderas productivas, llaveros `PRD` y nombres `prd/prod/production/live`. Mailpit es la única bandeja local.
 
 ## 3. Migraciones y primer administrador
 
@@ -51,31 +51,31 @@ El bootstrap valida política y HIBP, confirma correo y crea el primer `SUPERADM
 ## 4. Gates y suites
 
 ```bash
-make check           # docs/Git/idioma/fronteras/anti-PRD, lint, Prettier y typecheck
-pnpm test            # Vitest + Node + PG17 real + matriz RLS
-pnpm test:unit       # contratos Vitest de ambiente de pruebas
-pnpm test:integration# integración Node y fixtures persistentes
-pnpm test:rls        # matriz independiente tras poblar fixtures
-pnpm build           # build productivo de todos los paquetes
-pnpm exec playwright install chromium
-pnpm test:e2e        # build web + servidor :4110 + Chromium + axe
+make check            # docs/Git/idioma/fronteras/anti-PRD, lint, Prettier y typecheck total (incl. Vitest/E2E)
+pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
+pnpm test:unit        # contratos Vitest de guardas anti-PRD y bloqueo runtime de correo
+pnpm test:integration # integración Node, concurrencia outbox/idempotencia y bóveda AES-256-GCM
+pnpm test:rls         # matriz autónoma sobre PG17 real (174 denegaciones bajo SAVEPOINT/ROLLBACK)
+pnpm build            # build productivo + empaquetado standalone completo
+pnpm exec playwright install --with-deps chromium
+pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
 ```
 
-La integración local crea `f03-security-test_mundonettech` con contraseña aleatoria y lo elimina al terminar. Si `TEST_DATABASE_URL` está presente (CI), usa ese servicio aislado sin iniciar Podman. La matriz crea un rol `NOBYPASSRLS`, otorga permisos SQL y demuestra 36 denegaciones RLS: `SELECT`, `INSERT`, `UPDATE` y `DELETE` sobre las nueve tablas con filas persistidas.
+En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 174 casos reales: 45 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 129 operaciones sobre `anon`, `authenticated` y `service_role` en las 9 tablas y 7 funciones RPC.
 
-Playwright ejecuta seis rutas públicas, redirects protegidos, campos accesibles, captura `pageerror`/violaciones CSP y axe WCAG 2/2.1 A/AA. `test-results/`, `playwright-report/` y traces no se versionan.
+Playwright arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`, recorre las rutas públicas, avisos de sesión/invitación, 404 semántico, redirecciones protegidas (`/admin/*`, `/admin/login/mfa`, `/mi-cuenta`), controles accesibles por teclado, listener `securitypolicyviolation` + cabeceras CSP/HSTS y auditoría `@axe-core` WCAG 2/2.1 A/AA. `test-results/`, `playwright-report/` y traces no se versionan.
 
 ## 5. GitHub Actions PostgreSQL 17
 
-`.github/workflows/ci.yml` corre en PRs contra `develop` y pushes a `develop`, con permisos de solo lectura y cancelación de ejecuciones duplicadas. El job usa `postgres:17.12-alpine` en `:54422`, health checks, secrets HMAC aleatorios y `EMAIL_SEND_DISABLED=1`; no requiere Supabase remoto ni cuentas comerciales.
+`.github/workflows/ci.yml` corre en PRs contra `develop` y pushes a `develop`, con permisos de solo lectura y cancelación de ejecuciones duplicadas. El job usa `postgres:17.12-alpine` en `:54422`, health checks, secretos HMAC aleatorios y `EMAIL_SEND_DISABLED=1`; no requiere Supabase remoto ni cuentas comerciales.
 
-Orden del gate: instalación frozen → validación/migración → `make check` → `pnpm test` + `test:rls` → build → Chromium → E2E/axe. Un fallo detiene el pipeline. Las ramas protegidas exigen PR; no se hacen pushes directos ni despliegues desde este workflow.
+Orden del gate: instalación frozen → validación/migración → `make check` → `pnpm test` + `verify-security-posture` + `pnpm test:rls` → `pnpm build` standalone → Chromium (`--with-deps`) → `pnpm test:e2e` → verificación de árbol Git limpio (y carga de diagnósticos Playwright si falla).
 
 ## 6. Build standalone y ambientes
 
-`pnpm build` genera `apps/web/.next/standalone` con tracing desde la raíz del monorepo. El artefacto desplegado debe incluir además `public/` y `.next/static/` en las ubicaciones documentadas por Next.js, o servirlos desde CDN. Variables y migraciones se validan antes de iniciar el proceso; nunca se copia `.env.local` a STG/PRD.
+`pnpm build` genera `apps/web/.next/standalone` con tracing desde la raíz del monorepo y `apps/web/scripts/prepare-standalone.mjs` sincroniza `.next/static/` y `public/` dentro de `apps/web/.next/standalone/apps/web/`, dejando `server.js` listo para ejecutarse con `PORT` y `HOSTNAME`. Variables y migraciones se validan antes de iniciar el proceso; nunca se copia `.env.local` a STG/PRD.
 
-- **LOCAL:** Supabase/Podman y claves de prueba.
+- **LOCAL:** Supabase/Podman y claves de prueba en loopback (`127.0.0.1`).
 - **STG:** Preview de `develop`, Supabase STG y secretos independientes; aún por aprovisionar.
 - **PRD:** rama `production`, dominio comercial, Supabase PRD/R2; promoción humana, sin acceso desde tests.
 
@@ -84,7 +84,7 @@ Los cambios de esquema se despliegan hacia adelante y se verifican con `db:verif
 ## 7. Diagnóstico seguro
 
 - **Puerto ocupado:** identifica únicamente contenedores/procesos propios; no uses `pkill` ni limpieza general.
-- **Fallo RLS/matrix:** ejecuta `make db-verify` y revisa tabla/operación del caso; no debilites políticas para hacer pasar tests.
+- **Fallo RLS/matrix:** ejecuta `make db-verify` y revisa tabla/operación/rol del caso; toda tabla nueva en `public` debe cubrirse en `scripts/rls-matrix.mjs`.
 - **CSP en navegador:** reproduce con `pnpm test:e2e`, conserva trace y corrige el origen/script; no añadas `unsafe-eval` ni `strict-dynamic` sobre shells incompatibles.
 - **Correo no recibido:** verifica Mailpit `:54424`; en tests confirma `EMAIL_SEND_DISABLED=1` para impedir proveedores externos.
 - **Secretos/compromiso:** rota en el ambiente afectado, cierra sesiones y revisa auditoría. No imprimas URLs con contraseña ni adjuntes `.env` a issues o CI.

@@ -23,3 +23,8 @@ export { isPasswordCompromised } from "./hibp.js";
 export type { PasswordBreachOptions } from "./hibp.js";
 export { verifyTurnstile } from "./turnstile.js";
 export type { TurnstileVerificationOptions } from "./turnstile.js";
+export {
+  assertOutboundEmailAllowed,
+  isOutboundEmailDisabled,
+  OutboundEmailDisabledError,
+} from "./outbound-email.js";

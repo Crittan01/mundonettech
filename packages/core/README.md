@@ -9,3 +9,4 @@ Contratos actuales:
 - Política de contraseñas, normalización de correo y verificación HIBP k-anonymity con timeout, padding y respuestas estrictamente validadas.
 - Verificación Cloudflare Turnstile con acción/hostname y errores cerrados.
 - Tokens HMAC-SHA256 de actividad para admin/cliente/reset, validación de sujeto/tipo, idle y expiración absoluta, y renovación deslizante sin extender el límite absoluto.
+- Compuerta de correo saliente (`isOutboundEmailDisabled`, `assertOutboundEmailAllowed`, `OutboundEmailDisabledError`) para bloquear despachos externos cuando `EMAIL_SEND_DISABLED=1` está activo.

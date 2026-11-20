@@ -5,6 +5,7 @@ import {
   canManageAdministrator,
   isAdminRole,
   normalizeEmail,
+  OutboundEmailDisabledError,
 } from "@mundonettech/core";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -12,6 +13,7 @@ import { z } from "zod";
 import { actionError, actionSuccess, type ActionState } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
+import { assertServerOutboundEmailAllowed } from "@/lib/security/outbound-email";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
@@ -42,6 +44,7 @@ export async function inviteAdministratorAction(
     if (!canAssignAdminRole(session.profile.role, parsed.data.role))
       return actionError("No puedes asignar un rol de tu mismo anillo o superior.");
     const email = normalizeEmail(parsed.data.email);
+    assertServerOutboundEmailAllowed("admin_invite");
     const admin = createSupabaseAdminClient();
     const invited = await admin.auth.admin.inviteUserByEmail(email, {
       redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://127.0.0.1:4010"}/admin/invitacion`,
@@ -82,6 +85,8 @@ export async function inviteAdministratorAction(
       "Invitación enviada. El usuario deberá confirmar su correo y configurar TOTP.",
     );
   } catch (error) {
+    if (error instanceof OutboundEmailDisabledError)
+      return actionError("El envío de correos salientes está deshabilitado en este entorno.");
     return authorizationMessage(error);
   }
 }

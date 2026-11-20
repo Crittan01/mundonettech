@@ -9,6 +9,7 @@ import { getDatabase } from "@/lib/db";
 import { establishCustomerActivity, clearActivityCookies } from "@/lib/security/activity-cookies";
 import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
 import { isPasswordCompromised } from "@/lib/security/hibp";
+import { isServerOutboundEmailDisabled } from "@/lib/security/outbound-email";
 import { getRequestSecurityContext, recordSecurityEvent } from "@/lib/security/request-context";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -92,6 +93,7 @@ export async function registerCustomerAction(
   if (captchaError) return captchaError;
   const invalidPassword = await passwordError(parsed.data.password, parsed.data.confirmation);
   if (invalidPassword) return invalidPassword;
+  if (isServerOutboundEmailDisabled()) return actionSuccess(genericRequestMessage);
 
   const supabase = await createSupabaseServerClient();
   await supabase.auth.signUp({
@@ -114,6 +116,7 @@ export async function requestCustomerOtpAction(
   if (!parsed.success) return emailFieldError();
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_login");
   if (captchaError) return captchaError;
+  if (isServerOutboundEmailDisabled()) return actionSuccess(genericRequestMessage);
   const supabase = await createSupabaseServerClient();
   await supabase.auth.signInWithOtp({
     email: normalizeEmail(parsed.data.email),
@@ -132,6 +135,7 @@ export async function requestCustomerRecoveryAction(
   if (!parsed.success) return emailFieldError();
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_recovery");
   if (captchaError) return captchaError;
+  if (isServerOutboundEmailDisabled()) return actionSuccess(genericRequestMessage);
   const supabase = await createSupabaseServerClient();
   await supabase.auth.resetPasswordForEmail(normalizeEmail(parsed.data.email), {
     redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://127.0.0.1:4010"}/recuperar?code=1`,
