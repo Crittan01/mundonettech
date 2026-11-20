@@ -12,6 +12,10 @@ const tailwindPaletteColorPattern =
 const arbitraryColorPattern =
   /(?<![-\w])(?:bg|text|border|ring|fill|stroke|from|via|to|outline|decoration|accent|caret|divide|placeholder)-\[(?:#[0-9a-fA-F]{3,8}|(?:rgb|rgba|hsl|hsla|oklch|oklab|lab|lch|color)\()/g;
 const rawCssColorLiteralPattern = /#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla|oklch|oklab)\(/g;
+const commentMarkerPattern = /\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g;
+const incompleteTagPattern = /\b(?:TODO|FIXME|HACK|XXX)\b/;
+const notImplementedThrowPattern =
+  /\bthrow\s+new\s+\w*Error\(\s*["'`][^"'`]*(?:not\s+implemented|pendiente|todo|stub)\b/giu;
 
 function staticModuleText(node) {
   if (!node) return null;
@@ -174,6 +178,28 @@ export function findTokenColorViolations(file, text) {
   return errors;
 }
 
+export function findIncompleteCodeViolations(file, text) {
+  if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file)) return [];
+  const errors = [];
+
+  for (const comment of text.matchAll(commentMarkerPattern)) {
+    const tag = incompleteTagPattern.exec(comment[0]);
+    if (tag) {
+      errors.push(
+        `${file}:${lineNumberAt(text, (comment.index ?? 0) + (tag.index ?? 0))}: incomplete marker "${tag[0]}" is forbidden; ship production-complete code.`,
+      );
+    }
+  }
+
+  for (const match of text.matchAll(notImplementedThrowPattern)) {
+    errors.push(
+      `${file}:${lineNumberAt(text, match.index ?? 0)}: stubbed throw "${match[0]}..." is forbidden; implement full production behavior.`,
+    );
+  }
+
+  return errors;
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const root = process.cwd();
   const allFiles = repositoryFiles();
@@ -191,6 +217,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   for (const file of codeFiles) {
     const text = readFileSync(file, "utf8");
     errors.push(...findBoundaryViolations(file, text, root));
+    errors.push(...findIncompleteCodeViolations(file, text));
   }
 
   for (const file of manifestFiles) {

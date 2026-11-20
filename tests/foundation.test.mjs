@@ -9,6 +9,7 @@ import { storeConfig } from "../config/dist/store.config.js";
 import { themeConfig } from "../config/dist/theme.config.js";
 import {
   findBoundaryViolations,
+  findIncompleteCodeViolations,
   findManifestBoundaryViolations,
   findTokenColorViolations,
 } from "../scripts/check-boundaries.mjs";
@@ -240,6 +241,23 @@ describe("F0.2 — Boundary and Semantic Token Guards (ADR-001)", () => {
         "@theme inline { --color-primary: oklch(0.48 0.19 260); }",
       ).length,
       1,
+    );
+  });
+
+  it("blocks incomplete markers (TODO/FIXME/HACK) and stubbed throws in production modules", () => {
+    assert.deepEqual(
+      findIncompleteCodeViolations(
+        "packages/core/src/money.ts",
+        "export function assertNonNegative(v: bigint): bigint { if (v < 0n) throw new RangeError('negative'); return v; }",
+      ),
+      [],
+    );
+    assert.equal(
+      findIncompleteCodeViolations(
+        "packages/core/src/service.ts",
+        `// ${"TO" + "DO"}: wire persistence\nexport function save() { throw new Error("Not implemented yet"); }`,
+      ).length,
+      2,
     );
   });
 });
