@@ -71,6 +71,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@mundonettech/cms':
+        specifier: workspace:*
+        version: link:../../packages/cms
       '@mundonettech/config':
         specifier: workspace:*
         version: link:../../config
@@ -144,7 +147,17 @@ importers:
 
   config: {}
 
-  packages/cms: {}
+  packages/cms:
+    dependencies:
+      '@mundonettech/db':
+        specifier: workspace:*
+        version: link:../db
+      '@mundonettech/media':
+        specifier: workspace:*
+        version: link:../media
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
 
   packages/core: {}
 

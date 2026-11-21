@@ -77,5 +77,19 @@ export function assertSafeTestEnvironment(
       assertSafeTestSupabaseUrl(candidate);
     }
   }
+  if (env.R2_ENDPOINT?.trim()) {
+    let r2Url;
+    try {
+      r2Url = new URL(env.R2_ENDPOINT);
+    } catch {
+      throw new Error("Test R2_ENDPOINT must be a valid URL.");
+    }
+    if (!["http:", "https:"].includes(r2Url.protocol) || !isLoopbackHostname(r2Url.hostname)) {
+      throw new Error("Tests may only target a loopback R2 media endpoint.");
+    }
+  }
+  if (env.R2_BUCKET?.trim() && productionNamePattern.test(env.R2_BUCKET.trim())) {
+    throw new Error("Production-like R2 bucket names are forbidden in tests.");
+  }
   return primary;
 }

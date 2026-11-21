@@ -39,6 +39,9 @@ model AdminUser {
   securityEvents SecurityEvent[]
   credentials    IntegrationCredential[] @relation("CredentialCreator")
   rotations      IntegrationCredential[] @relation("CredentialRotator")
+  storeSettings  StoreSettings[]
+  cmsVersions    CmsBlockVersion[]
+  cmsMedia       CmsMedia[]
 
   @@index([role, status])
   @@index([createdAt])

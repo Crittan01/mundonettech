@@ -41,6 +41,11 @@ const requiredTables = [
   "PurchaseOrder",
   "PurchaseOrderItem",
   "Order",
+  "StoreSettings",
+  "CmsPage",
+  "CmsSectionBlock",
+  "CmsBlockVersion",
+  "CmsMedia",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -83,6 +88,30 @@ const requiredConstraints = [
   "PurchaseOrderItem_quantityReceived_valid",
   "PurchaseOrder_status_timestamps",
   "Order_total_balanced",
+  "StoreSettings_key_valid",
+  "StoreSettings_revenue_threshold_positive",
+  "StoreSettings_currency_valid",
+  "StoreSettings_timeZone_valid",
+  "StoreSettings_order_prefix_valid",
+  "StoreSettings_order_padding_valid",
+  "CmsPage_slug_valid",
+  "CmsPage_title_not_blank",
+  "CmsPage_seo_not_blank",
+  "CmsPage_publication_consistent",
+  "CmsSectionBlock_type_valid",
+  "CmsSectionBlock_position_nonnegative",
+  "CmsBlockVersion_version_positive",
+  "CmsBlockVersion_content_object",
+  "CmsBlockVersion_publication_consistent",
+  "CmsBlockVersion_contentHash_length",
+  "CmsMedia_storageKey_safe",
+  "CmsMedia_contentHash_length",
+  "CmsMedia_filename_not_blank",
+  "CmsMedia_mime_valid",
+  "CmsMedia_alt_not_blank",
+  "CmsMedia_byteSize_positive",
+  "CmsMedia_dimensions_valid",
+  "CmsMedia_derivatives_array",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -111,6 +140,9 @@ const requiredPartialIndexes = [
   "Supplier_taxId_active_key",
   "SerializedUnit_variantId_imei_key",
   "SerializedUnit_imei_active_key",
+  "CmsPage_slug_active_key",
+  "CmsMedia_storageKey_active_key",
+  "CmsMedia_contentHash_active_key",
 ] as const;
 const requiredCatalogIndexes = [
   "Product_searchVector_idx",
@@ -147,6 +179,8 @@ const requiredSecurityTriggers = [
   "InventoryLedger_append_only",
   "PurchaseOrder_enforce_state",
   "PurchaseOrderItem_enforce_state",
+  "CmsBlockVersion_immutable_history",
+  "CmsMedia_immutable_identity",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

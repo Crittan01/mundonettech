@@ -33,6 +33,11 @@ export type {
   StockLevel,
   StockLocation,
   Supplier,
+  CmsBlockVersion,
+  CmsMedia,
+  CmsPage,
+  CmsSectionBlock,
+  StoreSettings,
 } from "./generated/client.js";
 export {
   InsufficientStockError,

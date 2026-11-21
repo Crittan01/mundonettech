@@ -13,5 +13,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@mundonettech/db": "workspace:*",
+    "@mundonettech/media": "workspace:*",
+    "zod": "4.6.7"
   }
 }

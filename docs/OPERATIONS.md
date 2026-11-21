@@ -31,6 +31,8 @@ Configura mediante el gestor de secretos correspondiente:
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Captcha por ambiente y hostname. |
 | `TURNSTILE_EXPECTED_HOSTNAME` | Host esperado fuera de desarrollo; STG debe sobrescribirlo. |
 | `INTEGRATION_CREDENTIAL_KEYS_*` | Llaveros AES independientes `LOCAL`/`STG`/`PRD`. |
+| `R2_*` / `NEXT_PUBLIC_MEDIA_BASE_URL` | Bucket, endpoint y credenciales de medios por ambiente; origen público HTTPS. |
+| `CMS_CRON_SECRET` / `CMS_JOB_ACTOR_ID` | Bearer del scheduler y admin activo con `content:write` para `/api/jobs/cms-publish`. |
 
 `EMAIL_SEND_DISABLED=1` y `NODE_ENV=test` son obligatorios para pruebas y nunca se activan en STG/PRD. Tanto las guardas de entorno como el runtime (`@mundonettech/core` y acciones de Auth/Admin) bloquean despachos de correo saliente cuando `EMAIL_SEND_DISABLED=1` está presente, y rechazan hosts remotos (`DATABASE_URL`, `DIRECT_URL`, `NEXT_PUBLIC_SUPABASE_URL`), banderas productivas, llaveros `PRD` y nombres `prd/prod/production/live`. Mailpit es la única bandeja local.
 
@@ -55,13 +57,13 @@ make check            # docs/Git/idioma/fronteras/anti-PRD, lint, Prettier y typ
 pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
 pnpm test:unit        # contratos Vitest de guardas, catálogo, WAC, seriales y CSV
 pnpm test:integration # catálogo, inventario, RLS, concurrencia, idempotencia y bóveda AES-256-GCM
-pnpm test:rls         # matriz autónoma sobre PG17 real (685 denegaciones bajo SAVEPOINT/ROLLBACK)
+pnpm test:rls         # matriz autónoma sobre PG17 real (770 denegaciones bajo SAVEPOINT/ROLLBACK)
 pnpm build            # build productivo + empaquetado standalone completo
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
 ```
 
-En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 685 casos reales: 190 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 495 operaciones sobre `anon`, `authenticated` y `service_role` en las 38 tablas y 13 funciones RPC.
+En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 770 casos reales: 215 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 555 operaciones sobre `anon`, `authenticated` y `service_role` en las 43 tablas y 13 funciones RPC.
 
 `pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, auth y seguridad, controles de teclado, CSP/HSTS y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
 
