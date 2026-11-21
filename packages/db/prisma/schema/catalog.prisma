@@ -262,6 +262,10 @@ model ProductVariant {
   wishlistItems       WishlistItem[]
   subscriptions       BackInStockSubscription[]
   productMedias       ProductMedia[]
+  stockLevels         StockLevel[]
+  serializedUnits     SerializedUnit[]
+  ledgerEntries       InventoryLedger[]
+  purchaseOrderItems  PurchaseOrderItem[]
 
   @@unique([id, productId])
   @@index([productId, status])

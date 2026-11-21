@@ -1,0 +1,45 @@
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+  PARTIALLY_REFUNDED
+  REFUNDED
+  FAILED
+}
+
+enum FulfillmentStatus {
+  UNFULFILLED
+  PARTIALLY_FULFILLED
+  FULFILLED
+  CANCELLED
+}
+
+model Order {
+  id                    String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderNumber           String            @unique @db.VarChar(32)
+  customerId            String?           @db.Uuid
+  orderStatus           OrderStatus       @default(PENDING)
+  paymentStatus         PaymentStatus     @default(UNPAID)
+  fulfillmentStatus     FulfillmentStatus @default(UNFULFILLED)
+  subtotalCents         BigInt            @default(0)
+  discountCents         BigInt            @default(0)
+  taxCents              BigInt            @default(0)
+  shippingCents         BigInt            @default(0)
+  totalCents            BigInt            @default(0)
+  createdAt             DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  customer              Customer?         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  inventoryLedgerEntries InventoryLedger[]
+  serializedUnits       SerializedUnit[]
+
+  @@index([customerId, createdAt])
+  @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
+  @@map("Order")
+}

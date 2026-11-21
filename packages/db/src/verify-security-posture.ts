@@ -33,6 +33,14 @@ const requiredTables = [
   "WishlistItem",
   "BackInStockSubscription",
   "UrlRedirect",
+  "StockLocation",
+  "StockLevel",
+  "SerializedUnit",
+  "InventoryLedger",
+  "Supplier",
+  "PurchaseOrder",
+  "PurchaseOrderItem",
+  "Order",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -65,6 +73,16 @@ const requiredConstraints = [
   "Bundle_discount_valid",
   "BackInStockSubscription_status_timestamps",
   "UrlRedirect_status_valid",
+  "StockLevel_committed_within_onHand",
+  "StockLevel_safetyStock_nonnegative",
+  "StockLevel_weightedAvgCost_nonnegative",
+  "SerializedUnit_status_consistent",
+  "InventoryLedger_operationHash_length",
+  "InventoryLedger_movement_valid",
+  "PurchaseOrderItem_unitCost_nonnegative",
+  "PurchaseOrderItem_quantityReceived_valid",
+  "PurchaseOrder_status_timestamps",
+  "Order_total_balanced",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -88,6 +106,11 @@ const requiredPartialIndexes = [
   "Bundle_slug_active_key",
   "BackInStockSubscription_variantId_email_active_key",
   "UrlRedirect_fromPath_active_key",
+  "StockLocation_code_active_key",
+  "Supplier_code_active_key",
+  "Supplier_taxId_active_key",
+  "SerializedUnit_variantId_imei_key",
+  "SerializedUnit_imei_active_key",
 ] as const;
 const requiredSecurityTriggers = [
   "AdminActionLog_append_only",
@@ -108,6 +131,16 @@ const requiredSecurityTriggers = [
   "ProductVariant_search_after_write",
   "ProductAttributeValue_search_after_write",
   "AttributeDefinition_search_after_write",
+  "StockLevel_validate",
+  "StockLocation_validate_lifecycle",
+  "Supplier_validate_lifecycle",
+  "ProductVariant_validate_inventory_lifecycle",
+  "Product_validate_inventory_lifecycle",
+  "SerializedUnit_validate",
+  "InventoryLedger_validate",
+  "InventoryLedger_append_only",
+  "PurchaseOrder_enforce_state",
+  "PurchaseOrderItem_enforce_state",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

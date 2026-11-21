@@ -6,6 +6,7 @@ import pg from "pg";
 import { acquireIsolatedTestDatabase } from "./lib/postgres-test-harness.mjs";
 import { assertSafeTestDatabase } from "./lib/test-environment.mjs";
 import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mjs";
+import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixture.mjs";
 
 const expectedTables = [
   "AdminUser",
@@ -18,6 +19,7 @@ const expectedTables = [
   "DomainOutbox",
   "IdempotencyKey",
   ...catalogTables,
+  ...inventoryTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -67,6 +69,14 @@ const rpcProbes = [
     name: "refresh_product_search_vector",
     sql: "SELECT public.refresh_product_search_vector(NULL)",
   },
+  {
+    name: "available_stock",
+    sql: "SELECT public.available_stock(10, 2, 1)",
+  },
+  {
+    name: "validate_imei",
+    sql: "SELECT public.validate_imei('353915105440112')",
+  },
 ];
 
 async function verifySchemaCoverage(client) {
@@ -89,6 +99,21 @@ async function verifySchemaCoverage(client) {
 }
 
 async function ensureMatrixFixtures(client) {
+  await client.query(
+    `CREATE TEMP TABLE matrix_preexisting_ids (
+       table_name TEXT NOT NULL,
+       row_id UUID NOT NULL,
+       PRIMARY KEY (table_name, row_id)
+     ) ON COMMIT DROP`,
+  );
+  for (const table of expectedTables) {
+    await client.query(
+      `INSERT INTO pg_temp.matrix_preexisting_ids (table_name, row_id)
+       SELECT $1, "id" FROM public."${table}"`,
+      [table],
+    );
+  }
+
   const adminId = randomUUID();
   await client.query(
     `INSERT INTO public."AdminUser" ("id", "authUserId", "email", "displayName", "role", "status")
@@ -152,14 +177,28 @@ async function ensureMatrixFixtures(client) {
     [`matrix-${randomUUID()}`, randomBytes(32), randomBytes(32), randomBytes(32)],
   );
 
-  await seedCatalogFixture(client);
+  const catalog = await seedCatalogFixture(client);
+  await seedInventoryFixture(client, catalog);
 
+  const fixtureIds = new Map();
   for (const table of expectedTables) {
-    const count = await client.query(`SELECT count(*)::int AS count FROM public."${table}"`);
-    if ((count.rows[0]?.count ?? 0) < 1) {
-      throw new Error(`RLS matrix requires at least one row in ${table}.`);
+    const freshRow = await client.query(
+      `SELECT t."id"
+       FROM public."${table}" t
+       WHERE NOT EXISTS (
+         SELECT 1 FROM pg_temp.matrix_preexisting_ids p
+         WHERE p.table_name = $1 AND p.row_id = t."id"
+       )
+       LIMIT 1`,
+      [table],
+    );
+    const rowId = freshRow.rows[0]?.id;
+    if (!rowId) {
+      throw new Error(`RLS matrix requires at least one freshly seeded row in ${table}.`);
     }
+    fixtureIds.set(table, rowId);
   }
+  return fixtureIds;
 }
 
 export async function runRlsMatrix(databaseUrl) {
@@ -206,9 +245,10 @@ export async function runRlsMatrix(databaseUrl) {
 
     await client.query("BEGIN");
     try {
-      await ensureMatrixFixtures(client);
+      const fixtureIds = await ensureMatrixFixtures(client);
 
       for (const table of expectedTables) {
+        const fixtureId = fixtureIds.get(table);
         await inSavepoint({ role: grantedRole, table, operation: "SELECT" }, async () => {
           await client.query(`SET ROLE ${grantedRole}`);
           const selected = await client.query(`SELECT * FROM public."${table}"`);
@@ -239,7 +279,8 @@ export async function runRlsMatrix(databaseUrl) {
 
         await inSavepoint({ role: grantedRole, table, operation: "INSERT" }, async () => {
           await client.query(
-            `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS SELECT * FROM public."${table}" LIMIT 1`,
+            `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS SELECT * FROM public."${table}" WHERE "id" = $1::uuid`,
+            [fixtureId],
           );
           await client.query(`GRANT SELECT ON pg_temp.matrix_source TO ${grantedRole}`);
           await client.query(`SET ROLE ${grantedRole}`);
@@ -267,7 +308,8 @@ export async function runRlsMatrix(databaseUrl) {
             await inSavepoint({ role: apiRole, table, operation }, async () => {
               if (operation === "INSERT") {
                 await client.query(
-                  `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS SELECT * FROM public."${table}" LIMIT 1`,
+                  `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS SELECT * FROM public."${table}" WHERE "id" = $1::uuid`,
+                  [fixtureId],
                 );
                 await client.query(`GRANT SELECT ON pg_temp.matrix_source TO ${apiRole}`);
               }
