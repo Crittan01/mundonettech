@@ -89,10 +89,15 @@ function link(value: unknown, path: string): LegalLink {
   const label = text(input.label, `${path}.label`, 160);
   const rawHref = text(input.href, `${path}.href`, 2048);
   if (rawHref.startsWith("/")) {
+    const [rawPathname = "", rawHash, extraHash] = rawHref.split("#");
     if (
+      extraHash !== undefined ||
       rawHref.startsWith("//") ||
-      /[\\?\u0000-\u001f\u007f]/.test(rawHref) ||
-      rawHref.split("/").some((part) => part === "." || part === "..")
+      rawPathname.includes("//") ||
+      /[\s\\?\u0000-\u001f\u007f]/.test(rawHref) ||
+      /%(?:2f|2e)/i.test(rawPathname) ||
+      rawPathname.split("/").some((part) => part === "." || part === "..") ||
+      (rawHash !== undefined && !sectionPattern.test(rawHash))
     ) {
       fail(`${path}.href`, "contains an unsafe local path.");
     }

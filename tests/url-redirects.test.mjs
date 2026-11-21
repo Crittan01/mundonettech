@@ -81,11 +81,19 @@ describe("F2.3 — persistent redirect graph, concurrency and audit", () => {
       UrlRedirectValidationError,
     );
     for (const unsafe of [
+      { fromPath: "/", toPath: "/productos" },
+      { fromPath: "/legal", toPath: "/productos" },
+      { fromPath: "/legal/pqrs", toPath: "/productos" },
+      { fromPath: "/ingresar", toPath: "/productos" },
+      { fromPath: "/robots.txt", toPath: "/productos" },
+      { fromPath: "/sitemap.xml", toPath: "/productos" },
+      { fromPath: "/checkout", toPath: "/productos" },
       { fromPath: "https://evil.example", toPath: "/destino" },
       { fromPath: "/origen", toPath: "https://evil.example" },
       { fromPath: "/../secret", toPath: "/destino" },
       { fromPath: "/api/internal", toPath: "/destino" },
       { fromPath: "/origen", toPath: "/api/internal" },
+      { fromPath: "/origen", toPath: "/admin/contenido" },
       { fromPath: "/origen", toPath: "/destino", statusCode: 300 },
     ]) {
       await assert.rejects(service.create(unsafe, audit), UrlRedirectValidationError);

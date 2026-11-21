@@ -1,4 +1,4 @@
-import { isValidGs1 } from "./gs1.js";
+import { resolveCommercialGtin } from "./gs1.js";
 import { absolutePublicUrl } from "./xml.js";
 
 export interface JsonLdBreadcrumbItem {
@@ -49,9 +49,8 @@ export function centsToDecimalString(value: string): string {
 }
 
 function gtinProperty(gtin?: string | null, ean?: string | null): Record<string, string> {
-  const candidate = gtin || ean;
+  const candidate = resolveCommercialGtin(gtin, ean);
   if (!candidate) return {};
-  if (!isValidGs1(candidate)) throw new TypeError("JSON-LD GTIN/EAN is invalid.");
   const property =
     candidate.length === 8
       ? "gtin8"
@@ -59,9 +58,7 @@ function gtinProperty(gtin?: string | null, ean?: string | null): Record<string,
         ? "gtin12"
         : candidate.length === 13
           ? "gtin13"
-          : candidate.length === 14
-            ? "gtin14"
-            : "gtin";
+          : "gtin14";
   return { [property]: candidate };
 }
 

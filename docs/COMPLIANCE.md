@@ -45,11 +45,11 @@ Todos los importes de catálogo, JSON-LD y Merchant XML parten de centavos `BigI
 
 ## 5. Redirecciones y SEO técnico
 
-- `UrlRedirectService` serializa mutaciones con advisory lock, valida rutas locales, estados `301/302/307/308`, ciclos y máximo 100 saltos, audita y permite recrear orígenes archivados.
-- `proxy.ts` resuelve cadenas sobre una caché global con TTL de treinta segundos, deduplicación de carga e invalidación explícita desde acciones. `/api`, `/_next`, `/admin` y `/mi-cuenta` no son fuentes públicas; los destinos conservan el query original.
-- JSON-LD: `Organization`, `WebSite`, `Product`, `Offer`, `BreadcrumbList` y `FAQPage` visible. No se generan reseñas, ratings ni disponibilidad ficticias.
-- `/robots.txt` referencia `/sitemap.xml`; el sitemap incluye catálogo, marcas, categorías, CMS publicado y legales. Superadas 50.000 URLs, la raíz se convierte en índice y `/sitemaps/[id].xml` entrega particiones.
-- `/api/feeds/google-merchant` genera RSS 2.0 con namespace Google, una entrada por variante, `g:id`, `g:item_group_id`, título, descripción, enlace de variante, imagen real si existe, precio COP, disponibilidad, marca, GTIN/EAN o MPN y peso. Los productos sin identificadores usan `identifier_exists=no`; no se inventan imágenes ni GTIN.
+- `UrlRedirectService` serializa mutaciones con advisory lock, bloquea orígenes en `/` o rutas reservadas (`/api`, `/_next`, `/admin`, `/mi-cuenta`, auth, `/legal`, `/robots.txt`, `/sitemap.xml`, `/sitemaps`, `/checkout`, `/pagar`, `/pedido`, `/propuesta`) y destinos internos (`/api`, `/_next`, `/admin`), valida estados `301/302/307/308`, ciclos y máximo 100 saltos, audita y permite recrear orígenes archivados.
+- `proxy.ts` resuelve cadenas únicamente en peticiones `GET`/`HEAD` sin `next-action` ni Live Edit sobre una caché global con TTL de treinta segundos, deduplicación de carga e invalidación explícita más `revalidatePath` desde acciones. Los destinos públicos conservan el query original.
+- JSON-LD: `Organization`, `WebSite`, `Product`, `Offer`, `BreadcrumbList` (catálogo y centro legal) y `FAQPage` visible. No se generan reseñas, ratings ni disponibilidad ficticias.
+- `/robots.txt` autoriza explícitamente `/api/feeds/` mientras bloquea `/api/` y rutas privadas, y referencia `/sitemap.xml`; el sitemap incluye catálogo, marcas, categorías, CMS publicado (`lastmod` sincronizado con la última versión publicada) y legales. Superadas 50.000 URLs, la raíz se convierte en índice y `/sitemaps/[id].xml` entrega particiones.
+- `/api/feeds/google-merchant` (`x-robots-tag: noindex`) genera RSS 2.0 con namespace Google, una entrada por variante, `g:id`, `g:item_group_id`, título, descripción, enlace de variante, imagen propia de la variante o del producto si existe, precio COP, disponibilidad, marca, GTIN comercial (`8/12/13/14` dígitos GS1, excluyendo SSCC-18 logísticos) o MPN y peso. Los productos sin identificadores usan `identifier_exists=no`; no se inventan imágenes ni GTIN.
 
 ## 6. Pendientes empresariales antes de Go-Live
 

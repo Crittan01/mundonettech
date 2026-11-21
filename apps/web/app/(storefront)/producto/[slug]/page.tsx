@@ -54,7 +54,8 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
   const [{ slug }, query] = await Promise.all([params, searchParams]);
   const product = await getCatalogProduct(slug);
   if (!product) notFound();
-  const requestedVariant = typeof query.variant === "string" ? query.variant : null;
+  const rawVariant = Array.isArray(query.variant) ? query.variant[0] : query.variant;
+  const requestedVariant = typeof rawVariant === "string" ? rawVariant : null;
   const defaultVariantId = product.variants.some((variant) => variant.id === requestedVariant)
     ? requestedVariant!
     : product.defaultVariantId;

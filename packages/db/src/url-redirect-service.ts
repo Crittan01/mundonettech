@@ -9,8 +9,25 @@ import type { CatalogMutationAudit } from "./catalog-types.js";
 import { Prisma, PrismaClient, type UrlRedirect } from "./generated/client.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const reservedSourcePrefixes = ["/api", "/_next", "/admin", "/mi-cuenta"] as const;
-const reservedTargetPrefixes = ["/api", "/_next"] as const;
+const reservedSourcePrefixes = [
+  "/api",
+  "/_next",
+  "/admin",
+  "/mi-cuenta",
+  "/ingresar",
+  "/registro",
+  "/recuperar",
+  "/verificar-correo",
+  "/legal",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/sitemaps",
+  "/checkout",
+  "/pagar",
+  "/pedido",
+  "/propuesta",
+] as const;
+const reservedTargetPrefixes = ["/api", "/_next", "/admin"] as const;
 
 export interface UrlRedirectInput {
   readonly fromPath: string;
@@ -60,13 +77,18 @@ function normalizeInput(input: UrlRedirectInput) {
   } catch (error) {
     throw new UrlRedirectValidationError(error instanceof Error ? error.message : "Invalid path.");
   }
-  if (reservedSourcePrefixes.some((prefix) => hasPathPrefix(fromPath, prefix))) {
+  if (
+    fromPath === "/" ||
+    reservedSourcePrefixes.some((prefix) => hasPathPrefix(fromPath, prefix))
+  ) {
     throw new UrlRedirectValidationError(
-      "Application and authenticated routes cannot be redirect sources.",
+      "Root, authentication, legal, crawler, and transactional routes cannot be redirect sources.",
     );
   }
   if (reservedTargetPrefixes.some((prefix) => hasPathPrefix(toPath, prefix))) {
-    throw new UrlRedirectValidationError("Infrastructure routes cannot be redirect targets.");
+    throw new UrlRedirectValidationError(
+      "Infrastructure and backoffice routes cannot be redirect targets.",
+    );
   }
   const statusCode = input.statusCode ?? 308;
   if (!isRedirectStatus(statusCode)) {
@@ -312,6 +334,12 @@ export class UrlRedirectService {
     try {
       normalized = normalizeRedirectPath(path);
     } catch {
+      return null;
+    }
+    if (
+      normalized === "/" ||
+      reservedSourcePrefixes.some((prefix) => hasPathPrefix(normalized, prefix))
+    ) {
       return null;
     }
     const edges = await this.listActive();

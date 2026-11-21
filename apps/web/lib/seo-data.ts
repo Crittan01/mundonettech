@@ -118,6 +118,24 @@ function firstFeedImage(media: readonly CatalogMedia[], origin: string | null): 
   return null;
 }
 
+function variantFeedImage(
+  media: readonly CatalogMedia[],
+  variantId: string,
+  origin: string | null,
+): string | null {
+  if (!origin || media.length === 0) return null;
+  const variantMedia = media.filter((item) => item.variantId === variantId);
+  const sharedMedia = media.filter((item) => item.variantId === null);
+  const otherMedia = media.filter(
+    (item) => item.variantId !== null && item.variantId !== variantId,
+  );
+  return (
+    firstFeedImage(variantMedia, origin) ??
+    firstFeedImage(sharedMedia, origin) ??
+    firstFeedImage(otherMedia, origin)
+  );
+}
+
 async function readGoogleMerchantFeed(): Promise<string> {
   "use cache";
   cacheLife(seoLife);
@@ -125,8 +143,8 @@ async function readGoogleMerchantFeed(): Promise<string> {
   const products = await new CatalogService(getDatabase()).getFeedProducts();
   const origin = getPublicMediaOrigin();
   const items: MerchantFeedItem[] = products.flatMap((product) => {
-    const imageLink = firstFeedImage(product.media, origin);
     return product.variants.map((variant) => {
+      const imageLink = variantFeedImage(product.media, variant.id, origin);
       const optionLabels = variant.options.map((option) => option.label);
       const color = variant.options.find((option) => option.key.toLowerCase() === "color")?.label;
       const size = variant.options.find((option) =>

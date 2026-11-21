@@ -31,9 +31,11 @@ export {
 export {
   normalizeGs1,
   isValidGs1,
+  isValidCommercialGtin,
   isValidEan,
   assertValidGs1,
   assertValidEan,
+  resolveCommercialGtin,
   normalizeSku,
 } from "./gs1.js";
 export { buildCategoryPath, categoryDepth, assertCategoryMove } from "./catalog-tree.js";

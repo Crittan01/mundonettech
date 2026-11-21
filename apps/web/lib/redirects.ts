@@ -20,7 +20,29 @@ const redirectState = globalThis as typeof globalThis & {
   __urlRedirectCache?: RedirectCacheState;
 };
 const cacheTtlMs = 30_000;
-const reservedSourcePrefixes = ["/api", "/_next", "/admin", "/mi-cuenta"] as const;
+const reservedSourcePrefixes = [
+  "/api",
+  "/_next",
+  "/admin",
+  "/mi-cuenta",
+  "/ingresar",
+  "/registro",
+  "/recuperar",
+  "/verificar-correo",
+  "/legal",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/sitemaps",
+  "/checkout",
+  "/pagar",
+  "/pedido",
+  "/propuesta",
+] as const;
+const reservedTargetPrefixes = ["/api", "/_next", "/admin"] as const;
+
+function hasPathPrefix(path: string, prefix: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
 
 function state(): RedirectCacheState {
   redirectState.__urlRedirectCache ??= { loadedAt: 0, generation: 0 };
@@ -37,6 +59,13 @@ async function loadEdges(): Promise<ReadonlyMap<string, CachedRedirectEdge>> {
   for (const record of records) {
     const fromPath = normalizeRedirectPath(record.fromPath);
     const toPath = normalizeRedirectPath(record.toPath);
+    if (
+      fromPath === "/" ||
+      reservedSourcePrefixes.some((prefix) => hasPathPrefix(fromPath, prefix)) ||
+      reservedTargetPrefixes.some((prefix) => hasPathPrefix(toPath, prefix))
+    ) {
+      continue;
+    }
     if (edges.has(fromPath)) throw new Error("Duplicate active URL redirect source.");
     edges.set(fromPath, { toPath, statusCode: record.statusCode });
   }
@@ -75,13 +104,16 @@ export async function resolveCachedUrlRedirect(path: string): Promise<{
   statusCode: number;
   hops: number;
 } | null> {
-  if (reservedSourcePrefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))) {
-    return null;
-  }
   let normalized: string;
   try {
     normalized = normalizeRedirectPath(path);
   } catch {
+    return null;
+  }
+  if (
+    normalized === "/" ||
+    reservedSourcePrefixes.some((prefix) => hasPathPrefix(normalized, prefix))
+  ) {
     return null;
   }
   let edges: ReadonlyMap<string, CachedRedirectEdge>;

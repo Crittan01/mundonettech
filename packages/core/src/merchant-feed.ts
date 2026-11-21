@@ -1,4 +1,4 @@
-import { isValidGs1 } from "./gs1.js";
+import { resolveCommercialGtin } from "./gs1.js";
 import { centsToDecimalString } from "./structured-data.js";
 import { absolutePublicUrl, escapeXml, normalizeXmlText } from "./xml.js";
 
@@ -48,9 +48,12 @@ export function buildGoogleMerchantXml(
       if (!item.itemGroupId || item.itemGroupId.length > 100) {
         throw new Error(`Merchant item_group_id is invalid at index ${index}.`);
       }
-      const gtin = item.gtin || item.ean;
-      if (gtin && !isValidGs1(gtin))
+      let gtin: string | null;
+      try {
+        gtin = resolveCommercialGtin(item.gtin, item.ean);
+      } catch {
         throw new TypeError(`Invalid GTIN for merchant item ${item.id}.`);
+      }
       if (
         item.weightGrams !== undefined &&
         (!Number.isInteger(item.weightGrams) || item.weightGrams < 1)

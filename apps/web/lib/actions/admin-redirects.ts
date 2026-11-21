@@ -6,7 +6,7 @@ import {
   UrlRedirectService,
   UrlRedirectValidationError,
 } from "@mundonettech/db";
-import { updateTag } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
 import {
@@ -51,6 +51,7 @@ function audit(session: AdminSession, request: RequestSecurityContext) {
 function invalidate(): void {
   invalidateUrlRedirectCache();
   updateTag("url-redirects");
+  revalidatePath("/admin/contenido/redirecciones");
 }
 
 function input(formData: FormData) {

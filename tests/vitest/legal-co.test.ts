@@ -5,13 +5,20 @@ import {
   addColombianBusinessDays,
   bogotaDateOnly,
   buildLegalConfiguration,
+  calculateBusinessDayDeadline,
   calculateRetractRefundDeadline,
   calculateRetractWindow,
   colombianHolidays,
+  consumerPqrBusinessDays,
   easterSunday,
   evaluateRetractWindow,
+  habeasDataClaimBusinessDays,
+  habeasDataClaimExtensionBusinessDays,
+  habeasDataQueryBusinessDays,
+  habeasDataQueryExtensionBusinessDays,
   isColombianBusinessDay,
   LegalConfigurationError,
+  paymentReversalNoticeBusinessDays,
   requiredLegalSlugs,
 } from "../../packages/legal-co/dist/index.js";
 
@@ -95,6 +102,28 @@ describe("F2.3 — eight-versioned Colombian legal documents", () => {
       ),
     };
     expect(() => buildLegalConfiguration(invalidDate)).toThrow(/real calendar date/);
+    for (const badHref of [
+      "/legal/pqrs con espacios",
+      "/legal/%2e%2e/admin",
+      "/legal#INVALID_ID",
+    ]) {
+      const badLinkConfig = {
+        ...legalConfig,
+        documents: legalConfig.documents.map((document, documentIndex) =>
+          documentIndex === 0
+            ? {
+                ...document,
+                sections: document.sections.map((section, sectionIndex) =>
+                  sectionIndex === 0
+                    ? { ...section, links: [{ label: "Enlace inválido", href: badHref }] }
+                    : section,
+                ),
+              }
+            : document,
+        ),
+      };
+      expect(() => buildLegalConfiguration(badLinkConfig)).toThrow(LegalConfigurationError);
+    }
   });
 });
 
@@ -171,5 +200,30 @@ describe("F2.3 — official Colombian holidays and business-day SLA", () => {
     expect(calculateRetractRefundDeadline("2026-01-01T12:00:00-05:00").toISOString()).toBe(
       "2026-01-16T17:00:00.000Z",
     );
+    expect(
+      calculateBusinessDayDeadline("2026-11-20T16:30:00-05:00", paymentReversalNoticeBusinessDays),
+    ).toEqual({
+      receivedDate: "2026-11-20",
+      dueDate: "2026-11-27",
+      businessDays: 5,
+    });
+    expect(
+      calculateBusinessDayDeadline("2026-11-01T10:00:00-05:00", habeasDataQueryBusinessDays),
+    ).toEqual({
+      receivedDate: "2026-11-01",
+      dueDate: "2026-11-17",
+      businessDays: 10,
+    });
+    expect(habeasDataQueryExtensionBusinessDays).toBe(5);
+    expect(
+      calculateBusinessDayDeadline("2026-11-01T10:00:00-05:00", habeasDataClaimBusinessDays),
+    ).toEqual({
+      receivedDate: "2026-11-01",
+      dueDate: "2026-11-24",
+      businessDays: 15,
+    });
+    expect(habeasDataClaimExtensionBusinessDays).toBe(8);
+    expect(consumerPqrBusinessDays).toBe(15);
+    expect(() => calculateBusinessDayDeadline("2026-11-01", 0)).toThrow(RangeError);
   });
 });

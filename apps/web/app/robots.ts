@@ -5,11 +5,14 @@ export default function robots(): MetadataRoute.Robots {
   return {
     rules: {
       userAgent: "*",
-      allow: "/",
+      allow: ["/", "/api/feeds/"],
       disallow: [
+        "/admin",
         "/admin/",
+        "/mi-cuenta",
         "/mi-cuenta/",
         "/api/",
+        "/checkout",
         "/checkout/",
         "/pagar/",
         "/pedido/",

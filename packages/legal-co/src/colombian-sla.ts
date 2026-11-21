@@ -4,6 +4,12 @@ export const colombiaTimeZone = "America/Bogota";
 export const retractBusinessDays = 5;
 export const retractRefundCalendarDays = 15;
 export const defaultDeliveryCalendarDays = 30;
+export const paymentReversalNoticeBusinessDays = 5;
+export const habeasDataQueryBusinessDays = 10;
+export const habeasDataQueryExtensionBusinessDays = 5;
+export const habeasDataClaimBusinessDays = 15;
+export const habeasDataClaimExtensionBusinessDays = 8;
+export const consumerPqrBusinessDays = 15;
 
 const millisecondsPerDay = 86_400_000;
 const datePattern = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -212,4 +218,16 @@ export function evaluateRetractWindow(deliveredAt: DateLike, requestedAt: DateLi
 export function calculateRetractRefundDeadline(exercisedAt: DateLike): Date {
   const exercised = assertDate(exercisedAt, "exercisedAt");
   return new Date(exercised.getTime() + retractRefundCalendarDays * millisecondsPerDay);
+}
+
+export function calculateBusinessDayDeadline(receivedAt: DateLike, businessDays: number) {
+  if (!Number.isInteger(businessDays) || businessDays < 1 || businessDays > 3650) {
+    throw new RangeError("SLA businessDays must be an integer between 1 and 3650.");
+  }
+  const receivedDate = bogotaDateOnly(receivedAt);
+  return {
+    receivedDate,
+    dueDate: addColombianBusinessDays(receivedDate, businessDays),
+    businessDays,
+  };
 }

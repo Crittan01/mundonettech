@@ -1,5 +1,11 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+declare global {
+  interface Window {
+    __legalSeoCspViolations?: string[];
+  }
+}
 
 const legalRoutes = [
   "terminos-y-condiciones",
@@ -12,12 +18,48 @@ const legalRoutes = [
   "pqrs",
 ] as const;
 
-test("legal center renders eight complete documents, footer access and WCAG", async ({ page }) => {
+async function attachSecurityCollectors(page: Page) {
+  const browserErrors: string[] = [];
+  await page.addInitScript(() => {
+    window.__legalSeoCspViolations = [];
+    window.addEventListener("securitypolicyviolation", (event) => {
+      window.__legalSeoCspViolations?.push(`${event.violatedDirective}:${event.blockedURI}`);
+    });
+  });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      /Content Security Policy|Refused to|violates.*directive/i.test(message.text())
+    ) {
+      browserErrors.push(message.text());
+    }
+  });
+  return {
+    async assertClean() {
+      const cspViolations = await page.evaluate(() => window.__legalSeoCspViolations ?? []);
+      expect(cspViolations).toEqual([]);
+      expect(browserErrors).toEqual([]);
+    },
+  };
+}
+
+test("legal center renders eight complete documents, footer access, metadata and WCAG", async ({
+  page,
+}) => {
+  const collector = await attachSecurityCollectors(page);
   const response = await page.goto("/legal");
   expect(response?.status()).toBe(200);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
     "Legal, privacidad y atención al consumidor",
   );
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+    "href",
+    "https://mundonettech.co/legal",
+  );
+  await expect(page.locator('meta[property="og:locale"]')).toHaveAttribute("content", "es_CO");
+  const indexJsonLd = await page.locator('script[type="application/ld+json"]').allTextContents();
+  expect(indexJsonLd.some((entry) => entry.includes('"@type":"BreadcrumbList"'))).toBe(true);
   for (const slug of legalRoutes) {
     await expect(page.locator(`a[href="/legal/${slug}"]`).first()).toBeVisible();
   }
@@ -25,7 +67,8 @@ test("legal center renders eight complete documents, footer access and WCAG", as
   await expect(page.locator('footer a[href="https://www.sic.gov.co/"]')).toBeVisible();
 
   for (const slug of legalRoutes) {
-    await page.goto(`/legal/${slug}`);
+    const docResponse = await page.goto(`/legal/${slug}`);
+    expect(docResponse?.status()).toBe(200);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expect(page.getByText(/Versión 1\.0\.0 · Vigente desde 2026-11-21/)).toBeVisible();
     await expect(page.locator("article section").count()).resolves.toBeGreaterThanOrEqual(6);
@@ -33,15 +76,23 @@ test("legal center renders eight complete documents, footer access and WCAG", as
       "href",
       `https://mundonettech.co/legal/${slug}`,
     );
+    await expect(page.locator('meta[property="og:locale"]')).toHaveAttribute("content", "es_CO");
+    const docJsonLd = await page.locator('script[type="application/ld+json"]').allTextContents();
+    expect(docJsonLd.some((entry) => entry.includes('"@type":"BreadcrumbList"'))).toBe(true);
     if (slug === "retracto-y-devoluciones") {
       await expect(page.getByText(/quince días calendario/).first()).toBeVisible();
     }
   }
 
+  await page.goto("/legal/documento-inexistente");
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
+  await expect(page.locator('meta[name="robots"]').first()).toHaveAttribute("content", /noindex/);
+
   for (const route of [
     "/legal",
     "/legal/retracto-y-devoluciones",
     "/legal/tratamiento-datos-personales",
+    "/legal/pqrs",
   ]) {
     await page.goto(route);
     const result = await new AxeBuilder({ page })
@@ -49,15 +100,17 @@ test("legal center renders eight complete documents, footer access and WCAG", as
       .analyze();
     expect(result.violations).toEqual([]);
   }
+  await collector.assertClean();
 });
 
-test("robots and sitemap expose only canonical public resources with bounded partitions", async ({
+test("robots and sitemap expose only canonical public resources and allow Merchant feed", async ({
   page,
 }) => {
   const robots = await page.request.get("/robots.txt");
   expect(robots.status()).toBe(200);
   const robotsText = await robots.text();
   expect(robotsText).toContain("Sitemap: https://mundonettech.co/sitemap.xml");
+  expect(robotsText).toContain("Allow: /api/feeds/");
   expect(robotsText).toContain("Disallow: /admin/");
   expect(robotsText).toContain("Disallow: /api/");
 

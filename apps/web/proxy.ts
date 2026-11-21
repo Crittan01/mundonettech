@@ -74,13 +74,19 @@ export async function proxy(request: NextRequest) {
   const config = getSupabasePublicConfig();
   const mediaOrigin = getPublicMediaOrigin();
   const csp = securityPolicy(config.url, mediaOrigin, isDevelopment);
-  const persistedRedirect = await resolveCachedUrlRedirect(request.nextUrl.pathname);
-  if (persistedRedirect) {
-    const destination = request.nextUrl.clone();
-    destination.pathname = persistedRedirect.toPath;
-    const redirect = NextResponse.redirect(destination, persistedRedirect.statusCode);
-    applyHeaders(redirect, csp, isDevelopment);
-    return redirect;
+  const isSafeNavigationMethod = request.method === "GET" || request.method === "HEAD";
+  const isLiveEditRequest =
+    request.nextUrl.pathname.startsWith("/pagina/") &&
+    request.nextUrl.searchParams.getAll("liveEdit").includes("1");
+  if (isSafeNavigationMethod && !request.headers.has("next-action") && !isLiveEditRequest) {
+    const persistedRedirect = await resolveCachedUrlRedirect(request.nextUrl.pathname);
+    if (persistedRedirect) {
+      const destination = request.nextUrl.clone();
+      destination.pathname = persistedRedirect.toPath;
+      const redirect = NextResponse.redirect(destination, persistedRedirect.statusCode);
+      applyHeaders(redirect, csp, isDevelopment);
+      return redirect;
+    }
   }
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", requestNonce);

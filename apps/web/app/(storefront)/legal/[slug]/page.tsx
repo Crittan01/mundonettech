@@ -1,7 +1,12 @@
+import { storeConfig } from "@mundonettech/config/store";
+import { buildBreadcrumbJsonLd } from "@mundonettech/core";
+import type { LegalDocument } from "@mundonettech/legal-co";
 import type { Metadata } from "next";
+import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { JsonLd } from "@/components/seo/json-ld";
 import { getLegalDocument, getLegalDocuments } from "@/lib/legal";
 
 export function generateStaticParams() {
@@ -13,21 +18,42 @@ export function generateStaticParams() {
 export async function generateMetadata({ params }: PageProps<"/legal/[slug]">): Promise<Metadata> {
   const { slug } = await params;
   const document = await getLegalDocument(slug);
-  return document
-    ? {
-        title: document.title,
-        description: document.summary,
-        alternates: { canonical: `/legal/${document.slug}` },
-      }
-    : { title: "Documento legal no encontrado", robots: { index: false, follow: false } };
+  if (!document) {
+    return { title: "Documento legal no encontrado", robots: { index: false, follow: false } };
+  }
+  const canonical = new URL(`/legal/${document.slug}`, storeConfig.url).toString();
+  return {
+    title: document.title,
+    description: document.summary,
+    alternates: { canonical },
+    openGraph: {
+      type: "website",
+      locale: "es_CO",
+      url: canonical,
+      title: document.title,
+      description: document.summary,
+    },
+    twitter: {
+      card: "summary",
+      title: document.title,
+      description: document.summary,
+    },
+  };
 }
 
-export default async function LegalDocumentPage({ params }: PageProps<"/legal/[slug]">) {
-  const { slug } = await params;
-  const document = await getLegalDocument(slug);
-  if (!document) notFound();
+async function CachedLegalArticle({ document }: { document: LegalDocument }) {
+  "use cache";
+  cacheLife("max");
+  cacheTag("legal", "legal:documents", `legal:doc:${document.slug}`);
+  const canonical = new URL(`/legal/${document.slug}`, storeConfig.url).toString();
+  const breadcrumbs = buildBreadcrumbJsonLd([
+    { name: "Inicio", url: storeConfig.url },
+    { name: "Centro legal", url: new URL("/legal", storeConfig.url).toString() },
+    { name: document.title, url: canonical },
+  ]);
   return (
     <article className="mx-auto max-w-4xl space-y-10">
+      <JsonLd data={breadcrumbs} />
       <header className="space-y-5">
         <Link href="/legal" className="text-sm text-primary underline underline-offset-4">
           Volver al centro legal
@@ -115,4 +141,11 @@ export default async function LegalDocumentPage({ params }: PageProps<"/legal/[s
       </footer>
     </article>
   );
+}
+
+export default async function LegalDocumentPage({ params }: PageProps<"/legal/[slug]">) {
+  const { slug } = await params;
+  const document = await getLegalDocument(slug);
+  if (!document) notFound();
+  return <CachedLegalArticle document={document} />;
 }

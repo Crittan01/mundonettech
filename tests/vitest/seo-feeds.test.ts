@@ -9,8 +9,10 @@ import {
   buildSitemapIndex,
   buildSitemapUrlSet,
   centsToDecimalString,
+  isValidCommercialGtin,
   normalizeXmlText,
   partitionSitemapEntries,
+  resolveCommercialGtin,
   serializeJsonLd,
 } from "../../packages/core/dist/index.js";
 
@@ -97,6 +99,25 @@ describe("F2.3 — safe JSON-LD product and organization contracts", () => {
     expect(
       buildOrganizationJsonLd({ name: "Tienda", url: "https://tienda.example.co" })["@id"],
     ).toBe("https://tienda.example.co/#organization");
+    expect(isValidCommercialGtin("001234560000123458")).toBe(false);
+    expect(resolveCommercialGtin("001234560000123458", "5901234123457")).toBe("5901234123457");
+    expect(resolveCommercialGtin("001234560000123458", null)).toBeNull();
+    expect(() => resolveCommercialGtin("001234560000123450", null)).toThrow(/GTIN/);
+    const ssccProduct = buildProductJsonLd({
+      ...productInput,
+      offers: [
+        {
+          id: "00000000-0000-4000-8000-000000000003",
+          url: "https://tienda.example.co/producto/audifonos-pro?variant=3",
+          sku: "AUDIO-SSCC",
+          priceCents: "10000",
+          available: true,
+          gtin: "001234560000123458",
+          ean: "5901234123457",
+        },
+      ],
+    })[0]!;
+    expect(ssccProduct).toMatchObject({ gtin13: "5901234123457" });
   });
 });
 
@@ -143,6 +164,24 @@ describe("F2.3 — Merchant XML and scalable sitemap", () => {
     expect(xml).toContain("<g:shipping_weight>250 g</g:shipping_weight>");
     expect(xml).toContain("<g:identifier_exists>no</g:identifier_exists>");
     expect(xml).not.toContain("Audífonos <Pro>");
+    const ssccXml = buildGoogleMerchantXml(
+      { title: "Tienda", link: "https://tienda.example.co", description: "Feed" },
+      [
+        {
+          id: "variant-sscc",
+          itemGroupId: "product-sscc",
+          title: "Caja logística con SSCC-18",
+          description: "Descripción",
+          link: "https://tienda.example.co/producto/sscc",
+          brand: "Marca",
+          priceCents: "50000",
+          available: true,
+          gtin: "001234560000123458",
+        },
+      ],
+    );
+    expect(ssccXml).not.toContain("<g:gtin>");
+    expect(ssccXml).toContain("<g:identifier_exists>no</g:identifier_exists>");
   });
 
   it("rejects duplicate IDs, invalid identifiers and insecure media", () => {

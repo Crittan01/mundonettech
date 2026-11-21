@@ -1,22 +1,50 @@
+import { storeConfig } from "@mundonettech/config/store";
+import { buildBreadcrumbJsonLd } from "@mundonettech/core";
 import type { Metadata } from "next";
+import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 
+import { JsonLd } from "@/components/seo/json-ld";
 import { getLegalDocuments, getLegalOperator } from "@/lib/legal";
 
+const canonicalUrl = new URL("/legal", storeConfig.url).toString();
+const pageTitle = "Legal, privacidad y atención al consumidor";
+const pageDescription =
+  "Términos, privacidad, retracto, garantías, envíos y canales de atención en Colombia.";
+
 export const metadata: Metadata = {
-  title: "Legal, privacidad y atención al consumidor",
-  description:
-    "Términos, privacidad, retracto, garantías, envíos y canales de atención en Colombia.",
-  alternates: { canonical: "/legal" },
+  title: pageTitle,
+  description: pageDescription,
+  alternates: { canonical: canonicalUrl },
+  openGraph: {
+    type: "website",
+    locale: "es_CO",
+    url: canonicalUrl,
+    title: pageTitle,
+    description: pageDescription,
+  },
+  twitter: {
+    card: "summary",
+    title: pageTitle,
+    description: pageDescription,
+  },
 };
 
 export default async function LegalIndexPage() {
+  "use cache";
+  cacheLife("max");
+  cacheTag("legal", "legal:documents");
   const [documents, operator] = await Promise.all([
     getLegalDocuments(),
     Promise.resolve(getLegalOperator()),
   ]);
+  const breadcrumbs = buildBreadcrumbJsonLd([
+    { name: "Inicio", url: storeConfig.url },
+    { name: "Centro legal", url: canonicalUrl },
+  ]);
   return (
     <div className="space-y-10">
+      <JsonLd data={breadcrumbs} />
       <header className="max-w-3xl space-y-4">
         <p className="text-sm font-semibold text-primary">Cumplimiento colombiano</p>
         <h1 className="text-4xl font-bold tracking-tight">
