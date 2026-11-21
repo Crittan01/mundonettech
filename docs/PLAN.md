@@ -7,8 +7,8 @@
 | Hito | Fase | Alcance resumido | Estado |
 | --- | --- | --- | :---: |
 | **Hito 1 — Go-Live** | **Fase 0 — Fundación, Seguridad y Shell Admin** | Gobernanza (`F0.1`), Monorepo Next 16 (`F0.2`), PG 17 + Prisma `BigInt` + RLS + Bóveda + Outbox (`F0.3`), Auth + Login Admin + **MFA `aal2`** + RBAC 8 roles + PII mask (`F0.4`), CI/Gates (`F0.5`). | `[x]` |
-| **Hito 1** | **Fase 1 — Catálogo Tech, Media 360°/3D e Inventario WAC** | `F1.1` Marcas, Categorías N-niveles, Colecciones, Atributos/Facetas (`ADR-008`), GTIN/EAN, Compatibilidad y Bundles · `F1.2` `packages/media` (R2 + AVIF/WebP + Spin 360° + 3D/AR lazy) · `F1.3` Multi-bodega (`safetyStock` efectivo + orden determinista de locks) + Proveedores/WAC + Importador CSV · `F1.4` `CatalogService` único (`'use cache'`), Comparador, PDP, Admin y seed. | `[/]` |
-| **Hito 1** | **Fase 2 — CMS v3, SEO y Legal CO** | `F2.1` Bloques componibles Zod + `StoreSettings` separados + versionado/programación + Mediateca R2 · `F2.2` Live Edit en `<Suspense>` + SERP · `F2.3` `packages/legal-co` (8 docs, Ley 1480/2439 retracto + festivos CO, Ley 1581) + `UrlRedirect` + JSON-LD + Sitemap + Merchant XML (`Brand`/`GTIN`). | `[ ]` |
+| **Hito 1** | **Fase 1 — Catálogo Tech, Media 360°/3D e Inventario WAC** | `F1.1` Marcas, Categorías N-niveles, Colecciones, Atributos/Facetas (`ADR-008`), GTIN/EAN, Compatibilidad y Bundles · `F1.2` `packages/media` (R2 + AVIF/WebP + Spin 360° + 3D/AR lazy) · `F1.3` Multi-bodega (`safetyStock` efectivo + orden determinista de locks) + Proveedores/WAC + Importador CSV · `F1.4` `CatalogService` único (`'use cache'`), Comparador, PDP, Admin y seed. | `[x]` |
+| **Hito 1** | **Fase 2 — CMS v3, SEO y Legal CO** | `F2.1` Bloques componibles Zod + `StoreSettings` separados + versionado/programación + Mediateca R2 · `F2.2` Live Edit en `<Suspense>` + SERP · `F2.3` `packages/legal-co` (8 docs, Ley 1480/2439 retracto + festivos CO, Ley 1581) + `UrlRedirect` + JSON-LD + Sitemap + Merchant XML (`Brand`/`GTIN`). | `[/]` |
 | **Hito 1** | **Fase 3 — Carrito, Checkout, IVA Dual, Pagos y Logística** | `F3.1` `CartService` (revalidación precios, `WholesaleTier` multi-variante, Bundles, Cupones `BigInt`, Venta Asistida `/pagar/[token]`) · `F3.2` Checkout DANE/Click&Collect + IVA Dual/UVT + `OrderReceipt` (`ADR-010`) + `Shipment`/`OrderRefund` 1:N + `DomainOutbox` · `F3.3` Bóveda `/admin/integraciones` + `PaymentProvider` (`refund()`, Wompi, COD, Transferencia MFA, `StoreCredit`) · `F3.4` Aveonline *pick & pack* asíncrono + Claim Idempotente + multi-bulto + Flex local + Resend/Svix + puerto DIAN. | `[ ]` |
 | **Hito 1** | **Fase 4A — Operación, RMA/Seriales y Lanzamiento** | `F4A.1` `/admin/{hoy,dashboard,pedidos,finanzas}` (cuadre total de `OrderRefund`) + Vigilancia `3.500 UVT` · `F4A.2` `/mi-cuenta/*` + Posventa 2FA `/pedido/[token]` + RMA (Retracto parcial, Cambios, Garantía con `SerializedUnit` Serial/IMEI) + PQR SLA + Reseñas con FK · `F4A.3` OWASP + Playwright E2E + `@axe-core` + Lighthouse ≥ 95 + k6 + **Go-Live `mundonettech.co`**. | `[ ]` |
 | **Hito 2 — Escala** | **Fase 4B — CRM 360 y Canal B2B** | `F4B.1` `Contact` 360° + duplicados + tareas + retención Hábeas Data · `F4B.2` `PriceList` B2B + `/empresas` → Propuestas `BigInt` `/propuesta/[token]` → `Order` + Copiloto 0-PII. | `[ ]` |
@@ -18,17 +18,17 @@
 
 ---
 
-## 2. Fase Activa — Fase 1: Catálogo Tech, Media 360°/3D e Inventario WAC
+## 2. Fase Activa — Fase 2: CMS v3, SEO y Legal CO
 
 - `[x]` ✅ **Fase 0 cerrada (`F0.1`–`F0.5`):** Gobernanza, Next.js 16 standalone (`'use cache'`), PG 17 + RLS *deny-by-default* + Bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` MFA `aal2` + RBAC 8 roles + `pii-mask` y CI PG 17/Playwright/axe.
-- `[x]` ✅ **`F1.1` — Esquema y Dominio de Catálogo Tech (`catalog.prisma` + `@mundonettech/core` + `config/catalog-blueprint.ts`):** 21 modelos PG 17 (`TaxGroup` UVT `50`/`22`, `Category` N-niveles, `ProductVariant` `BigInt` + GS1/EAN, `AttributeDefinition`/`ProductAttributeValue`, `CompatibilityDevice`, `Bundle`, `BackInStockSubscription`, `UrlRedirect` ≤ 100 saltos, `tsvector` GIN + `immutable_unaccent`) y `rls-matrix` (`543` casos).
-- `[x]` ✅ **`F1.2` — Pipeline Multimedia y Activos 360°/3D (`packages/media` + `ProductMedia`):** `sharp-safe` (allowlist `libvips`, magic bytes/`ispe`/orientación EXIF, purga GPS), AVIF/WebP/GLB/USDZ en R2 con rollback, `@mundonettech/media/viewers` (`Spin360`/`Model3d` *lazy* WCAG AA) e invariantes PG 17 (`ADR-007`, `ADR-024`).
-- `[x]` ✅ **`F1.3` — Inventario Multi-Bodega, Proveedores/WAC e Importador CSV (`inventory.prisma`):** `StockLocation`, `StockLevel` (`safetyStock` efectivo + locks ordenados anti-deadlock `40P01` — `ADR-013`), `SerializedUnit` (`IMEI` global + paridad PG 17), `InventoryLedger` (`OPENING`/`ADJUSTMENT`), `Supplier`/`PurchaseOrder` (WAC) y CSV seguro (`ADR-025`).
-- `[R]` **`F1.4` — `CatalogService` Único (`'use cache'`), Storefront PDP/PLP/Comparador y Admin:** búsqueda/facetas indexadas, `ProductCard` única, comparador, PDP, vistas `/admin` RBAC+MFA, seed canónico y E2E Playwright/`@axe-core`.
+- `[x]` ✅ **Fase 1 cerrada (`F1.1`–`F1.4`):** Catálogo tech PG 17 (`29` modelos + `Order`, `BigInt`, GS1/EAN, `tsvector` GIN, `685` casos RLS), `@mundonettech/media` (R2 + `Spin360`/`Model3d` *lazy*), inventario WAC/seriales/CSV, `CatalogService` (`'use cache'`), PDP/PLP/Comparador, `/admin/catalogo` MFA y seed (`ADR-023`..`ADR-026`).
+- `[ ]` **`F2.1` — CMS v3 (`growth-cms.prisma`), `StoreSettings` y Mediateca R2 (`packages/cms`):** `StoreSettings` separada con RBAC (`ADR-016`), `CmsPage` + `CmsSectionBlock` (Zod + `{{tokens}}`) + `CmsBlockVersion` (versionado/programación), `CmsMedia` en R2 (`sharp-safe`), `/admin/{contenido,configuracion}` MFA y `rls-matrix`.
+- `[ ]` **`F2.2` — Renderizado `'use cache'`, Live Edit en `<Suspense>` y SERP:** bloques componibles en `(storefront)` sin penalizar LCP, modo Live Edit en `<Suspense>` (`ADR-015`) y vista previa SERP/OpenGraph.
+- `[ ]` **`F2.3` — Legal CO (`packages/legal-co`), Redirecciones, JSON-LD, Sitemap y Merchant XML (`COMPLIANCE.md`):** 8 docs legales desde `config/`, retracto 5 días hábiles + 18 festivos CO, Ley 1581, `UrlRedirect`, JSON-LD, `sitemap.xml` y Google Merchant XML (`Brand`/`GTIN`).
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Auditoría `F1.4`:** rama `feat/f1-4-catalog-storefront-admin`; entrega `[R]` con catálogo/PDP/comparador, admin MFA, seed, 99 integraciones y 21 E2E.
-- **Siguiente turno — Auditor:** auditar `git diff develop...HEAD`, reejecutar gates, certificar `[x]` y fusionar; luego seguir `F2.1`.
+- **Cierre `F1.4` (Fase 1):** ✅ certificada en `develop` (`CatalogService` `'use cache'`, PDP/PLP/Comparador, `/admin/catalogo` MFA + atributos/compatibilidad auditados, seed y suites PG 17/Playwright/`@axe-core`).
+- **Siguiente turno — Implementador (`F2.1`):** crear rama `feat/f2-1-cms-v3-settings-media` desde `develop` y entregar CMS v3 + `StoreSettings` (`ADR-016`) + Mediateca R2 + `/admin` MFA + `rls-matrix` en `[R]`.

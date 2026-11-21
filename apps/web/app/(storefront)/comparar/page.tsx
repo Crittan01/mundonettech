@@ -3,6 +3,9 @@ import { CatalogNotFoundError, CatalogQueryError } from "@mundonettech/db";
 import Link from "next/link";
 
 import { ProductCard } from "@/components/catalog/product-card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { compareCatalogProducts, searchCatalog } from "@/lib/catalog";
 import { getPublicMediaOrigin } from "@/lib/env";
 
@@ -11,16 +14,36 @@ export const metadata = {
   description: "Compara precio, disponibilidad y atributos técnicos de hasta cuatro productos.",
 };
 
+const authenticityLabels = {
+  ORIGINAL: "Original",
+  CERTIFIED_COMPATIBLE: "Compatible certificado",
+  OEM: "OEM",
+} as const;
+
+const retractLabels = {
+  STANDARD: "Estándar (Ley 1480)",
+  LEGAL_EXCEPTION_REVIEW: "Revisión de excepción legal",
+} as const;
+
 export default async function ComparePage({ searchParams }: PageProps<"/comparar">) {
-  const raw = (await searchParams).productos;
+  const params = await searchParams;
+  const rawProductos = Array.isArray(params.productos)
+    ? params.productos.join(",")
+    : String(params.productos ?? "");
   const slugs = [
     ...new Set(
-      String(raw ?? "")
+      rawProductos
         .split(",")
         .map((slug) => slug.trim())
         .filter(Boolean),
     ),
   ];
+  const rawCandidateQuery = typeof params.q === "string" ? params.q : "";
+  const candidateQuery = rawCandidateQuery
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 100);
+
   let comparison = { products: [], rows: [] } as Awaited<ReturnType<typeof compareCatalogProducts>>;
   let error: string | null = null;
   try {
@@ -32,16 +55,31 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
       throw cause;
     }
   }
-  const candidates = await searchCatalog({ pageSize: 12, sort: "newest" });
+
+  const activeSlugs = comparison.products.map((product) => product.slug);
+  const candidates = await searchCatalog({
+    ...(candidateQuery ? { q: candidateQuery } : {}),
+    pageSize: 12,
+    sort: candidateQuery ? "relevance" : "newest",
+  });
+  const selectableCandidates = candidates.items.filter((item) => !activeSlugs.includes(item.slug));
   const mediaOrigin = getPublicMediaOrigin();
+
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Comparador de productos</h1>
-        <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">
-          Selecciona hasta cuatro productos para contrastar sus especificaciones y disponibilidad
-          actual.
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Comparador de productos</h1>
+          <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">
+            Selecciona hasta cuatro productos para contrastar sus especificaciones y disponibilidad
+            actual.
+          </p>
+        </div>
+        {comparison.products.length > 0 ? (
+          <Button asChild variant="outline" size="sm">
+            <Link href="/comparar">Limpiar comparación</Link>
+          </Button>
+        ) : null}
       </div>
       {error ? (
         <p role="alert" className="rounded-xl border border-destructive p-4 text-destructive">
@@ -58,7 +96,7 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
               key={product.id}
               product={product}
               mediaOrigin={mediaOrigin}
-              compareSlugs={slugs}
+              compareSlugs={activeSlugs}
             />
           ))}
         </section>
@@ -70,6 +108,14 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
           </p>
         </section>
       )}
+      {comparison.products.length === 1 ? (
+        <p
+          role="status"
+          className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground"
+        >
+          Añade al menos otro producto abajo para ver la tabla comparativa lado a lado.
+        </p>
+      ) : null}
       {comparison.products.length >= 2 ? (
         <section
           aria-labelledby="comparison-table-title"
@@ -99,6 +145,26 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
             <tbody>
               <tr className="border-t border-border">
                 <th scope="row" className="p-4">
+                  Marca
+                </th>
+                {comparison.products.map((product) => (
+                  <td className="p-4" key={product.id}>
+                    {product.brand.name}
+                  </td>
+                ))}
+              </tr>
+              <tr className="border-t border-border">
+                <th scope="row" className="p-4">
+                  Categoría
+                </th>
+                {comparison.products.map((product) => (
+                  <td className="p-4" key={product.id}>
+                    {product.category.name}
+                  </td>
+                ))}
+              </tr>
+              <tr className="border-t border-border">
+                <th scope="row" className="p-4">
                   Precio desde
                 </th>
                 {comparison.products.map((product) => (
@@ -119,11 +185,31 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
               </tr>
               <tr className="border-t border-border">
                 <th scope="row" className="p-4">
+                  Autenticidad
+                </th>
+                {comparison.products.map((product) => (
+                  <td className="p-4" key={product.id}>
+                    {authenticityLabels[product.authenticity]}
+                  </td>
+                ))}
+              </tr>
+              <tr className="border-t border-border">
+                <th scope="row" className="p-4">
                   Garantía
                 </th>
                 {comparison.products.map((product) => (
                   <td className="p-4" key={product.id}>
                     {product.warrantyMonths} meses
+                  </td>
+                ))}
+              </tr>
+              <tr className="border-t border-border">
+                <th scope="row" className="p-4">
+                  Política de retracto
+                </th>
+                {comparison.products.map((product) => (
+                  <td className="p-4" key={product.id}>
+                    {retractLabels[product.retractPolicy]}
                   </td>
                 ))}
               </tr>
@@ -144,30 +230,59 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
           </table>
         </section>
       ) : null}
-      <section aria-labelledby="candidate-title" className="space-y-5">
-        <div>
-          <h2 id="candidate-title" className="text-2xl font-bold">
-            Añadir productos
-          </h2>
-          <p className="mt-2 text-muted-foreground">
-            Explora esta selección o{" "}
-            <Link href="/productos" className="text-primary underline underline-offset-4">
-              busca en todo el catálogo
-            </Link>
-            .
-          </p>
-        </div>
-        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {candidates.items.map((product) => (
-            <ProductCard
-              key={product.id}
-              product={product}
-              mediaOrigin={mediaOrigin}
-              compareSlugs={slugs}
-            />
-          ))}
-        </div>
-      </section>
+      {activeSlugs.length < 4 ? (
+        <section aria-labelledby="candidate-title" className="space-y-5">
+          <div>
+            <h2 id="candidate-title" className="text-2xl font-bold">
+              Añadir productos
+            </h2>
+            <p className="mt-2 text-muted-foreground">
+              Busca aquí o{" "}
+              <Link href="/productos" className="text-primary underline underline-offset-4">
+                explora todo el catálogo
+              </Link>
+              .
+            </p>
+          </div>
+          <form
+            action="/comparar"
+            className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card p-4"
+          >
+            {activeSlugs.length > 0 ? (
+              <input type="hidden" name="productos" value={activeSlugs.join(",")} />
+            ) : null}
+            <div className="min-w-64 flex-1 space-y-2">
+              <Label htmlFor="compare-q">Buscar producto para comparar</Label>
+              <Input
+                id="compare-q"
+                name="q"
+                defaultValue={candidateQuery}
+                maxLength={100}
+                placeholder="Nombre, marca, SKU o MPN"
+              />
+            </div>
+            <Button type="submit" variant="outline">
+              Buscar
+            </Button>
+          </form>
+          {selectableCandidates.length ? (
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {selectableCandidates.map((product) => (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  mediaOrigin={mediaOrigin}
+                  compareSlugs={activeSlugs}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-xl border border-border bg-card p-6 text-center text-muted-foreground">
+              No hay otros productos que coincidan con tu búsqueda actual.
+            </p>
+          )}
+        </section>
+      ) : null}
     </div>
   );
 }

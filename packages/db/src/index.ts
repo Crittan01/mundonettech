@@ -87,6 +87,7 @@ export {
   CatalogQueryError,
   CatalogService,
 } from "./catalog-service.js";
+export type { CatalogConflictErrorCode, CatalogQueryErrorCode } from "./catalog-service.js";
 export type {
   AdminCatalogPage,
   AdminCatalogProduct,
@@ -98,9 +99,12 @@ export type {
   CatalogComparison,
   CatalogFacetValue,
   CatalogMedia,
+  CatalogMediaDerivative,
   CatalogMediaFrame,
   CatalogMutationAudit,
+  CatalogProductAttributeInput,
   CatalogProductBaseInput,
+  CatalogProductCompatibilityInput,
   CatalogProductCreateInput,
   CatalogProductDetail,
   CatalogProductSummary,
@@ -109,5 +113,6 @@ export type {
   CatalogSort,
   CatalogVariant,
   CatalogVariantInput,
+  CatalogVariantOptionItem,
 } from "./catalog-types.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";

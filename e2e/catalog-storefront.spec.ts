@@ -37,9 +37,13 @@ test("catalog search, PDP and two-product comparison use persisted stock and att
   await expect(page).toHaveURL(/\/producto\/sony-wh-1000xm5/);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Audífonos Sony WH-1000XM5");
   await expect(page.getByText("6 disponibles", { exact: true })).toBeVisible();
+  await expect(page.getByText("SONY-WH1000XM5-BLACK").first()).toBeVisible();
   await expect(page.getByRole("heading", { name: "Ficha técnica" })).toBeVisible();
   await page.getByRole("link", { name: "Comparar este producto" }).click();
   await expect(page).toHaveURL(/\/comparar\?productos=sony/);
+  await expect(page.getByText(/Añade al menos otro producto/)).toBeVisible();
+  await page.getByLabel("Buscar producto para comparar").fill("JBL");
+  await page.getByRole("button", { name: "Buscar" }).click();
   const jblCard = page.locator("article").filter({ hasText: "Parlante JBL Charge 5" });
   await jblCard.getByRole("link", { name: "Añadir al comparador" }).click();
   await expect(page.getByRole("table")).toBeVisible();
@@ -49,29 +53,56 @@ test("catalog search, PDP and two-product comparison use persisted stock and att
   expect(errors).toEqual([]);
 });
 
-test("category, brand, validation, empty and not-found states render real responses", async ({
+test("N-level breadcrumbs, category/brand, malformed URLs, validation, empty and not-found states render cleanly", async ({
   page,
 }) => {
+  const errors = collectRuntimeErrors(page);
+  await page.goto("/producto/macbook-air-m3-13-256gb");
+  const breadcrumbs = page.getByRole("navigation", { name: "Migas de pan" });
+  await expect(breadcrumbs.getByRole("link", { name: "Computadores" })).toBeVisible();
+  await expect(breadcrumbs.getByRole("link", { name: "Portátiles" })).toBeVisible();
+  await expect(breadcrumbs.getByRole("link", { name: "Ultrabooks" })).toBeVisible();
+
   await page.goto("/categoria/audio");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Audio");
   await expect(
     page.getByRole("link", { name: "Audífonos Sony WH-1000XM5", exact: true }),
   ).toBeVisible();
+
   await page.goto("/marca/sony");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Sony");
   await expect(page.getByRole("link", { name: "Parlante JBL Charge 5", exact: true })).toHaveCount(
     0,
   );
+
   await page.goto("/productos?precioMin=2000000&precioMax=10");
   await expect(page.getByText(/Revisa los precios/)).toBeVisible();
+
+  await page.goto("/productos?marca=INVALID_BRAND!");
+  await expect(page.getByText(/La marca seleccionada no es válida/)).toBeVisible();
+
+  await page.goto("/productos?attr_BAD-KEY=1");
+  await expect(page.getByText(/Alguno de los filtros técnicos no es válido/)).toBeVisible();
+
   await page.goto("/productos?q=ningun-producto-existe");
   await expect(
     page.getByRole("heading", { name: "No hay productos con estos criterios" }),
   ).toBeVisible();
-  const response = await page.goto("/producto/no-existe");
-  expect(response?.status()).toBe(200);
-  await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
-  await expect(page.locator('meta[name="robots"]').first()).toHaveAttribute("content", "noindex");
+
+  for (const missingPath of [
+    "/producto/no-existe",
+    "/producto/invalid_slug!!",
+    "/categoria/invalid_slug!!",
+    "/marca/invalid_slug!!",
+  ]) {
+    const response = await page.goto(missingPath);
+    expect(response?.status()).toBe(200);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText(
+      "No encontramos esta página",
+    );
+    await expect(page.locator('meta[name="robots"]').first()).toHaveAttribute("content", "noindex");
+  }
+  expect(errors).toEqual([]);
 });
 
 const accessibleRoutes = [

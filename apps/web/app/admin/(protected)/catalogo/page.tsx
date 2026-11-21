@@ -25,7 +25,13 @@ function pageHref(q: string, status: string, page: number): string {
 export default async function AdminCatalogPage({ searchParams }: PageProps<"/admin/catalogo">) {
   const session = await requireAdminPage("catalog:read");
   const raw = await searchParams;
-  const q = typeof raw.q === "string" ? raw.q.trim().slice(0, 100) : "";
+  const q =
+    typeof raw.q === "string"
+      ? raw.q
+          .replace(/[\u0000-\u001f\u007f]/g, "")
+          .trim()
+          .slice(0, 100)
+      : "";
   const status = ["DRAFT", "ACTIVE", "ARCHIVED"].includes(String(raw.status))
     ? (raw.status as "DRAFT" | "ACTIVE" | "ARCHIVED")
     : undefined;

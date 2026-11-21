@@ -5,12 +5,36 @@ import Link from "next/link";
 
 import { resolveCatalogMediaUrl } from "@/components/catalog/media-url";
 
-function cardImage(product: CatalogProductSummary, origin: string | null): string | null {
-  const media = product.media.find((item) => item.mediaType === "IMAGE") ?? product.media[0];
-  if (!media) return null;
-  const key =
-    media.mediaType === "IMAGE" ? media.storageKey : (media.posterKey ?? media.storageKey);
-  return resolveCatalogMediaUrl(key, origin);
+function cardImage(
+  product: CatalogProductSummary,
+  origin: string | null,
+): { src: string; alt: string } | null {
+  if (!origin) return null;
+  for (const media of product.media) {
+    if (media.mediaType === "IMAGE") {
+      const src = resolveCatalogMediaUrl(media.storageKey, origin);
+      if (src) return { src, alt: media.altText || product.name };
+    }
+  }
+  for (const media of product.media) {
+    if (media.posterKey) {
+      const src = resolveCatalogMediaUrl(media.posterKey, origin);
+      if (src) return { src, alt: media.altText || product.name };
+    }
+    if (media.mediaType === "SPIN_360") {
+      const firstFrame = media.frames[0];
+      const fallbackKey =
+        firstFrame?.key ??
+        firstFrame?.derivatives.find((item) => item.format === "webp")?.key ??
+        firstFrame?.derivatives[0]?.key ??
+        null;
+      if (fallbackKey) {
+        const src = resolveCatalogMediaUrl(fallbackKey, origin);
+        if (src) return { src, alt: media.altText || product.name };
+      }
+    }
+  }
+  return null;
 }
 
 export function ProductCard({
@@ -24,11 +48,13 @@ export function ProductCard({
 }) {
   const image = cardImage(product, mediaOrigin);
   const compared = compareSlugs.includes(product.slug);
-  const compareHref = `/comparar?productos=${encodeURIComponent(
-    compared
-      ? compareSlugs.filter((slug) => slug !== product.slug).join(",")
-      : [...compareSlugs, product.slug].join(","),
-  )}`;
+  const nextSlugs = compared
+    ? compareSlugs.filter((slug) => slug !== product.slug)
+    : [...compareSlugs, product.slug];
+  const compareHref =
+    nextSlugs.length > 0
+      ? `/comparar?productos=${encodeURIComponent(nextSlugs.join(","))}`
+      : "/comparar";
   return (
     <article className="flex h-full flex-col overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-sm">
       <Link
@@ -38,8 +64,8 @@ export function ProductCard({
       >
         {image ? (
           <Image
-            src={image}
-            alt={product.media[0]?.altText ?? product.name}
+            src={image.src}
+            alt={image.alt}
             fill
             sizes="(min-width: 1024px) 30vw, (min-width: 640px) 45vw, 100vw"
             className="object-contain p-4"

@@ -57,6 +57,7 @@ export default async function CategoryPage({
           category.description ?? `Explora las opciones disponibles en ${category.name}.`
         }
         mediaOrigin={getPublicMediaOrigin()}
+        compareSlugs={parsed.compareSlugs}
         fixedFilter={{ kind: "categoria", value: category.slug }}
         {...(parsed.error ? { error: parsed.error } : {})}
       />

@@ -115,6 +115,7 @@ const requiredPartialIndexes = [
 const requiredCatalogIndexes = [
   "Product_searchVector_idx",
   "ProductVariant_active_price_idx",
+  "ProductVariant_product_active_price_idx",
   "ProductAttributeValue_product_attribute_normalized_idx",
 ] as const;
 const requiredSecurityTriggers = [

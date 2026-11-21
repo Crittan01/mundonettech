@@ -3,7 +3,14 @@ import { CatalogService } from "@mundonettech/db";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { CatalogProductForm, CatalogVariantForm } from "@/components/admin/catalog-forms";
+import {
+  CatalogAttributeForm,
+  CatalogAttributeRemoveForm,
+  CatalogCompatibilityForm,
+  CatalogCompatibilityRemoveForm,
+  CatalogProductForm,
+  CatalogVariantForm,
+} from "@/components/admin/catalog-forms";
 import { StepUpPrompt } from "@/components/admin/security-manager";
 import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
@@ -11,10 +18,17 @@ import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Editar producto" };
 
+const fitLabels = {
+  EXACT: "Compatibilidad directa",
+  ADAPTER: "Requiere adaptador",
+  NOT_COMPATIBLE: "No compatible",
+} as const;
+
 export default async function AdminCatalogProductPage({
   params,
+  searchParams,
 }: PageProps<"/admin/catalogo/[id]">) {
-  const { id } = await params;
+  const [{ id }, query] = await Promise.all([params, searchParams]);
   const session = await requireAdminPage("catalog:read");
   const service = new CatalogService(getDatabase());
   const product = await service.getAdminProduct(id);
@@ -31,17 +45,35 @@ export default async function AdminCatalogProductPage({
     const recentMfa = session.lastMfaAt && now.getTime() - session.lastMfaAt.getTime() <= 600_000;
     if (!recentMfa && verifiedFactor) stepUp = <StepUpPrompt factorId={verifiedFactor.id} />;
   }
+  const justCreated = query.created === "1";
+
   return (
     <div className="space-y-8">
       <div>
-        <Link href="/admin/catalogo" className="text-sm text-primary hover:underline">
-          Volver al catálogo
-        </Link>
+        <div className="flex flex-wrap items-center gap-4 text-sm">
+          <Link href="/admin/catalogo" className="text-primary hover:underline">
+            Volver al catálogo
+          </Link>
+          {product.status === "ACTIVE" ? (
+            <Link href={`/producto/${product.slug}`} className="text-primary hover:underline">
+              Ver ficha pública
+            </Link>
+          ) : null}
+        </div>
         <h1 className="mt-3 text-3xl font-bold">{product.name}</h1>
         <p className="mt-2 text-muted-foreground">
           {product.brand.name} · {product.category.name} · {product.taxGroup.code}
         </p>
       </div>
+      {justCreated ? (
+        <p
+          role="status"
+          className="rounded-xl border border-border bg-card p-4 text-sm font-medium text-foreground"
+        >
+          Producto creado con su variante inicial y cambio registrado en auditoría. Ahora puedes
+          completar variantes adicionales, ficha técnica y compatibilidad.
+        </p>
+      ) : null}
       {stepUp}
       {canWrite && references ? (
         <CatalogProductForm
@@ -60,6 +92,7 @@ export default async function AdminCatalogProductPage({
             retractPolicy: product.retractPolicy,
             warrantyMonths: product.warrantyMonths,
             trackSerial: product.trackSerial,
+            hasInventoryHistory: product.hasInventoryHistory,
             seoTitle: product.seoTitle ?? "",
             seoDescription: product.seoDescription ?? "",
           }}
@@ -75,13 +108,14 @@ export default async function AdminCatalogProductPage({
           </p>
         </section>
       )}
+
       <section aria-labelledby="admin-variants" className="space-y-4">
         <div>
           <h2 id="admin-variants" className="text-2xl font-bold">
             Variantes
           </h2>
           <p className="mt-2 text-muted-foreground">
-            SKU, precios, identificadores y configuración logística.
+            SKU, precios, identificadores GS1 y configuración logística.
           </p>
         </div>
         {product.variants.map((variant) =>
@@ -123,6 +157,112 @@ export default async function AdminCatalogProductPage({
               <CatalogVariantForm productId={product.id} />
             </div>
           </details>
+        ) : null}
+      </section>
+
+      <section aria-labelledby="admin-attributes" className="space-y-4">
+        <div>
+          <h2 id="admin-attributes" className="text-2xl font-bold">
+            Ficha técnica
+          </h2>
+          <p className="mt-2 text-muted-foreground">
+            Especificaciones tipadas para facetas de búsqueda, ficha pública y comparador.
+          </p>
+        </div>
+        {product.formattedAttributes.length > 0 ? (
+          <div className="space-y-3">
+            {product.formattedAttributes.map((attr) =>
+              canWrite && references ? (
+                <div key={attr.id} className="space-y-2">
+                  <CatalogAttributeForm
+                    productId={product.id}
+                    attributes={references.attributes}
+                    entry={{
+                      id: attr.id,
+                      attributeId: attr.attributeId,
+                      rawValue: attr.rawValue,
+                    }}
+                  />
+                  <div className="flex justify-end">
+                    <CatalogAttributeRemoveForm
+                      productId={product.id}
+                      attributeValueId={attr.id}
+                      label={attr.name}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <article
+                  key={attr.id}
+                  className="rounded-xl border border-border bg-card p-4 text-sm"
+                >
+                  <span className="font-semibold">
+                    {attr.name}
+                    {attr.unit ? ` (${attr.unit})` : ""}:
+                  </span>{" "}
+                  {attr.displayValue}
+                </article>
+              ),
+            )}
+          </div>
+        ) : (
+          <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+            Este producto aún no tiene especificaciones técnicas registradas.
+          </p>
+        )}
+        {canWrite && references ? (
+          <CatalogAttributeForm productId={product.id} attributes={references.attributes} />
+        ) : null}
+      </section>
+
+      <section aria-labelledby="admin-compatibility" className="space-y-4">
+        <div>
+          <h2 id="admin-compatibility" className="text-2xl font-bold">
+            Compatibilidad de dispositivos
+          </h2>
+          <p className="mt-2 text-muted-foreground">
+            Equipos compatibles verificados para orientar la compra y prevenir devoluciones.
+          </p>
+        </div>
+        {product.compatibility.length > 0 ? (
+          <ul className="space-y-3">
+            {product.compatibility.map((link) => {
+              const deviceLabel = `${link.device.brand.name} ${link.device.model}${
+                link.device.generation ? ` (${link.device.generation})` : ""
+              }`;
+              return (
+                <li
+                  key={link.id}
+                  className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border bg-card p-4 text-sm"
+                >
+                  <div>
+                    <p className="font-semibold">{deviceLabel}</p>
+                    <p className="text-muted-foreground">
+                      {fitLabels[link.fit]}
+                      {link.notes ? ` · ${link.notes}` : ""}
+                    </p>
+                  </div>
+                  {canWrite ? (
+                    <CatalogCompatibilityRemoveForm
+                      productId={product.id}
+                      compatibilityId={link.id}
+                      label={deviceLabel}
+                    />
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+            No se han asociado dispositivos de compatibilidad todavía.
+          </p>
+        )}
+        {canWrite && references ? (
+          <CatalogCompatibilityForm
+            productId={product.id}
+            devices={references.compatibilityDevices}
+          />
         ) : null}
       </section>
     </div>

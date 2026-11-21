@@ -19,6 +19,7 @@ export function CatalogBrowser({
   title,
   description,
   mediaOrigin,
+  compareSlugs = [],
   error,
   fixedFilter,
 }: {
@@ -28,6 +29,7 @@ export function CatalogBrowser({
   title: string;
   description: string;
   mediaOrigin: string | null;
+  compareSlugs?: readonly string[];
   error?: string;
   fixedFilter?: { kind: "categoria" | "marca"; value: string };
 }) {
@@ -192,7 +194,12 @@ export function CatalogBrowser({
           className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"
         >
           {result.items.map((product) => (
-            <ProductCard key={product.id} product={product} mediaOrigin={mediaOrigin} />
+            <ProductCard
+              key={product.id}
+              product={product}
+              mediaOrigin={mediaOrigin}
+              compareSlugs={compareSlugs}
+            />
           ))}
         </section>
       ) : (

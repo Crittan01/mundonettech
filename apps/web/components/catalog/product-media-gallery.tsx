@@ -1,8 +1,38 @@
 import type { CatalogMedia } from "@mundonettech/db";
-import { Model3d, Spin360 } from "@mundonettech/media/viewers";
+import { buildSpinFrames, Model3d, Spin360, type SpinFrame } from "@mundonettech/media/viewers";
 import Image from "next/image";
 
 import { resolveCatalogMediaUrl } from "@/components/catalog/media-url";
+
+function resolveSpin360Frames(
+  media: CatalogMedia,
+  origin: string,
+  fallbackWidth: number,
+  fallbackHeight: number,
+): SpinFrame[] {
+  if (media.frames.length >= 2 && media.frames.every((frame) => frame.derivatives.length > 0)) {
+    try {
+      return buildSpinFrames(
+        media.frames.map((frame) => ({
+          frame: frame.frame,
+          derivatives: frame.derivatives,
+        })),
+        {
+          baseUrl: origin,
+          sizes: "(min-width: 1024px) 45vw, 100vw",
+        },
+      );
+    } catch {
+      return [];
+    }
+  }
+  return media.frames
+    .map((frame) => {
+      const src = frame.key ? resolveCatalogMediaUrl(frame.key, origin) : null;
+      return src ? { src, width: fallbackWidth, height: fallbackHeight } : null;
+    })
+    .filter((frame): frame is SpinFrame => frame !== null);
+}
 
 function MediaItem({ media, origin }: { media: CatalogMedia; origin: string }) {
   const src = resolveCatalogMediaUrl(media.storageKey, origin);
@@ -22,18 +52,22 @@ function MediaItem({ media, origin }: { media: CatalogMedia; origin: string }) {
     );
   }
   if (media.mediaType === "VIDEO") {
+    const poster = media.posterKey ? resolveCatalogMediaUrl(media.posterKey, origin) : null;
     return (
-      <video controls preload="none" className="w-full rounded-xl" aria-label={media.altText}>
+      <video
+        controls
+        preload="none"
+        {...(poster ? { poster } : {})}
+        className="w-full rounded-xl"
+        aria-label={media.altText}
+      >
         <source src={src} />
         Tu navegador no puede reproducir este video.
       </video>
     );
   }
   if (media.mediaType === "SPIN_360") {
-    const frames = media.frames
-      .map((frame) => ({ ...frame, src: resolveCatalogMediaUrl(frame.key, origin) }))
-      .filter((frame): frame is typeof frame & { src: string } => frame.src !== null)
-      .map((frame) => ({ src: frame.src, width, height }));
+    const frames = resolveSpin360Frames(media, origin, width, height);
     return <Spin360 frames={frames} alt={media.altText} />;
   }
   if (media.mediaType === "MODEL_3D") {

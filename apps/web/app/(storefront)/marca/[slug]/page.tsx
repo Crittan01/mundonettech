@@ -30,6 +30,7 @@ export default async function BrandPage({ params, searchParams }: PageProps<"/ma
       title={brand.name}
       description={brand.description ?? `Productos originales y compatibles de ${brand.name}.`}
       mediaOrigin={getPublicMediaOrigin()}
+      compareSlugs={parsed.compareSlugs}
       fixedFilter={{ kind: "marca", value: brand.slug }}
       {...(parsed.error ? { error: parsed.error } : {})}
     />

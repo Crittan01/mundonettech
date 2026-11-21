@@ -14,13 +14,23 @@ export interface CatalogSearchFilters {
   readonly excludeProductId?: string;
 }
 
-export interface CatalogMediaFrame {
+export interface CatalogMediaDerivative {
+  readonly format: "avif" | "webp";
+  readonly width: number;
+  readonly height: number;
   readonly key: string;
+}
+
+export interface CatalogMediaFrame {
+  readonly frame: number;
+  readonly key: string | null;
   readonly altText: string | null;
+  readonly derivatives: CatalogMediaDerivative[];
 }
 
 export interface CatalogMedia {
   readonly id: string;
+  readonly variantId: string | null;
   readonly mediaType: "IMAGE" | "VIDEO" | "SPIN_360" | "MODEL_3D" | "GAUSSIAN_SPLAT";
   readonly storageKey: string;
   readonly altText: string;
@@ -49,6 +59,15 @@ export interface CatalogProductSummary {
   readonly media: CatalogMedia[];
 }
 
+export interface CatalogVariantOptionItem {
+  readonly key: string;
+  readonly name: string;
+  readonly displayType: "SELECT" | "SWATCH" | "PILL";
+  readonly label: string;
+  readonly value: string;
+  readonly hexColor: string | null;
+}
+
 export interface CatalogVariant {
   readonly id: string;
   readonly sku: string;
@@ -63,7 +82,7 @@ export interface CatalogVariant {
   readonly heightMillimeters: number;
   readonly isDefault: boolean;
   readonly available: number;
-  readonly options: Array<{ key: string; name: string; label: string; value: string }>;
+  readonly options: CatalogVariantOptionItem[];
 }
 
 export interface CatalogAttributeValue {
@@ -76,10 +95,12 @@ export interface CatalogAttributeValue {
 }
 
 export interface CatalogProductDetail extends CatalogProductSummary {
+  readonly categoryBreadcrumbs: Array<{ readonly slug: string; readonly name: string }>;
   readonly description: string | null;
   readonly seoTitle: string | null;
   readonly seoDescription: string | null;
   readonly authenticity: "ORIGINAL" | "CERTIFIED_COMPATIBLE" | "OEM";
+  readonly retractPolicy: "STANDARD" | "LEGAL_EXCEPTION_REVIEW";
   readonly warrantyMonths: number;
   readonly trackSerial: boolean;
   readonly variants: CatalogVariant[];
@@ -95,9 +116,17 @@ export interface CatalogProductDetail extends CatalogProductSummary {
   readonly bundles: Array<{
     readonly slug: string;
     readonly name: string;
+    readonly description: string | null;
     readonly priceCents: string | null;
     readonly discountCents: string;
-    readonly items: Array<{ variantId: string; sku: string; quantity: number }>;
+    readonly effectivePriceCents: string;
+    readonly items: Array<{
+      readonly variantId: string;
+      readonly sku: string;
+      readonly productSlug: string;
+      readonly productName: string;
+      readonly quantity: number;
+    }>;
   }>;
 }
 
@@ -211,6 +240,18 @@ export interface CatalogVariantInput {
 
 export interface CatalogProductCreateInput extends CatalogProductBaseInput {
   readonly variant: CatalogVariantInput;
+}
+
+export interface CatalogProductAttributeInput {
+  readonly id?: string;
+  readonly attributeId: string;
+  readonly value: string;
+}
+
+export interface CatalogProductCompatibilityInput {
+  readonly deviceId: string;
+  readonly fit: "EXACT" | "ADAPTER" | "NOT_COMPATIBLE";
+  readonly notes?: string;
 }
 
 export interface CatalogMutationAudit {

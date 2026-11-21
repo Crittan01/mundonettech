@@ -2,6 +2,7 @@ import {
   assertCatalogMoney,
   assertValidEan,
   assertValidGs1,
+  normalizeAttributeValue,
   normalizeSku,
 } from "@mundonettech/core";
 
@@ -20,9 +21,12 @@ import type {
   CatalogCategory,
   CatalogComparison,
   CatalogMedia,
+  CatalogMediaDerivative,
   CatalogMediaFrame,
   CatalogMutationAudit,
+  CatalogProductAttributeInput,
   CatalogProductBaseInput,
+  CatalogProductCompatibilityInput,
   CatalogProductCreateInput,
   CatalogProductDetail,
   CatalogProductSummary,
@@ -59,10 +63,12 @@ const detailInclude = {
   ...summaryInclude,
   taxGroup: true,
   attributeValues: {
+    where: { attribute: { deletedAt: null } },
     include: { attribute: true },
     orderBy: [{ attribute: { name: "asc" as const } }, { normalizedValue: "asc" as const }],
   },
   compatibility: {
+    where: { device: { deletedAt: null, brand: { deletedAt: null } } },
     include: { device: { include: { brand: true } } },
     orderBy: [{ device: { model: "asc" as const } }],
   },
@@ -77,7 +83,17 @@ const detailInclude = {
         include: {
           bundle: {
             include: {
-              items: { include: { variant: true } },
+              items: {
+                include: {
+                  variant: {
+                    include: {
+                      product: {
+                        include: { brand: true, category: true },
+                      },
+                    },
+                  },
+                },
+              },
             },
           },
         },
@@ -89,6 +105,21 @@ const detailInclude = {
 type SummaryRecord = Prisma.ProductGetPayload<{ include: typeof summaryInclude }>;
 type DetailRecord = Prisma.ProductGetPayload<{ include: typeof detailInclude }>;
 type AttributeRecord = ProductAttributeValue & { attribute: AttributeDefinition };
+
+export type CatalogQueryErrorCode =
+  | "INVALID_INPUT"
+  | "INVALID_SLUG"
+  | "INVALID_SKU"
+  | "INVALID_GS1"
+  | "INVALID_EAN"
+  | "INVALID_MONEY"
+  | "INVALID_ATTRIBUTE"
+  | "INVALID_REFERENCE"
+  | "INACTIVE_DEFAULT"
+  | "NO_ACTIVE_VARIANT";
+
+export type CatalogConflictErrorCode =
+  "DUPLICATE_IDENTITY" | "SERIAL_TRACKING_LOCKED" | "INVENTORY_LIFECYCLE_LOCKED";
 
 interface NormalizedFilters {
   readonly q: string | null;
@@ -112,14 +143,20 @@ export class CatalogNotFoundError extends Error {
 }
 
 export class CatalogQueryError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code: CatalogQueryErrorCode = "INVALID_INPUT",
+  ) {
     super(message);
     this.name = "CatalogQueryError";
   }
 }
 
 export class CatalogConflictError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code: CatalogConflictErrorCode = "DUPLICATE_IDENTITY",
+  ) {
     super(message);
     this.name = "CatalogConflictError";
   }
@@ -184,7 +221,9 @@ function inputText(
 function normalizeBaseInput(input: CatalogProductBaseInput): NormalizedBaseInput {
   const slug = normalizeSlug(input.slug, "slug");
   const name = inputText(input.name, "name", 200, true);
-  if (!slug || !name) throw new CatalogQueryError("Product slug and name are required.");
+  if (!slug || !name) {
+    throw new CatalogQueryError("Product slug and name are required.", "INVALID_SLUG");
+  }
   if (!["DRAFT", "ACTIVE", "ARCHIVED"].includes(input.status)) {
     throw new CatalogQueryError("Invalid product status.");
   }
@@ -223,7 +262,7 @@ function normalizeBaseInput(input: CatalogProductBaseInput): NormalizedBaseInput
 
 function requiredMoney(value: string, field: string): bigint {
   const parsed = normalizeMoney(value, field);
-  if (parsed === null) throw new CatalogQueryError(`${field} is required.`);
+  if (parsed === null) throw new CatalogQueryError(`${field} is required.`, "INVALID_MONEY");
   return parsed;
 }
 
@@ -233,7 +272,14 @@ function normalizeVariantInput(input: CatalogVariantInput): NormalizedVariantInp
   const compareAtPriceCents = input.compareAtPriceCents
     ? requiredMoney(input.compareAtPriceCents, "compareAtPriceCents")
     : null;
-  assertCatalogMoney(priceCents, costCents, compareAtPriceCents ?? undefined);
+  try {
+    assertCatalogMoney(priceCents, costCents, compareAtPriceCents ?? undefined);
+  } catch (error) {
+    throw new CatalogQueryError(
+      error instanceof Error ? error.message : "Invalid catalog money.",
+      "INVALID_MONEY",
+    );
+  }
   for (const [field, value] of [
     ["weightGrams", input.weightGrams],
     ["lengthMillimeters", input.lengthMillimeters],
@@ -248,16 +294,47 @@ function normalizeVariantInput(input: CatalogVariantInput): NormalizedVariantInp
     throw new CatalogQueryError("Invalid variant status.");
   }
   if (input.isDefault && input.status !== "ACTIVE") {
-    throw new CatalogQueryError("An inactive variant cannot be the default.");
+    throw new CatalogQueryError("An inactive variant cannot be the default.", "INACTIVE_DEFAULT");
+  }
+  let sku: string;
+  try {
+    sku = normalizeSku(input.sku);
+  } catch (error) {
+    throw new CatalogQueryError(
+      error instanceof Error ? error.message : "Invalid SKU format.",
+      "INVALID_SKU",
+    );
+  }
+  let gtin: string | null = null;
+  if (input.gtin && input.gtin.trim() !== "") {
+    try {
+      gtin = assertValidGs1(input.gtin);
+    } catch (error) {
+      throw new CatalogQueryError(
+        error instanceof Error ? error.message : "Invalid GS1 code.",
+        "INVALID_GS1",
+      );
+    }
+  }
+  let ean: string | null = null;
+  if (input.ean && input.ean.trim() !== "") {
+    try {
+      ean = assertValidEan(input.ean);
+    } catch (error) {
+      throw new CatalogQueryError(
+        error instanceof Error ? error.message : "Invalid EAN-8 or EAN-13 code.",
+        "INVALID_EAN",
+      );
+    }
   }
   return {
     id: input.id ? inputUuid(input.id, "variantId") : null,
-    sku: normalizeSku(input.sku),
+    sku,
     priceCents,
     costCents,
     compareAtPriceCents,
-    gtin: input.gtin ? assertValidGs1(input.gtin) : null,
-    ean: input.ean ? assertValidEan(input.ean) : null,
+    gtin,
+    ean,
     mpn: inputText(input.mpn, "mpn", 64),
     weightGrams: input.weightGrams,
     lengthMillimeters: input.lengthMillimeters,
@@ -272,11 +349,36 @@ function hasErrorCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
+function extractSqlErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return "";
+}
+
+function rethrowCatalogMutationError(error: unknown, duplicateMessage: string): never {
+  if (hasErrorCode(error, "P2002")) {
+    throw new CatalogConflictError(duplicateMessage, "DUPLICATE_IDENTITY");
+  }
+  const message = extractSqlErrorMessage(error);
+  if (/serial tracking cannot change once inventory/i.test(message)) {
+    throw new CatalogConflictError(
+      "Product serial tracking cannot change once inventory records exist.",
+      "SERIAL_TRACKING_LOCKED",
+    );
+  }
+  if (/cannot archive a (?:product|variant) with active stock/i.test(message)) {
+    throw new CatalogConflictError(
+      "Cannot archive a catalog item with active stock, serialized units, or open purchase orders.",
+      "INVENTORY_LIFECYCLE_LOCKED",
+    );
+  }
+  throw error;
+}
+
 async function writeCatalogAudit(
   tx: Prisma.TransactionClient,
   audit: CatalogMutationAudit,
   action: string,
-  targetType: "Product" | "ProductVariant",
+  targetType: "Product" | "ProductVariant" | "ProductAttributeValue" | "ProductCompatibility",
   targetId: string,
   metadata: Prisma.JsonObject,
 ): Promise<void> {
@@ -301,11 +403,20 @@ function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+function parseLookupSlug(value: string | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized.length > 160 || !slugPattern.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
 function normalizeSlug(value: string | undefined, field: string): string | null {
   if (value === undefined || value.trim() === "") return null;
   const normalized = value.trim().toLowerCase();
   if (!slugPattern.test(normalized) || normalized.length > 160) {
-    throw new CatalogQueryError(`${field} is not a valid catalog slug.`);
+    throw new CatalogQueryError(`${field} is not a valid catalog slug.`, "INVALID_SLUG");
   }
   return normalized;
 }
@@ -314,10 +425,15 @@ function normalizeMoney(value: string | undefined, field: string): bigint | null
   if (value === undefined || value.trim() === "") return null;
   const normalized = value.trim();
   if (!/^[0-9]+$/.test(normalized)) {
-    throw new CatalogQueryError(`${field} must contain non-negative integer cents.`);
+    throw new CatalogQueryError(
+      `${field} must contain non-negative integer cents.`,
+      "INVALID_MONEY",
+    );
   }
   const parsed = BigInt(normalized);
-  if (parsed > maxSignedBigInt) throw new CatalogQueryError(`${field} exceeds BIGINT bounds.`);
+  if (parsed > maxSignedBigInt) {
+    throw new CatalogQueryError(`${field} exceeds BIGINT bounds.`, "INVALID_MONEY");
+  }
   return parsed;
 }
 
@@ -353,7 +469,7 @@ function normalizeFilters(filters: CatalogSearchFilters): NormalizedFilters {
   const minPriceCents = normalizeMoney(filters.minPriceCents, "minPriceCents");
   const maxPriceCents = normalizeMoney(filters.maxPriceCents, "maxPriceCents");
   if (minPriceCents !== null && maxPriceCents !== null && minPriceCents > maxPriceCents) {
-    throw new CatalogQueryError("minPriceCents cannot exceed maxPriceCents.");
+    throw new CatalogQueryError("minPriceCents cannot exceed maxPriceCents.", "INVALID_MONEY");
   }
   const page = filters.page ?? 1;
   const pageSize = filters.pageSize ?? 12;
@@ -431,21 +547,34 @@ function catalogScope(
       `);
     }
   }
-  if (filters.minPriceCents !== null) {
+  if (filters.minPriceCents !== null || filters.maxPriceCents !== null) {
+    const variantConditions: Prisma.Sql[] = [
+      Prisma.sql`priceVariant."productId" = p."id"`,
+      Prisma.sql`priceVariant."status" = 'ACTIVE'`,
+      Prisma.sql`priceVariant."deletedAt" IS NULL`,
+    ];
+    if (filters.minPriceCents !== null) {
+      variantConditions.push(Prisma.sql`priceVariant."priceCents" >= ${filters.minPriceCents}`);
+    }
+    if (filters.maxPriceCents !== null) {
+      variantConditions.push(Prisma.sql`priceVariant."priceCents" <= ${filters.maxPriceCents}`);
+    }
+    if (filters.inStock) {
+      variantConditions.push(Prisma.sql`
+        EXISTS (
+          SELECT 1 FROM "StockLevel" variantLevel
+          JOIN "StockLocation" variantLocation ON variantLocation."id" = variantLevel."locationId"
+          WHERE variantLevel."variantId" = priceVariant."id"
+            AND variantLocation."deletedAt" IS NULL
+            AND variantLocation."type" <> 'QUARANTINE'
+          HAVING COALESCE(sum(available_stock(variantLevel."onHand", variantLevel."committed", variantLevel."safetyStock")), 0) > 0
+        )
+      `);
+    }
     conditions.push(Prisma.sql`
       EXISTS (
         SELECT 1 FROM "ProductVariant" priceVariant
-        WHERE priceVariant."productId" = p."id" AND priceVariant."status" = 'ACTIVE'
-          AND priceVariant."deletedAt" IS NULL AND priceVariant."priceCents" >= ${filters.minPriceCents}
-      )
-    `);
-  }
-  if (filters.maxPriceCents !== null) {
-    conditions.push(Prisma.sql`
-      EXISTS (
-        SELECT 1 FROM "ProductVariant" priceVariant
-        WHERE priceVariant."productId" = p."id" AND priceVariant."status" = 'ACTIVE'
-          AND priceVariant."deletedAt" IS NULL AND priceVariant."priceCents" <= ${filters.maxPriceCents}
+        WHERE ${Prisma.join(variantConditions, " AND ")}
       )
     `);
   }
@@ -490,28 +619,70 @@ function orderClause(filters: NormalizedFilters): Prisma.Sql {
   }
 }
 
+function parseFrameDerivatives(raw: unknown): CatalogMediaDerivative[] {
+  if (!Array.isArray(raw)) return [];
+  const derivatives: CatalogMediaDerivative[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const format = record.format;
+    const width = record.width;
+    const height = record.height;
+    const key = typeof record.key === "string" ? record.key : record.storageKey;
+    if (
+      (format === "avif" || format === "webp") &&
+      typeof width === "number" &&
+      Number.isSafeInteger(width) &&
+      width > 0 &&
+      typeof height === "number" &&
+      Number.isSafeInteger(height) &&
+      height > 0 &&
+      typeof key === "string" &&
+      key.length > 0
+    ) {
+      derivatives.push({ format, width, height, key });
+    }
+  }
+  return derivatives;
+}
+
 function mediaFrames(media: ProductMedia): CatalogMediaFrame[] {
   if (!Array.isArray(media.frames)) return [];
   const frames: CatalogMediaFrame[] = [];
-  for (const frame of media.frames) {
-    if (typeof frame === "string") frames.push({ key: frame, altText: null });
-    else if (typeof frame === "object" && frame !== null && !Array.isArray(frame)) {
-      const record = frame as Record<string, unknown>;
-      const key = typeof record.key === "string" ? record.key : record.storageKey;
-      if (typeof key === "string") {
+  for (let index = 0; index < media.frames.length; index += 1) {
+    const entry = media.frames[index];
+    if (typeof entry === "string" && entry.length > 0) {
+      frames.push({ frame: index, key: entry, altText: null, derivatives: [] });
+    } else if (typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+      const record = entry as Record<string, unknown>;
+      const frameNumber =
+        typeof record.frame === "number" && Number.isSafeInteger(record.frame) && record.frame >= 0
+          ? record.frame
+          : index;
+      const keyValue =
+        typeof record.key === "string" && record.key.length > 0
+          ? record.key
+          : typeof record.storageKey === "string" && record.storageKey.length > 0
+            ? record.storageKey
+            : null;
+      const derivatives = parseFrameDerivatives(record.derivatives);
+      if (keyValue !== null || derivatives.length > 0) {
         frames.push({
-          key,
+          frame: frameNumber,
+          key: keyValue,
           altText: typeof record.altText === "string" ? record.altText : null,
+          derivatives,
         });
       }
     }
   }
-  return frames;
+  return frames.sort((left, right) => left.frame - right.frame);
 }
 
 function toMedia(media: ProductMedia): CatalogMedia {
   return {
     id: media.id,
+    variantId: media.variantId,
     mediaType: media.mediaType,
     storageKey: media.storageKey,
     altText: media.altText,
@@ -532,6 +703,82 @@ function safeAvailable(value: bigint): number {
   return converted;
 }
 
+function typedAttributeColumns(
+  valueType: AttributeDefinition["valueType"],
+  rawInput: string,
+): {
+  textValue: string | null;
+  integerValue: bigint | null;
+  decimalValue: string | null;
+  booleanValue: boolean | null;
+  urlValue: string | null;
+  jsonValue: Prisma.InputJsonValue | typeof Prisma.DbNull;
+  normalizedValue: string;
+} {
+  let typedValue: unknown = rawInput;
+  if (valueType === "BOOLEAN") {
+    const lowered = rawInput.trim().toLowerCase();
+    if (lowered === "true" || lowered === "1" || lowered === "sí" || lowered === "si") {
+      typedValue = true;
+    } else if (lowered === "false" || lowered === "0" || lowered === "no") {
+      typedValue = false;
+    } else {
+      throw new CatalogQueryError("Boolean attribute requires true or false.", "INVALID_ATTRIBUTE");
+    }
+  } else if (valueType === "JSON") {
+    try {
+      typedValue = JSON.parse(rawInput);
+    } catch {
+      throw new CatalogQueryError("Attribute requires valid JSON.", "INVALID_ATTRIBUTE");
+    }
+  }
+
+  let normalizedValue: string;
+  try {
+    normalizedValue = normalizeAttributeValue(valueType, typedValue);
+  } catch (error) {
+    throw new CatalogQueryError(
+      error instanceof Error ? error.message : "Invalid attribute value.",
+      "INVALID_ATTRIBUTE",
+    );
+  }
+
+  return {
+    textValue: valueType === "TEXT" ? rawInput.trim() : null,
+    integerValue: valueType === "INTEGER" ? BigInt(normalizedValue) : null,
+    decimalValue: valueType === "DECIMAL" ? normalizedValue : null,
+    booleanValue: valueType === "BOOLEAN" ? (typedValue as boolean) : null,
+    urlValue: valueType === "URL" ? rawInput.trim() : null,
+    jsonValue: valueType === "JSON" ? (typedValue as Prisma.InputJsonValue) : Prisma.DbNull,
+    normalizedValue,
+  };
+}
+
+async function hasProductInventoryHistory(
+  db: PrismaClient | Prisma.TransactionClient,
+  productId: string,
+): Promise<boolean> {
+  const rows = await db.$queryRaw<Array<{ locked: boolean }>>`
+    SELECT (
+      EXISTS (
+        SELECT 1 FROM "StockLevel" level
+        JOIN "ProductVariant" variant ON variant."id" = level."variantId"
+        WHERE variant."productId" = ${productId}::uuid
+          AND (level."onHand" > 0 OR level."committed" > 0)
+      ) OR EXISTS (
+        SELECT 1 FROM "SerializedUnit" unit
+        JOIN "ProductVariant" variant ON variant."id" = unit."variantId"
+        WHERE variant."productId" = ${productId}::uuid
+      ) OR EXISTS (
+        SELECT 1 FROM "InventoryLedger" ledger
+        JOIN "ProductVariant" variant ON variant."id" = ledger."variantId"
+        WHERE variant."productId" = ${productId}::uuid
+      )
+    ) AS locked
+  `;
+  return rows[0]?.locked === true;
+}
+
 export class CatalogService {
   constructor(private readonly db: PrismaClient) {}
 
@@ -549,6 +796,19 @@ export class CatalogService {
     return new Map(rows.map((row) => [row.variantId, safeAvailable(row.available)]));
   }
 
+  private async breadcrumbsForPath(
+    materializedPath: string,
+  ): Promise<Array<{ slug: string; name: string }>> {
+    const ids = materializedPath.split("/").filter((id) => uuidPattern.test(id));
+    if (ids.length === 0) return [];
+    const records = await this.db.category.findMany({
+      where: { id: { in: ids }, deletedAt: null },
+      orderBy: { depth: "asc" },
+      select: { slug: true, name: true },
+    });
+    return records.map((record) => ({ slug: record.slug, name: record.name }));
+  }
+
   private summary(
     product: SummaryRecord,
     availability: ReadonlyMap<string, number>,
@@ -556,9 +816,27 @@ export class CatalogService {
     const variants = product.variants;
     const defaultVariant = variants.find((variant) => variant.isDefault) ?? variants[0];
     if (!defaultVariant) throw new CatalogNotFoundError("Active product has no active variant.");
-    const prices = variants.map((variant) => variant.priceCents);
-    const priceCents = prices.reduce((minimum, value) => (value < minimum ? value : minimum));
-    const maxPriceCents = prices.reduce((maximum, value) => (value > maximum ? value : maximum));
+    let lowestVariant = defaultVariant;
+    let maxPriceCents = defaultVariant.priceCents;
+    for (const variant of variants) {
+      if (
+        variant.priceCents < lowestVariant.priceCents ||
+        (variant.priceCents === lowestVariant.priceCents &&
+          variant.isDefault &&
+          !lowestVariant.isDefault)
+      ) {
+        lowestVariant = variant;
+      }
+      if (variant.priceCents > maxPriceCents) {
+        maxPriceCents = variant.priceCents;
+      }
+    }
+    const priceCents = lowestVariant.priceCents;
+    const compareAtPriceCents =
+      lowestVariant.compareAtPriceCents !== null &&
+      lowestVariant.compareAtPriceCents > lowestVariant.priceCents
+        ? lowestVariant.compareAtPriceCents.toString()
+        : null;
     return {
       id: product.id,
       slug: product.slug,
@@ -568,7 +846,7 @@ export class CatalogService {
       category: { slug: product.category.slug, name: product.category.name },
       priceCents: priceCents.toString(),
       maxPriceCents: maxPriceCents.toString(),
-      compareAtPriceCents: defaultVariant.compareAtPriceCents?.toString() ?? null,
+      compareAtPriceCents,
       available: variants.reduce(
         (total, variant) => total + (availability.get(variant.id) ?? 0),
         0,
@@ -610,12 +888,15 @@ export class CatalogService {
           unit: string | null;
           valueType: AttributeRecord["attribute"]["valueType"];
           value: string;
+          label: string;
           count: number;
         }>
       >(Prisma.sql`
         SELECT facetAttribute."id", facetAttribute."key", facetAttribute."name",
                facetAttribute."unit", facetAttribute."valueType",
-               facetValue."normalizedValue" AS value, count(*)::int AS count
+               facetValue."normalizedValue" AS value,
+               COALESCE(MIN(facetValue."textValue"), facetValue."normalizedValue") AS label,
+               count(*)::int AS count
         ${attributeScope.from}
         JOIN "ProductAttributeValue" facetValue ON facetValue."productId" = p."id"
         JOIN "AttributeDefinition" facetAttribute ON facetAttribute."id" = facetValue."attributeId"
@@ -637,15 +918,44 @@ export class CatalogService {
       }
     >();
     for (const row of attributes) {
-      const facet = attributeMap.get(row.id) ?? {
+      const facet = attributeMap.get(row.key) ?? {
         key: row.key,
         name: row.name,
         unit: row.unit,
         valueType: row.valueType,
         values: [],
       };
-      facet.values.push({ value: row.value, label: row.value, count: row.count });
-      attributeMap.set(row.id, facet);
+      facet.values.push({ value: row.value, label: row.label, count: row.count });
+      attributeMap.set(row.key, facet);
+    }
+    if (filters.attributes.length > 0) {
+      const missingKeys = filters.attributes
+        .map((entry) => entry.key)
+        .filter((key) => !attributeMap.has(key));
+      if (missingKeys.length > 0) {
+        const definitions = await this.db.attributeDefinition.findMany({
+          where: { key: { in: missingKeys }, filterable: true, deletedAt: null },
+        });
+        for (const definition of definitions) {
+          attributeMap.set(definition.key, {
+            key: definition.key,
+            name: definition.name,
+            unit: definition.unit,
+            valueType: definition.valueType,
+            values: [],
+          });
+        }
+      }
+      for (const selected of filters.attributes) {
+        const facet = attributeMap.get(selected.key);
+        if (!facet) continue;
+        for (const selectedValue of selected.values) {
+          if (!facet.values.some((item) => item.value === selectedValue)) {
+            facet.values.push({ value: selectedValue, label: selectedValue, count: 0 });
+          }
+        }
+        facet.values.sort((left, right) => compareStrings(left.value, right.value));
+      }
     }
     if (filters.brandSlug && !brands.some((brand) => brand.slug === filters.brandSlug)) {
       const selected = await this.db.brand.findFirst({
@@ -668,7 +978,10 @@ export class CatalogService {
     categories.sort((left, right) =>
       compareStrings(left.name.toLowerCase(), right.name.toLowerCase()),
     );
-    return { brands, categories, attributes: [...attributeMap.values()] };
+    const orderedAttributes = [...attributeMap.values()].sort((left, right) =>
+      compareStrings(left.name.toLowerCase(), right.name.toLowerCase()),
+    );
+    return { brands, categories, attributes: orderedAttributes };
   }
 
   async search(input: CatalogSearchFilters = {}): Promise<CatalogSearchResult> {
@@ -708,7 +1021,7 @@ export class CatalogService {
   }
 
   async getProductBySlug(slugValue: string): Promise<CatalogProductDetail | null> {
-    const slug = normalizeSlug(slugValue, "slug");
+    const slug = parseLookupSlug(slugValue);
     if (!slug) return null;
     const product: DetailRecord | null = await this.db.product.findFirst({
       where: {
@@ -720,8 +1033,11 @@ export class CatalogService {
       },
       include: detailInclude,
     });
-    if (!product) return null;
-    const availability = await this.availability(product.variants.map((variant) => variant.id));
+    if (!product || product.variants.length === 0) return null;
+    const [availability, categoryBreadcrumbs] = await Promise.all([
+      this.availability(product.variants.map((variant) => variant.id)),
+      this.breadcrumbsForPath(product.category.materializedPath),
+    ]);
     const summary = this.summary(product, availability);
     const variants: CatalogVariant[] = product.variants.map((variant) => ({
       id: variant.id,
@@ -740,22 +1056,46 @@ export class CatalogService {
       options: variant.optionLinks.map((link) => ({
         key: link.optionDefinition.key,
         name: link.optionDefinition.name,
+        displayType: link.optionDefinition.displayType,
         label: link.optionValue.label,
         value: link.optionValue.value,
+        hexColor: link.optionValue.hexColor,
       })),
     }));
     const bundleMap = new Map<string, CatalogProductDetail["bundles"][number]>();
     for (const variant of product.variants) {
       for (const item of variant.bundleItems) {
-        if (item.bundle.status !== "ACTIVE" || item.bundle.deletedAt) continue;
-        bundleMap.set(item.bundle.id, {
-          slug: item.bundle.slug,
-          name: item.bundle.name,
-          priceCents: item.bundle.priceCents?.toString() ?? null,
-          discountCents: item.bundle.discountCents.toString(),
-          items: item.bundle.items.map((bundleItem) => ({
+        const bundle = item.bundle;
+        if (bundle.status !== "ACTIVE" || bundle.deletedAt || bundle.items.length === 0) continue;
+        const allItemsSellable = bundle.items.every(
+          (bundleItem) =>
+            bundleItem.variant.status === "ACTIVE" &&
+            bundleItem.variant.deletedAt === null &&
+            bundleItem.variant.product.status === "ACTIVE" &&
+            bundleItem.variant.product.deletedAt === null &&
+            bundleItem.variant.product.brand.deletedAt === null &&
+            bundleItem.variant.product.category.deletedAt === null,
+        );
+        if (!allItemsSellable) continue;
+        const componentsTotal = bundle.items.reduce(
+          (sum, bundleItem) => sum + bundleItem.variant.priceCents * BigInt(bundleItem.quantity),
+          0n,
+        );
+        const basePrice = bundle.priceCents ?? componentsTotal;
+        const effectivePrice =
+          basePrice > bundle.discountCents ? basePrice - bundle.discountCents : 0n;
+        bundleMap.set(bundle.id, {
+          slug: bundle.slug,
+          name: bundle.name,
+          description: bundle.description,
+          priceCents: bundle.priceCents?.toString() ?? null,
+          discountCents: bundle.discountCents.toString(),
+          effectivePriceCents: effectivePrice.toString(),
+          items: bundle.items.map((bundleItem) => ({
             variantId: bundleItem.variantId,
             sku: bundleItem.variant.sku,
+            productSlug: bundleItem.variant.product.slug,
+            productName: bundleItem.variant.product.name,
             quantity: bundleItem.quantity,
           })),
         });
@@ -763,10 +1103,14 @@ export class CatalogService {
     }
     return {
       ...summary,
+      categoryBreadcrumbs: categoryBreadcrumbs.length
+        ? categoryBreadcrumbs
+        : [{ slug: product.category.slug, name: product.category.name }],
       description: product.description,
       seoTitle: product.seoTitle,
       seoDescription: product.seoDescription,
       authenticity: product.authenticity,
+      retractPolicy: product.retractPolicy,
       warrantyMonths: product.warrantyMonths,
       trackSerial: product.trackSerial,
       variants,
@@ -808,26 +1152,22 @@ export class CatalogService {
   }
 
   async getCategory(slugValue: string): Promise<CatalogCategory | null> {
-    const slug = normalizeSlug(slugValue, "slug");
+    const slug = parseLookupSlug(slugValue);
     if (!slug) return null;
     const category = await this.db.category.findFirst({ where: { slug, deletedAt: null } });
     if (!category) return null;
-    const ids = category.materializedPath.split("/").filter((id) => uuidPattern.test(id));
-    const records = await this.db.category.findMany({
-      where: { id: { in: ids }, deletedAt: null },
-      orderBy: { depth: "asc" },
-    });
+    const breadcrumbs = await this.breadcrumbsForPath(category.materializedPath);
     return {
       id: category.id,
       slug: category.slug,
       name: category.name,
       description: category.description,
-      breadcrumbs: records.map((record) => ({ slug: record.slug, name: record.name })),
+      breadcrumbs,
     };
   }
 
   async getBrand(slugValue: string): Promise<CatalogBrand | null> {
-    const slug = normalizeSlug(slugValue, "slug");
+    const slug = parseLookupSlug(slugValue);
     if (!slug) return null;
     return this.db.brand.findFirst({
       where: { slug, deletedAt: null },
@@ -900,9 +1240,26 @@ export class CatalogService {
     }
     const conditions: Prisma.Sql[] = [Prisma.sql`p."deletedAt" IS NULL`];
     if (q) {
-      conditions.push(
-        Prisma.sql`p."searchVector" @@ plainto_tsquery('simple', immutable_unaccent(${q}))`,
-      );
+      const upperCode = q.toUpperCase();
+      const lowerSlug = q.toLowerCase();
+      const digitsOnly = q.replace(/[\s-]/g, "");
+      conditions.push(Prisma.sql`
+        (
+          p."searchVector" @@ plainto_tsquery('simple', immutable_unaccent(${q}))
+          OR p."slug" = ${lowerSlug}
+          OR EXISTS (
+            SELECT 1 FROM "ProductVariant" adminVariant
+            WHERE adminVariant."productId" = p."id"
+              AND adminVariant."deletedAt" IS NULL
+              AND (
+                adminVariant."sku" = ${upperCode}
+                OR adminVariant."mpn" = ${q}
+                OR adminVariant."gtin" = ${digitsOnly}
+                OR adminVariant."ean" = ${digitsOnly}
+              )
+          )
+        )
+      `);
     }
     if (status) conditions.push(Prisma.sql`p."status" = ${status}::"ProductStatus"`);
     const where = Prisma.sql`WHERE ${Prisma.join(conditions, " AND ")}`;
@@ -956,19 +1313,50 @@ export class CatalogService {
   }
 
   async getAdminProduct(id: string) {
-    if (!uuidPattern.test(id)) throw new CatalogQueryError("Invalid product id.");
-    return this.db.product.findFirst({
-      where: { id, deletedAt: null },
-      include: {
-        brand: true,
-        category: true,
-        taxGroup: true,
-        variants: {
-          where: { deletedAt: null },
-          orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+    if (!uuidPattern.test(id)) return null;
+    const [product, hasInventoryHistory] = await Promise.all([
+      this.db.product.findFirst({
+        where: { id, deletedAt: null },
+        include: {
+          brand: true,
+          category: true,
+          taxGroup: true,
+          variants: {
+            where: { deletedAt: null },
+            orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+          },
+          attributeValues: {
+            where: { attribute: { deletedAt: null } },
+            include: { attribute: true },
+            orderBy: [{ attribute: { name: "asc" } }, { normalizedValue: "asc" }],
+          },
+          compatibility: {
+            where: { device: { deletedAt: null, brand: { deletedAt: null } } },
+            include: { device: { include: { brand: true } } },
+            orderBy: [{ device: { model: "asc" } }],
+          },
         },
-      },
-    });
+      }),
+      hasProductInventoryHistory(this.db, id),
+    ]);
+    if (!product) return null;
+    return {
+      ...product,
+      hasInventoryHistory,
+      formattedAttributes: product.attributeValues.map((entry) => ({
+        id: entry.id,
+        attributeId: entry.attributeId,
+        key: entry.attribute.key,
+        name: entry.attribute.name,
+        valueType: entry.attribute.valueType,
+        unit: entry.attribute.unit,
+        rawValue:
+          entry.attribute.valueType === "BOOLEAN"
+            ? String(entry.booleanValue ?? false)
+            : this.attributeDisplay(entry),
+        displayValue: this.attributeDisplay(entry),
+      })),
+    };
   }
 
   private variantData(input: NormalizedVariantInput) {
@@ -1002,22 +1390,31 @@ export class CatalogService {
       tx.taxGroup.findUnique({ where: { id: input.taxGroupId }, select: { id: true } }),
     ]);
     if (!brand || !category || !taxGroup) {
-      throw new CatalogQueryError("Brand, category, and tax group must exist and be active.");
+      throw new CatalogQueryError(
+        "Brand, category, and tax group must exist and be active.",
+        "INVALID_REFERENCE",
+      );
     }
   }
 
   async createProduct(
     input: CatalogProductCreateInput,
     audit: CatalogMutationAudit,
-  ): Promise<{ id: string }> {
+  ): Promise<{ id: string; slug: string }> {
     const product = normalizeBaseInput(input);
     const variant = normalizeVariantInput(input.variant);
     if (variant.id) throw new CatalogQueryError("A new initial variant cannot reuse an id.");
     if (!variant.isDefault) {
-      throw new CatalogQueryError("The initial variant must be the default variant.");
+      throw new CatalogQueryError(
+        "The initial variant must be the default variant.",
+        "INACTIVE_DEFAULT",
+      );
     }
     if (product.status === "ACTIVE" && variant.status !== "ACTIVE") {
-      throw new CatalogQueryError("An active product requires an active initial variant.");
+      throw new CatalogQueryError(
+        "An active product requires an active initial variant.",
+        "NO_ACTIVE_VARIANT",
+      );
     }
     try {
       return await this.db.$transaction(async (tx) => {
@@ -1030,13 +1427,10 @@ export class CatalogService {
           status: created.status,
           sku: variant.sku,
         });
-        return { id: created.id };
+        return { id: created.id, slug: created.slug };
       });
     } catch (error) {
-      if (hasErrorCode(error, "P2002")) {
-        throw new CatalogConflictError("The product slug or variant SKU/GS1 already exists.");
-      }
-      throw error;
+      rethrowCatalogMutationError(error, "The product slug or variant SKU/GS1 already exists.");
     }
   }
 
@@ -1044,38 +1438,52 @@ export class CatalogService {
     id: string,
     input: CatalogProductBaseInput,
     audit: CatalogMutationAudit,
-  ): Promise<{ id: string }> {
+  ): Promise<{ id: string; slug: string; previousSlug: string }> {
     inputUuid(id, "productId");
     const product = normalizeBaseInput(input);
     try {
       return await this.db.$transaction(async (tx) => {
-        const existingRows = await tx.$queryRaw<Array<{ id: string; status: ProductStatus }>>`
-          SELECT "id", "status" FROM "Product" WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL FOR UPDATE
+        const existingRows = await tx.$queryRaw<
+          Array<{ id: string; slug: string; status: ProductStatus; trackSerial: boolean }>
+        >`
+          SELECT "id", "slug", "status", "trackSerial"
+          FROM "Product"
+          WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
+          FOR UPDATE
         `;
         const existing = existingRows[0];
         if (!existing) throw new CatalogNotFoundError("Product not found.");
         await this.validateReferences(tx, product);
+        if (product.trackSerial !== existing.trackSerial) {
+          if (await hasProductInventoryHistory(tx, id)) {
+            throw new CatalogConflictError(
+              "Product serial tracking cannot change once inventory records exist.",
+              "SERIAL_TRACKING_LOCKED",
+            );
+          }
+        }
         if (product.status === "ACTIVE") {
           const activeVariants = await tx.productVariant.count({
             where: { productId: id, status: "ACTIVE", deletedAt: null },
           });
           if (activeVariants === 0) {
-            throw new CatalogQueryError("An active product requires at least one active variant.");
+            throw new CatalogQueryError(
+              "An active product requires at least one active variant.",
+              "NO_ACTIVE_VARIANT",
+            );
           }
         }
         await tx.product.update({ where: { id }, data: product });
         await writeCatalogAudit(tx, audit, "CATALOG_PRODUCT_UPDATED", "Product", id, {
           previousStatus: existing.status,
           status: product.status,
+          previousSlug: existing.slug,
           slug: product.slug,
         });
-        return { id };
+        return { id, slug: product.slug, previousSlug: existing.slug };
       });
     } catch (error) {
-      if (hasErrorCode(error, "P2002")) {
-        throw new CatalogConflictError("The product slug already exists.");
-      }
-      throw error;
+      rethrowCatalogMutationError(error, "The product slug already exists.");
     }
   }
 
@@ -1083,13 +1491,18 @@ export class CatalogService {
     productId: string,
     input: CatalogVariantInput,
     audit: CatalogMutationAudit,
-  ): Promise<{ id: string }> {
+  ): Promise<{ id: string; slug: string }> {
     inputUuid(productId, "productId");
     const variant = normalizeVariantInput(input);
     try {
       return await this.db.$transaction(async (tx) => {
-        const productRows = await tx.$queryRaw<Array<{ id: string; status: ProductStatus }>>`
-          SELECT "id", "status" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
+        const productRows = await tx.$queryRaw<
+          Array<{ id: string; slug: string; status: ProductStatus }>
+        >`
+          SELECT "id", "slug", "status"
+          FROM "Product"
+          WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL
+          FOR UPDATE
         `;
         const product = productRows[0];
         if (!product) throw new CatalogNotFoundError("Product not found.");
@@ -1123,9 +1536,16 @@ export class CatalogService {
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         });
         if (product.status === "ACTIVE" && activeVariants.length === 0) {
-          throw new CatalogQueryError("An active product requires at least one active variant.");
+          throw new CatalogQueryError(
+            "An active product requires at least one active variant.",
+            "NO_ACTIVE_VARIANT",
+          );
         }
         if (activeVariants.length > 0 && !activeVariants.some((item) => item.isDefault)) {
+          await tx.productVariant.updateMany({
+            where: { productId, deletedAt: null, id: { not: activeVariants[0]!.id } },
+            data: { isDefault: false },
+          });
           await tx.productVariant.update({
             where: { id: activeVariants[0]!.id },
             data: { isDefault: true },
@@ -1139,25 +1559,221 @@ export class CatalogService {
           saved.id,
           { productId, sku: saved.sku, status: saved.status },
         );
-        return { id: saved.id };
+        return { id: saved.id, slug: product.slug };
       });
     } catch (error) {
-      if (hasErrorCode(error, "P2002")) {
-        throw new CatalogConflictError("The variant SKU/GS1 already exists.");
-      }
-      throw error;
+      rethrowCatalogMutationError(error, "The variant SKU/GS1 already exists.");
     }
   }
 
+  async upsertProductAttribute(
+    productId: string,
+    input: CatalogProductAttributeInput,
+    audit: CatalogMutationAudit,
+  ): Promise<{ id: string; slug: string }> {
+    inputUuid(productId, "productId");
+    const attributeId = inputUuid(input.attributeId, "attributeId");
+    const existingId = input.id ? inputUuid(input.id, "attributeValueId") : null;
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const productRows = await tx.$queryRaw<
+          Array<{ id: string; slug: string; categoryId: string }>
+        >`
+          SELECT "id", "slug", "categoryId"
+          FROM "Product"
+          WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL
+          FOR UPDATE
+        `;
+        const product = productRows[0];
+        if (!product) throw new CatalogNotFoundError("Product not found.");
+        const definition = await tx.attributeDefinition.findFirst({
+          where: { id: attributeId, deletedAt: null },
+        });
+        if (!definition) {
+          throw new CatalogQueryError(
+            "Attribute definition does not exist or is archived.",
+            "INVALID_REFERENCE",
+          );
+        }
+        const columns = typedAttributeColumns(definition.valueType, input.value);
+        let saved: ProductAttributeValue;
+        if (existingId) {
+          const current = await tx.productAttributeValue.findFirst({
+            where: { id: existingId, productId },
+          });
+          if (!current) throw new CatalogNotFoundError("Attribute value not found.");
+          saved = await tx.productAttributeValue.update({
+            where: { id: existingId },
+            data: { ...columns, attributeId },
+          });
+        } else {
+          const duplicate = await tx.productAttributeValue.findFirst({
+            where: { productId, attributeId, normalizedValue: columns.normalizedValue },
+          });
+          saved = duplicate
+            ? await tx.productAttributeValue.update({
+                where: { id: duplicate.id },
+                data: columns,
+              })
+            : await tx.productAttributeValue.create({
+                data: { ...columns, productId, attributeId },
+              });
+        }
+        const categoryAttribute = await tx.categoryAttribute.findFirst({
+          where: { categoryId: product.categoryId, attributeId },
+        });
+        if (!categoryAttribute) {
+          const position = await tx.categoryAttribute.count({
+            where: { categoryId: product.categoryId },
+          });
+          await tx.categoryAttribute.create({
+            data: { categoryId: product.categoryId, attributeId, position, required: false },
+          });
+        }
+        await writeCatalogAudit(
+          tx,
+          audit,
+          "CATALOG_ATTRIBUTE_UPSERTED",
+          "ProductAttributeValue",
+          saved.id,
+          { productId, attributeKey: definition.key, normalizedValue: saved.normalizedValue },
+        );
+        return { id: saved.id, slug: product.slug };
+      });
+    } catch (error) {
+      rethrowCatalogMutationError(error, "This attribute value is already registered.");
+    }
+  }
+
+  async removeProductAttribute(
+    productId: string,
+    attributeValueId: string,
+    audit: CatalogMutationAudit,
+  ): Promise<{ id: string; slug: string }> {
+    inputUuid(productId, "productId");
+    inputUuid(attributeValueId, "attributeValueId");
+    return this.db.$transaction(async (tx) => {
+      const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
+        SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
+      `;
+      const product = productRows[0];
+      if (!product) throw new CatalogNotFoundError("Product not found.");
+      const existing = await tx.productAttributeValue.findFirst({
+        where: { id: attributeValueId, productId },
+        include: { attribute: true },
+      });
+      if (!existing) throw new CatalogNotFoundError("Attribute value not found.");
+      await tx.productAttributeValue.delete({ where: { id: existing.id } });
+      await writeCatalogAudit(
+        tx,
+        audit,
+        "CATALOG_ATTRIBUTE_REMOVED",
+        "ProductAttributeValue",
+        existing.id,
+        { productId, attributeKey: existing.attribute.key },
+      );
+      return { id: existing.id, slug: product.slug };
+    });
+  }
+
+  async upsertProductCompatibility(
+    productId: string,
+    input: CatalogProductCompatibilityInput,
+    audit: CatalogMutationAudit,
+  ): Promise<{ id: string; slug: string }> {
+    inputUuid(productId, "productId");
+    const deviceId = inputUuid(input.deviceId, "deviceId");
+    if (!["EXACT", "ADAPTER", "NOT_COMPATIBLE"].includes(input.fit)) {
+      throw new CatalogQueryError("Invalid compatibility fit.");
+    }
+    const notes = inputText(input.notes, "notes", 500);
+    return this.db.$transaction(async (tx) => {
+      const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
+        SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
+      `;
+      const product = productRows[0];
+      if (!product) throw new CatalogNotFoundError("Product not found.");
+      const device = await tx.compatibilityDevice.findFirst({
+        where: { id: deviceId, deletedAt: null, brand: { deletedAt: null } },
+      });
+      if (!device) {
+        throw new CatalogQueryError(
+          "Compatibility device does not exist or is archived.",
+          "INVALID_REFERENCE",
+        );
+      }
+      const existing = await tx.productCompatibility.findFirst({
+        where: { productId, deviceId },
+      });
+      const saved = existing
+        ? await tx.productCompatibility.update({
+            where: { id: existing.id },
+            data: { fit: input.fit, notes },
+          })
+        : await tx.productCompatibility.create({
+            data: { productId, deviceId, fit: input.fit, notes },
+          });
+      await writeCatalogAudit(
+        tx,
+        audit,
+        "CATALOG_COMPATIBILITY_UPSERTED",
+        "ProductCompatibility",
+        saved.id,
+        { productId, deviceSlug: device.slug, fit: saved.fit },
+      );
+      return { id: saved.id, slug: product.slug };
+    });
+  }
+
+  async removeProductCompatibility(
+    productId: string,
+    compatibilityId: string,
+    audit: CatalogMutationAudit,
+  ): Promise<{ id: string; slug: string }> {
+    inputUuid(productId, "productId");
+    inputUuid(compatibilityId, "compatibilityId");
+    return this.db.$transaction(async (tx) => {
+      const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
+        SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
+      `;
+      const product = productRows[0];
+      if (!product) throw new CatalogNotFoundError("Product not found.");
+      const existing = await tx.productCompatibility.findFirst({
+        where: { id: compatibilityId, productId },
+        include: { device: true },
+      });
+      if (!existing) throw new CatalogNotFoundError("Compatibility link not found.");
+      await tx.productCompatibility.delete({ where: { id: existing.id } });
+      await writeCatalogAudit(
+        tx,
+        audit,
+        "CATALOG_COMPATIBILITY_REMOVED",
+        "ProductCompatibility",
+        existing.id,
+        { productId, deviceSlug: existing.device.slug },
+      );
+      return { id: existing.id, slug: product.slug };
+    });
+  }
+
   async getReferences() {
-    const [brands, categories, taxGroups] = await Promise.all([
+    const [brands, categories, taxGroups, attributes, compatibilityDevices] = await Promise.all([
       this.db.brand.findMany({ where: { deletedAt: null }, orderBy: { name: "asc" } }),
       this.db.category.findMany({
         where: { deletedAt: null },
         orderBy: [{ depth: "asc" }, { name: "asc" }],
       }),
       this.db.taxGroup.findMany({ orderBy: { code: "asc" } }),
+      this.db.attributeDefinition.findMany({
+        where: { deletedAt: null },
+        orderBy: { name: "asc" },
+      }),
+      this.db.compatibilityDevice.findMany({
+        where: { deletedAt: null, brand: { deletedAt: null } },
+        include: { brand: true },
+        orderBy: [{ brand: { name: "asc" } }, { model: "asc" }],
+      }),
     ]);
-    return { brands, categories, taxGroups };
+    return { brands, categories, taxGroups, attributes, compatibilityDevices };
   }
 }

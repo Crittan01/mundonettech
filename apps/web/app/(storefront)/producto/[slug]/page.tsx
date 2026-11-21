@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 
 import { ProductCard } from "@/components/catalog/product-card";
 import { ProductMediaGallery } from "@/components/catalog/product-media-gallery";
+import { ProductVariantPanel } from "@/components/catalog/product-variant-panel";
 import { getCatalogProduct, searchCatalog } from "@/lib/catalog";
 import { getPublicMediaOrigin } from "@/lib/env";
 
@@ -13,12 +14,17 @@ const authenticityLabels = {
   OEM: "OEM",
 } as const;
 
+const retractLabels = {
+  STANDARD: "Retracto estándar (Ley 1480)",
+  LEGAL_EXCEPTION_REVIEW: "Sujeto a revisión de excepción legal",
+} as const;
+
 export async function generateMetadata({ params }: PageProps<"/producto/[slug]">) {
   const { slug } = await params;
   const product = await getCatalogProduct(slug);
   return product
     ? {
-        title: product.name,
+        title: product.seoTitle ?? product.name,
         description: product.seoDescription ?? product.shortDescription ?? undefined,
       }
     : { title: "Producto no encontrado" };
@@ -34,6 +40,7 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
     pageSize: 3,
     sort: "newest",
   });
+  const mediaOrigin = getPublicMediaOrigin();
   return (
     <div className="space-y-12">
       <nav aria-label="Migas de pan" className="text-sm text-muted-foreground">
@@ -43,12 +50,14 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
               Catálogo
             </Link>
           </li>
-          <li className="flex gap-2">
-            <span aria-hidden="true">/</span>
-            <Link href={`/categoria/${product.category.slug}`} className="hover:text-foreground">
-              {product.category.name}
-            </Link>
-          </li>
+          {product.categoryBreadcrumbs.map((crumb) => (
+            <li key={crumb.slug} className="flex gap-2">
+              <span aria-hidden="true">/</span>
+              <Link href={`/categoria/${crumb.slug}`} className="hover:text-foreground">
+                {crumb.name}
+              </Link>
+            </li>
+          ))}
           <li className="flex gap-2">
             <span aria-hidden="true">/</span>
             <span aria-current="page">{product.name}</span>
@@ -58,7 +67,7 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
       <div className="grid gap-10 lg:grid-cols-2">
         <ProductMediaGallery
           media={product.media}
-          origin={getPublicMediaOrigin()}
+          origin={mediaOrigin}
           productName={product.name}
         />
         <section className="space-y-6">
@@ -72,29 +81,19 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
             <h1 className="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">{product.name}</h1>
             <p className="mt-3 text-muted-foreground">
               {authenticityLabels[product.authenticity]} · Garantía: {product.warrantyMonths} meses
+              {" · "}
+              {retractLabels[product.retractPolicy]}
+              {product.trackSerial ? " · Control por serial/IMEI" : ""}
             </p>
           </div>
           {product.shortDescription ? (
             <p className="text-lg leading-8 text-muted-foreground">{product.shortDescription}</p>
           ) : null}
-          <div className="rounded-xl border border-border bg-card p-5">
-            <p className="text-3xl font-bold">
-              {product.priceCents === product.maxPriceCents
-                ? formatCopCents(product.priceCents)
-                : `Desde ${formatCopCents(product.priceCents)}`}
-            </p>
-            <p
-              className={`mt-2 font-medium ${product.available > 0 ? "text-success" : "text-muted-foreground"}`}
-            >
-              {product.available > 0 ? "Disponible para compra" : "Sin unidades disponibles"}
-            </p>
-            <Link
-              href={`/comparar?productos=${encodeURIComponent(product.slug)}`}
-              className="mt-4 inline-flex min-h-10 items-center font-medium text-primary underline-offset-4 hover:underline"
-            >
-              Comparar este producto
-            </Link>
-          </div>
+          <ProductVariantPanel
+            productSlug={product.slug}
+            defaultVariantId={product.defaultVariantId}
+            variants={product.variants}
+          />
           {product.description ? <p className="leading-7">{product.description}</p> : null}
         </section>
       </div>
@@ -167,7 +166,20 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
                   {attribute.name}
                   {attribute.unit ? ` (${attribute.unit})` : ""}
                 </dt>
-                <dd className="font-medium break-words">{attribute.value}</dd>
+                <dd className="font-medium break-words">
+                  {attribute.valueType === "URL" && /^https?:\/\//i.test(attribute.value) ? (
+                    <a
+                      href={attribute.value}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-primary underline underline-offset-4"
+                    >
+                      {attribute.value}
+                    </a>
+                  ) : (
+                    attribute.value
+                  )}
+                </dd>
               </div>
             ))}
           </dl>
@@ -209,15 +221,30 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
             {product.bundles.map((bundle) => (
               <article key={bundle.slug} className="rounded-xl border border-border bg-card p-5">
                 <h3 className="font-semibold">{bundle.name}</h3>
-                <ul className="mt-3 text-sm text-muted-foreground">
+                {bundle.description ? (
+                  <p className="mt-1 text-sm text-muted-foreground">{bundle.description}</p>
+                ) : null}
+                <ul className="mt-3 space-y-1 text-sm text-muted-foreground">
                   {bundle.items.map((item) => (
                     <li key={item.variantId}>
-                      {item.quantity} × {item.sku}
+                      {item.quantity} ×{" "}
+                      <Link
+                        href={`/producto/${item.productSlug}`}
+                        className="text-foreground hover:text-primary hover:underline"
+                      >
+                        {item.productName}
+                      </Link>{" "}
+                      <span className="font-mono text-xs">({item.sku})</span>
                     </li>
                   ))}
                 </ul>
-                {bundle.priceCents ? (
-                  <p className="mt-3 font-bold">{formatCopCents(bundle.priceCents)}</p>
+                <p className="mt-3 text-lg font-bold">
+                  {formatCopCents(bundle.effectivePriceCents)}
+                </p>
+                {BigInt(bundle.discountCents) > 0n ? (
+                  <p className="text-xs font-medium text-success">
+                    Ahorras {formatCopCents(bundle.discountCents)}
+                  </p>
                 ) : null}
               </article>
             ))}
@@ -232,7 +259,7 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
           </h2>
           <div className="mt-5 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {related.items.map((item) => (
-              <ProductCard key={item.id} product={item} mediaOrigin={getPublicMediaOrigin()} />
+              <ProductCard key={item.id} product={item} mediaOrigin={mediaOrigin} />
             ))}
           </div>
         </section>

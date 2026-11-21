@@ -22,6 +22,7 @@ export default async function ProductsPage({ searchParams }: PageProps<"/product
       title="Catálogo de tecnología"
       description="Filtra por atributos técnicos, precio y disponibilidad. Los valores se consultan del catálogo activo."
       mediaOrigin={getPublicMediaOrigin()}
+      compareSlugs={parsed.compareSlugs}
       {...(parsed.error ? { error: parsed.error } : {})}
     />
   );
