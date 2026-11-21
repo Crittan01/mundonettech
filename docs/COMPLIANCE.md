@@ -39,13 +39,15 @@ Las cookies actuales se documentan como necesarias para Auth, actividad y seguri
 
 ## 4. Régimen tributario y comprobantes
 
-La configuración inicia en `NO_RESPONSABLE_IVA` con vigilancia de `3.500 UVT`. El cambio a `RESPONSABLE_IVA`, topes tech `50`/`22 UVT`, cierre de impuestos por `OrderItemTaxLine`, `OrderReceipt`, DIAN UBL 2.1 y Notas Crédito pertenecen a `F3.2`–`F3.4`. Los documentos legales no afirman que esas capacidades futuras estén operativas.
+La configuración inicia en `NO_RESPONSABLE_IVA` con vigilancia de `3.500 UVT` y valor UVT configurable (año 2026: **$52.374 COP**, Resolución DIAN 000238 de 2025). `F3.2` ya implementa el cambio a `RESPONSABLE_IVA`, topes tech `50`/`22 UVT` por unidad neta, `OrderItemTaxLine[]` selladas y `OrderReceipt` no fiscal verificado. El recibo distingue pedido registrado de pago pendiente y no equivale a factura electrónica; mientras `paymentStatus = UNPAID`, la aceptación definitiva queda sujeta a validación de pago, inventario y condiciones de la operación. DIAN UBL 2.1 y Notas Crédito siguen en `F3.3`–`F3.4`.
+
+El checkout valida en PostgreSQL la DIVIPOLA oficial DANE con corte al 30 de diciembre de 2024 (`33` departamentos y `1.122` municipios/áreas), sin depender de llamadas externas en tiempo de compra. Aceptación de términos/privacidad, promesa de entrega, snapshots DANE, régimen y UVT quedan persistidos por orden.
 
 Todos los importes de catálogo, JSON-LD y Merchant XML parten de centavos `BigInt` serializados como strings. La conversión a decimal conserva los dos dígitos sin floats.
 
 ## 5. Redirecciones y SEO técnico
 
-- `UrlRedirectService` serializa mutaciones con advisory lock, bloquea orígenes en `/` o rutas reservadas (`/api`, `/_next`, `/admin`, `/mi-cuenta`, auth, `/legal`, `/robots.txt`, `/sitemap.xml`, `/sitemaps`, `/checkout`, `/pagar`, `/pedido`, `/propuesta`) y destinos internos (`/api`, `/_next`, `/admin`), valida estados `301/302/307/308`, ciclos y máximo 100 saltos, audita y permite recrear orígenes archivados.
+- `UrlRedirectService` serializa mutaciones con advisory lock, bloquea orígenes en `/` o rutas reservadas (`/api`, `/_next`, `/admin`, `/mi-cuenta`, auth, `/legal`, `/robots.txt`, `/sitemap.xml`, `/sitemaps`, `/checkout`, `/recibo`, `/pagar`, `/pedido`, `/propuesta`) y destinos internos (`/api`, `/_next`, `/admin`), valida estados `301/302/307/308`, ciclos y máximo 100 saltos, audita y permite recrear orígenes archivados.
 - `proxy.ts` resuelve cadenas únicamente en peticiones `GET`/`HEAD` sin `next-action` ni Live Edit sobre una caché global con TTL de treinta segundos, deduplicación de carga e invalidación explícita más `revalidatePath` desde acciones. Los destinos públicos conservan el query original.
 - JSON-LD: `Organization`, `WebSite`, `Product`, `Offer`, `BreadcrumbList` (catálogo y centro legal) y `FAQPage` visible. No se generan reseñas, ratings ni disponibilidad ficticias.
 - `/robots.txt` autoriza explícitamente `/api/feeds/` mientras bloquea `/api/` y rutas privadas, y referencia `/sitemap.xml`; el sitemap incluye catálogo, marcas, categorías, CMS publicado (`lastmod` sincronizado con la última versión publicada) y legales. Superadas 50.000 URLs, la raíz se convierte en índice y `/sitemaps/[id].xml` entrega particiones.
@@ -56,7 +58,7 @@ Todos los importes de catálogo, JSON-LD y Merchant XML parten de centavos `BigI
 1. Registrar y verificar razón social, NIT, dirección de notificación judicial, teléfono y demás datos exigidos por el artículo 50; no se rellenan con valores ficticios.
 2. Verificar operación y custodia de `servicioalcliente@mundonettech.co` y `privacidad@mundonettech.co`, además de los procedimientos humanos de respuesta y radicación.
 3. Someter los ocho textos a revisión jurídica colombiana y actualizar versión/vigencia ante cambios.
-4. Completar checkout, comprobante no fiscal, RMA/PQR web, retención self-service, integraciones y pruebas de lanzamiento de sus fases correspondientes.
+4. Completar pasarelas de pago, logística externa, RMA/PQR web, retención self-service, integraciones DIAN y pruebas de lanzamiento de sus fases correspondientes; checkout y comprobante no fiscal ya están implementados en `F3.2`.
 5. Configurar en Merchant Center envío, impuestos y políticas de la cuenta; el feed no inventa tarifas logísticas.
 
 ## 7. Fuentes oficiales de referencia

@@ -66,3 +66,12 @@ BOOTSTRAP_ADMIN_PASSWORD='contraseña-única-validada' \
 BOOTSTRAP_ADMIN_DISPLAY_NAME='Nombre autorizado' \
 pnpm admin:bootstrap
 ```
+
+
+## 7. Checkout, recibos y ciclo de vida de órdenes
+
+- La conversión exige el carrito aislado por token/cliente, validación Server Action cerrada, fingerprint de precios/impuestos/entrega y `IdempotencyKey` con hashes de clave, sujeto y request. Una repetición equivalente recupera la misma orden; reutilizar la clave con otro payload se rechaza.
+- DANE, contacto, aceptación legal, UVT, régimen, dinero y WAC quedan en snapshots relacionales inmutables. RLS permanece *deny-by-default* en las 63 tablas y los payloads `DomainOutbox` contienen identificadores/importes operativos, nombres de sede permitidos y jamás correo, teléfono, dirección ni notas del cliente.
+- `/recibo/[token]` y su descarga usan un token de 256 bits; la BD guarda solo SHA-256. La emisión y cada lectura recalculan hash y cuadre aritmético. El token de reintento se deriva con HMAC de servidor y no se almacena en claro. Las rutas son `noindex`/`no-store` y no se admiten como orígenes de `UrlRedirect`.
+- `UNPAID` se presenta siempre como pago pendiente, nunca como cobro confirmado. El comprobante es no fiscal. Reembolsos exigen actor activo autorizado y orden pagada; su request hash, montos, cantidades y transiciones se validan en PostgreSQL.
+- `/api/jobs/orders` exige bearer independiente `ORDER_CRON_SECRET`. La expiración libera stock y cupones en una transacción, nunca borra historial y no ejecuta correo ni APIs externas; los workers consumen el outbox con leases y dueños ya verificados por las primitivas de F0.

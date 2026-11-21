@@ -512,6 +512,12 @@ export function StoreSettingsForm({ settings }: { settings: StoreSettingsInput }
         const timeZoneDefault = values?.timeZone ?? settings.timeZone;
         const prefixDefault = values?.orderNumberPrefix ?? settings.orderNumberPrefix;
         const paddingDefault = values?.orderNumberPadding ?? String(settings.orderNumberPadding);
+        const uvtValueDefault = values?.uvtValueCents ?? settings.uvtValueCents;
+        const uvtYearDefault = values?.uvtYear ?? String(settings.uvtYear);
+        const shippingDefault = values?.standardShippingCents ?? settings.standardShippingCents;
+        const promiseDefault = values?.deliveryPromiseDays ?? String(settings.deliveryPromiseDays);
+        const reservationDefault =
+          values?.reservationMinutes ?? String(settings.reservationMinutes);
         const clickAndCollectDefault = values
           ? ["on", "true"].includes(values.clickAndCollectEnabled ?? "")
           : settings.clickAndCollectEnabled;
@@ -589,6 +595,69 @@ export function StoreSettingsForm({ settings }: { settings: StoreSettingsInput }
                 min="1"
                 max="12"
                 defaultValue={paddingDefault}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="settings-uvt-value">UVT en centavos COP</Label>
+              <Input
+                key={`settings-uvt-value-${uvtValueDefault}`}
+                id="settings-uvt-value"
+                name="uvtValueCents"
+                inputMode="numeric"
+                pattern="[0-9]+"
+                defaultValue={uvtValueDefault}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="settings-uvt-year">Año de la UVT</Label>
+              <Input
+                key={`settings-uvt-year-${uvtYearDefault}`}
+                id="settings-uvt-year"
+                name="uvtYear"
+                type="number"
+                min="2000"
+                max="9999"
+                defaultValue={uvtYearDefault}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="settings-shipping">Envío estándar (centavos COP)</Label>
+              <Input
+                key={`settings-shipping-${shippingDefault}`}
+                id="settings-shipping"
+                name="standardShippingCents"
+                inputMode="numeric"
+                pattern="[0-9]+"
+                defaultValue={shippingDefault}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="settings-promise">Promesa de entrega (días calendario)</Label>
+              <Input
+                key={`settings-promise-${promiseDefault}`}
+                id="settings-promise"
+                name="deliveryPromiseDays"
+                type="number"
+                min="1"
+                max="365"
+                defaultValue={promiseDefault}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="settings-reservation">Reserva de inventario (minutos)</Label>
+              <Input
+                key={`settings-reservation-${reservationDefault}`}
+                id="settings-reservation"
+                name="reservationMinutes"
+                type="number"
+                min="5"
+                max="10080"
+                defaultValue={reservationDefault}
                 required
               />
             </div>

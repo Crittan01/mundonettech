@@ -14,6 +14,13 @@ export const storeConfig = {
   tax: {
     regime: "NO_RESPONSABLE_IVA",
     annualRevenueAlertUvt: 3500,
+    uvtYear: 2026,
+    uvtValueCents: "5237400",
+  },
+  checkout: {
+    standardShippingCents: "0",
+    deliveryPromiseDays: 30,
+    reservationMinutes: 120,
   },
   modules: {
     retail: true,

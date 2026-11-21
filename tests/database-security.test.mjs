@@ -170,7 +170,7 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
     const migrations = await admin.query(
       "SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL",
     );
-    assert.equal(migrations.rows.length, 10);
+    assert.equal(migrations.rows.length, 12);
   });
 
   it("forces RLS on every application table and denies rows even with SQL grants", async () => {
@@ -512,6 +512,18 @@ describe("F0.3 — relational integrity and immutable security records", () => {
 });
 
 describe("F0.3 — idempotency and outbox concurrency", () => {
+  before(async () => {
+    for (;;) {
+      const preexisting = await admin.query(
+        "SELECT * FROM claim_domain_outbox('preexisting-suite-drain', 100)",
+      );
+      if (preexisting.rows.length === 0) break;
+      for (const row of preexisting.rows) {
+        await admin.query("SELECT complete_domain_outbox($1, 'preexisting-suite-drain')", [row.id]);
+      }
+    }
+  });
+
   it("acquires one idempotency record across races and rejects payload reuse", async () => {
     const scope = `test-${randomUUID()}`;
     const keyHash = randomBytes(32);
@@ -1073,14 +1085,14 @@ describe("F0.3 — persisted integration credential vault", () => {
 });
 
 describe("F0.5 — complete RLS and Data API matrix over persisted fixtures", () => {
-  it("denies all 889 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
+  it("denies all 1110 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
     const { runRlsMatrix } = await import("../scripts/rls-matrix.mjs");
     const summary = await runRlsMatrix(databaseUrl);
-    assert.equal(summary.tables, 50);
+    assert.equal(summary.tables, 63);
     assert.equal(summary.functions, 13);
-    assert.equal(summary.rlsOperations, 250);
-    assert.equal(summary.dataApiOperations, 639);
-    assert.equal(summary.operations, 889);
+    assert.equal(summary.rlsOperations, 315);
+    assert.equal(summary.dataApiOperations, 795);
+    assert.equal(summary.operations, 1110);
     assert.ok(summary.results.every((result) => result.passed));
   });
 });

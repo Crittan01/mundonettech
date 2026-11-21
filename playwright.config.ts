@@ -37,6 +37,7 @@ const webServerEnv: Record<string, string> = {
   SECURITY_EVENT_PEPPER: process.env.SECURITY_EVENT_PEPPER ?? fallbackSecret(),
   RECOVERY_CODE_PEPPER: process.env.RECOVERY_CODE_PEPPER ?? fallbackSecret(),
   CMS_CRON_SECRET: process.env.CMS_CRON_SECRET ?? "e2e-cms-scheduler-secret-32-chars-ok",
+  ORDER_CRON_SECRET: process.env.ORDER_CRON_SECRET ?? "e2e-order-scheduler-secret-32-chars-ok",
   CMS_JOB_ACTOR_ID: process.env.CMS_JOB_ACTOR_ID ?? "00000000-0000-4000-8000-00000000c201",
   NEXT_PUBLIC_TURNSTILE_SITE_KEY:
     process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? "1x00000000000000000000AA",

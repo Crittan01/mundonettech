@@ -206,12 +206,22 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                 Valores en centavos COP calculados con enteros exactos. El stock descuenta unidades
                 comprometidas, de seguridad y en cuarentena.
               </p>
-              <Link
-                href="/productos"
-                className="inline-flex font-medium text-primary hover:underline"
-              >
-                Seguir comprando
-              </Link>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <Link
+                  href="/productos"
+                  className="inline-flex font-medium text-primary hover:underline"
+                >
+                  Seguir comprando
+                </Link>
+                {cart.canContinue ? (
+                  <Link
+                    href="/checkout"
+                    className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-6 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    Continuar al checkout
+                  </Link>
+                ) : null}
+              </div>
             </aside>
           </div>
         </>

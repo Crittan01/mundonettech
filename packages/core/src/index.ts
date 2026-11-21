@@ -71,6 +71,18 @@ export {
 } from "./csv.js";
 export type { CsvCell, CsvParseOptions, CsvRow, InventoryStockCsvRow } from "./csv.js";
 export { formatCopCents, parseWholeCopToCents } from "./money.js";
+export { assertReceiptBalanced, calculateOrderTaxes } from "./order-tax.js";
+export type {
+  CalculatedOrderTaxLine,
+  CatalogTaxTreatment,
+  OrderTaxContext,
+  OrderTaxLineInput,
+  OrderTaxResult,
+  OrderTaxRule,
+  ReceiptBalanceInput,
+  ReceiptBalanceLine,
+  StoreTaxRegimeValue,
+} from "./order-tax.js";
 export {
   allocateProportionally,
   assertCartQuantity,

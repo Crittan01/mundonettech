@@ -170,7 +170,13 @@ export async function proxy(request: NextRequest) {
         response.cookies.set(adminActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
       }
     }
-  } else if (user && (pathname === "/carrito" || pathname.startsWith("/pagar/"))) {
+  } else if (
+    user &&
+    (pathname === "/carrito" ||
+      pathname.startsWith("/checkout") ||
+      pathname.startsWith("/pagar/") ||
+      pathname.startsWith("/recibo/"))
+  ) {
     const customerToken = request.cookies.get(customerActivityCookie)?.value;
     if (customerToken) {
       try {

@@ -66,6 +66,7 @@ model Coupon {
   categories           CouponCategory[]
   usages               CouponUsage[]
   carts                Cart[]
+  orders               Order[]
 
   @@index([status, startsAt, endsAt, deletedAt])
   @@map("Coupon")
@@ -102,6 +103,7 @@ model CouponUsage {
   couponId   String            @db.Uuid
   cartId     String            @db.Uuid
   customerId String?           @db.Uuid
+  orderId    String?           @db.Uuid
   status     CouponUsageStatus @default(RESERVED)
   reservedAt DateTime          @default(now()) @db.Timestamptz(6)
   expiresAt  DateTime          @db.Timestamptz(6)
@@ -112,9 +114,11 @@ model CouponUsage {
   coupon     Coupon            @relation(fields: [couponId], references: [id], onDelete: Restrict)
   cart       Cart              @relation(fields: [cartId], references: [id], onDelete: Restrict)
   customer   Customer?         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  order      Order?            @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   @@index([couponId, status, expiresAt])
   @@index([couponId, customerId, status, expiresAt])
   @@index([cartId, status])
+  @@index([orderId, status])
   @@map("CouponUsage")
 }

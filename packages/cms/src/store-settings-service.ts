@@ -10,12 +10,28 @@ export interface StoreSettingsInput {
   readonly timeZone: string;
   readonly orderNumberPrefix: string;
   readonly orderNumberPadding: number;
+  readonly uvtValueCents: string;
+  readonly uvtYear: number;
+  readonly standardShippingCents: string;
+  readonly deliveryPromiseDays: number;
+  readonly reservationMinutes: number;
   readonly clickAndCollectEnabled: boolean;
   readonly localDeliveryEnabled: boolean;
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ianaTimeZonePattern = /^(?:UTC|[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){1,2})$/;
+
+function cents(value: string, field: string, positive: boolean): bigint {
+  if (typeof value !== "string" || !/^[0-9]+$/.test(value.trim())) {
+    throw new CmsValidationError(`${field} must contain integer cents.`);
+  }
+  const parsed = BigInt(value.trim());
+  if (parsed < (positive ? 1n : 0n) || parsed > 9_223_372_036_854_775_807n) {
+    throw new CmsValidationError(`${field} must fit a non-negative INT8.`);
+  }
+  return parsed;
+}
 
 function validateSettings(input: StoreSettingsInput) {
   if (!["NO_RESPONSABLE_IVA", "RESPONSABLE_IVA"].includes(input.taxRegime)) {
@@ -52,6 +68,23 @@ function validateSettings(input: StoreSettingsInput) {
   ) {
     throw new CmsValidationError("Order number padding must be between 1 and 12.");
   }
+  if (!Number.isInteger(input.uvtYear) || input.uvtYear < 2000 || input.uvtYear > 9999) {
+    throw new CmsValidationError("The UVT year must be a four-digit year.");
+  }
+  if (
+    !Number.isInteger(input.deliveryPromiseDays) ||
+    input.deliveryPromiseDays < 1 ||
+    input.deliveryPromiseDays > 365
+  ) {
+    throw new CmsValidationError("Delivery promise must be between 1 and 365 calendar days.");
+  }
+  if (
+    !Number.isInteger(input.reservationMinutes) ||
+    input.reservationMinutes < 5 ||
+    input.reservationMinutes > 10_080
+  ) {
+    throw new CmsValidationError("Stock reservation must be between 5 and 10080 minutes.");
+  }
   if (
     typeof input.clickAndCollectEnabled !== "boolean" ||
     typeof input.localDeliveryEnabled !== "boolean"
@@ -63,6 +96,8 @@ function validateSettings(input: StoreSettingsInput) {
     currency,
     timeZone,
     orderNumberPrefix,
+    uvtValueCents: cents(input.uvtValueCents, "uvtValueCents", true),
+    standardShippingCents: cents(input.standardShippingCents, "standardShippingCents", false),
   };
 }
 
@@ -107,6 +142,11 @@ export class StoreSettingsService {
             timeZone: saved.timeZone,
             orderNumberPrefix: saved.orderNumberPrefix,
             orderNumberPadding: saved.orderNumberPadding,
+            uvtValueCents: saved.uvtValueCents.toString(),
+            uvtYear: saved.uvtYear,
+            standardShippingCents: saved.standardShippingCents.toString(),
+            deliveryPromiseDays: saved.deliveryPromiseDays,
+            reservationMinutes: saved.reservationMinutes,
             clickAndCollectEnabled: saved.clickAndCollectEnabled,
             localDeliveryEnabled: saved.localDeliveryEnabled,
           },

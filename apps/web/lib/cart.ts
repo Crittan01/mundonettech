@@ -142,3 +142,29 @@ export async function claimAssistedCart(token: string): Promise<CartSnapshot> {
   await setCartCookie(generated.token);
   return snapshot;
 }
+
+export async function checkoutCartReference(): Promise<{
+  accessTokenHash: Uint8Array<ArrayBuffer>;
+} | null> {
+  const token = await tokenFromCookie();
+  if (!token) return null;
+  const accessTokenHash = hashCartToken(token);
+  const record = await getDatabase().cart.findUnique({
+    where: { accessTokenHash },
+    select: { customerId: true, status: true },
+  });
+  if (!record || !["ACTIVE", "CONVERTED"].includes(record.status)) return null;
+  const customer = await optionalCustomer();
+  if (record.customerId !== null) {
+    return customer && customer.id === record.customerId ? { accessTokenHash } : null;
+  }
+  if (customer && record.status === "ACTIVE") {
+    await cartService().assignCustomer({ accessTokenHash }, customer.id);
+  }
+  return { accessTokenHash };
+}
+
+export async function clearCartAccessToken(): Promise<void> {
+  const store = await cookies();
+  store.set(cartTokenCookie, "", { ...sessionCookieOptions, maxAge: 0, expires: new Date(0) });
+}

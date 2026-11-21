@@ -381,6 +381,11 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
       timeZone: "America/Bogota",
       orderNumberPrefix: "MNT",
       orderNumberPadding: 4,
+      uvtValueCents: "5237400",
+      uvtYear: 2026,
+      standardShippingCents: "0",
+      deliveryPromiseDays: 30,
+      reservationMinutes: 120,
       clickAndCollectEnabled: true,
       localDeliveryEnabled: false,
     };

@@ -1,0 +1,111 @@
+enum ShipmentKind {
+  DELIVERY
+  CLICK_COLLECT
+}
+
+enum ShipmentStatus {
+  PENDING
+  READY
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum OrderRefundStatus {
+  REQUESTED
+  APPROVED
+  PROCESSING
+  COMPLETED
+  FAILED
+  REJECTED
+  CANCELLED
+}
+
+enum OrderRefundReason {
+  RETRACT
+  WARRANTY
+  ADJUSTMENT
+  CUSTOMER_SUPPORT
+}
+
+model Shipment {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId           String            @db.Uuid
+  originLocationId  String            @db.Uuid
+  kind              ShipmentKind
+  status            ShipmentStatus    @default(PENDING)
+  trackingCode      String?           @db.VarChar(120)
+  carrier           String?           @db.VarChar(120)
+  shippingCents     BigInt            @default(0)
+  promisedAt        DateTime          @db.Timestamptz(6)
+  readyAt           DateTime?         @db.Timestamptz(6)
+  shippedAt         DateTime?         @db.Timestamptz(6)
+  deliveredAt       DateTime?         @db.Timestamptz(6)
+  cancelledAt       DateTime?         @db.Timestamptz(6)
+  createdAt         DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  order             Order             @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  originLocation    StockLocation     @relation(fields: [originLocationId], references: [id], onDelete: Restrict)
+  items             ShipmentItem[]
+
+  @@index([orderId, status, createdAt])
+  @@index([originLocationId, status])
+  @@index([status, promisedAt])
+  @@map("Shipment")
+}
+
+model ShipmentItem {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipmentId String    @db.Uuid
+  orderItemId String   @db.Uuid
+  quantity   Int
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
+  shipment   Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  orderItem  OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@unique([shipmentId, orderItemId])
+  @@index([orderItemId, shipmentId])
+  @@map("ShipmentItem")
+}
+
+model OrderRefund {
+  id                      String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId                 String            @db.Uuid
+  idempotencyKey          String            @unique @db.VarChar(128)
+  requestHash             Bytes             @db.ByteA
+  reason                  OrderRefundReason
+  status                  OrderRefundStatus @default(REQUESTED)
+  subtotalCents           BigInt
+  taxCents                BigInt
+  shippingCents           BigInt            @default(0)
+  totalCents              BigInt
+  note                    String?           @db.VarChar(500)
+  requestedByAdminUserId  String            @db.Uuid
+  processedAt             DateTime?         @db.Timestamptz(6)
+  createdAt               DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  order                   Order             @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  requestedBy             AdminUser         @relation(fields: [requestedByAdminUserId], references: [id], onDelete: Restrict)
+  items                   OrderRefundItem[]
+
+  @@index([orderId, status, createdAt])
+  @@index([requestedByAdminUserId, createdAt])
+  @@map("OrderRefund")
+}
+
+model OrderRefundItem {
+  id            String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  refundId      String      @db.Uuid
+  orderItemId   String      @db.Uuid
+  quantity      Int
+  subtotalCents BigInt
+  taxCents      BigInt
+  totalCents    BigInt
+  createdAt     DateTime    @default(now()) @db.Timestamptz(6)
+  refund        OrderRefund @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  orderItem     OrderItem   @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+
+  @@unique([refundId, orderItemId])
+  @@index([orderItemId, refundId])
+  @@map("OrderRefundItem")
+}
