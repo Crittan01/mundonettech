@@ -179,7 +179,7 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
     );
 
     const reversed = detail.blocks.map((block) => block.id).reverse();
-    const [reordered, extraBlock] = await Promise.all([
+    const [reorderOutcome, addOutcome] = await Promise.allSettled([
       service.reorderBlocks(page.id, reversed, audit),
       service.addBlock(
         page.id,
@@ -187,11 +187,27 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
         audit,
       ),
     ]);
-    assert.ok(reordered.length >= 3);
-    assert.ok(extraBlock.id);
+    assert.equal(addOutcome.status, "fulfilled");
+    assert.ok(addOutcome.value.id);
+    if (reorderOutcome.status === "fulfilled") {
+      assert.equal(reorderOutcome.value.length, 3);
+    } else {
+      assert.ok(reorderOutcome.reason instanceof CmsValidationError);
+      assert.match(reorderOutcome.reason.message, /every block/i);
+    }
     const afterConcurrent = await service.getPage(page.id);
     assert.deepEqual(
       afterConcurrent.blocks.map((block) => block.position),
+      [0, 1, 2, 3],
+    );
+    const fullReversed = afterConcurrent.blocks.map((block) => block.id).reverse();
+    const reorderedAll = await service.reorderBlocks(page.id, fullReversed, audit);
+    assert.deepEqual(
+      reorderedAll.map((block) => block.id),
+      fullReversed,
+    );
+    assert.deepEqual(
+      reorderedAll.map((block) => block.position),
       [0, 1, 2, 3],
     );
 
