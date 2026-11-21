@@ -187,6 +187,51 @@ describe("F1.3 — persisted inventory schema and invariants", () => {
     });
     assert.notEqual(recreated.id, first.id);
   });
+
+  it("blocks archiving entities with active stock/open POs and prevents toggling trackSerial after inventory exists", async () => {
+    await assert.rejects(
+      db.stockLocation.update({
+        where: { id: fixture.locationId },
+        data: { deletedAt: new Date() },
+      }),
+      /Cannot archive a stock location/,
+    );
+    await assert.rejects(
+      db.stockLocation.update({
+        where: { id: fixture.locationId },
+        data: { type: "QUARANTINE" },
+      }),
+      /type cannot change/,
+    );
+    await assert.rejects(
+      db.supplier.update({
+        where: { id: fixture.supplierId },
+        data: { deletedAt: new Date() },
+      }),
+      /Cannot archive a supplier/,
+    );
+    await assert.rejects(
+      db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { deletedAt: new Date() },
+      }),
+      /Cannot archive a variant/,
+    );
+    await assert.rejects(
+      db.product.update({
+        where: { id: catalog.productId },
+        data: { deletedAt: new Date() },
+      }),
+      /Cannot archive a product/,
+    );
+    await assert.rejects(
+      db.product.update({
+        where: { id: catalog.productId },
+        data: { trackSerial: false },
+      }),
+      /serial tracking cannot change/,
+    );
+  });
 });
 
 describe("F1.3 — atomic stock reservations and deterministic concurrency", () => {
@@ -202,7 +247,14 @@ describe("F1.3 — atomic stock reservations and deterministic concurrency", () 
     const reserved = await reserveStock(db, { operationKey, items });
     assert.equal(reserved.replayed, false);
     assert.equal((await stockLevel(variant.id, fixture.locationId)).committed, 2);
-    const replay = await reserveStock(db, { operationKey, items: [...items].reverse() });
+    const replay = await reserveStock(db, {
+      operationKey,
+      items: [...items].reverse().map((entry) => ({
+        quantity: entry.quantity,
+        locationId: entry.locationId,
+        variantId: entry.variantId,
+      })),
+    });
     assert.equal(replay.replayed, true);
     await assert.rejects(
       reserveStock(db, { operationKey, items: [{ ...items[0], quantity: 1 }] }),
@@ -378,9 +430,8 @@ describe("F1.3 — atomic stock reservations and deterministic concurrency", () 
       InsufficientStockError,
     );
 
-    const serial = key("MOVE-SN");
-    await db.serializedUnit.create({
-      data: { variantId: catalog.variantId, locationId: fixture.locationId, serial },
+    const targetUnit = await db.serializedUnit.findUniqueOrThrow({
+      where: { id: fixture.serializedUnitIds[5] },
     });
     await transferStock(db, {
       operationKey: key("serial-transfer"),
@@ -390,12 +441,62 @@ describe("F1.3 — atomic stock reservations and deterministic concurrency", () 
           fromLocationId: fixture.locationId,
           toLocationId: fixture.destinationLocationId,
           quantity: 1,
+          serials: [targetUnit.serial],
         },
       ],
     });
-    const movedUnit = await db.serializedUnit.findFirstOrThrow({ where: { serial } });
+    const movedUnit = await db.serializedUnit.findUniqueOrThrow({ where: { id: targetUnit.id } });
     assert.equal(movedUnit.locationId, fixture.destinationLocationId);
     assert.equal(movedUnit.status, "IN_STOCK");
+
+    const quarantine = await db.stockLocation.create({
+      data: {
+        code: `QUAR-${randomUUID().slice(0, 8).toUpperCase()}`,
+        name: "Bodega cuarentena",
+        type: "QUARANTINE",
+      },
+    });
+    await transferStock(db, {
+      operationKey: key("to-quarantine"),
+      items: [
+        {
+          variantId: catalog.variantId,
+          fromLocationId: fixture.destinationLocationId,
+          toLocationId: quarantine.id,
+          quantity: 1,
+          serials: [targetUnit.serial],
+        },
+      ],
+    });
+    const quarantinedUnit = await db.serializedUnit.findUniqueOrThrow({
+      where: { id: targetUnit.id },
+    });
+    assert.equal(quarantinedUnit.locationId, quarantine.id);
+    assert.equal(quarantinedUnit.status, "QUARANTINED");
+    await assert.rejects(
+      reserveStock(db, {
+        operationKey: key("reserve-quarantine"),
+        items: [{ variantId: catalog.variantId, locationId: quarantine.id, quantity: 1 }],
+      }),
+      InventoryConflictError,
+    );
+    await transferStock(db, {
+      operationKey: key("from-quarantine"),
+      items: [
+        {
+          variantId: catalog.variantId,
+          fromLocationId: quarantine.id,
+          toLocationId: fixture.destinationLocationId,
+          quantity: 1,
+          serials: [targetUnit.serial],
+        },
+      ],
+    });
+    const restoredUnit = await db.serializedUnit.findUniqueOrThrow({
+      where: { id: targetUnit.id },
+    });
+    assert.equal(restoredUnit.locationId, fixture.destinationLocationId);
+    assert.equal(restoredUnit.status, "IN_STOCK");
   });
 });
 
@@ -535,6 +636,30 @@ describe("F1.3 — purchase orders, serialized receipts and WAC", () => {
       InventoryConflictError,
     );
     assert.equal((await stockLevel(variant.id, fixture.locationId)).onHand, 2);
+
+    const otherTracked = await createVariant(true);
+    const crossSkuImeiPurchase = await createPurchaseOrder(db, {
+      code: key("PO-CROSS-IMEI"),
+      supplierId: fixture.supplierId,
+      destinationLocationId: fixture.locationId,
+      items: [{ variantId: otherTracked.id, quantityOrdered: 1, unitCostCents: 600n }],
+    });
+    await markPurchaseOrderOrdered(db, crossSkuImeiPurchase.id);
+    await assert.rejects(
+      receivePurchaseOrder(db, {
+        purchaseOrderId: crossSkuImeiPurchase.id,
+        operationKey: key("cross-sku-imei"),
+        items: [
+          {
+            variantId: otherTracked.id,
+            quantity: 1,
+            serials: [{ serial: key("OTHER-SERIAL"), imei: serials[0].imei }],
+          },
+        ],
+      }),
+      InventoryConflictError,
+    );
+    assert.equal(await db.serializedUnit.count({ where: { variantId: otherTracked.id } }), 0);
   });
 
   it("serializes competing receipts so purchased quantities cannot exceed the order", async () => {
@@ -584,9 +709,28 @@ describe("F1.3 — atomic inventory CSV import and safe export", () => {
     const imported = await importInventoryStockCsv(db, { operationKey, csv });
     assert.equal(imported.importedRows, 3);
     assert.equal(imported.replayed, false);
+    const entriesByVariant = new Map(
+      imported.ledgerEntries.map((entry) => [
+        `${entry.locationId}:${entry.variantId}`,
+        entry.entryType,
+      ]),
+    );
+    assert.equal(entriesByVariant.get(`${fixture.destinationLocationId}:${plain.id}`), "OPENING");
+    assert.equal(entriesByVariant.get(`${fixture.destinationLocationId}:${tracked.id}`), "OPENING");
+    assert.equal(entriesByVariant.get(`${fixture.locationId}:${catalog.variantId}`), "ADJUSTMENT");
     assert.equal(
       (await stockLevel(plain.id, fixture.destinationLocationId)).weightedAvgCostCents,
       12_345n,
+    );
+    await assert.rejects(
+      importInventoryStockCsv(db, {
+        operationKey: key("csv-bad-downward-cost"),
+        csv: serializeCsv([
+          ["locationCode", "sku", "onHand", "safetyStock", "unitCostCents"],
+          [fixture.destinationCode, plain.sku, 4, 1, 99_999n],
+        ]),
+      }),
+      InventoryConflictError,
     );
     assert.equal(await db.serializedUnit.count({ where: { variantId: tracked.id } }), 2);
     assert.equal((await stockLevel(catalog.variantId, fixture.locationId)).safetyStock, 3);

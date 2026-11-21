@@ -13,6 +13,24 @@ import type { DatabaseExecutor } from "./primitives.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const retryableErrorCodes = new Set(["P1001", "P1017", "P2024", "40001", "40P01"]);
+const uniqueViolationCodes = new Set(["P2002", "23505"]);
+
+export function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (typeof value === "bigint") return value.toString();
+  if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item));
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([left], [right]) => compareStrings(left, right))
+      .map(([key, entryValue]) => [key, canonicalJsonValue(entryValue)] as const);
+    return Object.fromEntries(entries);
+  }
+  return value;
+}
 
 export class InventoryNotFoundError extends Error {
   constructor(message = "Inventory record not found.") {
@@ -99,41 +117,49 @@ export function normalizeKey(value: string, field = "operationKey"): string {
 }
 
 export function operationHash(payload: object): Buffer {
-  return createHash("sha256").update(JSON.stringify(payload)).digest();
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalJsonValue(payload)))
+    .digest();
 }
 
-export function normalizeStockMovements<T extends StockMovementInput>(items: readonly T[]): T[] {
+export function normalizeStockMovements(
+  items: readonly StockMovementInput[],
+): StockMovementInput[] {
   if (!Array.isArray(items) || items.length < 1 || items.length > 10_000) {
     throw new RangeError("items must contain between 1 and 10000 movements.");
   }
   const seen = new Set<string>();
   const normalized = items.map((item) => {
-    assertUuid(item.variantId, "variantId");
-    assertUuid(item.locationId, "locationId");
+    const variantId = assertUuid(item.variantId, "variantId");
+    const locationId = assertUuid(item.locationId, "locationId");
     if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 2_147_483_647) {
       throw new RangeError("quantity must be a positive 32-bit integer.");
     }
-    const key = `${item.variantId}:${item.locationId}`;
+    const key = `${variantId}:${locationId}`;
     if (seen.has(key)) throw new TypeError("Duplicate variant/location movements are not allowed.");
     seen.add(key);
-    return { ...item };
+    return { variantId, locationId, quantity: item.quantity };
   });
   return normalized.sort(
     (left, right) =>
-      left.variantId.localeCompare(right.variantId) ||
-      left.locationId.localeCompare(right.locationId),
+      compareStrings(left.variantId, right.variantId) ||
+      compareStrings(left.locationId, right.locationId),
   );
 }
 
-function findErrorCode(error: unknown, depth = 0): string | null {
+function findMatchingCode(error: unknown, codes: ReadonlySet<string>, depth = 0): string | null {
   if (typeof error !== "object" || error === null || depth > 6) return null;
   const record = error as Record<string, unknown>;
-  if (typeof record.code === "string" && retryableErrorCodes.has(record.code)) return record.code;
+  if (typeof record.code === "string" && codes.has(record.code)) return record.code;
   for (const property of ["cause", "meta", "driverAdapterError"] as const) {
-    const nested = findErrorCode(record[property], depth + 1);
+    const nested = findMatchingCode(record[property], codes, depth + 1);
     if (nested) return nested;
   }
   return null;
+}
+
+export function hasUniqueViolation(error: unknown): boolean {
+  return findMatchingCode(error, uniqueViolationCodes) !== null;
 }
 
 export async function inInventoryTransaction<T>(
@@ -146,8 +172,8 @@ export async function inInventoryTransaction<T>(
     try {
       return await client.$transaction(callback, { maxWait: 10_000, timeout: 120_000 });
     } catch (error) {
-      const code = findErrorCode(error);
-      if (attempt >= 3 || code === null || !retryableErrorCodes.has(code)) throw error;
+      const code = findMatchingCode(error, retryableErrorCodes);
+      if (attempt >= 3 || code === null) throw error;
       await delay(attempt * 25);
     }
   }
@@ -157,7 +183,7 @@ export async function acquireOperationLocks(
   tx: Prisma.TransactionClient,
   keys: readonly string[],
 ): Promise<void> {
-  for (const key of [...new Set(keys)].sort((left, right) => left.localeCompare(right))) {
+  for (const key of [...new Set(keys)].sort((left, right) => compareStrings(left, right))) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
   }
 }
@@ -217,7 +243,7 @@ export async function activeVariants(
   tx: Prisma.TransactionClient,
   variantIds: readonly string[],
 ): Promise<Map<string, VariantWithProduct>> {
-  const uniqueIds = [...new Set(variantIds)].sort((left, right) => left.localeCompare(right));
+  const uniqueIds = [...new Set(variantIds)].sort((left, right) => compareStrings(left, right));
   const variants = await tx.productVariant.findMany({
     where: { id: { in: uniqueIds }, deletedAt: null, product: { deletedAt: null } },
     include: { product: true },
@@ -232,7 +258,7 @@ export async function activeLocations(
   tx: Prisma.TransactionClient,
   locationIds: readonly string[],
 ): Promise<Map<string, { id: string; code: string; type: string }>> {
-  const uniqueIds = [...new Set(locationIds)].sort((left, right) => left.localeCompare(right));
+  const uniqueIds = [...new Set(locationIds)].sort((left, right) => compareStrings(left, right));
   const locations = await tx.stockLocation.findMany({
     where: { id: { in: uniqueIds }, deletedAt: null },
     select: { id: true, code: true, type: true },

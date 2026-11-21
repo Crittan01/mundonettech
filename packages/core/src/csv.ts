@@ -67,7 +67,7 @@ export function parseCsv(input: string, options: CsvParseOptions = {}): CsvRow[]
     2_000_000,
   );
   const source = input.charCodeAt(0) === 0xfeff ? input.slice(1) : input;
-  if (new TextEncoder().encode(source).byteLength > maxBytes) {
+  if (source.length > maxBytes || new TextEncoder().encode(source).byteLength > maxBytes) {
     throw new CsvValidationError(`Input exceeds ${maxBytes} bytes.`, 1);
   }
   if (source.includes("\u0000")) throw new CsvValidationError("NUL bytes are not allowed.", 1);
@@ -79,7 +79,15 @@ export function parseCsv(input: string, options: CsvParseOptions = {}): CsvRow[]
   let rowLine = 1;
   let inQuotes = false;
   let closedQuote = false;
+  let rowHasQuotedCell = false;
   let touched = false;
+
+  function pushFieldCharacter(chunk: string): void {
+    field += chunk;
+    if (field.length > maxFieldLength) {
+      throw new CsvValidationError(`Field exceeds ${maxFieldLength} characters.`, rowLine);
+    }
+  }
 
   function appendField(): void {
     if (field.length > maxFieldLength) {
@@ -92,13 +100,14 @@ export function parseCsv(input: string, options: CsvParseOptions = {}): CsvRow[]
 
   function appendRow(): void {
     appendField();
-    if (!(cells.length === 1 && cells[0] === "")) {
+    if (!(cells.length === 1 && cells[0] === "" && !rowHasQuotedCell)) {
       rows.push({ cells, line: rowLine });
       if (rows.length > maxRows + 1) {
         throw new CsvValidationError(`Input exceeds ${maxRows} data rows.`, rowLine);
       }
     }
     cells = [];
+    rowHasQuotedCell = false;
     touched = false;
   }
 
@@ -107,20 +116,20 @@ export function parseCsv(input: string, options: CsvParseOptions = {}): CsvRow[]
     if (inQuotes) {
       if (character === '"') {
         if (source[index + 1] === '"') {
-          field += '"';
+          pushFieldCharacter('"');
           index += 1;
         } else {
           inQuotes = false;
           closedQuote = true;
         }
       } else {
-        field += character;
-        if (character === "\r" || character === "\n") {
-          if (character === "\r" && source[index + 1] === "\n") {
-            field += "\n";
-            index += 1;
-          }
+        if (character === "\r" && source[index + 1] === "\n") {
+          pushFieldCharacter("\r\n");
+          index += 1;
           line += 1;
+        } else {
+          pushFieldCharacter(character);
+          if (character === "\r" || character === "\n") line += 1;
         }
       }
       touched = true;
@@ -135,6 +144,7 @@ export function parseCsv(input: string, options: CsvParseOptions = {}): CsvRow[]
         throw new CsvValidationError("A quote may only open at the start of a field.", line);
       }
       inQuotes = true;
+      rowHasQuotedCell = true;
       touched = true;
     } else if (character === ",") {
       appendField();
@@ -145,7 +155,7 @@ export function parseCsv(input: string, options: CsvParseOptions = {}): CsvRow[]
       line += 1;
       rowLine = line;
     } else {
-      field += character;
+      pushFieldCharacter(character);
       touched = true;
     }
   }
@@ -156,7 +166,7 @@ export function parseCsv(input: string, options: CsvParseOptions = {}): CsvRow[]
 }
 
 export function neutralizeCsvFormula(value: string): string {
-  return /^(?:[=+\-@\t\r]|[\s\uFEFF]*[=+\-@])/.test(value) ? `'${value}` : value;
+  return /^[\s\uFEFF]*[=+\-@\t\r]/.test(value) ? `'${value}` : value;
 }
 
 export function serializeCsv(rows: readonly (readonly CsvCell[])[]): string {
@@ -253,8 +263,11 @@ function parseSerials(value: string, line: number): Array<{ serial: string; imei
   });
 }
 
-export function parseInventoryStockCsv(input: string): InventoryStockCsvRow[] {
-  const parsed = parseCsv(input);
+export function parseInventoryStockCsv(
+  input: string,
+  options?: CsvParseOptions,
+): InventoryStockCsvRow[] {
+  const parsed = parseCsv(input, options);
   const header = parsed[0];
   if (!header) throw new CsvValidationError("A header row is required.", 1);
   if (new Set(header.cells).size !== header.cells.length) {
@@ -309,10 +322,9 @@ export function parseInventoryStockCsv(input: string): InventoryStockCsvRow[] {
         throw new CsvValidationError("Duplicate serial.", row.line, "serials");
       serialKeys.add(serialKey);
       if (identity.imei) {
-        const imeiKey = `${sku}:${identity.imei}`;
-        if (imeiKeys.has(imeiKey))
+        if (imeiKeys.has(identity.imei))
           throw new CsvValidationError("Duplicate IMEI.", row.line, "serials");
-        imeiKeys.add(imeiKey);
+        imeiKeys.add(identity.imei);
       }
     }
     return {

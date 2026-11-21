@@ -110,6 +110,7 @@ const requiredPartialIndexes = [
   "Supplier_code_active_key",
   "Supplier_taxId_active_key",
   "SerializedUnit_variantId_imei_key",
+  "SerializedUnit_imei_active_key",
 ] as const;
 const requiredSecurityTriggers = [
   "AdminActionLog_append_only",
@@ -131,6 +132,10 @@ const requiredSecurityTriggers = [
   "ProductAttributeValue_search_after_write",
   "AttributeDefinition_search_after_write",
   "StockLevel_validate",
+  "StockLocation_validate_lifecycle",
+  "Supplier_validate_lifecycle",
+  "ProductVariant_validate_inventory_lifecycle",
+  "Product_validate_inventory_lifecycle",
   "SerializedUnit_validate",
   "InventoryLedger_validate",
   "InventoryLedger_append_only",

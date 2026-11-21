@@ -10,8 +10,10 @@ import {
   InventoryConflictError,
   InventoryNotFoundError,
   acquireOperationLocks,
+  compareStrings,
   costWhenDepleted,
   findReplay,
+  hasUniqueViolation,
   inInventoryTransaction,
   levelFor,
   lockStockLevels,
@@ -32,23 +34,20 @@ export interface InventoryCsvImportResult extends InventoryOperationResult {
   readonly importedRows: number;
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-
 function canonicalRows(rows: readonly InventoryStockCsvRow[]): InventoryStockCsvRow[] {
   return rows
     .map((row) => ({
       ...row,
       serials: [...row.serials].sort(
         (left, right) =>
-          left.serial.localeCompare(right.serial) ||
-          (left.imei ?? "").localeCompare(right.imei ?? ""),
+          compareStrings(left.serial, right.serial) ||
+          compareStrings(left.imei ?? "", right.imei ?? ""),
       ),
     }))
     .sort(
       (left, right) =>
-        left.locationCode.localeCompare(right.locationCode) || left.sku.localeCompare(right.sku),
+        compareStrings(left.locationCode, right.locationCode) ||
+        compareStrings(left.sku, right.sku),
     );
 }
 
@@ -105,8 +104,8 @@ export async function importInventoryStockCsv(
         })
         .sort(
           (left, right) =>
-            left.variant.id.localeCompare(right.variant.id) ||
-            left.location.id.localeCompare(right.location.id),
+            compareStrings(left.variant.id, right.variant.id) ||
+            compareStrings(left.location.id, right.location.id),
         );
       const movements = resolved.map(({ row, location, variant }) => ({
         locationId: location.id,
@@ -114,6 +113,19 @@ export async function importInventoryStockCsv(
         quantity: Math.max(1, row.onHand),
       }));
       const levels = await lockStockLevels(tx, movements, true);
+      const existingLedgerPairs = await tx.inventoryLedger.findMany({
+        where: {
+          OR: resolved.map(({ location, variant }) => ({
+            locationId: location.id,
+            variantId: variant.id,
+          })),
+        },
+        distinct: ["locationId", "variantId"],
+        select: { locationId: true, variantId: true },
+      });
+      const initializedKeys = new Set(
+        existingLedgerPairs.map((pair) => `${pair.locationId}:${pair.variantId}`),
+      );
       const ledgerEntries: LedgerEntryInput[] = [];
 
       for (const { row, location, variant } of resolved) {
@@ -156,6 +168,20 @@ export async function importInventoryStockCsv(
             row.unitCostCents,
           );
         } else if (quantityDelta < 0) {
+          if (row.onHand > 0 && row.unitCostCents !== level.weightedAvgCostCents) {
+            throw new InventoryConflictError(
+              `unitCostCents must match current WAC when quantity does not increase for ${row.sku}.`,
+            );
+          }
+          if (
+            row.onHand === 0 &&
+            row.unitCostCents !== 0n &&
+            row.unitCostCents !== level.weightedAvgCostCents
+          ) {
+            throw new InventoryConflictError(
+              `Depleting stock to zero requires zero or current WAC unitCostCents for ${row.sku}.`,
+            );
+          }
           weightedAvgCostCents = costWhenDepleted(row.onHand, level.weightedAvgCostCents);
         } else if (level.onHand === 0) {
           if (row.unitCostCents !== 0n) {
@@ -171,13 +197,14 @@ export async function importInventoryStockCsv(
         }
 
         if (tracked && row.serials.length > 0) {
+          const initialStatus = location.type === "QUARANTINE" ? "QUARANTINED" : "IN_STOCK";
           await tx.serializedUnit.createMany({
             data: row.serials.map((identity) => ({
               variantId: variant.id,
               locationId: location.id,
               serial: identity.serial,
               imei: identity.imei,
-              status: "IN_STOCK" as const,
+              status: initialStatus,
             })),
           });
         }
@@ -189,10 +216,11 @@ export async function importInventoryStockCsv(
             weightedAvgCostCents,
           },
         });
+        const isFirstEntry = !initializedKeys.has(`${location.id}:${variant.id}`);
         ledgerEntries.push({
           locationId: location.id,
           variantId: variant.id,
-          entryType: "ADJUSTMENT",
+          entryType: isFirstEntry ? "OPENING" : "ADJUSTMENT",
           quantityDelta,
           committedDelta: 0,
           level: updated,
@@ -214,7 +242,7 @@ export async function importInventoryStockCsv(
       return { ...result, importedRows: rows.length };
     });
   } catch (error) {
-    if (hasErrorCode(error, "P2002")) {
+    if (hasUniqueViolation(error)) {
       throw new InventoryConflictError(
         "CSV contains a serial, IMEI, or operation key that already exists.",
       );

@@ -12,10 +12,13 @@ import {
   InventoryConflictError,
   InventoryNotFoundError,
   PurchaseOrderStateError,
+  activeLocations,
   activeVariants,
   acquireOperationLocks,
   assertUuid,
+  compareStrings,
   findReplay,
+  hasUniqueViolation,
   inInventoryTransaction,
   levelFor,
   lockStockLevels,
@@ -67,10 +70,6 @@ interface NormalizedReceiptItem {
   readonly serials: Array<{ serial: string; imei: string | null }>;
 }
 
-function hasErrorCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
-}
-
 function normalizePurchaseOrderCode(value: string): string {
   const code = normalizeInventoryCode(value, "code", 64);
   if (code.length < 3) throw new TypeError("code must contain at least 3 characters.");
@@ -111,8 +110,12 @@ export async function createPurchaseOrder(
     .map((item) => {
       assertUuid(item.variantId, "variantId");
       assertStockQuantity(item.quantityOrdered, "quantityOrdered", true);
-      if (typeof item.unitCostCents !== "bigint" || item.unitCostCents < 0n) {
-        throw new RangeError("unitCostCents must be a non-negative BigInt.");
+      if (
+        typeof item.unitCostCents !== "bigint" ||
+        item.unitCostCents < 0n ||
+        item.unitCostCents > 9_223_372_036_854_775_807n
+      ) {
+        throw new RangeError("unitCostCents must be a non-negative 64-bit BigInt.");
       }
       if (seen.has(item.variantId)) {
         throw new TypeError("A purchase order cannot contain the same variant twice.");
@@ -124,9 +127,16 @@ export async function createPurchaseOrder(
         unitCostCents: item.unitCostCents,
       };
     })
-    .sort((left, right) => left.variantId.localeCompare(right.variantId));
+    .sort((left, right) => compareStrings(left.variantId, right.variantId));
 
   return inInventoryTransaction(db, async (tx) => {
+    if (expectedAt !== null) {
+      const clock = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = clock[0]?.now;
+      if (now && expectedAt.getTime() < now.getTime()) {
+        throw new RangeError("expectedAt cannot be earlier than the purchase order creation time.");
+      }
+    }
     const supplier = await tx.supplier.findFirst({
       where: { id: supplierId, deletedAt: null },
       select: { id: true },
@@ -155,7 +165,7 @@ export async function createPurchaseOrder(
       });
       return purchase;
     } catch (error) {
-      if (hasErrorCode(error, "P2002")) {
+      if (hasUniqueViolation(error)) {
         throw new InventoryConflictError("Purchase order code already exists.");
       }
       throw error;
@@ -177,10 +187,28 @@ export async function markPurchaseOrderOrdered(
     if (purchase.status !== "DRAFT") {
       throw new PurchaseOrderStateError("Only a draft purchase order can be marked as ordered.");
     }
-    await tx.purchaseOrder.update({
-      where: { id: purchaseOrderId },
-      data: { status: "ORDERED", orderedAt: new Date() },
+    const supplier = await tx.supplier.findFirst({
+      where: { id: purchase.supplierId, deletedAt: null },
+      select: { id: true },
     });
+    if (!supplier) throw new InventoryNotFoundError("Active supplier not found.");
+    await activeLocations(tx, [purchase.destinationLocationId]);
+    const items = await tx.purchaseOrderItem.findMany({
+      where: { purchaseOrderId },
+      select: { variantId: true },
+    });
+    if (items.length === 0) {
+      throw new PurchaseOrderStateError("An ordered purchase must contain at least one item.");
+    }
+    await activeVariants(
+      tx,
+      items.map((item) => item.variantId),
+    );
+    await tx.$executeRaw`
+      UPDATE "PurchaseOrder"
+      SET "status" = 'ORDERED', "orderedAt" = CURRENT_TIMESTAMP
+      WHERE "id" = ${purchaseOrderId}::uuid
+    `;
     return purchaseOrderWithItems(tx, purchaseOrderId);
   });
 }
@@ -232,21 +260,22 @@ function normalizeReceiptItems(
           (
             left: { serial: string; imei: string | null },
             right: { serial: string; imei: string | null },
-          ) => left.serial.localeCompare(right.serial),
+          ) =>
+            compareStrings(left.serial, right.serial) ||
+            compareStrings(left.imei ?? "", right.imei ?? ""),
         );
       for (const identity of normalizedSerials) {
         const serialKey = `${item.variantId}:${identity.serial}`;
         if (serials.has(serialKey)) throw new TypeError("Duplicate serial in receipt.");
         serials.add(serialKey);
         if (identity.imei) {
-          const imeiKey = `${item.variantId}:${identity.imei}`;
-          if (imeis.has(imeiKey)) throw new TypeError("Duplicate IMEI in receipt.");
-          imeis.add(imeiKey);
+          if (imeis.has(identity.imei)) throw new TypeError("Duplicate IMEI in receipt.");
+          imeis.add(identity.imei);
         }
       }
       return { variantId: item.variantId, quantity: item.quantity, serials: normalizedSerials };
     })
-    .sort((left, right) => left.variantId.localeCompare(right.variantId));
+    .sort((left, right) => compareStrings(left.variantId, right.variantId));
 }
 
 async function lockPurchaseOrderItems(
@@ -296,10 +325,17 @@ export async function receivePurchaseOrder(
           "A receipt variant does not belong to the purchase order.",
         );
       }
-      const variants = await activeVariants(
-        tx,
-        items.map((item) => item.variantId),
-      );
+      const [locations, variants] = await Promise.all([
+        activeLocations(tx, [purchase.destinationLocationId]),
+        activeVariants(
+          tx,
+          items.map((item) => item.variantId),
+        ),
+      ]);
+      const destinationLocation = locations.get(purchase.destinationLocationId);
+      if (!destinationLocation) {
+        throw new InventoryNotFoundError("Active destination location not found.");
+      }
       const movements = items.map((item) => ({
         variantId: item.variantId,
         locationId: purchase.destinationLocationId,
@@ -347,6 +383,8 @@ export async function receivePurchaseOrder(
           data: { quantityReceived: { increment: item.quantity } },
         });
         if (item.serials.length > 0) {
+          const initialStatus =
+            destinationLocation.type === "QUARANTINE" ? "QUARANTINED" : "IN_STOCK";
           await tx.serializedUnit.createMany({
             data: item.serials.map((identity) => ({
               variantId: item.variantId,
@@ -354,7 +392,7 @@ export async function receivePurchaseOrder(
               purchaseOrderItemId: purchaseItem.id,
               serial: identity.serial,
               imei: identity.imei,
-              status: "IN_STOCK" as const,
+              status: initialStatus,
             })),
           });
         }
@@ -379,13 +417,12 @@ export async function receivePurchaseOrder(
 
       const allItems = await tx.purchaseOrderItem.findMany({ where: { purchaseOrderId } });
       const complete = allItems.every((item) => item.quantityReceived === item.quantityOrdered);
-      await tx.purchaseOrder.update({
-        where: { id: purchaseOrderId },
-        data: {
-          status: complete ? "RECEIVED" : "PARTIALLY_RECEIVED",
-          receivedAt: new Date(),
-        },
-      });
+      const nextStatus = complete ? "RECEIVED" : "PARTIALLY_RECEIVED";
+      await tx.$executeRaw`
+        UPDATE "PurchaseOrder"
+        SET "status" = ${nextStatus}::"PurchaseOrderStatus", "receivedAt" = CURRENT_TIMESTAMP
+        WHERE "id" = ${purchaseOrderId}::uuid
+      `;
       const entries = await writeLedgerEntries(tx, {
         operationKey,
         operationHash: hash,
@@ -395,7 +432,7 @@ export async function receivePurchaseOrder(
       return { ...result, purchaseOrderId };
     });
   } catch (error) {
-    if (hasErrorCode(error, "P2002")) {
+    if (hasUniqueViolation(error)) {
       throw new InventoryConflictError("A serial, IMEI, or receipt operation key already exists.");
     }
     throw error;

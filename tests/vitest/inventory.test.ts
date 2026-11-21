@@ -66,11 +66,16 @@ describe("F1.3 — effective stock and exact WAC", () => {
 });
 
 describe("F1.3 — RFC 4180 CSV and formula safety", () => {
-  it("parses BOM, CRLF, quoted commas, escaped quotes and embedded newlines", () => {
+  it("parses BOM, CRLF, quoted commas, escaped quotes, embedded newlines, and 1-column empty quotes", () => {
     const rows = parseCsv('\uFEFFname,note\r\n"A","x,""quoted""\r\nnext"\r\n');
     expect(rows).toEqual([
       { cells: ["name", "note"], line: 1 },
       { cells: ["A", 'x,"quoted"\r\nnext'], line: 2 },
+    ]);
+    expect(parseCsv('note\r\n""\r\n\r\n"text"\r\n')).toEqual([
+      { cells: ["note"], line: 1 },
+      { cells: [""], line: 2 },
+      { cells: ["text"], line: 4 },
     ]);
   });
 
@@ -80,6 +85,7 @@ describe("F1.3 — RFC 4180 CSV and formula safety", () => {
     expect(() => parseCsv("a,b\nvalue,\u0000")).toThrow(/NUL/);
     expect(() => parseCsv("a\n1\n2", { maxRows: 1 })).toThrow(/data rows/);
     expect(() => parseCsv("a,b", { maxBytes: 2 })).toThrow(/bytes/);
+    expect(() => parseCsv('"123456', { maxFieldLength: 4 })).toThrow(/characters/);
     expect(() =>
       parseInventoryStockCsv(
         "locationCode,locationCode,sku,onHand,safetyStock,unitCostCents\nA,A,B,1,0,1",
@@ -93,9 +99,20 @@ describe("F1.3 — RFC 4180 CSV and formula safety", () => {
   });
 
   it("neutralizes every spreadsheet formula prefix and quotes exported cells", () => {
-    for (const value of ["=1+1", "+SUM(A1:A2)", "-2+3", "@cmd", "\t=1", "\r=1", "  =1"]) {
+    for (const value of [
+      "=1+1",
+      "+SUM(A1:A2)",
+      "-2+3",
+      "@cmd",
+      "\t=1",
+      "\r=1",
+      "  =1",
+      "  \tcmd",
+      "\uFEFF@cmd",
+    ]) {
       expect(neutralizeCsvFormula(value).startsWith("'")).toBe(true);
     }
+    expect(neutralizeCsvFormula("  plain")).toBe("  plain");
     const csv = serializeCsv([["plain", "=formula", "comma,value", 'quote"value', 10n, null]]);
     const [row] = parseCsv(csv);
     expect(row?.cells).toEqual(["plain", "'=formula", "comma,value", 'quote"value', "10", ""]);
@@ -120,8 +137,9 @@ describe("F1.3 — RFC 4180 CSV and formula safety", () => {
     });
   });
 
-  it("rejects duplicate stock keys, duplicate serials, invalid numbers and formula identities", () => {
+  it("rejects duplicate stock keys, duplicate serials, cross-SKU duplicate IMEIs, invalid numbers and formula identities", () => {
     const header = "locationCode,sku,onHand,safetyStock,unitCostCents";
+    const sharedImei = imeiWithPrefix("35391510544011");
     expect(() => parseInventoryStockCsv(`${header}\nMAIN,AB-01,1,0,10\nMAIN,AB-01,2,0,20`)).toThrow(
       /Duplicate locationCode/,
     );
@@ -138,6 +156,15 @@ describe("F1.3 — RFC 4180 CSV and formula safety", () => {
         `${header},serials\nMAIN,AB-01,2,0,10,"[{""serial"":""S1""},{""serial"":""S1""}]"`,
       ),
     ).toThrow(/Duplicate serial/);
+    expect(() =>
+      parseInventoryStockCsv(
+        serializeCsv([
+          ["locationCode", "sku", "onHand", "safetyStock", "unitCostCents", "serials"],
+          ["MAIN", "AB-01", 1, 0, 10, JSON.stringify([{ serial: "S1", imei: sharedImei }])],
+          ["MAIN", "AB-02", 1, 0, 10, JSON.stringify([{ serial: "S2", imei: sharedImei }])],
+        ]),
+      ),
+    ).toThrow(/Duplicate IMEI/);
     expect(() => parseInventoryStockCsv(`${header},serials\nMAIN,AB-01,1,0,10,"not-json"`)).toThrow(
       /JSON array/,
     );

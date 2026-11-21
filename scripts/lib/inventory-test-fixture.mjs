@@ -19,10 +19,14 @@ export async function seedInventoryFixture(client, catalog) {
   const purchaseOrderId = randomUUID();
   const purchaseOrderItemId = randomUUID();
   const orderId = randomUUID();
-  const serializedUnitId = randomUUID();
+  const serializedUnitIds = Array.from({ length: 10 }, () => randomUUID()).sort();
+  const serializedUnitId = serializedUnitIds[0];
   const locationCode = `MAIN-${suffix.slice(0, 8).toUpperCase()}`;
   const destinationCode = `SECOND-${suffix.slice(0, 8).toUpperCase()}`;
 
+  await client.query(`UPDATE "Product" SET "trackSerial" = true WHERE "id" = $1`, [
+    catalog.productId,
+  ]);
   await client.query(
     `INSERT INTO "StockLocation" ("id", "code", "name", "type")
      VALUES ($1, $2, 'Bodega principal', 'LOCAL_MAIN'), ($3, $4, 'Sede secundaria', 'CLICK_COLLECT')`,
@@ -57,14 +61,18 @@ export async function seedInventoryFixture(client, catalog) {
      ) VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 100000, 19000, 119000)`,
     [orderId, `ORD-${suffix.replaceAll("-", "").slice(0, 28).toUpperCase()}`, catalog.customerId],
   );
-  await client.query(`UPDATE "Product" SET "trackSerial" = true WHERE "id" = $1`, [
-    catalog.productId,
-  ]);
-  await client.query(
-    `INSERT INTO "SerializedUnit" ("id", "variantId", "locationId", "serial")
-     VALUES ($1, $2, $3, $4)`,
-    [serializedUnitId, catalog.variantId, locationId, `SERIAL-${suffix.toUpperCase()}`],
-  );
+  for (const [index, unitId] of serializedUnitIds.entries()) {
+    await client.query(
+      `INSERT INTO "SerializedUnit" ("id", "variantId", "locationId", "serial")
+       VALUES ($1, $2, $3, $4)`,
+      [
+        unitId,
+        catalog.variantId,
+        locationId,
+        `SERIAL-${suffix.toUpperCase()}-${String(index + 1).padStart(2, "0")}`,
+      ],
+    );
+  }
   await client.query(
     `INSERT INTO "InventoryLedger" (
        "locationId", "variantId", "entryType", "quantityDelta", "committedDelta",
@@ -84,5 +92,6 @@ export async function seedInventoryFixture(client, catalog) {
     purchaseOrderItemId,
     orderId,
     serializedUnitId,
+    serializedUnitIds,
   };
 }

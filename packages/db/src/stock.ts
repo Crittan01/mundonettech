@@ -3,6 +3,7 @@ import {
   availableStock,
   calculateWeightedAverageCost,
   normalizeOperationKey,
+  normalizeSerial,
 } from "@mundonettech/core";
 
 import type { SerializedUnit } from "./generated/client.js";
@@ -15,6 +16,7 @@ import {
   activeVariants,
   acquireOperationLocks,
   assertUuid,
+  compareStrings,
   costWhenDepleted,
   findReplay,
   inInventoryTransaction,
@@ -48,6 +50,7 @@ export interface TransferStockItem {
   readonly fromLocationId: string;
   readonly toLocationId: string;
   readonly quantity: number;
+  readonly serials?: readonly string[];
 }
 
 export interface TransferStockOptions {
@@ -58,15 +61,24 @@ export interface TransferStockOptions {
 async function lockSerializedUnits(
   tx: Parameters<Parameters<typeof inInventoryTransaction>[1]>[0],
   movement: StockMovementInput,
-  status: "IN_STOCK" | "RESERVED",
-  reservationKey?: string,
+  status: "IN_STOCK" | "RESERVED" | "QUARANTINED",
+  options: {
+    readonly reservationKey?: string;
+    readonly serials?: readonly string[];
+    readonly requireUnordered?: boolean;
+  } = {},
 ): Promise<SerializedUnit[]> {
+  const reservationKey = options.reservationKey ?? null;
+  const serials = options.serials ?? null;
+  const requireUnordered = options.requireUnordered === true;
   const units = await tx.$queryRaw<SerializedUnit[]>`
     SELECT * FROM "SerializedUnit"
     WHERE "variantId" = ${movement.variantId}::uuid
       AND "locationId" = ${movement.locationId}::uuid
       AND "status" = ${status}::"SerializedUnitStatus"
-      AND (${reservationKey ?? null}::text IS NULL OR "reservationKey" = ${reservationKey ?? null})
+      AND (${reservationKey}::text IS NULL OR "reservationKey" = ${reservationKey})
+      AND (${serials}::text[] IS NULL OR "serial" = ANY(${serials}::text[]))
+      AND (NOT ${requireUnordered}::boolean OR "orderId" IS NULL)
     ORDER BY "id" ASC
     FOR UPDATE
     LIMIT ${movement.quantity}::int
@@ -235,7 +247,7 @@ async function settleReservation(
         );
       }
       if (variants.get(item.variantId)?.product.trackSerial) {
-        const units = await lockSerializedUnits(tx, item, "RESERVED", reservationKey);
+        const units = await lockSerializedUnits(tx, item, "RESERVED", { reservationKey });
         if (fulfill) {
           await tx.$executeRaw`
             UPDATE "SerializedUnit"
@@ -295,37 +307,70 @@ export async function fulfillStock(
   return settleReservation(db, options, true, options.orderId);
 }
 
-function normalizeTransfers(items: readonly TransferStockItem[]): TransferStockItem[] {
+interface NormalizedTransferStockItem {
+  readonly variantId: string;
+  readonly fromLocationId: string;
+  readonly toLocationId: string;
+  readonly quantity: number;
+  readonly serials?: readonly string[];
+}
+
+function normalizeTransfers(items: readonly TransferStockItem[]): NormalizedTransferStockItem[] {
   if (!Array.isArray(items) || items.length < 1 || items.length > 10_000) {
     throw new RangeError("items must contain between 1 and 10000 transfers.");
   }
   const transferKeys = new Set<string>();
   const stockKeys = new Set<string>();
+  const batchSerialKeys = new Set<string>();
   const normalized = items.map((item) => {
-    assertUuid(item.variantId, "variantId");
-    assertUuid(item.fromLocationId, "fromLocationId");
-    assertUuid(item.toLocationId, "toLocationId");
-    assertStockQuantity(item.quantity, "quantity", true);
-    if (item.fromLocationId === item.toLocationId) {
+    const variantId = assertUuid(item.variantId, "variantId");
+    const fromLocationId = assertUuid(item.fromLocationId, "fromLocationId");
+    const toLocationId = assertUuid(item.toLocationId, "toLocationId");
+    const quantity = assertStockQuantity(item.quantity, "quantity", true);
+    if (fromLocationId === toLocationId) {
       throw new TypeError("Transfer source and destination must differ.");
     }
-    const transferKey = `${item.variantId}:${item.fromLocationId}:${item.toLocationId}`;
+    const transferKey = `${variantId}:${fromLocationId}:${toLocationId}`;
     if (transferKeys.has(transferKey)) throw new TypeError("Duplicate transfers are not allowed.");
     transferKeys.add(transferKey);
-    for (const locationId of [item.fromLocationId, item.toLocationId]) {
-      const stockKey = `${item.variantId}:${locationId}`;
+    for (const locationId of [fromLocationId, toLocationId]) {
+      const stockKey = `${variantId}:${locationId}`;
       if (stockKeys.has(stockKey)) {
         throw new TypeError("A transfer batch cannot touch the same stock level more than once.");
       }
       stockKeys.add(stockKey);
     }
-    return { ...item };
+    let normalizedSerials: string[] | undefined;
+    if (item.serials !== undefined) {
+      if (!Array.isArray(item.serials) || item.serials.length !== quantity) {
+        throw new TypeError("Explicit transfer serials must match the transferred quantity.");
+      }
+      const rawSerials: readonly string[] = item.serials;
+      const sortedSerials = rawSerials
+        .map((serial: string) => normalizeSerial(serial))
+        .sort((left: string, right: string) => compareStrings(left, right));
+      for (const serial of sortedSerials) {
+        const serialKey = `${variantId}:${serial}`;
+        if (batchSerialKeys.has(serialKey)) {
+          throw new TypeError("Duplicate serial in transfer batch.");
+        }
+        batchSerialKeys.add(serialKey);
+      }
+      normalizedSerials = sortedSerials;
+    }
+    return {
+      variantId,
+      fromLocationId,
+      toLocationId,
+      quantity,
+      ...(normalizedSerials === undefined ? {} : { serials: normalizedSerials }),
+    };
   });
   return normalized.sort(
     (left, right) =>
-      left.variantId.localeCompare(right.variantId) ||
-      left.fromLocationId.localeCompare(right.fromLocationId) ||
-      left.toLocationId.localeCompare(right.toLocationId),
+      compareStrings(left.variantId, right.variantId) ||
+      compareStrings(left.fromLocationId, right.fromLocationId) ||
+      compareStrings(left.toLocationId, right.toLocationId),
   );
 }
 
@@ -351,8 +396,8 @@ export async function transferStock(
     ])
     .sort(
       (left, right) =>
-        left.variantId.localeCompare(right.variantId) ||
-        left.locationId.localeCompare(right.locationId),
+        compareStrings(left.variantId, right.variantId) ||
+        compareStrings(left.locationId, right.locationId),
     );
 
   return inInventoryTransaction(db, async (tx) => {
@@ -375,6 +420,11 @@ export async function transferStock(
     const ledgerEntries: LedgerEntryInput[] = [];
 
     for (const item of items) {
+      const sourceLocation = locations.get(item.fromLocationId);
+      const destinationLocation = locations.get(item.toLocationId);
+      if (!sourceLocation || !destinationLocation) {
+        throw new InventoryNotFoundError("Stock location not found.");
+      }
       const sourceKey = {
         variantId: item.variantId,
         locationId: item.fromLocationId,
@@ -394,7 +444,14 @@ export async function transferStock(
           item.quantity,
         );
       }
-      if (variants.get(item.variantId)?.product.trackSerial) {
+      const tracked = variants.get(item.variantId)?.product.trackSerial === true;
+      if (!tracked && item.serials !== undefined) {
+        throw new TypeError("Serials are not accepted for variants without serial tracking.");
+      }
+      if (tracked) {
+        const sourceStatus = sourceLocation.type === "QUARANTINE" ? "QUARANTINED" : "IN_STOCK";
+        const destinationStatus =
+          destinationLocation.type === "QUARANTINE" ? "QUARANTINED" : "IN_STOCK";
         const units = await lockSerializedUnits(
           tx,
           {
@@ -402,11 +459,15 @@ export async function transferStock(
             locationId: item.fromLocationId,
             quantity: item.quantity,
           },
-          "IN_STOCK",
+          sourceStatus,
+          {
+            ...(item.serials === undefined ? {} : { serials: item.serials }),
+            requireUnordered: destinationStatus === "IN_STOCK",
+          },
         );
         await tx.serializedUnit.updateMany({
           where: { id: { in: units.map((unit) => unit.id) } },
-          data: { locationId: item.toLocationId },
+          data: { locationId: item.toLocationId, status: destinationStatus },
         });
       }
 
