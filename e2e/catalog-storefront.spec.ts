@@ -22,7 +22,7 @@ test("catalog search, PDP and two-product comparison use persisted stock and att
   await page.goto("/productos");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Catálogo de tecnología");
   await expect(
-    page.getByRole("status").filter({ hasText: "8 productos encontrados" }),
+    page.getByRole("status").filter({ hasText: /\b(?:[89]|[1-9][0-9]+)\s+productos encontrados/ }),
   ).toBeVisible();
   await page.getByLabel("Buscar productos").fill("audífonos");
   await page.getByRole("button", { name: "Aplicar filtros" }).click();

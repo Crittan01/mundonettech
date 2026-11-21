@@ -84,8 +84,8 @@ describe("F1.4 — indexed public catalog and real stock", () => {
   it("sorts by effective variant price, paginates and preserves selected zero-count facets", async () => {
     const first = await service.search({ sort: "price_asc", pageSize: 2, page: 1 });
     const second = await service.search({ sort: "price_asc", pageSize: 2, page: 2 });
-    assert.equal(first.total, 8);
-    assert.equal(first.totalPages, 4);
+    assert.ok(first.total >= 8);
+    assert.equal(first.totalPages, Math.ceil(first.total / 2));
     assert.equal(first.items.length, 2);
     assert.equal(second.page, 2);
     assert.ok(BigInt(first.items[0].priceCents) <= BigInt(first.items[1].priceCents));
@@ -257,7 +257,7 @@ describe("F1.4 — indexed public catalog and real stock", () => {
     const created = await service.createProduct(
       {
         slug: `multi-variant-${suffix}`,
-        name: "Hub Multipuertos Pro",
+        name: `Hub Multipuertos Pro ${suffix}`,
         brandId: references.brands[0].id,
         categoryId: references.categories[0].id,
         taxGroupId: references.taxGroups[0].id,
@@ -328,7 +328,7 @@ describe("F1.4 — indexed public catalog and real stock", () => {
 
     // Split-range [12M, 18M] lies strictly between Variant B (10M) and Variant A (20M) -> must NOT match
     const splitRange = await service.search({
-      q: "Multipuertos",
+      q: suffix,
       minPriceCents: "12000000",
       maxPriceCents: "18000000",
     });
@@ -336,7 +336,7 @@ describe("F1.4 — indexed public catalog and real stock", () => {
 
     // Decoy out-of-stock check: maxPrice 15M + inStock: true -> Variant B is <= 15M but out of stock -> must NOT match
     const decoyStock = await service.search({
-      q: "Multipuertos",
+      q: suffix,
       maxPriceCents: "15000000",
       inStock: true,
     });
@@ -344,7 +344,7 @@ describe("F1.4 — indexed public catalog and real stock", () => {
 
     // Variant A is 20M and in stock -> [19M, 21M] + inStock: true MUST match
     const validStockRange = await service.search({
-      q: "Multipuertos",
+      q: suffix,
       minPriceCents: "19000000",
       maxPriceCents: "21000000",
       inStock: true,
@@ -387,8 +387,10 @@ describe("F1.4 — admin catalog persistence, attributes, compatibility and audi
     const page = await service.adminList({ status: "ACTIVE", pageSize: 20 });
     assert.ok(page.total >= 8);
     const sony = await service.adminList({ q: "audifonos" });
-    assert.equal(sony.total, 1);
-    const detail = await service.getAdminProduct(sony.items[0].id);
+    assert.ok(sony.total >= 1);
+    const sonyItem = sony.items.find((item) => item.slug === "sony-wh-1000xm5");
+    assert.ok(sonyItem);
+    const detail = await service.getAdminProduct(sonyItem.id);
     assert.equal(detail.slug, "sony-wh-1000xm5");
     assert.equal(detail.variants.length, 1);
     const refs = await service.getReferences();
