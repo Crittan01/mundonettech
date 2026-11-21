@@ -133,6 +133,28 @@ export async function proxy(request: NextRequest) {
       redirectResponse = loginRedirect(request, isAdmin ? "/admin/login" : "/ingresar", "timeout");
       response.cookies.set(cookieName, "", { ...sessionCookieOptions, maxAge: 0 });
     }
+  } else if (user && pathname.startsWith("/pagina/")) {
+    const adminToken = request.cookies.get(adminActivityCookie)?.value;
+    if (adminToken) {
+      try {
+        const refreshed = refreshTimeoutToken({
+          token: adminToken,
+          expectedKind: "admin",
+          expectedSubject: user.id,
+          secret: getSessionHmacSecret(),
+          idleSeconds: adminIdleSeconds,
+          maximumAbsoluteSeconds: adminAbsoluteSeconds,
+        });
+        if (refreshed.refreshed) {
+          response.cookies.set(adminActivityCookie, refreshed.token, {
+            ...sessionCookieOptions,
+            maxAge: adminAbsoluteSeconds,
+          });
+        }
+      } catch {
+        response.cookies.set(adminActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+      }
+    }
   }
 
   if (redirectResponse) {

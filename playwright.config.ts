@@ -16,7 +16,16 @@ const webServerEnv: Record<string, string> = {
   HOSTNAME: "127.0.0.1",
   PORT: "4110",
   NEXT_PUBLIC_SITE_URL: "http://127.0.0.1:4110",
-  NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54421",
+  MEDIA_BASE_URL:
+    process.env.MEDIA_BASE_URL ?? process.env.NEXT_PUBLIC_MEDIA_BASE_URL ?? "http://127.0.0.1:4110",
+  NEXT_PUBLIC_MEDIA_BASE_URL: process.env.NEXT_PUBLIC_MEDIA_BASE_URL ?? "http://127.0.0.1:4110",
+  SUPABASE_URL:
+    process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54429",
+  NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54429",
+  SUPABASE_PUBLISHABLE_KEY:
+    process.env.SUPABASE_PUBLISHABLE_KEY ??
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
+    "sb_publishable_e2e_isolated_test_only_key",
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "sb_publishable_e2e_isolated_test_only_key",
   SUPABASE_SERVICE_ROLE_KEY:

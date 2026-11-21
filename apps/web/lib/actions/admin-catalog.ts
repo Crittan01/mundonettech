@@ -194,6 +194,7 @@ function invalidateCatalog(options: {
   updateTag("catalog");
   updateTag("catalog:search");
   updateTag("catalog:compare");
+  updateTag("catalog:cms-grid");
   if (options.slug) updateTag(`catalog:product:${options.slug}`);
   if (options.previousSlug && options.previousSlug !== options.slug) {
     updateTag(`catalog:product:${options.previousSlug}`);

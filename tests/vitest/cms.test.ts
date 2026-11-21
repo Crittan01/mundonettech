@@ -106,6 +106,27 @@ describe("F2.1 — typed composable CMS blocks", () => {
       subheading: "Visita tienda.co",
     });
     expect(() => parseCmsBlock("HERO", { heading: "{{broken" })).toThrow(/Malformed/);
+    expect(() =>
+      renderCmsBlock(
+        "HERO",
+        { heading: "X", primaryCta: { label: "Ir", href: "/{{store.path}}" } },
+        { "store.path": "/evil.co" },
+      ),
+    ).toThrow();
+    expect(() =>
+      renderCmsBlock(
+        "HERO",
+        { heading: "X", primaryCta: { label: "Ir", href: "/{{store.name}}" } },
+        tokens,
+      ),
+    ).toThrow();
+    expect(() =>
+      renderCmsBlock(
+        "HERO",
+        { heading: "{{store.long}} {{store.long}}" },
+        { "store.long": "x".repeat(90) },
+      ),
+    ).toThrow();
   });
 });
 

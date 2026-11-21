@@ -181,6 +181,7 @@ export async function updateCmsPageAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
+  let liveEditSlug: string | null = null;
   try {
     const { session, request } = await authorize("content:write");
     const id = z.uuid().parse(formString(formData, "pageId"));
@@ -190,10 +191,14 @@ export async function updateCmsPageAction(
     });
     const page = await cmsService().updatePage(id, pageInput(formData), audit(session, request));
     invalidateCms({ pageId: id, slugs: [previous?.slug, page.slug] });
-    return actionSuccess("Página actualizada y cambio registrado en auditoría.");
+    if (formString(formData, "liveEdit") === "1" && previous?.slug !== page.slug) {
+      liveEditSlug = page.slug;
+    }
   } catch (error) {
     return errorMessage(error, values);
   }
+  if (liveEditSlug) redirect(`/pagina/${liveEditSlug}?liveEdit=1`);
+  return actionSuccess("Página actualizada y cambio registrado en auditoría.");
 }
 
 export async function addCmsBlockAction(

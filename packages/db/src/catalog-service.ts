@@ -1020,6 +1020,38 @@ export class CatalogService {
     };
   }
 
+  async getProductsBySlugs(slugValues: readonly string[]): Promise<CatalogProductSummary[]> {
+    if (!Array.isArray(slugValues) || slugValues.length > 100) {
+      throw new CatalogQueryError("A product slug lookup accepts at most 100 slugs.");
+    }
+    const slugs = [
+      ...new Set(
+        slugValues.map((value) => {
+          const slug = parseLookupSlug(value);
+          if (!slug) throw new CatalogQueryError("Invalid product slug.", "INVALID_SLUG");
+          return slug;
+        }),
+      ),
+    ];
+    if (slugs.length === 0) return [];
+    const records: SummaryRecord[] = await this.db.product.findMany({
+      where: {
+        slug: { in: slugs },
+        status: "ACTIVE",
+        deletedAt: null,
+        brand: { deletedAt: null },
+        category: { deletedAt: null },
+        variants: { some: { status: "ACTIVE", deletedAt: null } },
+      },
+      include: summaryInclude,
+    });
+    const bySlug = new Map(records.map((record) => [record.slug, record]));
+    const ordered = slugs
+      .map((slug) => bySlug.get(slug))
+      .filter((record): record is SummaryRecord => record !== undefined);
+    return this.summaries(ordered);
+  }
+
   async getProductBySlug(slugValue: string): Promise<CatalogProductDetail | null> {
     const slug = parseLookupSlug(slugValue);
     if (!slug) return null;

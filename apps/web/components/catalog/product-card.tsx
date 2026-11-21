@@ -41,12 +41,15 @@ export function ProductCard({
   product,
   mediaOrigin,
   compareSlugs = [],
+  headingLevel = 2,
 }: {
   product: CatalogProductSummary;
   mediaOrigin: string | null;
   compareSlugs?: readonly string[];
+  headingLevel?: 2 | 3 | 4;
 }) {
   const image = cardImage(product, mediaOrigin);
+  const Heading = headingLevel === 4 ? "h4" : headingLevel === 3 ? "h3" : "h2";
   const compared = compareSlugs.includes(product.slug);
   const nextSlugs = compared
     ? compareSlugs.filter((slug) => slug !== product.slug)
@@ -85,14 +88,14 @@ export function ProductCard({
           >
             {product.brand.name}
           </Link>
-          <h2 className="mt-1 text-lg leading-snug font-semibold">
+          <Heading className="mt-1 text-lg leading-snug font-semibold">
             <Link
               href={`/producto/${product.slug}`}
               className="outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
             >
               {product.name}
             </Link>
-          </h2>
+          </Heading>
         </div>
         {product.shortDescription ? (
           <p className="line-clamp-3 text-sm leading-6 text-muted-foreground">
