@@ -1,9 +1,11 @@
 import { formatCopCents } from "@mundonettech/core";
 import { CartService } from "@mundonettech/db";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 
 import { ClaimAssistedCartForm } from "@/components/cart/cart-forms";
+import { optionalCustomerId } from "@/lib/cart";
 import { hashCartToken } from "@/lib/cart-token";
 import { getDatabase } from "@/lib/db";
 
@@ -20,14 +22,19 @@ export async function generateMetadata() {
 export default async function AssistedPaymentPage({ params }: PageProps<"/pagar/[token]">) {
   await connection();
   const { token } = await params;
+  const viewerCustomerId = await optionalCustomerId();
   let cart;
   try {
-    cart = await new CartService(getDatabase()).getByAssistedToken(hashCartToken(token));
+    cart = await new CartService(getDatabase()).getByAssistedToken(
+      hashCartToken(token),
+      viewerCustomerId,
+    );
   } catch (error) {
     if (error instanceof TypeError) notFound();
     throw error;
   }
   if (!cart) notFound();
+  const requiresCustomerSignIn = cart.customerId !== null && viewerCustomerId === null;
   return (
     <div className="mx-auto max-w-4xl space-y-8">
       <div>
@@ -101,6 +108,17 @@ export default async function AssistedPaymentPage({ params }: PageProps<"/pagar/
             Algún producto, paquete o cantidad ya no está disponible. No puedes aceptar esta
             versión; solicita un enlace nuevo.
           </p>
+        </section>
+      ) : requiresCustomerSignIn ? (
+        <section role="alert" className="space-y-3 rounded-xl border border-border bg-card p-5">
+          <h2 className="font-semibold">Inicia sesión para aceptar esta venta</h2>
+          <p className="text-sm text-muted-foreground">
+            Esta venta asistida está asociada a una cuenta registrada. Ingresa con tu correo antes
+            de llevarla a tu carrito.
+          </p>
+          <Link href="/ingresar" className="inline-flex font-medium text-primary hover:underline">
+            Iniciar sesión
+          </Link>
         </section>
       ) : (
         <ClaimAssistedCartForm token={token} disabled={cart.items.length === 0} />

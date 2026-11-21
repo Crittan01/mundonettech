@@ -37,6 +37,12 @@ export function cartMutationMessage(error: unknown): string {
     return "El carrito o la línea solicitada ya no está disponible. Recarga la página.";
   }
   if (error instanceof CartStateError) {
+    if (error.message.includes("assigned customer")) {
+      return "Inicia sesión con la cuenta del cliente asignado antes de aceptar esta venta asistida.";
+    }
+    if (error.message.includes("already been claimed")) {
+      return "El cliente ya aceptó esta venta asistida; no admite nuevos cambios desde consola.";
+    }
     return "El carrito cambió de estado o requiere revisar un paquete antes de continuar. Recarga y ajusta lo indicado.";
   }
   if (error instanceof CartValidationError) {

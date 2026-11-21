@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -63,6 +63,7 @@ function Field({
   label,
   value,
   required = false,
+  disabled = false,
   type = "text",
   maxLength,
   min,
@@ -72,6 +73,7 @@ function Field({
   label: string;
   value: string;
   required?: boolean;
+  disabled?: boolean;
   type?: string;
   maxLength?: number;
   min?: string;
@@ -80,12 +82,13 @@ function Field({
     <div className="space-y-2">
       <Label htmlFor={id}>{label}</Label>
       <Input
-        key={`${id}-${value}`}
+        key={`${id}-${value}-${disabled}`}
         id={id}
         name={name}
         type={type}
         defaultValue={value}
         required={required}
+        disabled={disabled}
         maxLength={maxLength}
         min={min}
       />
@@ -96,19 +99,27 @@ function Field({
 export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults }) {
   const [state, action, pending] = useActionState(saveWholesaleTierAction, initialActionState);
   const values = state.status === "error" ? state.values : undefined;
-  const scope = values?.scope ?? defaults.scope;
+  const [scopeOverride, setScopeOverride] = useState<string | null>(null);
+  const scope = scopeOverride ?? values?.scope ?? defaults.scope;
   const active = values ? ["on", "true"].includes(values.active ?? "") : defaults.active;
+  const isGlobal = scope === "GLOBAL";
   return (
-    <form action={action} className="space-y-5 rounded-xl border border-border bg-card p-5">
+    <form
+      action={(formData) => {
+        setScopeOverride(null);
+        action(formData);
+      }}
+      className="space-y-5 rounded-xl border border-border bg-card p-5"
+    >
       {defaults.id ? <input type="hidden" name="id" value={defaults.id} /> : null}
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="wholesale-scope">Alcance</Label>
           <select
-            key={scope}
             id="wholesale-scope"
             name="scope"
-            defaultValue={scope}
+            value={scope}
+            onChange={(event) => setScopeOverride(event.target.value)}
             className={selectClass}
           >
             <option value="VARIANT">Variante (SKU)</option>
@@ -121,7 +132,9 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
           id="wholesale-target"
           name="target"
           label="SKU o slug; vacío para global"
-          value={values?.target ?? defaults.target}
+          value={isGlobal ? "" : (values?.target ?? defaults.target)}
+          required={!isGlobal}
+          disabled={isGlobal}
           maxLength={160}
         />
         <Field
@@ -168,10 +181,18 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
   const [state, action, pending] = useActionState(saveCouponAction, initialActionState);
   const values = state.status === "error" ? state.values : undefined;
   const get = (key: Exclude<keyof CouponDefaults, "id">): string => values?.[key] ?? defaults[key];
-  const discountType = get("discountType");
+  const [discountTypeOverride, setDiscountTypeOverride] = useState<string | null>(null);
+  const discountType = discountTypeOverride ?? get("discountType");
   const status = get("status");
+  const isPercentage = discountType === "PERCENTAGE";
   return (
-    <form action={action} className="space-y-6 rounded-xl border border-border bg-card p-5">
+    <form
+      action={(formData) => {
+        setDiscountTypeOverride(null);
+        action(formData);
+      }}
+      className="space-y-6 rounded-xl border border-border bg-card p-5"
+    >
       {defaults.id ? <input type="hidden" name="id" value={defaults.id} /> : null}
       <fieldset className="grid gap-4 sm:grid-cols-2">
         <legend className="mb-2 font-semibold">Identidad y vigencia</legend>
@@ -194,10 +215,10 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
         <div className="space-y-2">
           <Label htmlFor="coupon-type">Tipo de descuento</Label>
           <select
-            key={discountType}
             id="coupon-type"
             name="discountType"
-            defaultValue={discountType}
+            value={discountType}
+            onChange={(event) => setDiscountTypeOverride(event.target.value)}
             className={selectClass}
           >
             <option value="PERCENTAGE">Porcentaje</option>
@@ -238,14 +259,18 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           id="coupon-percentage"
           name="percentageBps"
           label="Porcentaje en puntos básicos (1000 = 10 %)"
-          value={get("percentageBps")}
+          value={isPercentage ? get("percentageBps") : ""}
+          required={isPercentage}
+          disabled={!isPercentage}
           maxLength={5}
         />
         <Field
           id="coupon-amount"
           name="amountCents"
           label="Monto fijo (centavos COP)"
-          value={get("amountCents")}
+          value={isPercentage ? "" : get("amountCents")}
+          required={!isPercentage}
+          disabled={isPercentage}
           maxLength={19}
         />
         <Field

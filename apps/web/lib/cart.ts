@@ -7,15 +7,15 @@ import { cookies } from "next/headers";
 import { hashCartToken, createCartToken } from "@/lib/cart-token";
 import { getDatabase } from "@/lib/db";
 import { getSessionHmacSecret } from "@/lib/env";
-import { sessionCookieOptions } from "@/lib/security/session-policy";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
+  cartTokenCookie,
   customerAbsoluteSeconds,
   customerActivityCookie,
   customerIdleSeconds,
+  sessionCookieOptions,
 } from "@/lib/security/session-policy";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-const cartCookie = process.env.NODE_ENV === "production" ? "__Host-cart_token" : "cart_token";
 const cartLifetimeSeconds = 30 * 24 * 60 * 60;
 
 interface OptionalCustomer {
@@ -54,7 +54,7 @@ function cartService(): CartService {
 
 async function tokenFromCookie(): Promise<string | null> {
   const store = await cookies();
-  const token = store.get(cartCookie)?.value;
+  const token = store.get(cartTokenCookie)?.value;
   if (!token) return null;
   try {
     hashCartToken(token);
@@ -66,22 +66,31 @@ async function tokenFromCookie(): Promise<string | null> {
 
 async function setCartCookie(token: string): Promise<void> {
   const store = await cookies();
-  store.set(cartCookie, token, {
+  store.set(cartTokenCookie, token, {
     ...sessionCookieOptions,
     maxAge: cartLifetimeSeconds,
     expires: new Date(Date.now() + cartLifetimeSeconds * 1000),
   });
 }
 
+export async function optionalCustomerId(): Promise<string | null> {
+  const customer = await optionalCustomer();
+  return customer?.id ?? null;
+}
+
 export async function readCart(): Promise<CartSnapshot | null> {
   const token = await tokenFromCookie();
   if (!token) return null;
+  const hash = hashCartToken(token);
   const service = cartService();
-  const cart = await service.getByAccessToken(hashCartToken(token));
+  const cart = await service.getByAccessToken(hash);
   if (!cart) return null;
   const customer = await optionalCustomer();
-  if (customer && cart.customerId === null) {
-    return service.assignCustomer({ accessTokenHash: hashCartToken(token) }, customer.id);
+  if (cart.customerId !== null) {
+    return customer && customer.id === cart.customerId ? cart : null;
+  }
+  if (customer) {
+    return service.assignCustomer({ accessTokenHash: hash }, customer.id);
   }
   return cart;
 }
@@ -104,15 +113,31 @@ export async function existingCartReference(): Promise<{
   accessTokenHash: Uint8Array<ArrayBuffer>;
 } | null> {
   const token = await tokenFromCookie();
-  return token ? { accessTokenHash: hashCartToken(token) } : null;
+  if (!token) return null;
+  const accessTokenHash = hashCartToken(token);
+  const record = await getDatabase().cart.findUnique({
+    where: { accessTokenHash },
+    select: { customerId: true, status: true },
+  });
+  if (!record || record.status !== "ACTIVE") return null;
+  const customer = await optionalCustomer();
+  if (record.customerId !== null) {
+    return customer && customer.id === record.customerId ? { accessTokenHash } : null;
+  }
+  if (customer) {
+    await cartService().assignCustomer({ accessTokenHash }, customer.id);
+  }
+  return { accessTokenHash };
 }
 
 export async function claimAssistedCart(token: string): Promise<CartSnapshot> {
   const generated = createCartToken();
+  const customer = await optionalCustomer();
   const snapshot = await cartService().claimAssistedCart({
     assistedTokenHash: hashCartToken(token),
     accessTokenHash: generated.hash,
     expiresAt: new Date(Date.now() + cartLifetimeSeconds * 1000),
+    customerId: customer?.id ?? null,
   });
   await setCartCookie(generated.token);
   return snapshot;

@@ -41,6 +41,7 @@ export interface PricingLineInput {
   readonly variantId: string;
   readonly productId: string;
   readonly categoryId: string;
+  readonly categoryAncestorIds?: readonly string[];
   readonly quantity: number;
   readonly unitPriceCents: bigint;
   readonly bundleId: string | null;
@@ -174,6 +175,24 @@ const scopeRank: Readonly<Record<WholesaleScope, number>> = {
   GLOBAL: 1,
 };
 
+function lineCategoryChain(line: PricingLineInput): string[] {
+  const seen = new Set<string>([line.categoryId]);
+  const chain = [line.categoryId];
+  for (const ancestorId of line.categoryAncestorIds ?? []) {
+    if (!seen.has(ancestorId)) {
+      seen.add(ancestorId);
+      chain.push(ancestorId);
+    }
+  }
+  return chain;
+}
+
+function categoryDistance(line: PricingLineInput, tier: PricingTier): number {
+  if (tier.scope !== "CATEGORY" || tier.categoryId === null) return 0;
+  const index = lineCategoryChain(line).indexOf(tier.categoryId);
+  return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+}
+
 function tierMatches(line: PricingLineInput, tier: PricingTier, productQuantity: number): boolean {
   const thresholdQuantity = tier.scope === "VARIANT" ? line.quantity : productQuantity;
   if (thresholdQuantity < tier.minimumQuantity) return false;
@@ -183,7 +202,7 @@ function tierMatches(line: PricingLineInput, tier: PricingTier, productQuantity:
     case "PRODUCT":
       return tier.productId === line.productId;
     case "CATEGORY":
-      return tier.categoryId === line.categoryId;
+      return tier.categoryId !== null && lineCategoryChain(line).includes(tier.categoryId);
     case "GLOBAL":
       return true;
   }
@@ -198,6 +217,7 @@ export function selectWholesaleTier(
   candidates.sort(
     (left, right) =>
       scopeRank[right.scope] - scopeRank[left.scope] ||
+      categoryDistance(line, left) - categoryDistance(line, right) ||
       right.minimumQuantity - left.minimumQuantity ||
       (left.unitPriceCents < right.unitPriceCents
         ? -1
@@ -212,7 +232,10 @@ export function selectWholesaleTier(
 function couponEligibility(line: PricingLineInput, coupon: PricingCoupon | null): boolean {
   if (!coupon) return false;
   if (coupon.productIds.length === 0 && coupon.categoryIds.length === 0) return true;
-  return coupon.productIds.includes(line.productId) || coupon.categoryIds.includes(line.categoryId);
+  return (
+    coupon.productIds.includes(line.productId) ||
+    lineCategoryChain(line).some((categoryId) => coupon.categoryIds.includes(categoryId))
+  );
 }
 
 export function calculateCartPricing(

@@ -107,9 +107,19 @@ type VariantWithProduct = ProductVariant & {
     deletedAt: Date | null;
     categoryId: string;
     brand: { deletedAt: Date | null };
-    category: { deletedAt: Date | null };
+    category: { deletedAt: Date | null; materializedPath: string };
   };
 };
+
+const pathUuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function categoryAncestors(categoryId: string, materializedPath: string): string[] {
+  return materializedPath
+    .split("/")
+    .filter((segment) => pathUuidPattern.test(segment) && segment !== categoryId)
+    .reverse();
+}
 
 type CartItemWithVariant = CartItem & { variant: VariantWithProduct };
 type CouponWithRestrictions = Coupon & {
@@ -182,6 +192,12 @@ async function lockCart(
 function assertActiveCart(cart: Cart, now: Date): void {
   if (cart.status !== "ACTIVE") throw new CartStateError("Cart is not active.");
   if (cart.expiresAt <= now) throw new CartStateError("Cart has expired.");
+}
+
+function assertAdminMutable(cart: Cart, audit?: PricingMutationAudit): void {
+  if (audit && cart.kind === "ASSISTED" && cart.assistedClaimedAt !== null) {
+    throw new CartStateError("Assisted cart has already been claimed by the customer.");
+  }
 }
 
 async function writeCartAudit(
@@ -319,6 +335,45 @@ async function releaseCoupon(
   });
 }
 
+async function transferCouponToCustomer(
+  tx: Prisma.TransactionClient,
+  cart: CartWithItems,
+  customerId: string,
+  expiresAt: Date,
+  now: Date,
+): Promise<{ couponId: string | null; detached: boolean }> {
+  await releaseCoupon(tx, cart.id, now);
+  if (!cart.coupon) return { couponId: null, detached: false };
+  if (!couponIsCurrent(cart.coupon, now)) {
+    return { couponId: null, detached: true };
+  }
+  const counts = await tx.$queryRaw<Array<{ total: number; customer: number }>>`
+    SELECT
+      count(*) FILTER (WHERE "status" = 'REDEEMED' OR ("status" = 'RESERVED' AND "expiresAt" > CURRENT_TIMESTAMP))::int AS total,
+      count(*) FILTER (WHERE "customerId" = ${customerId}::uuid AND ("status" = 'REDEEMED' OR ("status" = 'RESERVED' AND "expiresAt" > CURRENT_TIMESTAMP)))::int AS customer
+    FROM "CouponUsage"
+    WHERE "couponId" = ${cart.coupon.id}::uuid
+  `;
+  const count = counts[0] ?? { total: 0, customer: 0 };
+  if (
+    (cart.coupon.maximumUsages !== null && count.total >= cart.coupon.maximumUsages) ||
+    (cart.coupon.perCustomerUsages !== null && count.customer >= cart.coupon.perCustomerUsages)
+  ) {
+    return { couponId: null, detached: true };
+  }
+  const reservationExpiresAt =
+    cart.coupon.endsAt && cart.coupon.endsAt < expiresAt ? cart.coupon.endsAt : expiresAt;
+  await tx.couponUsage.create({
+    data: {
+      couponId: cart.coupon.id,
+      cartId: cart.id,
+      customerId,
+      expiresAt: reservationExpiresAt,
+    },
+  });
+  return { couponId: cart.coupon.id, detached: false };
+}
+
 function bundleDefinition(
   bundle: Bundle & { items: Array<{ variantId: string; quantity: number }> },
 ): PricingBundle {
@@ -438,6 +493,7 @@ export class CartService {
     tx: Prisma.TransactionClient,
     cartId: string,
     suppliedNow?: Date,
+    extraIssues: readonly CartPricingIssue[] = [],
   ): Promise<CartSnapshot> {
     let cart = await loadCart(tx, cartId);
     const now = suppliedNow ?? (await databaseNow(tx));
@@ -452,7 +508,17 @@ export class CartService {
 
     const variantIds = cart.items.map((item) => item.variantId);
     const productIds = [...new Set(cart.items.map((item) => item.variant.productId))];
-    const categoryIds = [...new Set(cart.items.map((item) => item.variant.product.categoryId))];
+    const categoryIds = [
+      ...new Set(
+        cart.items.flatMap((item) => [
+          item.variant.product.categoryId,
+          ...categoryAncestors(
+            item.variant.product.categoryId,
+            item.variant.product.category.materializedPath,
+          ),
+        ]),
+      ),
+    ];
     const [availability, tiers, bundleRecords] = await Promise.all([
       availabilityFor(tx, variantIds),
       cart.items.length
@@ -484,7 +550,10 @@ export class CartService {
     }));
     const bundleMap = new Map(bundleRecords.map((bundle) => [bundle.id, bundle]));
     const pricingBundles = new Map<string, PricingBundle>();
-    const issues: CartPricingIssue[] = cart.items.length ? [] : [{ code: "CART_EMPTY" }];
+    const issues: CartPricingIssue[] = [
+      ...(cart.items.length ? [] : [{ code: "CART_EMPTY" as const }]),
+      ...extraIssues,
+    ];
     const requestedByVariant = new Map<string, number>();
 
     for (const item of cart.items) {
@@ -565,6 +634,10 @@ export class CartService {
       variantId: item.variantId,
       productId: item.variant.productId,
       categoryId: item.variant.product.categoryId,
+      categoryAncestorIds: categoryAncestors(
+        item.variant.product.categoryId,
+        item.variant.product.category.materializedPath,
+      ),
       quantity: item.quantity,
       unitPriceCents: item.variant.priceCents,
       bundleId: item.bundleId,
@@ -659,6 +732,7 @@ export class CartService {
     return inInventoryTransaction(this.db, async (tx) => {
       const { cart, now } = await lockCart(tx, reference);
       assertActiveCart(cart, now);
+      assertAdminMutable(cart, audit);
       await callback(tx, cart, now);
       await writeCartAudit(tx, audit, action, cart.id);
       const snapshot = await this.revalidateLocked(tx, cart.id, now);
@@ -727,7 +801,23 @@ export class CartService {
 
   async assignCustomer(reference: CartReference, customerId: string): Promise<CartSnapshot> {
     assertUuid(customerId, "customerId");
-    return this.mutate(reference, undefined, "CART_CUSTOMER_ASSIGNED", async (tx, cart) => {
+    if ("cartId" in reference) assertUuid(reference.cartId, "cartId");
+    return inInventoryTransaction(this.db, async (tx) => {
+      const peek =
+        "cartId" in reference
+          ? await tx.cart.findUnique({
+              where: { id: reference.cartId },
+              select: { couponId: true },
+            })
+          : await tx.cart.findUnique({
+              where: {
+                accessTokenHash: assertTokenHash(reference.accessTokenHash, "accessTokenHash"),
+              },
+              select: { couponId: true },
+            });
+      if (peek?.couponId) await acquireOperationLocks(tx, [`coupon-redemption:${peek.couponId}`]);
+      const { cart, now } = await lockCart(tx, reference);
+      assertActiveCart(cart, now);
       if (cart.customerId && cart.customerId !== customerId) {
         throw new CartStateError("Cart already belongs to another customer.");
       }
@@ -736,9 +826,21 @@ export class CartService {
         select: { id: true },
       });
       if (!customer) throw new CartValidationError("Customer is not available.");
-      if (cart.customerId === customerId) return;
-      await releaseCoupon(tx, cart.id, await databaseNow(tx));
-      await tx.cart.update({ where: { id: cart.id }, data: { customerId, couponId: null } });
+      if (cart.customerId === customerId) return this.revalidateLocked(tx, cart.id, now);
+      if (cart.couponId && cart.couponId !== peek?.couponId) {
+        await acquireOperationLocks(tx, [`coupon-redemption:${cart.couponId}`]);
+      }
+      const transferred = await transferCouponToCustomer(tx, cart, customerId, cart.expiresAt, now);
+      await tx.cart.update({
+        where: { id: cart.id },
+        data: { customerId, couponId: transferred.couponId },
+      });
+      return this.revalidateLocked(
+        tx,
+        cart.id,
+        now,
+        transferred.detached ? [{ code: "COUPON_INVALID" }] : [],
+      );
     });
   }
 
@@ -982,6 +1084,7 @@ export class CartService {
       await acquireOperationLocks(tx, [`coupon-redemption:${coupon.id}`]);
       const { cart, now } = await lockCart(tx, reference);
       assertActiveCart(cart, now);
+      assertAdminMutable(cart, audit);
       if (cart.items.length === 0)
         throw new CouponError("EMPTY_CART", "Cannot apply a coupon to an empty cart.");
       if (coupon.status !== "ACTIVE") throw new CouponError("INACTIVE", "Coupon is not active.");
@@ -1176,8 +1279,12 @@ export class CartService {
     });
   }
 
-  async getByAssistedToken(assistedTokenHash: Uint8Array): Promise<CartSnapshot | null> {
+  async getByAssistedToken(
+    assistedTokenHash: Uint8Array,
+    viewerCustomerId?: string | null,
+  ): Promise<CartSnapshot | null> {
     const hash = assertTokenHash(assistedTokenHash, "assistedTokenHash");
+    if (viewerCustomerId) assertUuid(viewerCustomerId, "viewerCustomerId");
     return inInventoryTransaction(this.db, async (tx) => {
       const rows = await tx.$queryRaw<
         Cart[]
@@ -1194,6 +1301,9 @@ export class CartService {
         cart.expiresAt <= now
       )
         return null;
+      if (cart.customerId && viewerCustomerId && cart.customerId !== viewerCustomerId) {
+        return null;
+      }
       return this.revalidateLocked(tx, cart.id, now);
     });
   }
@@ -1202,11 +1312,20 @@ export class CartService {
     assistedTokenHash: Uint8Array;
     accessTokenHash: Uint8Array;
     expiresAt: Date;
+    customerId?: string | null;
   }): Promise<CartSnapshot> {
     const assistedTokenHash = assertTokenHash(input.assistedTokenHash, "assistedTokenHash");
     const accessTokenHash = assertTokenHash(input.accessTokenHash, "accessTokenHash");
     const expiresAt = validateExpiration(input.expiresAt, "expiresAt");
+    if (input.customerId) assertUuid(input.customerId, "customerId");
     return inInventoryTransaction(this.db, async (tx) => {
+      const peek = await tx.cart.findFirst({
+        where: { assistedTokenHash },
+        select: { couponId: true },
+      });
+      if (peek?.couponId && input.customerId) {
+        await acquireOperationLocks(tx, [`coupon-redemption:${peek.couponId}`]);
+      }
       const rows = await tx.$queryRaw<
         Cart[]
       >`SELECT * FROM "Cart" WHERE "assistedTokenHash" = ${assistedTokenHash} FOR UPDATE`;
@@ -1222,14 +1341,54 @@ export class CartService {
         expiresAt <= now
       )
         throw new CartStateError("Assisted payment link is unavailable or expired.");
-      const snapshot = await this.revalidateLocked(tx, cart.id, now);
-      if (!snapshot.canContinue)
-        throw new CartStateError("Resolve cart issues before accepting the assisted sale.");
+      if (cart.customerId && cart.customerId !== (input.customerId ?? null)) {
+        throw new CartStateError(
+          "This assisted sale requires signing in with the assigned customer account.",
+        );
+      }
+      let nextCustomerId = cart.customerId;
+      let nextCouponId = cart.couponId;
+      let detachedCoupon = false;
+      if (!cart.customerId && input.customerId) {
+        const customer = await tx.customer.findFirst({
+          where: { id: input.customerId, deletedAt: null, status: { not: "ANONYMIZED" } },
+          select: { id: true },
+        });
+        if (!customer) throw new CartValidationError("Customer is not available.");
+        if (cart.couponId && cart.couponId !== peek?.couponId) {
+          await acquireOperationLocks(tx, [`coupon-redemption:${cart.couponId}`]);
+        }
+        const transferred = await transferCouponToCustomer(
+          tx,
+          cart,
+          input.customerId,
+          expiresAt,
+          now,
+        );
+        nextCustomerId = input.customerId;
+        nextCouponId = transferred.couponId;
+        detachedCoupon = transferred.detached;
+      }
       await tx.cart.update({
         where: { id: cart.id },
-        data: { assistedTokenHash: null, assistedClaimedAt: now, accessTokenHash, expiresAt },
+        data: {
+          customerId: nextCustomerId,
+          couponId: nextCouponId,
+          assistedTokenHash: null,
+          assistedClaimedAt: now,
+          accessTokenHash,
+          expiresAt,
+        },
       });
-      return storedSnapshot(tx, cart.id);
+      const snapshot = await this.revalidateLocked(
+        tx,
+        cart.id,
+        now,
+        detachedCoupon ? [{ code: "COUPON_INVALID" }] : [],
+      );
+      if (!snapshot.canContinue)
+        throw new CartStateError("Resolve cart issues before accepting the assisted sale.");
+      return snapshot;
     });
   }
 

@@ -170,6 +170,28 @@ export async function proxy(request: NextRequest) {
         response.cookies.set(adminActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
       }
     }
+  } else if (user && (pathname === "/carrito" || pathname.startsWith("/pagar/"))) {
+    const customerToken = request.cookies.get(customerActivityCookie)?.value;
+    if (customerToken) {
+      try {
+        const refreshed = refreshTimeoutToken({
+          token: customerToken,
+          expectedKind: "customer",
+          expectedSubject: user.id,
+          secret: getSessionHmacSecret(),
+          idleSeconds: customerIdleSeconds,
+          maximumAbsoluteSeconds: customerAbsoluteSeconds,
+        });
+        if (refreshed.refreshed) {
+          response.cookies.set(customerActivityCookie, refreshed.token, {
+            ...sessionCookieOptions,
+            maxAge: customerAbsoluteSeconds,
+          });
+        }
+      } catch {
+        response.cookies.set(customerActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+      }
+    }
   }
 
   if (redirectResponse) {

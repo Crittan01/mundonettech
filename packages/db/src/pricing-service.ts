@@ -96,6 +96,11 @@ function pageResult<T>(items: T[], total: number, page: number, pageSize: number
   return { items, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
 }
 
+async function databaseNow(tx: Prisma.TransactionClient): Promise<Date> {
+  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+  return rows[0]!.now;
+}
+
 async function writeAudit(
   tx: Prisma.TransactionClient,
   audit: PricingMutationAudit,
@@ -426,9 +431,10 @@ export class PricingService {
       await acquireOperationLocks(tx, [
         `wholesale:${existing.scope}:${JSON.stringify(target)}:${existing.minimumQuantity}`,
       ]);
+      const now = await databaseNow(tx);
       const updated = await tx.wholesaleTier.update({
         where: { id },
-        data: { active: false, deletedAt: new Date() },
+        data: { active: false, deletedAt: now },
       });
       await writeAudit(tx, audit, "WHOLESALE_TIER_ARCHIVED", "WholesaleTier", id, {
         scope: existing.scope,
@@ -527,15 +533,15 @@ export class PricingService {
       await acquireOperationLocks(tx, [`coupon-redemption:${id}`, `coupon-write:${id}`]);
       const existing = await tx.coupon.findFirst({ where: { id, deletedAt: null } });
       if (!existing) throw new PricingNotFoundError("Coupon not found.");
+      const now = await databaseNow(tx);
       const updated = await tx.coupon.update({
         where: { id },
-        data: { status: "ARCHIVED", deletedAt: new Date() },
+        data: { status: "ARCHIVED", deletedAt: now },
       });
       await tx.couponUsage.updateMany({
         where: { couponId: id, status: "RESERVED" },
-        data: { status: "RELEASED", releasedAt: new Date() },
+        data: { status: "RELEASED", releasedAt: now },
       });
-      await tx.cart.updateMany({ where: { couponId: id }, data: { couponId: null } });
       await writeAudit(tx, audit, "COUPON_ARCHIVED", "Coupon", id, { code: existing.code });
       return updated;
     });
@@ -705,9 +711,10 @@ export class PricingService {
       await acquireOperationLocks(tx, [`bundle:${id}`]);
       const existing = await tx.bundle.findFirst({ where: { id, deletedAt: null } });
       if (!existing) throw new PricingNotFoundError("Bundle not found.");
+      const now = await databaseNow(tx);
       const updated = await tx.bundle.update({
         where: { id },
-        data: { status: "ARCHIVED", deletedAt: new Date() },
+        data: { status: "ARCHIVED", deletedAt: now },
       });
       await writeAudit(tx, audit, "BUNDLE_ARCHIVED", "Bundle", id, { slug: existing.slug });
       return updated;

@@ -2,7 +2,6 @@
 
 import {
   absolutePublicUrl,
-  normalizeCouponCode,
   normalizeEmail,
   normalizePromotionSlug,
   normalizeSku,
@@ -75,7 +74,15 @@ export async function createAssistedSaleAction(
   try {
     const audit = await context();
     if (rawEmail.trim()) {
-      const email = normalizeEmail(rawEmail);
+      let email: string;
+      try {
+        email = normalizeEmail(rawEmail);
+      } catch {
+        return actionError(
+          "Ingresa un correo electrónico con formato válido o déjalo vacío para invitado.",
+          values,
+        );
+      }
       const customer = await getDatabase().customer.findFirst({
         where: { email, deletedAt: null, status: { not: "ANONYMIZED" } },
         select: { id: true },
@@ -121,7 +128,15 @@ export async function mutateAssistedCartAction(
       case "add_variant": {
         if (!quantity.success || quantity.data < 1)
           return actionError("Ingresa una cantidad positiva.", values);
-        const sku = normalizeSku(formString(formData, "sku"));
+        let sku: string;
+        try {
+          sku = normalizeSku(formString(formData, "sku"));
+        } catch {
+          return actionError(
+            "Ingresa un SKU válido (2 a 64 caracteres alfanuméricos, puntos, guiones o guiones bajos).",
+            values,
+          );
+        }
         const variant = await getDatabase().productVariant.findFirst({
           where: { sku, deletedAt: null },
           select: { id: true },
@@ -133,7 +148,12 @@ export async function mutateAssistedCartAction(
       case "add_bundle": {
         if (!quantity.success || quantity.data < 1)
           return actionError("Ingresa una cantidad positiva.", values);
-        const slug = normalizePromotionSlug(formString(formData, "slug"), "bundle slug");
+        let slug: string;
+        try {
+          slug = normalizePromotionSlug(formString(formData, "slug"), "bundle slug");
+        } catch {
+          return actionError("Ingresa un slug de bundle válido en minúsculas.", values);
+        }
         const bundle = await getDatabase().bundle.findFirst({
           where: { slug, status: "ACTIVE", deletedAt: null },
           select: { id: true },
@@ -167,7 +187,6 @@ export async function mutateAssistedCartAction(
         await service.clear(reference, audit);
         break;
       case "apply_coupon":
-        normalizeCouponCode(formString(formData, "code"));
         await service.applyCoupon(reference, formString(formData, "code"), audit);
         break;
       case "remove_coupon":
@@ -207,7 +226,7 @@ export async function issueAssistedLinkAction(
       expiresAt: expiration(hours.data),
       audit,
     });
-    const base = absolutePublicUrl(process.env.SITE_URL ?? storeConfig.url);
+    const base = absolutePublicUrl((process.env.SITE_URL ?? storeConfig.url).trim());
     const paymentUrl = new URL(`/pagar/${generated.token}`, base).toString();
     revalidatePath(`/admin/venta-asistida/${cartId}`);
     return {

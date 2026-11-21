@@ -341,7 +341,17 @@ describe("F3.1 — cart revalidation, stock and coupon arithmetic", () => {
       where: { id: catalog.rootCategoryId },
       select: { slug: true },
     });
-    const restricted = await activePercentCoupon({ categorySlugs: [root.slug] });
+    const ancestorCoupon = await activePercentCoupon({ categorySlugs: [root.slug] });
+    const ancestorApplied = await service.applyCoupon({ cartId: cart.id }, ancestorCoupon.code);
+    assert.equal(ancestorApplied.coupon?.id, ancestorCoupon.id);
+    await service.removeCoupon({ cartId: cart.id });
+
+    const unrelatedSlug = `unrelated-${randomUUID()}`;
+    await sql.query(
+      `INSERT INTO "Category" ("id", "slug", "name", "materializedPath", "depth") VALUES ($1, $2, 'Unrelated', '/', 0)`,
+      [randomUUID(), unrelatedSlug],
+    );
+    const restricted = await activePercentCoupon({ categorySlugs: [unrelatedSlug] });
     await assert.rejects(
       service.applyCoupon({ cartId: cart.id }, restricted.code),
       (error) => error instanceof CouponError && error.code === "NO_ELIGIBLE_ITEMS",
@@ -351,6 +361,49 @@ describe("F3.1 — cart revalidation, stock and coupon arithmetic", () => {
       service.applyCoupon({ cartId: cart.id }, expired.code),
       (error) => error instanceof CouponError && error.code === "SCHEDULE",
     );
+  });
+
+  it("transfers guest carts safely on sign-in and surfaces archived coupons as explicit issues", async () => {
+    const freshCustomerId = randomUUID();
+    await sql.query(
+      `INSERT INTO "Customer" ("id", "authUserId", "email", "status") VALUES ($1, $2, $3, 'ACTIVE')`,
+      [freshCustomerId, randomUUID(), `cart-transfer-${freshCustomerId}@example.test`],
+    );
+    const limitedCoupon = await activePercentCoupon({ perCustomerUsages: 1 });
+    const guestCart = await createCart();
+    await service.addVariant({ cartId: guestCart.id }, catalog.variantId, 2);
+    await service.applyCoupon({ cartId: guestCart.id }, limitedCoupon.code);
+
+    // Assigning customer preserves valid coupon reservation under customer identity
+    const assigned = await service.assignCustomer({ cartId: guestCart.id }, freshCustomerId);
+    assert.equal(assigned.customerId, freshCustomerId);
+    assert.equal(assigned.coupon?.id, limitedCoupon.id);
+
+    // Second guest cart with same coupon detaches with COUPON_INVALID if customer limit reached, even if stock dropped
+    const secondGuest = await createCart();
+    await service.addVariant({ cartId: secondGuest.id }, catalog.variantId, 5);
+    await service.applyCoupon({ cartId: secondGuest.id }, limitedCoupon.code);
+    await sql.query(`UPDATE "StockLevel" SET "safetyStock" = 7 WHERE "variantId" = $1`, [
+      catalog.variantId,
+    ]);
+    const assignedWithIssues = await service.assignCustomer(
+      { cartId: secondGuest.id },
+      freshCustomerId,
+    );
+    assert.equal(assignedWithIssues.customerId, freshCustomerId);
+    assert.equal(assignedWithIssues.coupon, null);
+    assert.ok(assignedWithIssues.issues.some((issue) => issue.code === "COUPON_INVALID"));
+    assert.ok(assignedWithIssues.issues.some((issue) => issue.code === "STOCK_INSUFFICIENT"));
+    await sql.query(`UPDATE "StockLevel" SET "safetyStock" = 2 WHERE "variantId" = $1`, [
+      catalog.variantId,
+    ]);
+
+    // Archiving coupon releases reservation and surfaces COUPON_INVALID on next cart read
+    await pricing.archiveCoupon(limitedCoupon.id, audit);
+    const afterArchive = await service.getById(guestCart.id);
+    assert.equal(afterArchive.coupon, null);
+    assert.equal(afterArchive.couponDiscountCents, "0");
+    assert.ok(afterArchive.issues.some((issue) => issue.code === "COUPON_INVALID"));
   });
 });
 
@@ -450,10 +503,63 @@ describe("F3.1 — bundles and assisted sale lifecycle", () => {
     );
     assert.equal((await service.getByAccessToken(accessHash)).id, cart.id);
     await assert.rejects(service.cancelAssistedCart(cart.id, audit), CartStateError);
+    await assert.rejects(
+      service.addVariant({ cartId: cart.id }, catalog.variantId, 1, audit),
+      CartStateError,
+    );
+    await assert.rejects(service.clear({ cartId: cart.id }, audit), CartStateError);
     assert.ok((await service.listAssisted()).items.some((item) => item.id === cart.id));
     assert.ok(
       (await db.adminActionLog.count({ where: { targetType: "Cart", targetId: cart.id } })) >= 3,
     );
+
+    // Account-bound assisted cart enforces customer identity on view and claim
+    const otherCustomerId = randomUUID();
+    await sql.query(
+      `INSERT INTO "Customer" ("id", "authUserId", "email", "status") VALUES ($1, $2, $3, 'ACTIVE')`,
+      [otherCustomerId, randomUUID(), `other-assisted-${otherCustomerId}@example.test`],
+    );
+    const boundCart = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: adminId,
+      customerId: catalog.customerId,
+      audit,
+    });
+    await service.addVariant({ cartId: boundCart.id }, catalog.variantId, 1, audit);
+    const boundTokenHash = hash();
+    await service.issueAssistedToken({
+      cartId: boundCart.id,
+      assistedTokenHash: boundTokenHash,
+      expiresAt: future(),
+      audit,
+    });
+    assert.equal(await service.getByAssistedToken(boundTokenHash, otherCustomerId), null);
+    assert.ok(await service.getByAssistedToken(boundTokenHash, catalog.customerId));
+    await assert.rejects(
+      service.claimAssistedCart({
+        assistedTokenHash: boundTokenHash,
+        accessTokenHash: hash(),
+        expiresAt: future(),
+      }),
+      CartStateError,
+    );
+    await assert.rejects(
+      service.claimAssistedCart({
+        assistedTokenHash: boundTokenHash,
+        accessTokenHash: hash(),
+        expiresAt: future(),
+        customerId: otherCustomerId,
+      }),
+      CartStateError,
+    );
+    const claimedBound = await service.claimAssistedCart({
+      assistedTokenHash: boundTokenHash,
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      customerId: catalog.customerId,
+    });
+    assert.equal(claimedBound.customerId, catalog.customerId);
   });
 
   it("expires assisted links and blocks unavailable products without hiding them", async () => {

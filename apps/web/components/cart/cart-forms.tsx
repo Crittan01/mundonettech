@@ -34,6 +34,7 @@ export function CartQuantityForm({
       <Label htmlFor={`quantity-${id}`}>{bundleId ? "Cantidad de paquetes" : "Cantidad"}</Label>
       <div className="flex gap-2">
         <Input
+          key={`${id}-${quantity}`}
           id={`quantity-${id}`}
           name="quantity"
           type="number"

@@ -119,6 +119,50 @@ describe("wholesale precedence and product aggregation", () => {
     ];
     expect(selectWholesaleTier(input, 20, tiers)?.id).toBe("ten");
   });
+
+  it("matches ancestor categories and prefers closer subcategories over parent categories", () => {
+    const parentCategory = "00000000-0000-4000-8000-000000000200";
+    const unrelatedCategory = "00000000-0000-4000-8000-000000000299";
+    const childLine: PricingLineInput = {
+      ...line("a", variantA, 10),
+      categoryAncestorIds: [parentCategory],
+    };
+    const parentTier: PricingTier = {
+      id: "parent-cat",
+      scope: "CATEGORY",
+      variantId: null,
+      productId: null,
+      categoryId: parentCategory,
+      minimumQuantity: 10,
+      unitPriceCents: 94_000n,
+    };
+    const childTier: PricingTier = {
+      id: "child-cat",
+      scope: "CATEGORY",
+      variantId: null,
+      productId: null,
+      categoryId: categoryA,
+      minimumQuantity: 5,
+      unitPriceCents: 92_000n,
+    };
+    const unrelatedTier: PricingTier = {
+      ...parentTier,
+      id: "unrelated-cat",
+      categoryId: unrelatedCategory,
+      unitPriceCents: 70_000n,
+    };
+    expect(selectWholesaleTier(childLine, 10, [parentTier, unrelatedTier])?.id).toBe("parent-cat");
+    expect(selectWholesaleTier(childLine, 10, [parentTier, childTier, unrelatedTier])?.id).toBe(
+      "child-cat",
+    );
+    const parentCouponResult = calculateCartPricing(
+      [childLine],
+      [],
+      new Map(),
+      coupon({ categoryIds: [parentCategory] }),
+    );
+    expect(parentCouponResult.couponDiscountCents).toBe(100_000n);
+  });
 });
 
 describe("bundles and coupons", () => {

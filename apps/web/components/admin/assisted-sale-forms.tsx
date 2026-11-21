@@ -67,7 +67,7 @@ function MutationForm({
 }: {
   cartId: string;
   operation: string;
-  children?: React.ReactNode;
+  children?: React.ReactNode | ((state: ActionState) => React.ReactNode);
   submit: string;
   destructive?: boolean;
   className?: string;
@@ -77,7 +77,7 @@ function MutationForm({
     <form action={action} className={`space-y-3 ${className}`}>
       <input type="hidden" name="cartId" value={cartId} />
       <input type="hidden" name="operation" value={operation} />
-      {children}
+      {typeof children === "function" ? children(state) : children}
       <Button type="submit" variant={destructive ? "destructive" : "outline"} disabled={pending}>
         {pending ? "Procesando…" : submit}
       </Button>
@@ -89,24 +89,34 @@ function MutationForm({
 export function AssistedAddVariantForm({ cartId }: { cartId: string }) {
   return (
     <MutationForm cartId={cartId} operation="add_variant" submit="Añadir variante">
-      <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-        <div className="space-y-2">
-          <Label htmlFor="assisted-sku">SKU</Label>
-          <Input id="assisted-sku" name="sku" maxLength={64} required />
+      {(state) => (
+        <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+          <div className="space-y-2">
+            <Label htmlFor="assisted-sku">SKU</Label>
+            <Input
+              key={`sku-${state.values?.sku ?? ""}`}
+              id="assisted-sku"
+              name="sku"
+              defaultValue={state.status === "error" ? (state.values?.sku ?? "") : ""}
+              maxLength={64}
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="assisted-variant-quantity">Cantidad</Label>
+            <Input
+              key={`qty-${state.values?.quantity ?? "1"}`}
+              id="assisted-variant-quantity"
+              name="quantity"
+              type="number"
+              min="1"
+              max="1000000"
+              defaultValue={state.status === "error" ? (state.values?.quantity ?? "1") : "1"}
+              required
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="assisted-variant-quantity">Cantidad</Label>
-          <Input
-            id="assisted-variant-quantity"
-            name="quantity"
-            type="number"
-            min="1"
-            max="1000000"
-            defaultValue="1"
-            required
-          />
-        </div>
-      </div>
+      )}
     </MutationForm>
   );
 }
@@ -114,24 +124,34 @@ export function AssistedAddVariantForm({ cartId }: { cartId: string }) {
 export function AssistedAddBundleForm({ cartId }: { cartId: string }) {
   return (
     <MutationForm cartId={cartId} operation="add_bundle" submit="Añadir bundle">
-      <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
-        <div className="space-y-2">
-          <Label htmlFor="assisted-bundle-slug">Slug del bundle</Label>
-          <Input id="assisted-bundle-slug" name="slug" maxLength={160} required />
+      {(state) => (
+        <div className="grid gap-3 sm:grid-cols-[1fr_120px]">
+          <div className="space-y-2">
+            <Label htmlFor="assisted-bundle-slug">Slug del bundle</Label>
+            <Input
+              key={`slug-${state.values?.slug ?? ""}`}
+              id="assisted-bundle-slug"
+              name="slug"
+              defaultValue={state.status === "error" ? (state.values?.slug ?? "") : ""}
+              maxLength={160}
+              required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="assisted-bundle-quantity">Cantidad</Label>
+            <Input
+              key={`bqty-${state.values?.quantity ?? "1"}`}
+              id="assisted-bundle-quantity"
+              name="quantity"
+              type="number"
+              min="1"
+              max="1000000"
+              defaultValue={state.status === "error" ? (state.values?.quantity ?? "1") : "1"}
+              required
+            />
+          </div>
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="assisted-bundle-quantity">Cantidad</Label>
-          <Input
-            id="assisted-bundle-quantity"
-            name="quantity"
-            type="number"
-            min="1"
-            max="1000000"
-            defaultValue="1"
-            required
-          />
-        </div>
-      </div>
+      )}
     </MutationForm>
   );
 }
@@ -155,6 +175,7 @@ export function AssistedQuantityForm({
       <div className="space-y-2">
         <Label htmlFor={`assisted-quantity-${id}`}>{bundleId ? "Paquetes" : "Cantidad"}</Label>
         <Input
+          key={`${id}-${quantity}`}
           id={`assisted-quantity-${id}`}
           name="quantity"
           type="number"
@@ -185,10 +206,20 @@ export function AssistedCouponForm({ cartId, code }: { cartId: string; code: str
     return <MutationForm cartId={cartId} operation="remove_coupon" submit={`Retirar ${code}`} />;
   return (
     <MutationForm cartId={cartId} operation="apply_coupon" submit="Aplicar cupón">
-      <div className="space-y-2">
-        <Label htmlFor="assisted-coupon">Cupón</Label>
-        <Input id="assisted-coupon" name="code" minLength={2} maxLength={64} required />
-      </div>
+      {(state) => (
+        <div className="space-y-2">
+          <Label htmlFor="assisted-coupon">Cupón</Label>
+          <Input
+            key={`coupon-${state.values?.code ?? ""}`}
+            id="assisted-coupon"
+            name="code"
+            defaultValue={state.status === "error" ? (state.values?.code ?? "") : ""}
+            minLength={2}
+            maxLength={64}
+            required
+          />
+        </div>
+      )}
     </MutationForm>
   );
 }

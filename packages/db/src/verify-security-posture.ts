@@ -123,6 +123,7 @@ const requiredConstraints = [
   "WholesaleTier_minimumQuantity_positive",
   "WholesaleTier_unitPrice_nonnegative",
   "Coupon_code_valid",
+  "Coupon_name_not_blank",
   "Coupon_discount_value_valid",
   "Coupon_maximumDiscount_nonnegative",
   "Coupon_minimumSubtotal_nonnegative",

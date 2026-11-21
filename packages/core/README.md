@@ -5,7 +5,7 @@ Servicios puros y compartidos, sin identidad comercial ni dependencias de aplica
 Contratos actuales:
 
 - RBAC de ocho roles y tres anillos, permisos para catálogo, contenido, configuración, precios y venta asistida (`catalog:*`, `content:*`, `settings:*`, `pricing:*`, `sales:*`), navegación autorizada y controles de asignación entre anillos. Formato COP y conversión de pesos enteros a centavos sin floats (`formatCopCents`, `parseWholeCopToCents`).
-- Pricing puro: normalización de cupones/slugs, montos y cantidades acotadas, selección mayorista por precedencia, cálculo de bundles/cupones y prorrateo proporcional acumulado *half-up* cuya suma siempre cuadra. El motor valida desbordamientos `INT8`, composiciones y elegibilidad sin depender de Next.js ni de la base de datos.
+- Pricing puro: normalización de cupones/slugs, montos y cantidades acotadas, selección mayorista por precedencia (incluyendo herencia N-niveles de categorías con prioridad a subcategorías cercanas), cálculo de bundles/cupones y prorrateo proporcional acumulado *half-up* cuya suma siempre cuadra. El motor valida desbordamientos `INT8`, composiciones y elegibilidad sin depender de Next.js ni de la base de datos.
 - Máscaras de correo, teléfono, nombre e identificadores, además de redacción profunda y acotada de metadatos de auditoría.
 - Política de contraseñas, normalización de correo y verificación HIBP k-anonymity con timeout, padding y respuestas estrictamente validadas.
 - Verificación Cloudflare Turnstile con acción/hostname y errores cerrados.

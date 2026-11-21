@@ -16,6 +16,7 @@ const sku = "SONY-WH1000XM5-BLACK";
 let db: ReturnType<typeof createDatabaseClient>;
 let cartService: CartService;
 let admin: { id: string; authUserId: string; email: string };
+let financeViewer: { id: string; authUserId: string; email: string };
 let audit: { actorAdminUserId: string; ipHash: Uint8Array<ArrayBuffer>; userAgentHash: null };
 let couponCode: string;
 let productSlug: string;
@@ -24,20 +25,24 @@ function tokenHash(token: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(createHash("sha256").update(token, "utf8").digest());
 }
 
-async function authenticateAdmin(page: Page, mfaAgeSeconds = 30) {
+async function authenticateAdmin(
+  page: Page,
+  mfaAgeSeconds = 30,
+  actor: { authUserId: string; email: string } = admin,
+) {
   const secret = process.env.SESSION_TIMEOUT_SECRET;
   if (!secret) throw new Error("SESSION_TIMEOUT_SECRET is required for authenticated E2E.");
   await page.context().clearCookies();
   const session = createSupabaseFixtureSession({
-    subject: admin.authUserId,
-    email: admin.email,
+    subject: actor.authUserId,
+    email: actor.email,
     factorId: randomUUID(),
     aal: "aal2",
     mfaAgeSeconds,
   });
   const activity = createTimeoutToken({
     kind: "admin",
-    subject: admin.authUserId,
+    subject: actor.authUserId,
     secret: Buffer.from(secret, "base64"),
     idleSeconds: 1800,
     absoluteSeconds: 43_200,
@@ -89,6 +94,15 @@ test.beforeAll(async () => {
       email: `cart-admin-${randomUUID()}@example.test`,
       displayName: "Administrador carrito E2E",
       role: "SUPERADMIN",
+      status: "ACTIVE",
+    },
+  });
+  financeViewer = await db.adminUser.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `finance-viewer-${randomUUID()}@example.test`,
+      displayName: "Analista financiero E2E",
+      role: "FINANCE_ANALYST",
       status: "ACTIVE",
     },
   });
@@ -245,6 +259,23 @@ test("pricing admin writes an audited tier with recent aal2 and preserves RBAC s
   await authenticateAdmin(page, 900);
   await page.goto("/admin/precios");
   await expect(page.getByText(/autenticador/i).first()).toBeVisible();
+
+  await authenticateAdmin(page, 30);
+  await page.goto("/admin/precios/nuevo?tipo=cupones");
+  const fixedCode = `FIJO-${randomUUID().replaceAll("-", "").slice(0, 10).toUpperCase()}`;
+  await page.getByLabel("Código").fill(fixedCode);
+  await page.getByLabel("Nombre interno").fill("Cupón monto fijo E2E");
+  await page.getByLabel("Tipo de descuento").selectOption("FIXED_AMOUNT");
+  await expect(page.getByLabel("Porcentaje en puntos básicos (1000 = 10 %)")).toBeDisabled();
+  await page.getByLabel("Monto fijo (centavos COP)").fill("500000");
+  await page.getByRole("button", { name: "Crear cupón" }).click();
+  await expect(page).toHaveURL(/\/admin\/precios\/cupones\/[0-9a-f-]+\?creado=1/);
+
+  await authenticateAdmin(page, 30, financeViewer);
+  await page.goto(`/admin/precios/mayoristas/${saved.id}`);
+  await expect(page.getByRole("heading", { name: "Vista de solo lectura" })).toBeVisible();
+  await page.goto("/admin/venta-asistida");
+  await expect(page).toHaveURL(/\/admin\/login\?reason=security/);
 });
 
 test("assisted admin emits a one-time link and the customer accepts it exactly once", async ({
