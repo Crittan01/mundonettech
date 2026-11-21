@@ -20,6 +20,7 @@ import type {
   CatalogBrand,
   CatalogCategory,
   CatalogComparison,
+  CatalogFeedProduct,
   CatalogMedia,
   CatalogMediaDerivative,
   CatalogMediaFrame,
@@ -32,6 +33,7 @@ import type {
   CatalogProductSummary,
   CatalogSearchFilters,
   CatalogSearchResult,
+  CatalogSeoEntries,
   CatalogSort,
   CatalogVariant,
   CatalogVariantInput,
@@ -1018,6 +1020,117 @@ export class CatalogService {
       totalPages,
       facets,
     };
+  }
+
+  async getSeoEntries(): Promise<CatalogSeoEntries> {
+    const [products, categories, brands] = await Promise.all([
+      this.db.product.findMany({
+        where: {
+          status: "ACTIVE",
+          deletedAt: null,
+          brand: { deletedAt: null },
+          category: { deletedAt: null },
+          variants: { some: { status: "ACTIVE", deletedAt: null } },
+        },
+        select: { slug: true, updatedAt: true },
+        orderBy: [{ slug: "asc" }, { id: "asc" }],
+      }),
+      this.db.category.findMany({
+        where: { deletedAt: null },
+        select: { slug: true, updatedAt: true },
+        orderBy: [{ slug: "asc" }, { id: "asc" }],
+      }),
+      this.db.brand.findMany({
+        where: { deletedAt: null },
+        select: { slug: true, updatedAt: true },
+        orderBy: [{ slug: "asc" }, { id: "asc" }],
+      }),
+    ]);
+    return {
+      products: products.map((item) => ({
+        slug: item.slug,
+        updatedAt: item.updatedAt.toISOString(),
+      })),
+      categories: categories.map((item) => ({
+        slug: item.slug,
+        updatedAt: item.updatedAt.toISOString(),
+      })),
+      brands: brands.map((item) => ({ slug: item.slug, updatedAt: item.updatedAt.toISOString() })),
+    };
+  }
+
+  async getFeedProducts(): Promise<CatalogFeedProduct[]> {
+    const records = await this.db.product.findMany({
+      where: {
+        status: "ACTIVE",
+        deletedAt: null,
+        brand: { deletedAt: null },
+        category: { deletedAt: null },
+        variants: { some: { status: "ACTIVE", deletedAt: null } },
+      },
+      include: {
+        brand: true,
+        category: true,
+        media: summaryInclude.media,
+        variants: {
+          ...summaryInclude.variants,
+          include: {
+            optionLinks: {
+              include: { optionDefinition: true, optionValue: true },
+              orderBy: [{ optionDefinition: { position: "asc" } }, { id: "asc" }],
+            },
+          },
+        },
+      },
+      orderBy: [{ slug: "asc" }, { id: "asc" }],
+    });
+    const availability = await this.availability(
+      records.flatMap((product) => product.variants.map((variant) => variant.id)),
+    );
+    return records.map((product) => {
+      const external = product.category.externalCategoryMap;
+      let googleProductCategory: string | null = null;
+      if (typeof external === "object" && external !== null && !Array.isArray(external)) {
+        const candidate =
+          (external as Prisma.JsonObject).googleProductCategory ??
+          (external as Prisma.JsonObject).google;
+        if (typeof candidate === "string" && candidate.trim() && candidate.length <= 750) {
+          googleProductCategory = candidate.trim();
+        }
+      }
+      return {
+        id: product.id,
+        slug: product.slug,
+        name: product.name,
+        shortDescription: product.shortDescription,
+        description: product.description,
+        brand: { slug: product.brand.slug, name: product.brand.name },
+        category: {
+          slug: product.category.slug,
+          name: product.category.name,
+          googleProductCategory,
+        },
+        media: product.media.map(toMedia),
+        variants: product.variants.map((variant) => ({
+          id: variant.id,
+          sku: variant.sku,
+          priceCents: variant.priceCents.toString(),
+          gtin: variant.gtin,
+          ean: variant.ean,
+          mpn: variant.mpn,
+          weightGrams: variant.weightGrams,
+          available: availability.get(variant.id) ?? 0,
+          options: variant.optionLinks.map((link) => ({
+            key: link.optionDefinition.key,
+            name: link.optionDefinition.name,
+            displayType: link.optionDefinition.displayType,
+            label: link.optionValue.label,
+            value: link.optionValue.value,
+            hexColor: link.optionValue.hexColor,
+          })),
+        })),
+      };
+    });
   }
 
   async getProductsBySlugs(slugValues: readonly string[]): Promise<CatalogProductSummary[]> {

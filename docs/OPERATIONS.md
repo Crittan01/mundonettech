@@ -90,3 +90,11 @@ Los cambios de esquema se despliegan hacia adelante y se verifican con `db:verif
 - **CSP en navegador:** reproduce con `pnpm test:e2e`, conserva trace y corrige el origen/script; no añadas `unsafe-eval` ni `strict-dynamic` sobre shells incompatibles.
 - **Correo no recibido:** verifica Mailpit `:54424`; en tests confirma `EMAIL_SEND_DISABLED=1` para impedir proveedores externos.
 - **Secretos/compromiso:** rota en el ambiente afectado, cierra sesiones y revisa auditoría. No imprimas URLs con contraseña ni adjuntes `.env` a issues o CI.
+
+## 8. Superficies legales y SEO
+
+- `/legal` y `/legal/[slug]`: ocho documentos validados desde `config/legal.config.ts`; actualizar versión/vigencia y ejecutar build tras cambios.
+- `/robots.txt` y `/sitemap.xml`: recursos públicos cacheados cinco minutos; si hay más de 50.000 URLs, la raíz es un índice hacia `/sitemaps/[id].xml`.
+- `/api/feeds/google-merchant`: RSS XML por variante con precio COP, disponibilidad, marca, GTIN/EAN o MPN e imagen real cuando existe. Configurar envío e impuestos en Merchant Center; no se fabrican valores ausentes.
+- `/admin/contenido/redirecciones`: `content:read` para consulta y `content:write` + MFA reciente para mutaciones. El proxy Node mantiene caché de treinta segundos y las acciones la invalidan al guardar.
+- JSON-LD se emite en layout, PDP y FAQs CMS visibles. No añadir ratings, reseñas, GTIN, imágenes o disponibilidad sintéticos para mejorar aparentemente un feed.

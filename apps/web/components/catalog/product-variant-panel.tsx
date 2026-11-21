@@ -15,6 +15,11 @@ export function ProductVariantPanel({
   variants: readonly CatalogVariant[];
 }) {
   const [selectedId, setSelectedId] = useState(defaultVariantId);
+  const [syncedDefaultId, setSyncedDefaultId] = useState(defaultVariantId);
+  if (syncedDefaultId !== defaultVariantId) {
+    setSyncedDefaultId(defaultVariantId);
+    setSelectedId(defaultVariantId);
+  }
 
   const selected = useMemo(
     () => variants.find((variant) => variant.id === selectedId) ?? variants[0]!,

@@ -816,6 +816,60 @@ export class CmsService {
     });
   }
 
+  async getSeoEntries(at?: Date) {
+    const now = await databaseNow(this.db, at);
+    const pages = await this.db.cmsPage.findMany({
+      where: {
+        status: "PUBLISHED",
+        deletedAt: null,
+        publishedAt: { lte: now },
+        blocks: {
+          some: {
+            isVisible: true,
+            versions: { some: { status: "PUBLISHED", effectiveAt: { lte: now } } },
+          },
+        },
+      },
+      select: {
+        slug: true,
+        updatedAt: true,
+        publishedAt: true,
+        blocks: {
+          where: { isVisible: true },
+          select: {
+            updatedAt: true,
+            versions: {
+              where: { status: "PUBLISHED", effectiveAt: { lte: now } },
+              orderBy: [{ effectiveAt: "desc" }, { version: "desc" }],
+              take: 1,
+              select: { publishedAt: true, effectiveAt: true, createdAt: true },
+            },
+          },
+        },
+      },
+      orderBy: [{ slug: "asc" }, { id: "asc" }],
+    });
+    return pages.map((page) => {
+      const timestamps = [
+        page.updatedAt.getTime(),
+        ...(page.publishedAt ? [page.publishedAt.getTime()] : []),
+        ...page.blocks.flatMap((block) => {
+          const latest = block.versions[0];
+          return [
+            block.updatedAt.getTime(),
+            ...(latest?.publishedAt ? [latest.publishedAt.getTime()] : []),
+            ...(latest?.effectiveAt ? [latest.effectiveAt.getTime()] : []),
+            ...(latest ? [latest.createdAt.getTime()] : []),
+          ];
+        }),
+      ];
+      return {
+        slug: page.slug,
+        updatedAt: new Date(Math.max(...timestamps)).toISOString(),
+      };
+    });
+  }
+
   private async loadMedia(contents: readonly unknown[]): Promise<CmsMediaView[]> {
     const ids = [...new Set(contents.flatMap(mediaIds))].sort((left, right) =>
       left < right ? -1 : left > right ? 1 : 0,

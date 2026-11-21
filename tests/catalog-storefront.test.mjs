@@ -133,6 +133,28 @@ describe("F1.4 — indexed public catalog and real stock", () => {
     );
   });
 
+  it("provides batch sitemap and Merchant feed DTOs with real variants and stock", async () => {
+    const seo = await service.getSeoEntries();
+    assert.ok(seo.products.some((product) => product.slug === "sony-wh-1000xm5"));
+    assert.ok(seo.categories.some((category) => category.slug === "audio"));
+    assert.ok(seo.brands.some((brand) => brand.slug === "sony"));
+    assert.match(seo.products[0].updatedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.deepEqual(
+      seo.products.map((product) => product.slug),
+      [...seo.products.map((product) => product.slug)].sort(),
+    );
+
+    const feed = await service.getFeedProducts();
+    const sony = feed.find((product) => product.slug === "sony-wh-1000xm5");
+    assert.ok(sony);
+    assert.equal(sony.brand.name, "Sony");
+    assert.equal(sony.category.slug, "audifonos");
+    assert.equal(sony.variants[0].priceCents, "145000000");
+    assert.equal(sony.variants[0].available, 6);
+    assert.equal(sony.variants[0].sku, "SONY-WH1000XM5-BLACK");
+    assert.doesNotThrow(() => JSON.stringify(feed));
+  });
+
   it("returns complete PDP data, N-level breadcrumbs, SPIN_360 derivatives, active bundles and soft-delete hygiene", async () => {
     const macbook = await service.getProductBySlug("macbook-air-m3-13-256gb");
     assert.ok(macbook);

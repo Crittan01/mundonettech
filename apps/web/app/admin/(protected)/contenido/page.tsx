@@ -46,9 +46,12 @@ export default async function AdminContentPage({ searchParams }: PageProps<"/adm
             Páginas, bloques, versiones y publicación programada.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button asChild variant="outline">
             <Link href="/admin/contenido/medios">Mediateca</Link>
+          </Button>
+          <Button asChild variant="outline">
+            <Link href="/admin/contenido/redirecciones">Redirecciones</Link>
           </Button>
           {canWrite ? (
             <Button asChild>

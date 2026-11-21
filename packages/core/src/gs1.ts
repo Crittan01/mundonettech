@@ -1,4 +1,5 @@
 const supportedGs1Lengths = new Set([8, 12, 13, 14, 18]);
+const supportedCommercialGtinLengths = new Set([8, 12, 13, 14]);
 const supportedEanLengths = new Set([8, 13]);
 
 export function normalizeGs1(value: string): string {
@@ -27,6 +28,28 @@ export function isValidGs1(value: string): boolean {
 export function isValidEan(value: string): boolean {
   const normalized = normalizeGs1(value);
   return supportedEanLengths.has(normalized.length) && isValidGs1(normalized);
+}
+
+export function isValidCommercialGtin(value: string): boolean {
+  const normalized = normalizeGs1(value);
+  return supportedCommercialGtinLengths.has(normalized.length) && isValidGs1(normalized);
+}
+
+export function resolveCommercialGtin(gtin?: string | null, ean?: string | null): string | null {
+  for (const [field, raw] of [
+    ["gtin", gtin],
+    ["ean", ean],
+  ] as const) {
+    if (!raw || !raw.trim()) continue;
+    const normalized = normalizeGs1(raw);
+    if (!isValidGs1(normalized)) {
+      throw new TypeError(`Invalid ${field.toUpperCase()} checksum or format.`);
+    }
+    if (supportedCommercialGtinLengths.has(normalized.length)) {
+      return normalized;
+    }
+  }
+  return null;
 }
 
 export function assertValidGs1(value: string, field = "gtin"): string {

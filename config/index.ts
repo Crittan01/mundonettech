@@ -6,3 +6,5 @@ export { catalogBlueprint } from "./catalog-blueprint.js";
 export type { CatalogBlueprint } from "./catalog-blueprint.js";
 export { catalogSeed } from "./catalog-seed.js";
 export type { CatalogSeed } from "./catalog-seed.js";
+export { legalConfig } from "./legal.config.js";
+export type { LegalConfig } from "./legal.config.js";
