@@ -20,6 +20,10 @@
     "./catalog": {
       "types": "./dist/catalog-blueprint.d.ts",
       "import": "./dist/catalog-blueprint.js"
+    },
+    "./seed": {
+      "types": "./dist/catalog-seed.d.ts",
+      "import": "./dist/catalog-seed.js"
     }
   },
   "scripts": {

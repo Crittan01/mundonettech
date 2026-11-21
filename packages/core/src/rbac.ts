@@ -17,7 +17,9 @@ export type AdminPermission =
   | "users:write"
   | "security:read_own"
   | "security:write_own"
-  | "audit:read";
+  | "audit:read"
+  | "catalog:read"
+  | "catalog:write";
 
 const rings: Readonly<Record<AdminRoleValue, AdminRing>> = {
   SUPERADMIN: 1,
@@ -30,6 +32,20 @@ const rings: Readonly<Record<AdminRoleValue, AdminRing>> = {
   CMS_EDITOR: 3,
 };
 
+const catalogReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "INVENTORY_BUYER",
+  "CMS_EDITOR",
+] as const satisfies readonly AdminRoleValue[];
+const catalogWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "INVENTORY_BUYER",
+] as const satisfies readonly AdminRoleValue[];
+
 const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> = {
   "dashboard:read": adminRoles,
   "users:read": ["SUPERADMIN", "OPERATIONS_MANAGER"],
@@ -37,6 +53,8 @@ const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> 
   "security:read_own": adminRoles,
   "security:write_own": adminRoles,
   "audit:read": ["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"],
+  "catalog:read": catalogReaders,
+  "catalog:write": catalogWriters,
 };
 
 export function isAdminRole(value: unknown): value is AdminRoleValue {
@@ -71,11 +89,14 @@ export function canManageAdministrator(
 }
 
 export function adminNavigation(role: AdminRoleValue): readonly {
-  href: "/admin" | "/admin/usuarios" | "/admin/seguridad" | "/admin/auditoria";
+  href: "/admin" | "/admin/catalogo" | "/admin/usuarios" | "/admin/seguridad" | "/admin/auditoria";
   label: string;
 }[] {
   return [
     { href: "/admin", label: "Resumen" },
+    ...(hasAdminPermission(role, "catalog:read")
+      ? [{ href: "/admin/catalogo" as const, label: "Catálogo" }]
+      : []),
     ...(hasAdminPermission(role, "users:read")
       ? [{ href: "/admin/usuarios" as const, label: "Usuarios" }]
       : []),

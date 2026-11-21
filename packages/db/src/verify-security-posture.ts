@@ -112,6 +112,11 @@ const requiredPartialIndexes = [
   "SerializedUnit_variantId_imei_key",
   "SerializedUnit_imei_active_key",
 ] as const;
+const requiredCatalogIndexes = [
+  "Product_searchVector_idx",
+  "ProductVariant_active_price_idx",
+  "ProductAttributeValue_product_attribute_normalized_idx",
+] as const;
 const requiredSecurityTriggers = [
   "AdminActionLog_append_only",
   "AdminActionLog_self_dealing",
@@ -389,7 +394,7 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
        FROM pg_indexes
        WHERE schemaname = 'public'
          AND indexname = ANY($1::text[])`,
-      [[...requiredPartialIndexes, "Product_searchVector_idx"]],
+      [[...requiredPartialIndexes, ...requiredCatalogIndexes]],
     );
     for (const required of requiredPartialIndexes) {
       const index = indexes.rows.find((row) => row.index_name === required);
@@ -401,11 +406,16 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
         errors.push(`Missing partial unique index ${required}.`);
       }
     }
-    const searchGinIndex = indexes.rows.find(
-      (row) => row.index_name === "Product_searchVector_idx",
-    );
-    if (!searchGinIndex || !/USING gin/i.test(searchGinIndex.index_definition)) {
-      errors.push("Missing GIN full-text index Product_searchVector_idx.");
+    for (const required of requiredCatalogIndexes) {
+      const index = indexes.rows.find((row) => row.index_name === required);
+      if (!index) errors.push(`Missing catalog index ${required}.`);
+      if (
+        required === "Product_searchVector_idx" &&
+        index &&
+        !/USING gin/i.test(index.index_definition)
+      ) {
+        errors.push("Product_searchVector_idx must use GIN.");
+      }
     }
 
     const migrations = await client.query<{ total: number; healthy: number }>(

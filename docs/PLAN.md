@@ -24,11 +24,11 @@
 - `[x]` ✅ **`F1.1` — Esquema y Dominio de Catálogo Tech (`catalog.prisma` + `@mundonettech/core` + `config/catalog-blueprint.ts`):** 21 modelos PG 17 (`TaxGroup` UVT `50`/`22`, `Category` N-niveles, `ProductVariant` `BigInt` + GS1/EAN, `AttributeDefinition`/`ProductAttributeValue`, `CompatibilityDevice`, `Bundle`, `BackInStockSubscription`, `UrlRedirect` ≤ 100 saltos, `tsvector` GIN + `immutable_unaccent`) y `rls-matrix` (`543` casos).
 - `[x]` ✅ **`F1.2` — Pipeline Multimedia y Activos 360°/3D (`packages/media` + `ProductMedia`):** `sharp-safe` (allowlist `libvips`, magic bytes/`ispe`/orientación EXIF, purga GPS), AVIF/WebP/GLB/USDZ en R2 con rollback, `@mundonettech/media/viewers` (`Spin360`/`Model3d` *lazy* WCAG AA) e invariantes PG 17 (`ADR-007`, `ADR-024`).
 - `[x]` ✅ **`F1.3` — Inventario Multi-Bodega, Proveedores/WAC e Importador CSV (`inventory.prisma`):** `StockLocation`, `StockLevel` (`safetyStock` efectivo + locks ordenados anti-deadlock `40P01` — `ADR-013`), `SerializedUnit` (`IMEI` global + paridad PG 17), `InventoryLedger` (`OPENING`/`ADJUSTMENT`), `Supplier`/`PurchaseOrder` (WAC) y CSV seguro (`ADR-025`).
-- `[ ]` **`F1.4` — `CatalogService` Único (`'use cache'`), Storefront PDP/PLP/Comparador y Admin:** búsqueda/facetas indexadas, `ProductCard` única, comparador, PDP, vistas `/admin` RBAC+MFA, seed canónico y E2E Playwright/`@axe-core`.
+- `[R]` **`F1.4` — `CatalogService` Único (`'use cache'`), Storefront PDP/PLP/Comparador y Admin:** búsqueda/facetas indexadas, `ProductCard` única, comparador, PDP, vistas `/admin` RBAC+MFA, seed canónico y E2E Playwright/`@axe-core`.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Cierre `F1.3`:** ✅ certificado en `develop` (`38` tablas PG 17, `685` casos RLS, WAC `BigInt`, paridad serial/`IMEI` global y CSV seguro).
-- **Siguiente turno — Implementador (`F1.4`):** partir de `develop` limpio, crear rama `feat/f1-4-catalog-storefront-admin` e implementar `CatalogService` único (`'use cache'`), PDP/PLP/Comparador, vistas `/admin` RBAC+MFA, seed canónico y E2E Playwright/`@axe-core`.
+- **Auditoría `F1.4`:** rama `feat/f1-4-catalog-storefront-admin`; entrega `[R]` con catálogo/PDP/comparador, admin MFA, seed, 99 integraciones y 21 E2E.
+- **Siguiente turno — Auditor:** auditar `git diff develop...HEAD`, reejecutar gates, certificar `[x]` y fusionar; luego seguir `F2.1`.

@@ -21,7 +21,20 @@ export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }>
           {storeConfig.name}
         </Link>
         <div className="flex items-center gap-4">
-          <span className="text-sm text-muted-foreground">{storeConfig.domain}</span>
+          <nav
+            aria-label="Navegación principal"
+            className="flex items-center gap-4 text-sm font-medium"
+          >
+            <Link href="/productos" className="hover:text-primary">
+              Catálogo
+            </Link>
+            <Link href="/comparar" className="hover:text-primary">
+              Comparar
+            </Link>
+          </nav>
+          <span className="hidden text-sm text-muted-foreground sm:inline">
+            {storeConfig.domain}
+          </span>
           {actions}
         </div>
       </div>

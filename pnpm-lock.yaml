@@ -80,6 +80,9 @@ importers:
       '@mundonettech/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@mundonettech/media':
+        specifier: workspace:*
+        version: link:../../packages/media
       '@radix-ui/react-slot':
         specifier: ^1.2.4
         version: 1.5.0(@types/react@19.3.0)(react@19.3.1)

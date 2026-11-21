@@ -46,7 +46,7 @@ BOOTSTRAP_ADMIN_DISPLAY_NAME='Nombre autorizado' \
 pnpm admin:bootstrap
 ```
 
-El bootstrap valida política y HIBP, confirma correo y crea el primer `SUPERADMIN`; el primer login exige TOTP. Vincular una cuenta Auth existente requiere `BOOTSTRAP_ADMIN_LINK_EXISTING=YES` después de verificar propiedad. Las migraciones aplicadas no se editan: cualquier cambio posterior crea una nueva migración. No hay seeds comerciales ni administradores de demostración.
+El bootstrap valida política y HIBP, confirma correo y crea el primer `SUPERADMIN`; el primer login exige TOTP. Vincular una cuenta Auth existente requiere `BOOTSTRAP_ADMIN_LINK_EXISTING=YES` después de verificar propiedad. Las migraciones aplicadas no se editan: cualquier cambio posterior crea una nueva migración. No hay administradores de demostración. `pnpm db:seed` carga explícitamente el catálogo canónico de `config/`, con advisory lock, sin imágenes/GTIN/seriales inventados y sin alterar stock ya existente.
 
 ## 4. Gates y suites
 
@@ -63,7 +63,7 @@ pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + 
 
 En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 685 casos reales: 190 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 495 operaciones sobre `anon`, `authenticated` y `service_role` en las 38 tablas y 13 funciones RPC.
 
-Playwright arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`, recorre las rutas públicas, avisos de sesión/invitación, 404 semántico, redirecciones protegidas (`/admin/*`, `/admin/login/mfa`, `/mi-cuenta`), controles accesibles por teclado, listener `securitypolicyviolation` + cabeceras CSP/HSTS y auditoría `@axe-core` WCAG 2/2.1 A/AA. `test-results/`, `playwright-report/` y traces no se versionan.
+`pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, auth y seguridad, controles de teclado, CSP/HSTS y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
 
 ## 5. GitHub Actions PostgreSQL 17
 

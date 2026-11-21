@@ -81,4 +81,33 @@ export {
   retryDomainOutbox,
 } from "./primitives.js";
 export type { AcquiredIdempotencyKey, DatabaseExecutor } from "./primitives.js";
+export {
+  CatalogConflictError,
+  CatalogNotFoundError,
+  CatalogQueryError,
+  CatalogService,
+} from "./catalog-service.js";
+export type {
+  AdminCatalogPage,
+  AdminCatalogProduct,
+  AdminCatalogStatus,
+  CatalogAttributeFacet,
+  CatalogAttributeValue,
+  CatalogBrand,
+  CatalogCategory,
+  CatalogComparison,
+  CatalogFacetValue,
+  CatalogMedia,
+  CatalogMediaFrame,
+  CatalogMutationAudit,
+  CatalogProductBaseInput,
+  CatalogProductCreateInput,
+  CatalogProductDetail,
+  CatalogProductSummary,
+  CatalogSearchFilters,
+  CatalogSearchResult,
+  CatalogSort,
+  CatalogVariant,
+  CatalogVariantInput,
+} from "./catalog-types.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";
