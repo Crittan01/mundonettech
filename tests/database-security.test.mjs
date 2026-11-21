@@ -512,6 +512,18 @@ describe("F0.3 — relational integrity and immutable security records", () => {
 });
 
 describe("F0.3 — idempotency and outbox concurrency", () => {
+  before(async () => {
+    for (;;) {
+      const preexisting = await admin.query(
+        "SELECT * FROM claim_domain_outbox('preexisting-suite-drain', 100)",
+      );
+      if (preexisting.rows.length === 0) break;
+      for (const row of preexisting.rows) {
+        await admin.query("SELECT complete_domain_outbox($1, 'preexisting-suite-drain')", [row.id]);
+      }
+    }
+  });
+
   it("acquires one idempotency record across races and rejects payload reuse", async () => {
     const scope = `test-${randomUUID()}`;
     const keyHash = randomBytes(32);

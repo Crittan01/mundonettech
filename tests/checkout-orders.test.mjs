@@ -15,6 +15,8 @@ import {
   OrderService,
   ReceiptBalanceError,
   RefundConflictError,
+  claimDomainOutbox,
+  completeDomainOutbox,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
@@ -744,5 +746,25 @@ describe("F3.2 — abandoned carts, reservation expiry and partial refunds", () 
     assert.equal(finalWithShipping.taxCents, "9500");
     assert.equal(finalWithShipping.shippingCents, "1000000");
     assert.equal(finalWithShipping.totalCents, "1059500");
+
+    let drainedCount = 0;
+    for (;;) {
+      const batch = await claimDomainOutbox(db, { workerId: "f32-outbox-verifier", limit: 100 });
+      if (batch.length === 0) break;
+      for (const entry of batch) {
+        const serializedPayload = JSON.stringify(entry.payload);
+        assert.doesNotMatch(
+          serializedPayload,
+          /@example\.test|3001234567|Carrera 7|Laura|Rodríguez|Chapinero/i,
+        );
+        const completed = await completeDomainOutbox(db, {
+          id: entry.id,
+          workerId: "f32-outbox-verifier",
+        });
+        assert.equal(completed, true);
+        drainedCount += 1;
+      }
+    }
+    assert.ok(drainedCount >= 10);
   });
 });
