@@ -816,6 +816,26 @@ export class CmsService {
     });
   }
 
+  async getSeoEntries(at?: Date) {
+    const now = await databaseNow(this.db, at);
+    const pages = await this.db.cmsPage.findMany({
+      where: {
+        status: "PUBLISHED",
+        deletedAt: null,
+        publishedAt: { lte: now },
+        blocks: {
+          some: {
+            isVisible: true,
+            versions: { some: { status: "PUBLISHED", effectiveAt: { lte: now } } },
+          },
+        },
+      },
+      select: { slug: true, updatedAt: true },
+      orderBy: [{ slug: "asc" }, { id: "asc" }],
+    });
+    return pages.map((page) => ({ slug: page.slug, updatedAt: page.updatedAt.toISOString() }));
+  }
+
   private async loadMedia(contents: readonly unknown[]): Promise<CmsMediaView[]> {
     const ids = [...new Set(contents.flatMap(mediaIds))].sort((left, right) =>
       left < right ? -1 : left > right ? 1 : 0,

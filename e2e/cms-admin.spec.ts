@@ -17,6 +17,7 @@ test("CMS, detail, media and settings admin routes enforce the authenticated MFA
     "/admin/contenido/nuevo",
     "/admin/contenido/00000000-0000-4000-8000-000000000000",
     "/admin/contenido/medios",
+    "/admin/contenido/redirecciones",
     "/admin/configuracion",
   ]) {
     await page.goto(route);

@@ -1,9 +1,11 @@
 import type { CmsBlockView, CmsContentFor, CmsMediaView, CmsPageView } from "@mundonettech/cms";
+import { buildFaqJsonLd } from "@mundonettech/core";
 import { cacheLife, cacheTag } from "next/cache";
 import Image from "next/image";
 import Link from "next/link";
 
 import { ProductCard } from "@/components/catalog/product-card";
+import { JsonLd } from "@/components/seo/json-ld";
 import { getCatalogProductsBySlugs, searchCatalog } from "@/lib/catalog";
 import { buildCmsPicture } from "@/lib/cms-media";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -374,8 +376,14 @@ export async function CmsPageRenderer({
       }),
     })),
   );
+  const faqItems = preview
+    ? []
+    : page.blocks.flatMap((block) =>
+        block.isVisible && block.type === "FAQ" ? block.content.items : [],
+      );
   return (
     <div className="space-y-14" data-cms-page={page.id}>
+      {faqItems.length ? <JsonLd data={buildFaqJsonLd(faqItems)} /> : null}
       {!hasVisibleHero ? (
         <FallbackTitleTag className="text-4xl font-bold tracking-tight">
           {page.title}

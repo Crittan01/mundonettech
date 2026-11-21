@@ -5,8 +5,10 @@ import { notFound } from "next/navigation";
 import { ProductCard } from "@/components/catalog/product-card";
 import { ProductMediaGallery } from "@/components/catalog/product-media-gallery";
 import { ProductVariantPanel } from "@/components/catalog/product-variant-panel";
+import { JsonLd } from "@/components/seo/json-ld";
 import { getCatalogProduct, searchCatalog } from "@/lib/catalog";
 import { getPublicMediaOrigin } from "@/lib/env";
+import { getProductImageUrls, getProductStructuredData, productUrl } from "@/lib/product-seo";
 
 const authenticityLabels = {
   ORIGINAL: "Original",
@@ -22,18 +24,40 @@ const retractLabels = {
 export async function generateMetadata({ params }: PageProps<"/producto/[slug]">) {
   const { slug } = await params;
   const product = await getCatalogProduct(slug);
-  return product
-    ? {
-        title: product.seoTitle ?? product.name,
-        description: product.seoDescription ?? product.shortDescription ?? undefined,
-      }
-    : { title: "Producto no encontrado" };
+  if (!product) {
+    return { title: "Producto no encontrado", robots: { index: false, follow: false } };
+  }
+  const description = product.seoDescription ?? product.shortDescription ?? product.description;
+  const images = getProductImageUrls(product, getPublicMediaOrigin());
+  const canonical = productUrl(product);
+  return {
+    title: product.seoTitle ?? product.name,
+    description: description ?? undefined,
+    alternates: { canonical },
+    openGraph: {
+      type: "website",
+      url: canonical,
+      title: product.seoTitle ?? product.name,
+      description: description ?? undefined,
+      images,
+    },
+    twitter: {
+      card: images.length ? "summary_large_image" : "summary",
+      title: product.seoTitle ?? product.name,
+      description: description ?? undefined,
+      images,
+    },
+  };
 }
 
-export default async function ProductPage({ params }: PageProps<"/producto/[slug]">) {
-  const { slug } = await params;
+export default async function ProductPage({ params, searchParams }: PageProps<"/producto/[slug]">) {
+  const [{ slug }, query] = await Promise.all([params, searchParams]);
   const product = await getCatalogProduct(slug);
   if (!product) notFound();
+  const requestedVariant = typeof query.variant === "string" ? query.variant : null;
+  const defaultVariantId = product.variants.some((variant) => variant.id === requestedVariant)
+    ? requestedVariant!
+    : product.defaultVariantId;
   const related = await searchCatalog({
     categorySlug: product.category.slug,
     excludeProductId: product.id,
@@ -43,6 +67,7 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
   const mediaOrigin = getPublicMediaOrigin();
   return (
     <div className="space-y-12">
+      <JsonLd data={getProductStructuredData(product, mediaOrigin)} />
       <nav aria-label="Migas de pan" className="text-sm text-muted-foreground">
         <ol className="flex flex-wrap gap-2">
           <li>
@@ -91,7 +116,7 @@ export default async function ProductPage({ params }: PageProps<"/producto/[slug
           ) : null}
           <ProductVariantPanel
             productSlug={product.slug}
-            defaultVariantId={product.defaultVariantId}
+            defaultVariantId={defaultVariantId}
             variants={product.variants}
           />
           {product.description ? <p className="leading-7">{product.description}</p> : null}

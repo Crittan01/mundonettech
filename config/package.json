@@ -24,6 +24,10 @@
     "./seed": {
       "types": "./dist/catalog-seed.d.ts",
       "import": "./dist/catalog-seed.js"
+    },
+    "./legal": {
+      "types": "./dist/legal.config.d.ts",
+      "import": "./dist/legal.config.js"
     }
   },
   "scripts": {

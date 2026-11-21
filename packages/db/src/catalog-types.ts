@@ -130,6 +130,40 @@ export interface CatalogProductDetail extends CatalogProductSummary {
   }>;
 }
 
+export interface CatalogSeoEntries {
+  readonly products: Array<{ readonly slug: string; readonly updatedAt: string }>;
+  readonly categories: Array<{ readonly slug: string; readonly updatedAt: string }>;
+  readonly brands: Array<{ readonly slug: string; readonly updatedAt: string }>;
+}
+
+export interface CatalogFeedVariant {
+  readonly id: string;
+  readonly sku: string;
+  readonly priceCents: string;
+  readonly gtin: string | null;
+  readonly ean: string | null;
+  readonly mpn: string | null;
+  readonly weightGrams: number;
+  readonly available: number;
+  readonly options: CatalogVariantOptionItem[];
+}
+
+export interface CatalogFeedProduct {
+  readonly id: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly shortDescription: string | null;
+  readonly description: string | null;
+  readonly brand: { readonly slug: string; readonly name: string };
+  readonly category: {
+    readonly slug: string;
+    readonly name: string;
+    readonly googleProductCategory: string | null;
+  };
+  readonly media: CatalogMedia[];
+  readonly variants: CatalogFeedVariant[];
+}
+
 export interface CatalogFacetValue {
   readonly value: string;
   readonly label: string;

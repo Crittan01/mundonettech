@@ -343,6 +343,9 @@ test("published CMS renders all six blocks, curated and auto grids, responsive m
     "summary_large_image",
   );
 
+  const structuredData = await page.locator('script[type="application/ld+json"]').allTextContents();
+  expect(structuredData.some((entry) => entry.includes('"@type":"FAQPage"'))).toBe(true);
+
   const accessibility = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();
@@ -615,4 +618,49 @@ test("authenticated CMS editor enforces step-up MFA, previews, edits tokens/SEO,
     }),
   ).toBeGreaterThanOrEqual(2);
   await collector.assertClean();
+});
+
+test("CMS editor creates, executes and disables a persisted proxy redirect", async ({ page }) => {
+  await authenticateAdmin(page, { subject: actorAuthUserId, email: actorEmail });
+  const source = `/legacy-${randomUUID()}`;
+  await page.goto("/admin/contenido/redirecciones");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Redirecciones persistentes");
+  await page.locator("summary").filter({ hasText: "Crear redirección" }).click();
+  await page.getByLabel("Ruta de origen").fill(source);
+  await page.getByLabel("Ruta de destino").fill("/legal");
+  await page.getByLabel("Estado HTTP").selectOption("307");
+  await page.getByRole("button", { name: "Crear redirección" }).click();
+  await expect(page.getByText(`Redirección ${source} creada y auditada.`)).toBeVisible();
+
+  const redirect = await page.request.get(`${source}?origen=seo`, { maxRedirects: 0 });
+  expect(redirect.status()).toBe(307);
+  const location = new URL(redirect.headers().location!, "http://127.0.0.1:4110");
+  expect(location.pathname).toBe("/legal");
+  expect(location.searchParams.get("origen")).toBe("seo");
+  await page.goto(`${source}?origen=seo`);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    "Legal, privacidad y atención al consumidor",
+  );
+  await expect(page).toHaveURL(/\/legal\?origen=seo$/);
+
+  const record = await db.urlRedirect.findFirstOrThrow({
+    where: { fromPath: source, deletedAt: null },
+  });
+  await page.goto("/admin/contenido/redirecciones");
+  const article = page.locator("article").filter({ hasText: source });
+  await article.getByText("Editar", { exact: true }).click();
+  await article.getByRole("button", { name: "Desactivar", exact: true }).click();
+  await expect(page.getByText("Redirección desactivada.")).toBeVisible();
+  const disabled = await page.request.get(source, { maxRedirects: 0 });
+  expect(disabled.status()).toBe(404);
+  expect(disabled.headers().location).toBeUndefined();
+  expect(
+    await db.adminActionLog.count({
+      where: {
+        targetType: "UrlRedirect",
+        targetId: record.id,
+        action: { in: ["URL_REDIRECT_CREATED", "URL_REDIRECT_ACTIVITY_UPDATED"] },
+      },
+    }),
+  ).toBe(2);
 });

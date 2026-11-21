@@ -24,10 +24,10 @@
 - `[x]` ✅ **Fase 1 cerrada (`F1.1`–`F1.4`):** Catálogo tech PG 17 (`29` modelos + `Order`, `BigInt`, GS1/EAN, `tsvector` GIN), `@mundonettech/media` (R2 + `Spin360`/`Model3d` *lazy*), inventario WAC/seriales/CSV, `CatalogService` (`'use cache'`), PDP/PLP/Comparador, `/admin/catalogo` MFA y seed (`ADR-023`..`ADR-026`).
 - `[x]` **`F2.1` — CMS v3 (`growth-cms.prisma`), `StoreSettings` y Mediateca R2 (`packages/cms`):** `StoreSettings` separada con RBAC (`ADR-016`), `CmsPage` + `CmsSectionBlock` (Zod + `{{tokens}}`) + `CmsBlockVersion`, `CmsMedia` R2 (`sharp-safe`), `/admin/{contenido,configuracion}` MFA y `770` casos RLS (`ADR-027`).
 - `[x]` **`F2.2` — Renderizado `'use cache'`, Live Edit en `<Suspense>` y SERP:** `/pagina/[slug]` PPR con 6 bloques (`CachedCmsPageRenderer`), medios AVIF/WebP y grillas curadas/auto; Live Edit `aal2` + step-up en `<Suspense>`, canonical/SERP/OG/Twitter e invalidación programada (`ADR-028`).
-- `[ ]` **`F2.3` — Legal CO (`packages/legal-co`), Redirecciones, JSON-LD, Sitemap y Merchant XML (`COMPLIANCE.md`):** 8 docs legales desde `config/`, retracto 5 días hábiles + 18 festivos CO, Ley 1581, `UrlRedirect`, JSON-LD, `sitemap.xml` y Google Merchant XML (`Brand`/`GTIN`).
+- `[R]` **`F2.3` — Legal CO (`packages/legal-co`), Redirecciones, JSON-LD, Sitemap y Merchant XML (`COMPLIANCE.md`):** 8 docs desde `config/`, 18 festivos/retracto/Ley 1581, `UrlRedirectService` + proxy/admin MFA, JSON-LD, robots, sitemap particionado y Merchant XML por variante (`Brand`/`GTIN`/`MPN`) (`ADR-029`).
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Implementador (`F2.3`):** desde `develop` limpio, crear `feat/f2-3-legal-co-redirects-seo-feeds`, implementar `packages/legal-co` (8 docs desde `config/`, retracto Ley 1480/2439 5 días hábiles + 18 festivos CO en `colombian-sla.ts`, Ley 1581), `docs/COMPLIANCE.md`, `UrlRedirect`, JSON-LD, `sitemap.xml` y Google Merchant XML (`Brand`/`GTIN`), pasar gates + E2E y marcar `[R]`.
+- **Siguiente turno — Auditor (`F2.3`):** auditar `git diff develop...HEAD` contra `ADR-029`/`COMPLIANCE.md` (legal, redirects, MFA/RLS, feeds y anti-demo); ejecutar `make check && pnpm test && pnpm build && pnpm test:e2e`, certificar `[x]` sin concesiones y seguir PR/merge.

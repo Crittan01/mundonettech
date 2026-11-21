@@ -15,6 +15,7 @@
     "@mundonettech/cms": "workspace:*",
     "@mundonettech/core": "workspace:*",
     "@mundonettech/db": "workspace:*",
+    "@mundonettech/legal-co": "workspace:*",
     "@mundonettech/media": "workspace:*",
     "@radix-ui/react-slot": "^1.2.4",
     "@supabase/ssr": "^0.12.7",

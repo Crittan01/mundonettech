@@ -33,6 +33,7 @@ export type {
   StockLevel,
   StockLocation,
   Supplier,
+  UrlRedirect,
   CmsBlockVersion,
   CmsMedia,
   CmsPage,
@@ -93,6 +94,13 @@ export {
   CatalogService,
 } from "./catalog-service.js";
 export type { CatalogConflictErrorCode, CatalogQueryErrorCode } from "./catalog-service.js";
+export {
+  UrlRedirectConflictError,
+  UrlRedirectNotFoundError,
+  UrlRedirectService,
+  UrlRedirectValidationError,
+} from "./url-redirect-service.js";
+export type { ResolvedUrlRedirect, UrlRedirectInput } from "./url-redirect-service.js";
 export type {
   AdminCatalogPage,
   AdminCatalogProduct,
@@ -103,6 +111,8 @@ export type {
   CatalogCategory,
   CatalogComparison,
   CatalogFacetValue,
+  CatalogFeedProduct,
+  CatalogFeedVariant,
   CatalogMedia,
   CatalogMediaDerivative,
   CatalogMediaFrame,
@@ -115,6 +125,7 @@ export type {
   CatalogProductSummary,
   CatalogSearchFilters,
   CatalogSearchResult,
+  CatalogSeoEntries,
   CatalogSort,
   CatalogVariant,
   CatalogVariantInput,

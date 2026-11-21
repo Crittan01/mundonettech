@@ -249,7 +249,15 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
       service.scheduleVersion(first.id, new Date(Date.now() + 60_000), audit),
       CmsConflictError,
     );
+    assert.equal(
+      (await service.getSeoEntries()).some((entry) => entry.slug === page.slug),
+      false,
+    );
     await service.publishPage(page.id, audit);
+    assert.equal(
+      (await service.getSeoEntries()).some((entry) => entry.slug === page.slug),
+      true,
+    );
     assert.equal(
       (await service.getPublishedPage(page.slug)).blocks[0].content.heading,
       "Hola Tienda de prueba",

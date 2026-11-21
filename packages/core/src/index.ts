@@ -69,3 +69,23 @@ export {
 } from "./csv.js";
 export type { CsvCell, CsvParseOptions, CsvRow, InventoryStockCsvRow } from "./csv.js";
 export { formatCopCents, parseWholeCopToCents } from "./money.js";
+export {
+  buildBreadcrumbJsonLd,
+  buildFaqJsonLd,
+  buildOrganizationJsonLd,
+  buildProductJsonLd,
+  buildWebSiteJsonLd,
+  centsToDecimalString,
+  serializeJsonLd,
+} from "./structured-data.js";
+export type { JsonLdBreadcrumbItem, JsonLdOffer, JsonLdProduct } from "./structured-data.js";
+export { buildGoogleMerchantXml } from "./merchant-feed.js";
+export type { MerchantFeedItem } from "./merchant-feed.js";
+export {
+  buildSitemapIndex,
+  buildSitemapUrlSet,
+  partitionSitemapEntries,
+  sitemapEntriesPerFile,
+} from "./sitemap-xml.js";
+export type { SitemapXmlEntry } from "./sitemap-xml.js";
+export { absolutePublicUrl, escapeXml, normalizeXmlText } from "./xml.js";
