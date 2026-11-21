@@ -85,9 +85,7 @@ function randomTaxId() {
   return `${digits.slice(0, 11).join("")}-${digits[11]}`;
 }
 
-function validImei(
-  prefix = `35${Array.from(randomBytes(12), (byte) => byte % 10).join("")}`,
-) {
+function validImei(prefix = `35${Array.from(randomBytes(12), (byte) => byte % 10).join("")}`) {
   let sum = 0;
   for (let index = 0; index < 14; index += 1) {
     let digit = prefix.charCodeAt(index) - 48;
