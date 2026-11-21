@@ -3,6 +3,20 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
+      "env": ["NEXT_PUBLIC_*", "EMAIL_SEND_DISABLED"],
+      "passThroughEnv": [
+        "DATABASE_URL",
+        "DIRECT_URL",
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SESSION_TIMEOUT_SECRET",
+        "SECURITY_EVENT_PEPPER",
+        "RECOVERY_CODE_PEPPER",
+        "TURNSTILE_SECRET_KEY",
+        "TURNSTILE_EXPECTED_HOSTNAME",
+        "INTEGRATION_CREDENTIAL_KEYS_*",
+        "TRUSTED_PROXY",
+        "VERCEL"
+      ],
       "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.next/**"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
     },
