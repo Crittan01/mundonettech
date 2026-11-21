@@ -43,6 +43,11 @@ export function CheckoutForm({
   );
   const sections = useRef<Record<number, HTMLElement | null>>({});
   const values = state.values;
+  const customer = preview.customer;
+  const defaultRecipient =
+    customer?.givenName && customer?.familyName
+      ? `${customer.givenName} ${customer.familyName}`
+      : "";
 
   const municipalities = useMemo(
     () => preview.municipalities.filter((entry) => entry.departmentCode === departmentCode),
@@ -151,10 +156,17 @@ export function CheckoutForm({
                 name="email"
                 type="email"
                 autoComplete="email"
-                defaultValue={field("email")}
+                defaultValue={field("email", customer?.email ?? "")}
+                readOnly={customer?.authenticated === true}
+                aria-readonly={customer?.authenticated === true ? "true" : undefined}
                 maxLength={320}
                 required
               />
+              {customer?.authenticated ? (
+                <p className="text-xs text-muted-foreground">
+                  Compra vinculada a tu cuenta activa.
+                </p>
+              ) : null}
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-given-name">Nombres</Label>
@@ -162,7 +174,7 @@ export function CheckoutForm({
                 id="checkout-given-name"
                 name="givenName"
                 autoComplete="given-name"
-                defaultValue={field("givenName")}
+                defaultValue={field("givenName", customer?.givenName ?? "")}
                 minLength={2}
                 maxLength={100}
                 required
@@ -174,7 +186,7 @@ export function CheckoutForm({
                 id="checkout-family-name"
                 name="familyName"
                 autoComplete="family-name"
-                defaultValue={field("familyName")}
+                defaultValue={field("familyName", customer?.familyName ?? "")}
                 minLength={2}
                 maxLength={100}
                 required
@@ -186,7 +198,7 @@ export function CheckoutForm({
                 id="checkout-recipient"
                 name="recipientName"
                 autoComplete="name"
-                defaultValue={field("recipientName")}
+                defaultValue={field("recipientName", defaultRecipient)}
                 minLength={2}
                 maxLength={200}
                 required
@@ -199,8 +211,10 @@ export function CheckoutForm({
                 name="phoneE164"
                 type="tel"
                 autoComplete="tel"
-                defaultValue={field("phoneE164")}
+                defaultValue={field("phoneE164", customer?.phoneE164 ?? "")}
                 placeholder="3001234567"
+                minLength={8}
+                maxLength={24}
                 required
               />
             </div>
@@ -488,6 +502,14 @@ export function CheckoutForm({
                   className="text-primary hover:underline"
                 >
                   aviso de privacidad
+                </Link>{" "}
+                y la{" "}
+                <Link
+                  href="/legal/tratamiento-datos-personales"
+                  target="_blank"
+                  className="text-primary hover:underline"
+                >
+                  política de tratamiento de datos personales
                 </Link>
                 . No se activa mercadeo por esta compra.
               </span>
@@ -537,7 +559,14 @@ export function CheckoutForm({
       </form>
 
       <aside className="space-y-5 rounded-xl border border-border bg-card p-5 lg:sticky lg:top-6">
-        <h2 className="text-xl font-bold">Tu pedido</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-xl font-bold">Tu pedido</h2>
+          {preview.cart.coupon ? (
+            <span className="rounded-md border border-border bg-secondary px-2 py-1 font-mono text-xs font-medium">
+              {preview.cart.coupon.code}
+            </span>
+          ) : null}
+        </div>
         <ul className="space-y-3">
           {preview.cart.items.map((item) => {
             const tax = preview.taxLines.find((line) => line.lineId === item.id);

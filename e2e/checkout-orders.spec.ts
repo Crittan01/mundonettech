@@ -196,6 +196,10 @@ test("Click & Collect reserves only showroom stock and emits a zero-shipping rec
   expect(stock.committed).toBe(committedBeforeCheckout + 1);
   await page.goto("/recibo/not-a-valid-token");
   await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
+  const badDownload = await page.request.get("/api/recibos/not-a-valid-token/descargar");
+  expect(badDownload.status()).toBe(404);
+  expect(badDownload.headers()["cache-control"]).toContain("no-store");
+  expect(badDownload.headers()["x-robots-tag"]).toContain("noindex");
 });
 
 test("order scheduler rejects anonymous callers and processes abandonment and expiry", async ({

@@ -6,11 +6,14 @@ import pg from "pg";
 
 import {
   CartService,
+  CheckoutAuthenticationRequiredError,
   CheckoutConflictError,
+  CheckoutCouponError,
   CheckoutReviewRequiredError,
   OrderLifecycleService,
   OrderRefundService,
   OrderService,
+  ReceiptBalanceError,
   RefundConflictError,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
@@ -369,6 +372,110 @@ describe("F3.2 — atomic checkout, receipt and inventory snapshots", () => {
     const second = await makeCart(1);
     await assert.rejects(carts.applyCoupon({ cartId: second.cart.id }, coupon.code));
   });
+
+  it("binds guest coupon redemptions to customer identity, records Ley 1581 consent, prefills active customers and blocks receipt tampering", async () => {
+    await addPickupStock(4);
+    const perCustomerCouponId = randomUUID();
+    await sql.query(
+      `INSERT INTO "Coupon" ("id", "code", "name", "discountType", "status", "percentageBps", "perCustomerUsages")
+       VALUES ($1, $2, 'One per customer', 'PERCENTAGE', 'ACTIVE', 1000, 1)`,
+      [perCustomerCouponId, `CUST-${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`],
+    );
+    const perCustomerCoupon = await db.coupon.findUniqueOrThrow({
+      where: { id: perCustomerCouponId },
+    });
+    const guestEmail = `guest-limit-${randomUUID()}@example.test`;
+    const firstGuest = await makeCart(1, guestEmail);
+    await carts.applyCoupon({ cartId: firstGuest.cart.id }, perCustomerCoupon.code);
+    const firstResult = await orders.checkout(await conversion(firstGuest.cart, guestEmail));
+    const redeemedUsage = await db.couponUsage.findFirstOrThrow({
+      where: { orderId: firstResult.orderId },
+    });
+    assert.ok(redeemedUsage.customerId);
+    assert.equal(
+      await db.consent.count({
+        where: {
+          customerId: redeemedUsage.customerId,
+          purpose: "DATA_PROCESSING",
+          status: "GRANTED",
+          source: "checkout",
+        },
+      }),
+      1,
+    );
+
+    const secondGuest = await makeCart(1, guestEmail);
+    await carts.applyCoupon({ cartId: secondGuest.cart.id }, perCustomerCoupon.code);
+    await assert.rejects(
+      orders.checkout(await conversion(secondGuest.cart, guestEmail)),
+      CheckoutCouponError,
+    );
+
+    const activeCustomer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `active-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+      },
+    });
+    const activeCart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(24 * 30),
+      customerId: activeCustomer.id,
+    });
+    await carts.addVariant({ cartId: activeCart.id }, catalog.variantId, 1);
+    const activePreview = await orders.preview({ cartId: activeCart.id });
+    assert.deepEqual(activePreview.customer, {
+      id: activeCustomer.id,
+      email: activeCustomer.email,
+      givenName: null,
+      familyName: null,
+      phoneE164: null,
+      authenticated: true,
+    });
+    await assert.rejects(
+      orders.checkout(await conversion(activeCart, `other-${randomUUID()}@example.test`)),
+      CheckoutAuthenticationRequiredError,
+    );
+    const receiptToken = randomBytes(32).toString("base64url");
+    const receiptTokenHash = Uint8Array.from(createHash("sha256").update(receiptToken).digest());
+    const activeInput = await conversion(activeCart, activeCustomer.email, {
+      receiptAccessTokenHash: receiptTokenHash,
+    });
+    const activeOrder = await orders.checkout(activeInput);
+    const updatedCustomer = await db.customer.findUniqueOrThrow({
+      where: { id: activeCustomer.id },
+    });
+    assert.equal(updatedCustomer.givenName, "Laura");
+    assert.equal(updatedCustomer.familyName, "Rodríguez");
+    assert.equal(updatedCustomer.phoneE164, "+573001234567");
+
+    await db.order.update({ where: { id: activeOrder.orderId }, data: { paymentStatus: "PAID" } });
+    const paidReplay = await orders.checkout(activeInput);
+    assert.equal(paidReplay.replayed, true);
+    assert.equal(paidReplay.paymentStatus, "PAID");
+
+    await assert.rejects(
+      sql.query(`DELETE FROM "Order" WHERE "id" = $1`, [activeOrder.orderId]),
+      /Order history cannot be deleted/,
+    );
+
+    const savedReceipt = await db.orderReceipt.findUniqueOrThrow({
+      where: { orderId: activeOrder.orderId },
+    });
+    await sql.query(`ALTER TABLE "OrderReceipt" DISABLE TRIGGER "OrderReceipt_immutable_history"`);
+    await sql.query(`UPDATE "OrderReceipt" SET "contentHash" = $1 WHERE "id" = $2`, [
+      randomBytes(32),
+      savedReceipt.id,
+    ]);
+    await sql.query(`ALTER TABLE "OrderReceipt" ENABLE TRIGGER "OrderReceipt_immutable_history"`);
+    await assert.rejects(orders.getReceiptByToken(receiptTokenHash), ReceiptBalanceError);
+    assert.ok(
+      await db.domainOutbox.findUnique({
+        where: { deduplicationKey: `receipt:${savedReceipt.id}:integrity-failed:v1` },
+      }),
+    );
+  });
 });
 
 describe("F3.2 — abandoned carts, reservation expiry and partial refunds", () => {
@@ -405,6 +512,27 @@ describe("F3.2 — abandoned carts, reservation expiry and partial refunds", () 
       (await db.abandonedCart.findUniqueOrThrow({ where: { cartId: cart.id } })).status,
       "RECOVERED",
     );
+
+    const expiringCart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(1),
+    });
+    await carts.addVariant({ cartId: expiringCart.id }, catalog.variantId, 1);
+    await sql.query(
+      `UPDATE "Cart" SET "expiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE "id" = $1`,
+      [expiringCart.id],
+    );
+    const expiredRun = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60, limit: 100 });
+    assert.equal(expiredRun.expired, 1);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { cartId: expiringCart.id } })).status,
+      "EXPIRED",
+    );
+    const secondExpiredRun = await lifecycle.captureAbandonedCarts({
+      inactivityMinutes: 60,
+      limit: 100,
+    });
+    assert.deepEqual(secondExpiredRun, { detected: 0, expired: 0, outboxEvents: 0 });
   });
 
   it("releases stock and redeemed coupons when an unpaid reservation expires", async () => {
@@ -524,5 +652,97 @@ describe("F3.2 — abandoned carts, reservation expiry and partial refunds", () 
       refunds.request({ ...firstInput, idempotencyKey: `refund-third-${randomUUID()}` }),
       RefundConflictError,
     );
+
+    await assert.rejects(
+      sql.query(
+        `UPDATE "Order" SET "paymentStatus" = 'PAID' WHERE "id" = (SELECT "id" FROM "Order" WHERE "orderStatus" = 'CANCELLED' LIMIT 1)`,
+      ),
+      /Cancelled orders are immutable/,
+    );
+
+    await addPickupStock(2);
+    const secondVariantId = randomUUID();
+    await sql.query(
+      `INSERT INTO "ProductVariant" (
+         "id", "productId", "sku", "priceCents", "costCents", "weightGrams",
+         "lengthMillimeters", "widthMillimeters", "heightMillimeters", "isDefault", "status"
+       ) VALUES ($1, $2, $3, 50000, 30000, 250, 100, 100, 50, false, 'ACTIVE')`,
+      [
+        secondVariantId,
+        catalog.productId,
+        `SKU-REF-${randomUUID().replaceAll("-", "").slice(0, 10).toUpperCase()}`,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "StockLevel" ("locationId", "variantId", "onHand", "safetyStock", "weightedAvgCostCents")
+       VALUES ($1, $2, 2, 0, 30000)`,
+      [inventory.locationId, secondVariantId],
+    );
+    for (let idx = 0; idx < 2; idx += 1) {
+      await sql.query(
+        `INSERT INTO "SerializedUnit" ("id", "variantId", "locationId", "serial") VALUES ($1, $2, $3, $4)`,
+        [randomUUID(), secondVariantId, inventory.locationId, `REF2-${randomUUID()}-${idx}`],
+      );
+    }
+    await sql.query(
+      `INSERT INTO "InventoryLedger" (
+         "locationId", "variantId", "entryType", "quantityDelta", "committedDelta", "onHandAfter",
+         "committedAfter", "safetyStockAfter", "weightedAvgCostAfterCents", "operationKey", "operationHash", "operationSequence"
+       ) VALUES ($1, $2, 'OPENING', 2, 0, 2, 0, 0, 30000, $3, $4, 0)`,
+      [inventory.locationId, secondVariantId, `ref2-open-${randomUUID()}`, randomBytes(32)],
+    );
+    const multiCart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(24 * 30),
+    });
+    await carts.addVariant({ cartId: multiCart.id }, catalog.variantId, 1);
+    await carts.addVariant({ cartId: multiCart.id }, secondVariantId, 1);
+    const multiResult = await orders.checkout(
+      await conversion(multiCart, `multi-${randomUUID()}@example.test`),
+    );
+    await db.order.update({ where: { id: multiResult.orderId }, data: { paymentStatus: "PAID" } });
+    const multiOrder = await db.order.findUniqueOrThrow({
+      where: { id: multiResult.orderId },
+      include: { items: { orderBy: { unitPriceCents: "desc" } } },
+    });
+    const [firstMultiItem, secondMultiItem] = multiOrder.items;
+    const rejectedCandidate = await refunds.request({
+      orderId: multiOrder.id,
+      idempotencyKey: `multi-reject-${randomUUID()}`,
+      reason: "CUSTOMER_SUPPORT",
+      items: [{ orderItemId: firstMultiItem.id, quantity: 1 }],
+      includeShipping: false,
+      audit,
+    });
+    const rejected = await refunds.reject({
+      refundId: rejectedCandidate.id,
+      note: "Solicitud duplicada rechazada",
+      audit,
+    });
+    assert.equal(rejected.status, "REJECTED");
+
+    const approvedFirst = await refunds.request({
+      orderId: multiOrder.id,
+      idempotencyKey: `multi-part1-${randomUUID()}`,
+      reason: "RETRACT",
+      items: [{ orderItemId: firstMultiItem.id, quantity: 1 }],
+      includeShipping: false,
+      audit,
+    });
+    const approved = await refunds.approve({ refundId: approvedFirst.id, audit });
+    assert.equal(approved.status, "APPROVED");
+
+    const finalWithShipping = await refunds.request({
+      orderId: multiOrder.id,
+      idempotencyKey: `multi-part2-${randomUUID()}`,
+      reason: "RETRACT",
+      items: [{ orderItemId: secondMultiItem.id, quantity: 1 }],
+      includeShipping: true,
+      audit,
+    });
+    assert.equal(finalWithShipping.subtotalCents, "50000");
+    assert.equal(finalWithShipping.taxCents, "9500");
+    assert.equal(finalWithShipping.shippingCents, "1000000");
+    assert.equal(finalWithShipping.totalCents, "1059500");
   });
 });

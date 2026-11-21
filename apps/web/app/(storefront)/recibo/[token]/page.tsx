@@ -1,4 +1,5 @@
 import { formatCopCents } from "@mundonettech/core";
+import { ReceiptBalanceError, type OrderStatus, type PaymentStatus } from "@mundonettech/db";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
@@ -7,6 +8,22 @@ import { PrintReceiptButton } from "@/components/orders/receipt-actions";
 import { Button } from "@/components/ui/button";
 import { hashCartToken } from "@/lib/cart-token";
 import { orderService } from "@/lib/checkout";
+
+const paymentStatusLabels: Record<PaymentStatus, string> = {
+  UNPAID: "Pago pendiente",
+  PARTIALLY_PAID: "Pago parcial",
+  PAID: "Pagado",
+  PARTIALLY_REFUNDED: "Reembolso parcial",
+  REFUNDED: "Reembolsado",
+  FAILED: "Pago fallido",
+};
+
+const orderStatusLabels: Record<OrderStatus, string> = {
+  PENDING: "En validación",
+  CONFIRMED: "Confirmado",
+  CANCELLED: "Cancelado",
+  COMPLETED: "Completado",
+};
 
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
@@ -23,11 +40,38 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
   await connection();
   const [{ token }, query] = await Promise.all([params, searchParams]);
   let receipt;
+  let integrityBlocked = false;
   try {
     receipt = await orderService().getReceiptByToken(hashCartToken(token));
   } catch (error) {
     if (error instanceof TypeError) notFound();
-    throw error;
+    if (error instanceof ReceiptBalanceError) {
+      integrityBlocked = true;
+    } else {
+      throw error;
+    }
+  }
+  if (integrityBlocked) {
+    return (
+      <section
+        role="alert"
+        className="mx-auto max-w-2xl rounded-2xl border border-warning bg-card p-8"
+      >
+        <h1 className="text-2xl font-bold tracking-tight">
+          Comprobante retenido por verificación aritmética
+        </h1>
+        <p className="mt-3 text-sm leading-6 text-muted-foreground">
+          Detectamos una discrepancia en la verificación de integridad del comprobante y generamos
+          una alerta operativa automática para revisar tu pedido.
+        </p>
+        <Link
+          href="/legal/pqrs"
+          className="mt-6 inline-flex font-medium text-primary hover:underline"
+        >
+          Consultar canales de atención
+        </Link>
+      </section>
+    );
   }
   if (!receipt) notFound();
   const confirmed = query.confirmado === "1";
@@ -101,8 +145,9 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
         </div>
         <div>
           <h2 className="font-semibold">Estado financiero</h2>
-          <p className="mt-2 text-sm font-medium">
-            {receipt.paymentStatus === "UNPAID" ? "Pago pendiente" : receipt.paymentStatus}
+          <p className="mt-2 text-sm font-medium">{paymentStatusLabels[receipt.paymentStatus]}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Estado del pedido: {orderStatusLabels[receipt.orderStatus]}
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
             {receipt.paymentStatus === "UNPAID"
@@ -161,7 +206,10 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
             <dd>{formatCopCents(receipt.subtotalCents)}</dd>
           </div>
           <div className="flex justify-between gap-4 text-success">
-            <dt>Descuentos</dt>
+            <dt>
+              Descuentos
+              {receipt.couponCodeSnapshot ? ` (cupón ${receipt.couponCodeSnapshot})` : ""}
+            </dt>
             <dd>−{formatCopCents(receipt.discountCents)}</dd>
           </div>
           <div className="flex justify-between gap-4">

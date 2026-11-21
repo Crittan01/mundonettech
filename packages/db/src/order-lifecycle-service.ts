@@ -57,8 +57,16 @@ export class OrderLifecycleService {
       const cutoff = new Date(now.getTime() - inactivityMinutes * 60_000);
       const carts = await tx.$queryRaw<Cart[]>`
         SELECT cart.* FROM "Cart" cart
-        WHERE cart."status" IN ('ACTIVE', 'EXPIRED')
-          AND (cart."status" = 'EXPIRED' OR cart."updatedAt" <= ${cutoff})
+        WHERE (
+          (cart."status" = 'ACTIVE' AND (cart."expiresAt" <= ${now} OR cart."updatedAt" <= ${cutoff}))
+          OR (
+            cart."status" = 'EXPIRED'
+            AND NOT EXISTS (
+              SELECT 1 FROM "AbandonedCart" abandoned
+              WHERE abandoned."cartId" = cart."id" AND abandoned."status" = 'EXPIRED'
+            )
+          )
+        )
           AND EXISTS (SELECT 1 FROM "CartItem" item WHERE item."cartId" = cart."id")
         ORDER BY cart."updatedAt", cart."id"
         FOR UPDATE OF cart SKIP LOCKED
@@ -68,7 +76,12 @@ export class OrderLifecycleService {
       let expired = 0;
       let outboxEvents = 0;
       for (const cart of carts) {
-        await acquireOperationLocks(tx, [`cart-lifecycle:${cart.id}`]);
+        await acquireOperationLocks(
+          tx,
+          cart.couponId
+            ? [`cart-lifecycle:${cart.id}`, `coupon-redemption:${cart.couponId}`]
+            : [`cart-lifecycle:${cart.id}`],
+        );
         const customer = cart.customerId
           ? await tx.customer.findFirst({
               where: { id: cart.customerId, deletedAt: null },
@@ -80,7 +93,9 @@ export class OrderLifecycleService {
             where: { cartId: cart.id, status: "RESERVED" },
             data: { status: "RELEASED", releasedAt: now },
           });
-          await tx.cart.update({ where: { id: cart.id }, data: { status: "EXPIRED" } });
+          if (cart.status !== "EXPIRED") {
+            await tx.cart.update({ where: { id: cart.id }, data: { status: "EXPIRED" } });
+          }
           await tx.abandonedCart.upsert({
             where: { cartId: cart.id },
             create: {
@@ -99,19 +114,23 @@ export class OrderLifecycleService {
             },
           });
           const key = `cart:${cart.id}:expired:${cart.expiresAt.toISOString()}:v1`;
-          await tx.domainOutbox.upsert({
+          const existingOutbox = await tx.domainOutbox.findUnique({
             where: { deduplicationKey: key },
-            create: {
-              eventType: "cart.expired.v1",
-              aggregateType: "Cart",
-              aggregateId: cart.id,
-              deduplicationKey: key,
-              payload: { cartId: cart.id, expiredAt: now.toISOString() },
-            },
-            update: {},
+            select: { id: true },
           });
+          if (!existingOutbox) {
+            await tx.domainOutbox.create({
+              data: {
+                eventType: "cart.expired.v1",
+                aggregateType: "Cart",
+                aggregateId: cart.id,
+                deduplicationKey: key,
+                payload: { cartId: cart.id, expiredAt: now.toISOString() },
+              },
+            });
+            outboxEvents += 1;
+          }
           expired += 1;
-          outboxEvents += 1;
           continue;
         }
         const existing = await tx.abandonedCart.findUnique({ where: { cartId: cart.id } });
@@ -140,21 +159,27 @@ export class OrderLifecycleService {
           },
         });
         const key = `cart:${cart.id}:abandoned:${cart.updatedAt.toISOString()}:v1`;
-        await tx.domainOutbox.create({
-          data: {
-            eventType: "cart.abandoned.v1",
-            aggregateType: "Cart",
-            aggregateId: cart.id,
-            deduplicationKey: key,
-            payload: {
-              cartId: cart.id,
-              lastActivityAt: cart.updatedAt.toISOString(),
-              hasContact: customer !== null,
-            },
-          },
+        const existingOutbox = await tx.domainOutbox.findUnique({
+          where: { deduplicationKey: key },
+          select: { id: true },
         });
+        if (!existingOutbox) {
+          await tx.domainOutbox.create({
+            data: {
+              eventType: "cart.abandoned.v1",
+              aggregateType: "Cart",
+              aggregateId: cart.id,
+              deduplicationKey: key,
+              payload: {
+                cartId: cart.id,
+                lastActivityAt: cart.updatedAt.toISOString(),
+                hasContact: customer !== null,
+              },
+            },
+          });
+          outboxEvents += 1;
+        }
         detected += 1;
-        outboxEvents += 1;
       }
       return { detected, expired, outboxEvents };
     });
@@ -179,7 +204,11 @@ export class OrderLifecycleService {
         `;
         const order = candidates[0];
         if (!order) return null;
-        await acquireOperationLocks(tx, [order.reservationKey!, `order-release:${order.id}`]);
+        await acquireOperationLocks(tx, [
+          order.reservationKey!,
+          `order-release:${order.id}`,
+          ...(order.couponId ? [`coupon-redemption:${order.couponId}`] : []),
+        ]);
         const [items, shipments] = await Promise.all([
           tx.orderItem.findMany({
             where: { orderId: order.id },

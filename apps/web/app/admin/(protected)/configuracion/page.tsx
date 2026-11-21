@@ -1,6 +1,6 @@
 import { StoreSettingsService } from "@mundonettech/cms";
 import { storeConfig } from "@mundonettech/config/store";
-import { hasAdminPermission, maskEmail } from "@mundonettech/core";
+import { formatCopCents, hasAdminPermission, maskEmail } from "@mundonettech/core";
 
 import { StoreSettingsForm } from "@/components/admin/cms-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -63,8 +63,8 @@ export default async function StoreSettingsPage() {
             "Zona horaria": settings.timeZone,
             "Prefijo de orden": settings.orderNumberPrefix,
             "Dígitos del consecutivo": String(settings.orderNumberPadding),
-            "UVT vigente": `${settings.uvtYear} · ${settings.uvtValueCents} centavos`,
-            "Envío estándar": `${settings.standardShippingCents} centavos`,
+            "UVT vigente": `${settings.uvtYear} · ${formatCopCents(settings.uvtValueCents)} (${settings.uvtValueCents} centavos)`,
+            "Envío estándar": `${formatCopCents(settings.standardShippingCents)} (${settings.standardShippingCents} centavos)`,
             "Promesa de entrega": `${settings.deliveryPromiseDays} días calendario`,
             "Reserva de inventario": `${settings.reservationMinutes} minutos`,
             "Click & Collect": settings.clickAndCollectEnabled ? "Sí" : "No",

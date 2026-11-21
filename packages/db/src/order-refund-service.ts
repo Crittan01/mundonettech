@@ -7,7 +7,7 @@ import {
   roundDivHalfUp,
 } from "@mundonettech/core";
 
-import type { Order, PrismaClient } from "./generated/client.js";
+import type { Order, OrderRefund, PrismaClient } from "./generated/client.js";
 import {
   acquireOperationLocks,
   assertUuid,
@@ -15,7 +15,12 @@ import {
   hasUniqueViolation,
   inInventoryTransaction,
 } from "./inventory-shared.js";
-import type { RefundRequestInput, RefundRequestResult } from "./order-types.js";
+import type {
+  RefundAudit,
+  RefundRequestInput,
+  RefundRequestResult,
+  RefundStatusTransitionInput,
+} from "./order-types.js";
 
 const activeRefundStatuses = ["REQUESTED", "APPROVED", "PROCESSING"] as const;
 const refundActorRoles = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"]);
@@ -91,12 +96,35 @@ function result(
   };
 }
 
+function optionalNote(value: string | null | undefined): string | null {
+  const note = value ?? null;
+  if (
+    note !== null &&
+    (typeof note !== "string" ||
+      note.trim() !== note ||
+      note.length === 0 ||
+      note.length > 500 ||
+      /[\u0000-\u001f\u007f]/.test(note))
+  ) {
+    throw new RefundValidationError("note must be trimmed, printable and at most 500 characters.");
+  }
+  return note;
+}
+
+function validatedAudit(audit: RefundAudit) {
+  assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+  const ipHash = hash32(audit.ipHash, "ipHash");
+  const userAgentHash =
+    audit.userAgentHash === null ? null : hash32(audit.userAgentHash, "userAgentHash");
+  return { actorAdminUserId: audit.actorAdminUserId, ipHash, userAgentHash };
+}
+
 export class OrderRefundService {
   constructor(private readonly db: PrismaClient) {}
 
   async request(input: RefundRequestInput): Promise<RefundRequestResult> {
     assertUuid(input.orderId, "orderId");
-    assertUuid(input.audit.actorAdminUserId, "actorAdminUserId");
+    const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
     if (!["RETRACT", "WARRANTY", "ADJUSTMENT", "CUSTOMER_SUPPORT"].includes(input.reason)) {
       throw new RefundValidationError("Invalid refund reason.");
@@ -104,18 +132,7 @@ export class OrderRefundService {
     if (typeof input.includeShipping !== "boolean") {
       throw new RefundValidationError("includeShipping must be boolean.");
     }
-    const note = input.note ?? null;
-    if (
-      note !== null &&
-      (note.trim() !== note ||
-        note.length === 0 ||
-        note.length > 500 ||
-        /[\u0000-\u001f\u007f]/.test(note))
-    ) {
-      throw new RefundValidationError(
-        "note must be trimmed, printable and at most 500 characters.",
-      );
-    }
+    const note = optionalNote(input.note);
     if (!Array.isArray(input.items) || input.items.length === 0) {
       throw new RefundValidationError("A refund requires at least one order item.");
     }
@@ -131,11 +148,6 @@ export class OrderRefundService {
       })
       .sort((left, right) => compareStrings(left.orderItemId, right.orderItemId));
     const expectedHash = requestDigest({ ...input, idempotencyKey, note }, requestedItems);
-    const ipHash = hash32(input.audit.ipHash, "ipHash");
-    const userAgentHash =
-      input.audit.userAgentHash === null
-        ? null
-        : hash32(input.audit.userAgentHash, "userAgentHash");
 
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
@@ -158,7 +170,7 @@ export class OrderRefundService {
           return result(existing, true);
         }
         const actor = await tx.adminUser.findFirst({
-          where: { id: input.audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+          where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
           select: { role: true },
         });
         if (!actor || !refundActorRoles.has(actor.role)) {
@@ -188,7 +200,13 @@ export class OrderRefundService {
           taxCents: bigint;
           totalCents: bigint;
         }> = [];
-        const fullyRefundedByItem = new Map<string, boolean>();
+        const cumulativeByItem = new Map<string, number>();
+        for (const item of orderItems) {
+          const priorQuantity = previousItems
+            .filter((entry) => entry.orderItemId === item.id)
+            .reduce((sum, entry) => sum + entry.quantity, 0);
+          cumulativeByItem.set(item.id, priorQuantity);
+        }
         for (const requested of requestedItems) {
           const item = itemMap.get(requested.orderItemId);
           if (!item) throw new RefundValidationError("A refund item does not belong to the order.");
@@ -223,10 +241,10 @@ export class OrderRefundService {
             taxCents,
             totalCents,
           });
-          fullyRefundedByItem.set(item.id, cumulativeQuantity === item.quantity);
+          cumulativeByItem.set(item.id, cumulativeQuantity);
         }
         const isFullOrderRefund = orderItems.every(
-          (item) => fullyRefundedByItem.get(item.id) === true,
+          (item) => (cumulativeByItem.get(item.id) ?? 0) === item.quantity,
         );
         if (input.includeShipping && !isFullOrderRefund) {
           throw new RefundValidationError(
@@ -237,6 +255,13 @@ export class OrderRefundService {
           (sum, refund) => sum + refund.shippingCents,
           0n,
         );
+        if (
+          input.includeShipping &&
+          order.shippingCents > 0n &&
+          previousShipping >= order.shippingCents
+        ) {
+          throw new RefundConflictError("Order shipping has already been refunded.");
+        }
         const shippingCents = input.includeShipping ? order.shippingCents - previousShipping : 0n;
         assertMoney(shippingCents, "refund shippingCents");
         const subtotalCents = calculations.reduce((sum, item) => sum + item.subtotalCents, 0n);
@@ -256,7 +281,7 @@ export class OrderRefundService {
             taxCents,
             shippingCents,
             totalCents,
-            requestedByAdminUserId: input.audit.actorAdminUserId,
+            requestedByAdminUserId: actorAdminUserId,
           },
         });
         await tx.orderRefundItem.createMany({
@@ -264,7 +289,7 @@ export class OrderRefundService {
         });
         await tx.adminActionLog.create({
           data: {
-            actorAdminUserId: input.audit.actorAdminUserId,
+            actorAdminUserId,
             action: "ORDER_REFUND_REQUESTED",
             targetType: "OrderRefund",
             targetId: refund.id,
@@ -308,5 +333,119 @@ export class OrderRefundService {
       }
       throw error;
     }
+  }
+
+  async approve(input: RefundStatusTransitionInput): Promise<RefundRequestResult> {
+    return this.transition(
+      input,
+      ["REQUESTED"],
+      "APPROVED",
+      "ORDER_REFUND_APPROVED",
+      "order.refund.approved.v1",
+    );
+  }
+
+  async reject(input: RefundStatusTransitionInput): Promise<RefundRequestResult> {
+    return this.transition(
+      input,
+      ["REQUESTED"],
+      "REJECTED",
+      "ORDER_REFUND_REJECTED",
+      "order.refund.rejected.v1",
+    );
+  }
+
+  async cancel(input: RefundStatusTransitionInput): Promise<RefundRequestResult> {
+    return this.transition(
+      input,
+      ["REQUESTED", "APPROVED", "FAILED"],
+      "CANCELLED",
+      "ORDER_REFUND_CANCELLED",
+      "order.refund.cancelled.v1",
+    );
+  }
+
+  private async transition(
+    input: RefundStatusTransitionInput,
+    allowedFrom: readonly ("REQUESTED" | "APPROVED" | "FAILED")[],
+    targetStatus: "APPROVED" | "REJECTED" | "CANCELLED",
+    auditAction: string,
+    eventType: string,
+  ): Promise<RefundRequestResult> {
+    assertUuid(input.refundId, "refundId");
+    const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
+    const note = input.note === undefined ? undefined : optionalNote(input.note);
+    return inInventoryTransaction(this.db, async (tx) => {
+      const peek = await tx.orderRefund.findUnique({
+        where: { id: input.refundId },
+        select: { orderId: true },
+      });
+      if (!peek) throw new RefundNotFoundError("Refund request not found.");
+      await acquireOperationLocks(tx, [`order-refund:${peek.orderId}`]);
+      const rows = await tx.$queryRaw<
+        OrderRefund[]
+      >`SELECT * FROM "OrderRefund" WHERE "id" = ${input.refundId}::uuid FOR UPDATE`;
+      const existing = rows[0];
+      if (!existing) throw new RefundNotFoundError("Refund request not found.");
+      const actor = await tx.adminUser.findFirst({
+        where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { role: true },
+      });
+      if (!actor || !refundActorRoles.has(actor.role)) {
+        throw new RefundConflictError("The administrator is not authorized to manage refunds.");
+      }
+      if (existing.status === targetStatus) {
+        return result(existing, true);
+      }
+      if (!allowedFrom.includes(existing.status as "REQUESTED" | "APPROVED" | "FAILED")) {
+        throw new RefundConflictError(
+          `Cannot transition refund from ${existing.status} to ${targetStatus}.`,
+        );
+      }
+      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = nowRows[0]!.now;
+      const updated = await tx.orderRefund.update({
+        where: { id: existing.id },
+        data: {
+          status: targetStatus,
+          ...(note === undefined ? {} : { note }),
+        },
+      });
+      await tx.adminActionLog.create({
+        data: {
+          actorAdminUserId,
+          action: auditAction,
+          targetType: "OrderRefund",
+          targetId: updated.id,
+          ipHash,
+          userAgentHash,
+          metadata: {
+            orderId: updated.orderId,
+            previousStatus: existing.status,
+            status: updated.status,
+            totalCents: updated.totalCents.toString(),
+          },
+        },
+      });
+      const statusSlug = targetStatus.toLowerCase();
+      await tx.domainOutbox.upsert({
+        where: { deduplicationKey: `order-refund:${updated.id}:${statusSlug}:v1` },
+        create: {
+          eventType,
+          aggregateType: "OrderRefund",
+          aggregateId: updated.id,
+          deduplicationKey: `order-refund:${updated.id}:${statusSlug}:v1`,
+          payload: {
+            orderId: updated.orderId,
+            refundId: updated.id,
+            status: updated.status,
+            totalCents: updated.totalCents.toString(),
+            transitionedAt: now.toISOString(),
+          },
+        },
+        update: {},
+      });
+      return result(updated, false);
+    });
   }
 }

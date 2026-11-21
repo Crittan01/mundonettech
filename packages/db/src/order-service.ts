@@ -495,6 +495,7 @@ function receiptSnapshot(record: ReceiptWithOrder): OrderReceiptSnapshot {
     postalCodeSnapshot: order.postalCodeSnapshot,
     deliveryNotesSnapshot: order.deliveryNotesSnapshot,
     pickupLocationName: order.clickCollectLocation?.name ?? null,
+    couponCodeSnapshot: order.couponCodeSnapshot,
     subtotalCents: record.subtotalCents.toString(),
     wholesaleDiscountCents: order.wholesaleDiscountCents.toString(),
     bundleDiscountCents: order.bundleDiscountCents.toString(),
@@ -630,12 +631,39 @@ export class OrderService {
           }),
         };
       });
-      const [departments, municipalities] = await Promise.all([
+      const [departments, municipalities, customer] = await Promise.all([
         tx.daneDepartment.findMany({ orderBy: [{ name: "asc" }, { code: "asc" }] }),
         tx.daneMunicipality.findMany({ orderBy: [{ name: "asc" }, { code: "asc" }] }),
+        cart.customerId
+          ? tx.customer.findFirst({
+              where: {
+                id: cart.customerId,
+                deletedAt: null,
+                status: { not: "ANONYMIZED" },
+              },
+              select: {
+                id: true,
+                email: true,
+                givenName: true,
+                familyName: true,
+                phoneE164: true,
+                status: true,
+              },
+            })
+          : null,
       ]);
       return {
         cart,
+        customer: customer
+          ? {
+              id: customer.id,
+              email: customer.email,
+              givenName: customer.givenName,
+              familyName: customer.familyName,
+              phoneE164: customer.phoneE164,
+              authenticated: customer.status === "ACTIVE",
+            }
+          : null,
         taxRegime: settings.taxRegime,
         uvtValueCents: settings.uvtValueCents.toString(),
         uvtYear: settings.uvtYear,
@@ -719,7 +747,6 @@ export class OrderService {
             });
             if (
               !order?.receipt ||
-              order.paymentStatus !== "UNPAID" ||
               !timingSafeEqual(
                 Uint8Array.from(order.receipt.accessTokenHash),
                 receiptAccessTokenHash,
@@ -732,7 +759,7 @@ export class OrderService {
               orderNumber: order.orderNumber,
               receiptNumber: order.receipt.receiptNumber,
               totalCents: order.totalCents.toString(),
-              paymentStatus: "UNPAID" as const,
+              paymentStatus: order.paymentStatus,
               replayed: true,
             };
           }
@@ -866,6 +893,16 @@ export class OrderService {
           });
           if (!customer) throw new CheckoutConflictError("The assigned customer is unavailable.");
           if (customer.email !== contact.email) throw new CheckoutAuthenticationRequiredError();
+          if (!customer.givenName || !customer.familyName || !customer.phoneE164) {
+            await tx.customer.update({
+              where: { id: customer.id },
+              data: {
+                givenName: customer.givenName ?? contact.givenName,
+                familyName: customer.familyName ?? contact.familyName,
+                phoneE164: customer.phoneE164 ?? contact.phoneE164,
+              },
+            });
+          }
         } else {
           await acquireOperationLocks(tx, [`checkout-customer:${contact.email}`]);
           const existingRows = await tx.$queryRaw<Array<{ id: string; status: string }>>`
@@ -900,6 +937,19 @@ export class OrderService {
             customerId = customer.id;
           }
         }
+        await tx.consent.create({
+          data: {
+            customerId,
+            purpose: "DATA_PROCESSING",
+            status: "GRANTED",
+            source: "checkout",
+            policyVersion: contact.privacyPolicyVersion,
+            proofHash: contact.acceptanceProofHash,
+            ipHash: contact.acceptanceIpHash,
+            userAgentHash: contact.acceptanceUserAgentHash,
+            occurredAt: now,
+          },
+        });
 
         const allocation = await this.planStock(tx, cart, locationId);
         const orderId = randomUUID();
@@ -1121,13 +1171,16 @@ export class OrderService {
           }
           const redeemed = await tx.couponUsage.updateMany({
             where: { id: usage.id, status: "RESERVED" },
-            data: { status: "REDEEMED", redeemedAt: now, orderId },
+            data: { status: "REDEEMED", redeemedAt: now, orderId, customerId },
           });
           if (redeemed.count !== 1)
             throw new CheckoutCouponError("The coupon was consumed concurrently.");
         }
 
-        await tx.cart.update({ where: { id: cart.id }, data: { status: "CONVERTED" } });
+        await tx.cart.update({
+          where: { id: cart.id },
+          data: { status: "CONVERTED", customerId },
+        });
         await tx.abandonedCart.upsert({
           where: { cartId: cart.id },
           create: {
@@ -1223,12 +1276,30 @@ export class OrderService {
           orderNumber: order.orderNumber,
           receiptNumber: receipt.receiptNumber,
           totalCents: order.totalCents.toString(),
-          paymentStatus: "UNPAID",
+          paymentStatus: order.paymentStatus,
           replayed: false,
         };
       });
     } catch (error) {
-      if (error instanceof RangeError && !(error instanceof OrderValidationError)) {
+      if (
+        error instanceof ReceiptBalanceError ||
+        (error instanceof RangeError && !(error instanceof OrderValidationError))
+      ) {
+        const keyHex = Buffer.from(idempotency.keyHash).toString("hex");
+        await this.db.domainOutbox
+          .upsert({
+            where: { deduplicationKey: `receipt-emission-blocked:${keyHex}:v1` },
+            create: {
+              eventType: "order.receipt.emission_blocked.v1",
+              aggregateType: "CheckoutSubmission",
+              aggregateId: keyHex,
+              deduplicationKey: `receipt-emission-blocked:${keyHex}:v1`,
+              payload: { submissionKeyHash: keyHex },
+            },
+            update: {},
+          })
+          .catch(() => undefined);
+        if (error instanceof ReceiptBalanceError) throw error;
         throw new ReceiptBalanceError(error.message);
       }
       if (hasUniqueViolation(error)) {
@@ -1330,13 +1401,33 @@ export class OrderService {
     });
     if (!record) return null;
     const typed = record as ReceiptWithOrder;
-    const expected = receiptHash(
-      typed.order,
-      { receiptNumber: typed.receiptNumber, issuedAt: typed.issuedAt },
-      typed.order.items,
-    );
-    const actual = Uint8Array.from(record.contentHash);
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    try {
+      const expected = receiptHash(
+        typed.order,
+        { receiptNumber: typed.receiptNumber, issuedAt: typed.issuedAt },
+        typed.order.items,
+      );
+      const actual = Uint8Array.from(record.contentHash);
+      if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+        throw new ReceiptBalanceError();
+      }
+      const snapshot = receiptSnapshot(typed);
+      assertReceiptBalanced({
+        items: typed.order.items.map((item) => ({
+          quantity: item.quantity,
+          unitPriceCents: item.unitPriceCents,
+          discountCents: item.discountCents,
+          lineTotalCents: item.lineTotalCents,
+          taxCents: item.taxCents,
+        })),
+        subtotalCents: typed.subtotalCents,
+        discountCents: typed.discountCents,
+        taxCents: typed.taxCents,
+        shippingCents: typed.shippingCents,
+        totalCents: typed.totalCents,
+      });
+      return snapshot;
+    } catch (error) {
       await this.db.domainOutbox.upsert({
         where: { deduplicationKey: `receipt:${record.id}:integrity-failed:v1` },
         create: {
@@ -1348,23 +1439,10 @@ export class OrderService {
         },
         update: {},
       });
-      throw new ReceiptBalanceError();
+      if (error instanceof ReceiptBalanceError) throw error;
+      throw new ReceiptBalanceError(
+        error instanceof Error ? error.message : "Receipt verification failed.",
+      );
     }
-    const snapshot = receiptSnapshot(typed);
-    assertReceiptBalanced({
-      items: typed.order.items.map((item) => ({
-        quantity: item.quantity,
-        unitPriceCents: item.unitPriceCents,
-        discountCents: item.discountCents,
-        lineTotalCents: item.lineTotalCents,
-        taxCents: item.taxCents,
-      })),
-      subtotalCents: typed.subtotalCents,
-      discountCents: typed.discountCents,
-      taxCents: typed.taxCents,
-      shippingCents: typed.shippingCents,
-      totalCents: typed.totalCents,
-    });
-    return snapshot;
   }
 }

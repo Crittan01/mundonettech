@@ -21,6 +21,9 @@ const optionalText = (maximumLength: number) =>
     .max(maximumLength)
     .transform((value) => value || null);
 
+const phoneInputPattern =
+  /^(?:\+57[\s()-]*[36][0-9\s()-]{9}|[36][0-9\s()-]{9}|\+[1-9][0-9\s()-]{7,18})$/;
+
 const submissionSchema = z
   .object({
     submissionId: z.string().uuid(),
@@ -30,7 +33,7 @@ const submissionSchema = z
     givenName: z.string().trim().min(2).max(100),
     familyName: z.string().trim().min(2).max(100),
     recipientName: z.string().trim().min(2).max(200),
-    phoneE164: z.string().trim().min(8).max(24),
+    phoneE164: z.string().trim().min(8).max(24).regex(phoneInputPattern),
     departmentCode: z.union([z.string().regex(/^[0-9]{2}$/), z.literal("")]),
     municipalityCode: z.union([z.string().regex(/^[0-9]{5}$/), z.literal("")]),
     addressLine1: z.string().trim().max(200),
@@ -103,6 +106,7 @@ export async function confirmCheckoutAction(
     if (!reference) return actionError("Tu carrito ya no está disponible.", values);
     const terms = legalDocument("terminos-y-condiciones");
     const privacy = legalDocument("privacidad");
+    const dataProcessing = legalDocument("tratamiento-datos-personales");
     const fulfillment: CheckoutFulfillmentInput =
       input.fulfillmentMethod === "CLICK_COLLECT"
         ? {
@@ -126,7 +130,7 @@ export async function confirmCheckoutAction(
         subjectHash: Buffer.from(subjectHash).toString("base64"),
         input,
         termsVersion: terms.version,
-        privacyPolicyVersion: privacy.version,
+        privacyPolicyVersion: dataProcessing.version,
       }),
     );
     const security = await getRequestSecurityContext();
@@ -134,6 +138,7 @@ export async function confirmCheckoutAction(
       JSON.stringify({
         terms,
         privacy,
+        dataProcessing,
         reviewFingerprint: input.reviewFingerprint,
         email: input.email,
         recipientName: input.recipientName,
@@ -149,7 +154,7 @@ export async function confirmCheckoutAction(
         recipientName: input.recipientName,
         phoneE164: input.phoneE164,
         termsVersion: terms.version,
-        privacyPolicyVersion: privacy.version,
+        privacyPolicyVersion: dataProcessing.version,
         acceptanceProofHash,
         acceptanceIpHash: security.ipHash,
         acceptanceUserAgentHash: security.userAgentHash,

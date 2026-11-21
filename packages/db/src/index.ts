@@ -191,6 +191,7 @@ export {
 export type {
   CheckoutContactInput,
   CheckoutConversionInput,
+  CheckoutCustomerSnapshot,
   CheckoutDefaults,
   CheckoutFulfillmentInput,
   CheckoutIdempotencyInput,
@@ -209,6 +210,7 @@ export type {
   RefundItemRequest,
   RefundRequestInput,
   RefundRequestResult,
+  RefundStatusTransitionInput,
 } from "./order-types.js";
 export {
   AbandonedCartStatus,

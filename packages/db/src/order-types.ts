@@ -1,6 +1,7 @@
 import type { CalculatedOrderTaxLine, OrderTaxRule, StoreTaxRegimeValue } from "@mundonettech/core";
 
 import type { CartReference, CartSnapshot } from "./cart-types.js";
+import type { OrderStatus, PaymentStatus } from "./generated/client.js";
 
 export interface CheckoutDefaults {
   readonly taxRegime: StoreTaxRegimeValue;
@@ -69,8 +70,17 @@ export interface CheckoutResult {
   readonly orderNumber: string;
   readonly receiptNumber: string;
   readonly totalCents: string;
-  readonly paymentStatus: "UNPAID";
+  readonly paymentStatus: PaymentStatus;
   readonly replayed: boolean;
+}
+
+export interface CheckoutCustomerSnapshot {
+  readonly id: string;
+  readonly email: string;
+  readonly givenName: string | null;
+  readonly familyName: string | null;
+  readonly phoneE164: string | null;
+  readonly authenticated: boolean;
 }
 
 export interface PickupLocationSnapshot {
@@ -112,6 +122,7 @@ export type CheckoutTaxLineSnapshot = Omit<
 
 export interface CheckoutPreview {
   readonly cart: CartSnapshot;
+  readonly customer: CheckoutCustomerSnapshot | null;
   readonly taxRegime: StoreTaxRegimeValue;
   readonly uvtValueCents: string;
   readonly uvtYear: number;
@@ -167,8 +178,8 @@ export interface OrderReceiptSnapshot {
   readonly orderNumber: string;
   readonly receiptNumber: string;
   readonly issuedAt: string;
-  readonly orderStatus: string;
-  readonly paymentStatus: string;
+  readonly orderStatus: OrderStatus;
+  readonly paymentStatus: PaymentStatus;
   readonly fulfillmentMethod: "HOME_DELIVERY" | "CLICK_COLLECT";
   readonly taxRegime: StoreTaxRegimeValue;
   readonly currency: "COP";
@@ -183,6 +194,7 @@ export interface OrderReceiptSnapshot {
   readonly postalCodeSnapshot: string | null;
   readonly deliveryNotesSnapshot: string | null;
   readonly pickupLocationName: string | null;
+  readonly couponCodeSnapshot: string | null;
   readonly subtotalCents: string;
   readonly wholesaleDiscountCents: string;
   readonly bundleDiscountCents: string;
@@ -213,6 +225,12 @@ export interface RefundRequestInput {
   readonly note?: string | null;
   readonly items: readonly RefundItemRequest[];
   readonly includeShipping: boolean;
+  readonly audit: RefundAudit;
+}
+
+export interface RefundStatusTransitionInput {
+  readonly refundId: string;
+  readonly note?: string | null;
   readonly audit: RefundAudit;
 }
 

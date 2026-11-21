@@ -457,7 +457,8 @@ BEGIN
     RAISE EXCEPTION 'Coupon usage history cannot be deleted' USING ERRCODE = '55000';
   END IF;
   IF NEW."couponId" IS DISTINCT FROM OLD."couponId" OR NEW."cartId" IS DISTINCT FROM OLD."cartId" OR
-     NEW."customerId" IS DISTINCT FROM OLD."customerId" OR NEW."reservedAt" IS DISTINCT FROM OLD."reservedAt" OR
+     (OLD."customerId" IS NOT NULL AND NEW."customerId" IS DISTINCT FROM OLD."customerId") OR
+     NEW."reservedAt" IS DISTINCT FROM OLD."reservedAt" OR
      NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR
      (OLD."orderId" IS NOT NULL AND NEW."orderId" IS DISTINCT FROM OLD."orderId") THEN
     RAISE EXCEPTION 'Coupon usage identity is immutable' USING ERRCODE = '55000';
@@ -465,9 +466,9 @@ BEGIN
   IF (OLD."status" = 'RESERVED' AND NEW."status" NOT IN ('REDEEMED', 'RELEASED')) OR
      (OLD."status" = 'REDEEMED' AND NEW."status" <> 'RELEASED') OR
      (OLD."status" = 'RELEASED') OR
-     (NEW."status" = 'REDEEMED' AND (NEW."redeemedAt" IS NULL OR NEW."orderId" IS NULL)) OR
+     (NEW."status" = 'REDEEMED' AND (NEW."redeemedAt" IS NULL OR NEW."orderId" IS NULL OR NEW."customerId" IS NULL)) OR
      (NEW."status" = 'RELEASED' AND NEW."releasedAt" IS NULL) OR
-     (NEW."status" <> 'REDEEMED' AND NEW."orderId" IS NOT NULL AND OLD."status" = 'RESERVED') THEN
+     (NEW."status" <> 'REDEEMED' AND OLD."status" = 'RESERVED' AND (NEW."orderId" IS NOT NULL OR NEW."customerId" IS DISTINCT FROM OLD."customerId")) THEN
     RAISE EXCEPTION 'Invalid coupon usage transition' USING ERRCODE = '55000';
   END IF;
   RETURN NEW;
@@ -477,13 +478,16 @@ $$;
 ALTER TABLE "CouponUsage" DROP CONSTRAINT "CouponUsage_status_timestamps";
 ALTER TABLE "CouponUsage" ADD CONSTRAINT "CouponUsage_status_timestamps" CHECK (
   ("status" = 'RESERVED' AND "orderId" IS NULL AND "redeemedAt" IS NULL AND "releasedAt" IS NULL) OR
-  ("status" = 'REDEEMED' AND "orderId" IS NOT NULL AND "redeemedAt" IS NOT NULL AND "releasedAt" IS NULL) OR
+  ("status" = 'REDEEMED' AND "orderId" IS NOT NULL AND "customerId" IS NOT NULL AND "redeemedAt" IS NOT NULL AND "releasedAt" IS NULL) OR
   ("status" = 'RELEASED' AND "releasedAt" IS NOT NULL)
 );
 
 CREATE FUNCTION "protect_order_snapshots"() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Order history cannot be deleted' USING ERRCODE = '55000';
+  END IF;
   IF OLD."orderStatus" <> 'PENDING' AND (
      NEW."orderNumber" IS DISTINCT FROM OLD."orderNumber" OR NEW."cartId" IS DISTINCT FROM OLD."cartId" OR
      NEW."customerId" IS DISTINCT FROM OLD."customerId" OR NEW."couponId" IS DISTINCT FROM OLD."couponId" OR
@@ -505,8 +509,17 @@ BEGIN
      NEW."termsVersion" IS DISTINCT FROM OLD."termsVersion" OR NEW."privacyPolicyVersion" IS DISTINCT FROM OLD."privacyPolicyVersion" OR
      NEW."acceptanceProofHash" IS DISTINCT FROM OLD."acceptanceProofHash" OR NEW."acceptanceIpHash" IS DISTINCT FROM OLD."acceptanceIpHash" OR
      NEW."acceptanceUserAgentHash" IS DISTINCT FROM OLD."acceptanceUserAgentHash" OR NEW."acceptedAt" IS DISTINCT FROM OLD."acceptedAt" OR
-     NEW."confirmedAt" IS DISTINCT FROM OLD."confirmedAt" OR NEW."createdAt" IS DISTINCT FROM OLD."createdAt") THEN
+     NEW."confirmedAt" IS DISTINCT FROM OLD."confirmedAt" OR NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR
+     (OLD."cancelledAt" IS NOT NULL AND NEW."cancelledAt" IS DISTINCT FROM OLD."cancelledAt") OR
+     (OLD."completedAt" IS NOT NULL AND NEW."completedAt" IS DISTINCT FROM OLD."completedAt")) THEN
     RAISE EXCEPTION 'Order commercial and acceptance snapshots are immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."orderStatus" = 'CANCELLED' AND (
+     NEW."orderStatus" <> 'CANCELLED' OR
+     NEW."paymentStatus" IS DISTINCT FROM OLD."paymentStatus" OR
+     NEW."fulfillmentStatus" IS DISTINCT FROM OLD."fulfillmentStatus" OR
+     NEW."reservationExpiresAt" IS DISTINCT FROM OLD."reservationExpiresAt") THEN
+    RAISE EXCEPTION 'Cancelled orders are immutable' USING ERRCODE = '55000';
   END IF;
   IF OLD."orderStatus" <> 'PENDING' AND OLD."orderStatus" <> NEW."orderStatus" AND
      NOT (OLD."orderStatus" = 'CONFIRMED' AND NEW."orderStatus" IN ('CANCELLED', 'COMPLETED')) THEN
@@ -515,7 +528,7 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-CREATE TRIGGER "Order_protect_snapshots" BEFORE UPDATE ON "Order" FOR EACH ROW EXECUTE FUNCTION "protect_order_snapshots"();
+CREATE TRIGGER "Order_protect_snapshots" BEFORE UPDATE OR DELETE ON "Order" FOR EACH ROW EXECUTE FUNCTION "protect_order_snapshots"();
 
 DO $$
 DECLARE
