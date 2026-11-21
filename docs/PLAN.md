@@ -23,13 +23,12 @@
 - `[x]` ✅ **Fase 0 cerrada (`F0.1`–`F0.5`):** Gobernanza, Next.js 16 standalone (`'use cache'`), PG 17 + RLS *deny-by-default* + Bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` MFA `aal2` + RBAC 8 roles + `pii-mask` y CI PG 17/Playwright/axe.
 - `[x]` ✅ **`F1.1` — Esquema y Dominio de Catálogo Tech (`catalog.prisma` + `@mundonettech/core` + `config/catalog-blueprint.ts`):** 21 modelos PG 17 (`TaxGroup` UVT `50`/`22`, `Category` N-niveles, `ProductVariant` `BigInt` + GS1/EAN, `AttributeDefinition`/`ProductAttributeValue`, `CompatibilityDevice`, `Bundle`, `BackInStockSubscription`, `UrlRedirect` ≤ 100 saltos, `tsvector` GIN + `immutable_unaccent`) y `rls-matrix` (`543` casos).
 - `[x]` ✅ **`F1.2` — Pipeline Multimedia y Activos 360°/3D (`packages/media` + `ProductMedia`):** `sharp-safe` (allowlist `libvips`, magic bytes/`ispe`/orientación EXIF, purga GPS), AVIF/WebP/GLB/USDZ en R2 con rollback, `@mundonettech/media/viewers` (`Spin360`/`Model3d` *lazy* WCAG AA) e invariantes PG 17 (`ADR-007`, `ADR-024`).
-- `[ ]` **`F1.3` — Inventario Multi-Bodega, Proveedores/WAC e Importador CSV (`inventory.prisma`):** `StockLocation`, `StockLevel` (`safetyStock` efectivo + locks ordenados anti-deadlock `40P01` — `ADR-013`), `SerializedUnit`, `InventoryLedger`, `Supplier`/`PurchaseOrder` (WAC) y CSV seguro.
+- `[R]` **`F1.3` — Inventario Multi-Bodega, Proveedores/WAC e Importador CSV (`inventory.prisma`):** `StockLocation`, `StockLevel` (`safetyStock` efectivo + locks ordenados anti-deadlock `40P01` — `ADR-013`), `SerializedUnit`, `InventoryLedger`, `Supplier`/`PurchaseOrder` (WAC) y CSV seguro.
 - `[ ]` **`F1.4` — `CatalogService` Único (`'use cache'`), Storefront PDP/PLP/Comparador y Admin:** búsqueda/facetas indexadas, `ProductCard` única, comparador, PDP, vistas `/admin` RBAC+MFA, seed canónico y E2E Playwright/`@axe-core`.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente bloque:** **`F1.3`** en rama `feat/f1-3-inventory-wac-csv` desde `develop` (**Fase 1**).
-- **Leer al iniciar:** `AGENTS.md`, `docs/{STATE,PLAN,ARCHITECTURE,DECISIONS}.md` y `packages/{db,core}/README.md`.
-- **Cierre dual `F1.3`:** Implementador entrega `inventory.prisma` + migración PG 17 + `rls-matrix`, stock (`safetyStock` efectivo + locks ordenados `variantId` anti-`40P01` — `ADR-013`), `SerializedUnit`, `InventoryLedger` inmutable, `Supplier`/`PurchaseOrder` WAC `BigInt` y CSV anti-fórmulas en `[R]`; Auditor certifica `[x]` y fusiona en `develop`.
+- **Auditoría `F1.3`:** rama `feat/f1-3-inventory-wac-csv`; entrega en `[R]` con stock/seriales, WAC, CSV, 38 tablas y 685 casos RLS.
+- **Siguiente turno — Auditor:** auditar `git diff develop...HEAD`, reejecutar `make check && pnpm test`, certificar `[x]` y fusionar; luego seguir `F1.4`.

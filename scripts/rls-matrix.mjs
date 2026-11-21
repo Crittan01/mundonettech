@@ -6,6 +6,7 @@ import pg from "pg";
 import { acquireIsolatedTestDatabase } from "./lib/postgres-test-harness.mjs";
 import { assertSafeTestDatabase } from "./lib/test-environment.mjs";
 import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mjs";
+import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixture.mjs";
 
 const expectedTables = [
   "AdminUser",
@@ -18,6 +19,7 @@ const expectedTables = [
   "DomainOutbox",
   "IdempotencyKey",
   ...catalogTables,
+  ...inventoryTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -66,6 +68,14 @@ const rpcProbes = [
   {
     name: "refresh_product_search_vector",
     sql: "SELECT public.refresh_product_search_vector(NULL)",
+  },
+  {
+    name: "available_stock",
+    sql: "SELECT public.available_stock(10, 2, 1)",
+  },
+  {
+    name: "validate_imei",
+    sql: "SELECT public.validate_imei('353915105440112')",
   },
 ];
 
@@ -152,7 +162,8 @@ async function ensureMatrixFixtures(client) {
     [`matrix-${randomUUID()}`, randomBytes(32), randomBytes(32), randomBytes(32)],
   );
 
-  await seedCatalogFixture(client);
+  const catalog = await seedCatalogFixture(client);
+  await seedInventoryFixture(client, catalog);
 
   for (const table of expectedTables) {
     const count = await client.query(`SELECT count(*)::int AS count FROM public."${table}"`);

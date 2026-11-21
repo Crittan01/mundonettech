@@ -46,3 +46,25 @@ export {
 export type { RedirectEdge } from "./url-redirect.js";
 export { normalizeAttributeValue, assertCatalogMoney } from "./catalog-values.js";
 export type { CatalogAttributeType } from "./catalog-values.js";
+export {
+  assertStockQuantity,
+  assertValidImei,
+  availableStock,
+  calculateWeightedAverageCost,
+  isValidImei,
+  normalizeInventoryCode,
+  normalizeOperationKey,
+  normalizeSerial,
+  normalizeSerializedUnitIdentity,
+  roundDivHalfUp,
+  roundMulDiv,
+} from "./inventory.js";
+export type { SerializedUnitIdentity, StockQuantity } from "./inventory.js";
+export {
+  CsvValidationError,
+  neutralizeCsvFormula,
+  parseCsv,
+  parseInventoryStockCsv,
+  serializeCsv,
+} from "./csv.js";
+export type { CsvCell, CsvParseOptions, CsvRow, InventoryStockCsvRow } from "./csv.js";

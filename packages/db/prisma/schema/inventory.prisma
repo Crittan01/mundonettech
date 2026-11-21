@@ -1,0 +1,185 @@
+enum StockLocationType {
+  LOCAL_MAIN
+  MELI_FULL
+  QUARANTINE
+  CLICK_COLLECT
+}
+
+enum SerializedUnitStatus {
+  IN_STOCK
+  RESERVED
+  SOLD
+  RETURNED
+  QUARANTINED
+}
+
+enum InventoryLedgerEntryType {
+  OPENING
+  RECEIPT
+  RESERVATION
+  RELEASE
+  FULFILLMENT
+  ADJUSTMENT
+  TRANSFER_OUT
+  TRANSFER_IN
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+model StockLocation {
+  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code            String            @db.VarChar(40)
+  name            String            @db.VarChar(120)
+  type            StockLocationType
+  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt       DateTime?         @db.Timestamptz(6)
+  stockLevels     StockLevel[]
+  serializedUnits SerializedUnit[]
+  ledgerEntries   InventoryLedger[]
+  purchaseOrders  PurchaseOrder[]
+
+  @@index([type, deletedAt])
+  @@map("StockLocation")
+}
+
+model StockLevel {
+  id                   String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  locationId           String         @db.Uuid
+  variantId            String         @db.Uuid
+  onHand               Int            @default(0)
+  committed            Int            @default(0)
+  safetyStock          Int            @default(0)
+  weightedAvgCostCents BigInt         @default(0)
+  createdAt            DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  location             StockLocation  @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  variant              ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  ledgerEntries        InventoryLedger[]
+
+  @@unique([locationId, variantId])
+  @@index([variantId, locationId])
+  @@map("StockLevel")
+}
+
+model SerializedUnit {
+  id                  String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  variantId           String              @db.Uuid
+  locationId          String              @db.Uuid
+  purchaseOrderItemId String?             @db.Uuid
+  orderId             String?             @db.Uuid
+  serial              String              @db.VarChar(120)
+  imei                String?             @db.VarChar(15)
+  status              SerializedUnitStatus @default(IN_STOCK)
+  reservationKey      String?             @db.VarChar(128)
+  soldAt              DateTime?           @db.Timestamptz(6)
+  createdAt           DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  variant             ProductVariant      @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  location            StockLocation       @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  purchaseOrderItem   PurchaseOrderItem?  @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
+  order               Order?              @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@unique([variantId, serial])
+  @@index([locationId, variantId, status, id])
+  @@index([reservationKey, variantId, locationId])
+  @@index([orderId])
+  @@index([purchaseOrderItemId])
+  @@map("SerializedUnit")
+}
+
+model InventoryLedger {
+  id                       String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  locationId               String                  @db.Uuid
+  variantId                String                  @db.Uuid
+  orderId                  String?                 @db.Uuid
+  purchaseOrderItemId      String?                 @db.Uuid
+  entryType                InventoryLedgerEntryType
+  quantityDelta            Int
+  committedDelta           Int                     @default(0)
+  onHandAfter              Int
+  committedAfter           Int
+  safetyStockAfter         Int
+  weightedAvgCostAfterCents BigInt
+  operationKey             String                  @db.VarChar(128)
+  operationHash            Bytes                   @db.ByteA
+  operationSequence        Int
+  referenceKey             String?                 @db.VarChar(128)
+  metadata                 Json                    @default("{}") @db.JsonB
+  occurredAt               DateTime                @default(now()) @db.Timestamptz(6)
+  location                 StockLocation           @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  variant                  ProductVariant          @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  order                    Order?                  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  purchaseOrderItem        PurchaseOrderItem?      @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
+  stockLevel               StockLevel              @relation(fields: [locationId, variantId], references: [locationId, variantId], onDelete: Restrict)
+
+  @@unique([operationKey, operationSequence])
+  @@index([variantId, locationId, occurredAt, id])
+  @@index([orderId, occurredAt])
+  @@index([purchaseOrderItemId, occurredAt])
+  @@index([referenceKey, entryType])
+  @@map("InventoryLedger")
+}
+
+model Supplier {
+  id               String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code             String          @db.VarChar(40)
+  legalName        String          @db.VarChar(200)
+  taxId            String          @db.VarChar(32)
+  email            String?         @db.VarChar(320)
+  phoneE164        String?         @db.VarChar(16)
+  paymentTermsDays Int             @default(0)
+  createdAt        DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime        @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt        DateTime?       @db.Timestamptz(6)
+  purchaseOrders   PurchaseOrder[]
+
+  @@index([legalName])
+  @@index([deletedAt])
+  @@map("Supplier")
+}
+
+model PurchaseOrder {
+  id                    String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                  String              @unique @db.VarChar(64)
+  supplierId            String              @db.Uuid
+  destinationLocationId String              @db.Uuid
+  status                PurchaseOrderStatus @default(DRAFT)
+  expectedAt            DateTime?           @db.Timestamptz(6)
+  orderedAt             DateTime?           @db.Timestamptz(6)
+  receivedAt            DateTime?           @db.Timestamptz(6)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  supplier              Supplier            @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  destinationLocation   StockLocation       @relation(fields: [destinationLocationId], references: [id], onDelete: Restrict)
+  items                 PurchaseOrderItem[]
+
+  @@index([supplierId, status, createdAt])
+  @@index([destinationLocationId, status])
+  @@map("PurchaseOrder")
+}
+
+model PurchaseOrderItem {
+  id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  purchaseOrderId  String         @db.Uuid
+  variantId        String         @db.Uuid
+  quantityOrdered  Int
+  quantityReceived Int            @default(0)
+  unitCostCents    BigInt
+  createdAt        DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  purchaseOrder    PurchaseOrder  @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  variant          ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  serializedUnits  SerializedUnit[]
+  ledgerEntries    InventoryLedger[]
+
+  @@unique([purchaseOrderId, variantId])
+  @@index([variantId, purchaseOrderId])
+  @@map("PurchaseOrderItem")
+}

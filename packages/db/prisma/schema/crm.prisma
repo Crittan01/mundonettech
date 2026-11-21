@@ -32,6 +32,7 @@ model Customer {
   securityEvents           SecurityEvent[]
   wishlistItems            WishlistItem[]
   backInStockSubscriptions BackInStockSubscription[]
+  orders                   Order[]
 
   @@index([status, createdAt])
   @@index([deletedAt])
