@@ -46,10 +46,10 @@ export function ProductCard({
   product: CatalogProductSummary;
   mediaOrigin: string | null;
   compareSlugs?: readonly string[];
-  headingLevel?: 2 | 3;
+  headingLevel?: 2 | 3 | 4;
 }) {
   const image = cardImage(product, mediaOrigin);
-  const Heading = headingLevel === 3 ? "h3" : "h2";
+  const Heading = headingLevel === 4 ? "h4" : headingLevel === 3 ? "h3" : "h2";
   const compared = compareSlugs.includes(product.slug);
   const nextSlugs = compared
     ? compareSlugs.filter((slug) => slug !== product.slug)

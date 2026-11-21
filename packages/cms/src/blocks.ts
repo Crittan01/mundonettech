@@ -191,5 +191,6 @@ export function renderCmsBlock<Type extends CmsBlockType>(
   tokens: CmsTokens,
 ): CmsContentFor<Type> {
   const parsed = parseCmsBlock(type, input);
-  return visitStrings(parsed, (value) => interpolateCmsText(value, tokens)) as CmsContentFor<Type>;
+  const interpolated = visitStrings(parsed, (value) => interpolateCmsText(value, tokens));
+  return cmsBlockSchemas[type].parse(interpolated) as CmsContentFor<Type>;
 }

@@ -19,6 +19,9 @@ export function createSupabaseFixtureSession(options: {
   subject: string;
   email: string;
   factorId: string;
+  aal?: "aal1" | "aal2";
+  mfaAgeSeconds?: number;
+  hasVerifiedFactor?: boolean;
   now?: Date;
 }): SupabaseFixtureSession;
 

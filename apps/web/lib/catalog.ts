@@ -76,7 +76,12 @@ export async function getCatalogBrand(slug: string): Promise<CatalogBrand | null
 async function readCachedProductList(slugs: readonly string[]) {
   "use cache";
   cacheLife(catalogLife);
-  cacheTag("catalog", "catalog:inventory", "catalog:cms-grid");
+  cacheTag(
+    "catalog",
+    "catalog:inventory",
+    "catalog:cms-grid",
+    ...slugs.map((slug) => `catalog:product:${slug}`),
+  );
   return catalogService().getProductsBySlugs(slugs);
 }
 

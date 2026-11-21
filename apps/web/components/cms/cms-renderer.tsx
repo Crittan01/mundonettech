@@ -1,4 +1,5 @@
 import type { CmsBlockView, CmsContentFor, CmsMediaView, CmsPageView } from "@mundonettech/cms";
+import { cacheLife, cacheTag } from "next/cache";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -7,14 +8,18 @@ import { getCatalogProductsBySlugs, searchCatalog } from "@/lib/catalog";
 import { buildCmsPicture } from "@/lib/cms-media";
 import { getPublicMediaOrigin } from "@/lib/env";
 
+const cmsRenderLife = { stale: 30, revalidate: 60, expire: 3600 } as const;
+
 const versionStatusLabels = {
   DRAFT: "Borrador",
   SCHEDULED: "Programada",
   PUBLISHED: "Publicada",
 } as const;
 
+type BlockHeadingTag = "h2" | "h3";
+
 function CmsLink({ href, label, className }: { href: string; label: string; className: string }) {
-  return href.startsWith("/") ? (
+  return href.startsWith("/") && !href.startsWith("//") ? (
     <Link href={href} className={className}>
       {label}
     </Link>
@@ -85,15 +90,17 @@ function HeroBlock({
   block,
   page,
   mediaOrigin,
-  firstHero,
+  headingTag,
+  eagerMedia,
 }: {
   block: Extract<CmsBlockView, { type: "HERO" }>;
   page: CmsPageView;
   mediaOrigin: string | null;
-  firstHero: boolean;
+  headingTag: "h1" | BlockHeadingTag;
+  eagerMedia: boolean;
 }) {
   const { content } = block;
-  const Heading = firstHero ? "h1" : "h2";
+  const Heading = headingTag;
   const media = content.mediaId
     ? page.media.find((item) => item.id === content.mediaId)
     : undefined;
@@ -119,19 +126,26 @@ function HeroBlock({
         ) : null}
       </div>
       {content.mediaId ? (
-        <CmsMediaImage media={media} mediaOrigin={mediaOrigin} eager={firstHero} />
+        <CmsMediaImage media={media} mediaOrigin={mediaOrigin} eager={eagerMedia} />
       ) : null}
     </section>
   );
 }
 
-function RichTextBlock({ block }: { block: Extract<CmsBlockView, { type: "RICH_TEXT" }> }) {
+function RichTextBlock({
+  block,
+  headingTag,
+}: {
+  block: Extract<CmsBlockView, { type: "RICH_TEXT" }>;
+  headingTag: BlockHeadingTag;
+}) {
+  const Heading = headingTag;
   return (
     <section aria-labelledby={block.content.heading ? `${block.id}-heading` : undefined}>
       {block.content.heading ? (
-        <h2 id={`${block.id}-heading`} className="text-2xl font-bold">
+        <Heading id={`${block.id}-heading`} className="text-2xl font-bold">
           {block.content.heading}
-        </h2>
+        </Heading>
       ) : null}
       <div className="mt-4 max-w-3xl space-y-5 leading-7">
         {block.content.body.split(/\n{2,}/).map((paragraph, index) => (
@@ -148,15 +162,17 @@ function ImageBlock({
   block,
   page,
   mediaOrigin,
+  eagerMedia,
 }: {
   block: Extract<CmsBlockView, { type: "IMAGE" }>;
   page: CmsPageView;
   mediaOrigin: string | null;
+  eagerMedia: boolean;
 }) {
   const media = page.media.find((item) => item.id === block.content.mediaId);
   return (
     <figure className="space-y-3">
-      <CmsMediaImage media={media} mediaOrigin={mediaOrigin} />
+      <CmsMediaImage media={media} mediaOrigin={mediaOrigin} eager={eagerMedia} />
       {block.content.caption ? (
         <figcaption className="text-sm leading-6 whitespace-pre-line text-muted-foreground">
           {block.content.caption}
@@ -166,15 +182,22 @@ function ImageBlock({
   );
 }
 
-function CtaBlock({ block }: { block: Extract<CmsBlockView, { type: "CTA" }> }) {
+function CtaBlock({
+  block,
+  headingTag,
+}: {
+  block: Extract<CmsBlockView, { type: "CTA" }>;
+  headingTag: BlockHeadingTag;
+}) {
+  const Heading = headingTag;
   return (
     <section
       aria-labelledby={`${block.id}-heading`}
       className="rounded-3xl border border-border bg-card p-8 text-card-foreground sm:p-10"
     >
-      <h2 id={`${block.id}-heading`} className="text-2xl font-bold sm:text-3xl">
+      <Heading id={`${block.id}-heading`} className="text-2xl font-bold sm:text-3xl">
         {block.content.title}
-      </h2>
+      </Heading>
       {block.content.body ? (
         <p className="mt-4 max-w-3xl leading-7 whitespace-pre-line text-muted-foreground">
           {block.content.body}
@@ -194,11 +217,16 @@ async function ProductGridBlock({
   content,
   blockId,
   mediaOrigin,
+  headingTag,
 }: {
   content: CmsContentFor<"PRODUCT_GRID">;
   blockId: string;
   mediaOrigin: string | null;
+  headingTag: BlockHeadingTag;
 }) {
+  const Heading = headingTag;
+  const cardHeadingLevel: 2 | 3 | 4 =
+    headingTag === "h3" ? (content.heading ? 4 : 3) : content.heading ? 3 : 2;
   const selected = content.productSlugs.length
     ? await getCatalogProductsBySlugs(content.productSlugs)
     : (
@@ -212,9 +240,9 @@ async function ProductGridBlock({
   return (
     <section aria-labelledby={content.heading ? `${blockId}-heading` : undefined}>
       {content.heading ? (
-        <h2 id={`${blockId}-heading`} className="text-2xl font-bold">
+        <Heading id={`${blockId}-heading`} className="text-2xl font-bold">
           {content.heading}
-        </h2>
+        </Heading>
       ) : null}
       {products.length ? (
         <div className="mt-6 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
@@ -223,7 +251,7 @@ async function ProductGridBlock({
               key={product.id}
               product={product}
               mediaOrigin={mediaOrigin}
-              headingLevel={3}
+              headingLevel={cardHeadingLevel}
             />
           ))}
         </div>
@@ -239,13 +267,20 @@ async function ProductGridBlock({
   );
 }
 
-function FaqBlock({ block }: { block: Extract<CmsBlockView, { type: "FAQ" }> }) {
+function FaqBlock({
+  block,
+  headingTag,
+}: {
+  block: Extract<CmsBlockView, { type: "FAQ" }>;
+  headingTag: BlockHeadingTag;
+}) {
+  const Heading = headingTag;
   return (
     <section aria-labelledby={block.content.heading ? `${block.id}-heading` : undefined}>
       {block.content.heading ? (
-        <h2 id={`${block.id}-heading`} className="text-2xl font-bold">
+        <Heading id={`${block.id}-heading`} className="text-2xl font-bold">
           {block.content.heading}
-        </h2>
+        </Heading>
       ) : null}
       <div className="mt-5 divide-y divide-border rounded-xl border border-border">
         {block.content.items.map((item, index) => (
@@ -263,7 +298,18 @@ function FaqBlock({ block }: { block: Extract<CmsBlockView, { type: "FAQ" }> }) 
   );
 }
 
-async function renderBlock(block: CmsBlockView, page: CmsPageView, mediaOrigin: string | null) {
+async function renderBlock(
+  block: CmsBlockView,
+  page: CmsPageView,
+  mediaOrigin: string | null,
+  options: {
+    preview: boolean;
+    firstVisibleHeroId: string | undefined;
+    firstVisibleMediaBlockId: string | undefined;
+  },
+) {
+  const sectionHeadingTag: BlockHeadingTag = options.preview ? "h3" : "h2";
+  const eagerMedia = !options.preview && options.firstVisibleMediaBlockId === block.id;
   switch (block.type) {
     case "HERO":
       return (
@@ -271,23 +317,31 @@ async function renderBlock(block: CmsBlockView, page: CmsPageView, mediaOrigin: 
           block={block}
           page={page}
           mediaOrigin={mediaOrigin}
-          firstHero={
-            page.blocks.find((item) => item.type === "HERO" && item.isVisible)?.id === block.id
+          headingTag={
+            !options.preview && options.firstVisibleHeroId === block.id ? "h1" : sectionHeadingTag
           }
+          eagerMedia={eagerMedia}
         />
       );
     case "RICH_TEXT":
-      return <RichTextBlock block={block} />;
+      return <RichTextBlock block={block} headingTag={sectionHeadingTag} />;
     case "IMAGE":
-      return <ImageBlock block={block} page={page} mediaOrigin={mediaOrigin} />;
+      return (
+        <ImageBlock block={block} page={page} mediaOrigin={mediaOrigin} eagerMedia={eagerMedia} />
+      );
     case "CTA":
-      return <CtaBlock block={block} />;
+      return <CtaBlock block={block} headingTag={sectionHeadingTag} />;
     case "PRODUCT_GRID":
       return (
-        <ProductGridBlock content={block.content} blockId={block.id} mediaOrigin={mediaOrigin} />
+        <ProductGridBlock
+          content={block.content}
+          blockId={block.id}
+          mediaOrigin={mediaOrigin}
+          headingTag={sectionHeadingTag}
+        />
       );
     case "FAQ":
-      return <FaqBlock block={block} />;
+      return <FaqBlock block={block} headingTag={sectionHeadingTag} />;
   }
 }
 
@@ -299,16 +353,34 @@ export async function CmsPageRenderer({
   preview?: boolean;
 }) {
   const mediaOrigin = getPublicMediaOrigin();
-  const hasHero = page.blocks.some((block) => block.type === "HERO" && block.isVisible);
+  const firstVisibleHeroId = page.blocks.find(
+    (block) => block.type === "HERO" && block.isVisible,
+  )?.id;
+  const firstVisibleMediaBlockId = page.blocks.find(
+    (block) =>
+      block.isVisible &&
+      ((block.type === "HERO" && Boolean(block.content.mediaId)) || block.type === "IMAGE"),
+  )?.id;
+  const hasVisibleHero = Boolean(firstVisibleHeroId);
+  const FallbackTitleTag = preview ? "h3" : "h1";
+  const EmptyTitleTag = preview ? "h3" : "h2";
   const rendered = await Promise.all(
     page.blocks.map(async (block) => ({
       block,
-      content: await renderBlock(block, page, mediaOrigin),
+      content: await renderBlock(block, page, mediaOrigin, {
+        preview,
+        firstVisibleHeroId,
+        firstVisibleMediaBlockId,
+      }),
     })),
   );
   return (
     <div className="space-y-14" data-cms-page={page.id}>
-      {!hasHero ? <h1 className="text-4xl font-bold tracking-tight">{page.title}</h1> : null}
+      {!hasVisibleHero ? (
+        <FallbackTitleTag className="text-4xl font-bold tracking-tight">
+          {page.title}
+        </FallbackTitleTag>
+      ) : null}
       {rendered.length ? (
         rendered.map(({ block, content }) => (
           <div
@@ -332,7 +404,9 @@ export async function CmsPageRenderer({
         ))
       ) : (
         <section role="status" className="rounded-xl border border-border bg-card p-8">
-          <h2 className="text-xl font-semibold">Esta página aún no tiene bloques para mostrar</h2>
+          <EmptyTitleTag className="text-xl font-semibold">
+            Esta página aún no tiene bloques para mostrar
+          </EmptyTitleTag>
           <p className="mt-3 text-muted-foreground">
             {preview
               ? "Crea una versión de contenido para comenzar la previsualización."
@@ -342,4 +416,18 @@ export async function CmsPageRenderer({
       )}
     </div>
   );
+}
+
+export async function CachedCmsPageRenderer({ page }: { page: CmsPageView }) {
+  "use cache";
+  cacheLife(cmsRenderLife);
+  cacheTag(
+    "cms",
+    "cms:media",
+    "catalog",
+    "catalog:inventory",
+    "catalog:cms-grid",
+    `cms:page:${page.slug}`,
+  );
+  return <CmsPageRenderer page={page} />;
 }

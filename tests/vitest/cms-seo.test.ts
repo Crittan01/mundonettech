@@ -51,7 +51,15 @@ describe("F2.2 — canonical SEO, SERP and OpenGraph contracts", () => {
     });
   });
 
-  it("falls back to page/site fields and rejects unsafe or incomplete SEO inputs", () => {
+  it("allows loopback HTTP media in local/E2E while rejecting HTML, control chars and unsafe URLs", () => {
+    const loopbackResult = buildCmsSeo({ slug: "editorial", title: "Página editorial" }, site, {
+      url: "http://127.0.0.1:4110/cms/local/1280.webp",
+      alt: "Imagen local",
+      width: 1280,
+      height: 800,
+    });
+    expect(loopbackResult.twitter.card).toBe("summary_large_image");
+
     const fallback = buildCmsSeo({ slug: "editorial", title: "Página editorial" }, site);
     expect(fallback.title).toBe("Página editorial");
     expect(fallback.description).toBe(site.description);
@@ -63,9 +71,19 @@ describe("F2.2 — canonical SEO, SERP and OpenGraph contracts", () => {
       expect(() => buildCmsSeo({ slug, title: "Válido" }, site)).toThrow(/slug/);
     }
     expect(() => buildCmsSeo({ slug: "valido", title: "   " }, site)).toThrow(/title/);
+    expect(() => buildCmsSeo({ slug: "valido", title: "<script>alert(1)</script>" }, site)).toThrow(
+      /title/,
+    );
+    expect(() =>
+      buildCmsSeo({ slug: "valido", title: "Válido", seoDescription: "<b>malo</b>" }, site),
+    ).toThrow(/description/);
+    expect(() => buildCmsSeo({ slug: "valido", title: "Válido\u0000" }, site)).toThrow(/title/);
     expect(() =>
       buildCmsSeo({ slug: "valido", title: "Válido" }, { ...site, description: " " }),
     ).toThrow(/description/);
+    expect(() =>
+      buildCmsSeo({ slug: "valido", title: "Válido" }, { ...site, locale: "invalid_locale!" }),
+    ).toThrow(/locale/);
     expect(() =>
       buildCmsSeo({ slug: "valido", title: "Válido" }, { ...site, url: "http://inseguro.co" }),
     ).toThrow(/HTTPS/);
@@ -81,5 +99,37 @@ describe("F2.2 — canonical SEO, SERP and OpenGraph contracts", () => {
         { ...site, editorialBasePath: "/ruta/anidada" },
       ),
     ).toThrow(/base path/);
+    expect(() =>
+      buildCmsSeo({ slug: "valido", title: "Válido" }, site, {
+        url: "http://remote.example.co/img.webp",
+        alt: "Remota insegura",
+        width: 800,
+        height: 600,
+      }),
+    ).toThrow(/HTTPS/);
+    expect(() =>
+      buildCmsSeo({ slug: "valido", title: "Válido" }, site, {
+        url: "https://user:pass@media.example.co/img.webp",
+        alt: "Con credenciales",
+        width: 800,
+        height: 600,
+      }),
+    ).toThrow(/credentials/);
+    expect(() =>
+      buildCmsSeo({ slug: "valido", title: "Válido" }, site, {
+        url: "https://media.example.co/img.webp",
+        alt: "<img src=x onerror=1>",
+        width: 800,
+        height: 600,
+      }),
+    ).toThrow(/alt/);
+    expect(() =>
+      buildCmsSeo({ slug: "valido", title: "Válido" }, site, {
+        url: "https://media.example.co/img.webp",
+        alt: "Dimensiones inválidas",
+        width: 0,
+        height: 600,
+      }),
+    ).toThrow(/dimensions/);
   });
 });

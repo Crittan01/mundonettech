@@ -5,6 +5,7 @@ import { storeConfig } from "@mundonettech/config/store";
 import { cacheLife, cacheTag } from "next/cache";
 
 import { getDatabase } from "@/lib/db";
+import { getAdminSession } from "@/lib/security/admin-auth";
 
 const cmsLife = { stale: 30, revalidate: 60, expire: 3600 } as const;
 const safeSlugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -16,7 +17,7 @@ function cmsService(): CmsService {
   });
 }
 
-function normalizeCmsSlug(raw: string): string | null {
+export function normalizeCmsSlug(raw: string): string | null {
   const slug = raw.trim().toLowerCase();
   return slug.length > 0 && slug.length <= 160 && safeSlugPattern.test(slug) ? slug : null;
 }
@@ -33,7 +34,11 @@ export async function getPublicCmsPage(slug: string): Promise<CmsPageView | null
   return normalized ? readPublishedCmsPage(normalized) : null;
 }
 
-export async function getPreviewCmsPage(slug: string): Promise<CmsPageView | null> {
+export async function getPreviewCmsPage(
+  slug: string,
+  permission: "content:read" | "content:write" = "content:read",
+): Promise<CmsPageView | null> {
+  await getAdminSession({ permission });
   const normalized = normalizeCmsSlug(slug);
   return normalized ? cmsService().getPreviewPage(normalized) : null;
 }

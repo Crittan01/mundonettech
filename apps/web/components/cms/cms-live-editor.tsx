@@ -3,16 +3,19 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import {
+  CmsAddBlockForm,
   CmsNewVersionForm,
   CmsPageForm,
   CmsPublishPageForm,
   CmsPublishVersionForm,
+  CmsReorderForm,
+  CmsSchedulePageForm,
   CmsScheduleVersionForm,
   CmsVisibilityForm,
 } from "@/components/admin/cms-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { CmsPageRenderer } from "@/components/cms/cms-renderer";
-import { getPreviewCmsPage } from "@/lib/cms";
+import { getPreviewCmsPage, normalizeCmsSlug } from "@/lib/cms";
 import { getCmsOpenGraphImage } from "@/lib/cms-media";
 import { getPublicMediaOrigin } from "@/lib/env";
 import {
@@ -35,19 +38,24 @@ export async function CmsLiveEditor({
   slug: string;
   publicPage: CmsPageView | null;
 }) {
+  const safeSlug = normalizeCmsSlug(slug);
+  if (!safeSlug) notFound();
+
   let session: AdminSession;
+  let page: CmsPageView | null;
   try {
     session = await getAdminSession({ permission: "content:write" });
+    page = await getPreviewCmsPage(safeSlug, "content:write");
   } catch (error) {
-    if (error instanceof AdminAuthorizationError) redirect(`/pagina/${slug}`);
+    if (error instanceof AdminAuthorizationError) redirect(`/pagina/${safeSlug}`);
     throw error;
   }
-  const page = await getPreviewCmsPage(slug);
   if (!page) {
-    if (publicPage) redirect(`/pagina/${slug}`);
+    if (publicPage) redirect(`/pagina/${safeSlug}`);
     notFound();
   }
   const image = getCmsOpenGraphImage(page, getPublicMediaOrigin());
+  const blockIds = page.blocks.map((block) => block.id);
 
   return (
     <div className="space-y-10" data-live-edit="true">
@@ -77,7 +85,14 @@ export async function CmsLiveEditor({
           </nav>
         </div>
         <CmsStepUp session={session} />
-        {page.status !== "PUBLISHED" ? <CmsPublishPageForm pageId={page.id} /> : null}
+        {page.status !== "PUBLISHED" ? (
+          <div className="flex flex-wrap items-end gap-4">
+            <CmsPublishPageForm pageId={page.id} />
+            {page.status === "DRAFT" || page.status === "SCHEDULED" ? (
+              <CmsSchedulePageForm pageId={page.id} />
+            ) : null}
+          </div>
+        ) : null}
       </header>
 
       <CmsPageForm
@@ -102,13 +117,37 @@ export async function CmsLiveEditor({
             los cambios nunca modifican el historial.
           </p>
         </div>
-        {page.blocks.map((block) => (
+        {page.blocks.map((block, index) => (
           <article key={block.id} className="space-y-4 rounded-xl border border-border bg-card p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h3 className="font-semibold">
                 {block.type} · posición {block.position + 1} · v{block.version}
               </h3>
               <div className="flex flex-wrap items-end gap-3">
+                {index > 0 ? (
+                  <CmsReorderForm
+                    pageId={page.id}
+                    blockIds={[
+                      ...blockIds.slice(0, index - 1),
+                      blockIds[index]!,
+                      blockIds[index - 1]!,
+                      ...blockIds.slice(index + 1),
+                    ]}
+                    label="Subir"
+                  />
+                ) : null}
+                {index < blockIds.length - 1 ? (
+                  <CmsReorderForm
+                    pageId={page.id}
+                    blockIds={[
+                      ...blockIds.slice(0, index),
+                      blockIds[index + 1]!,
+                      blockIds[index]!,
+                      ...blockIds.slice(index + 2),
+                    ]}
+                    label="Bajar"
+                  />
+                ) : null}
                 <CmsVisibilityForm blockId={block.id} isVisible={block.isVisible} />
                 {block.versionStatus !== "PUBLISHED" ? (
                   <>
@@ -126,9 +165,15 @@ export async function CmsLiveEditor({
         ))}
         {page.blocks.length === 0 ? (
           <p className="rounded-xl border border-border p-5 text-muted-foreground">
-            No hay bloques versionados. Usa la administración completa para añadir el primero.
+            No hay bloques versionados todavía. Añade el primer bloque a continuación.
           </p>
         ) : null}
+        <details className="rounded-xl border border-border bg-card">
+          <summary className="cursor-pointer p-4 font-semibold">Añadir bloque</summary>
+          <div className="p-4 pt-0">
+            <CmsAddBlockForm pageId={page.id} />
+          </div>
+        </details>
       </section>
 
       <section

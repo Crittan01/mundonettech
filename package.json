@@ -29,7 +29,7 @@
     "guards": "pnpm guard:docs && pnpm guard:git && pnpm guard:language && pnpm guard:boundaries && pnpm guard:test-env",
     "lint": "eslint . --max-warnings 0",
     "test": "pnpm guard:test-env && turbo run build --filter=@mundonettech/config --filter=@mundonettech/core --filter=@mundonettech/db --filter=@mundonettech/integrations --filter=@mundonettech/media --filter=@mundonettech/cms && pnpm test:unit && pnpm test:integration",
-    "test:e2e": "pnpm guard:test-env && NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54429 EMAIL_SEND_DISABLED=1 turbo run build --filter=@mundonettech/web && NODE_ENV=test EMAIL_SEND_DISABLED=1 node scripts/test-e2e.mjs",
+    "test:e2e": "pnpm guard:test-env && EMAIL_SEND_DISABLED=1 turbo run build --filter=@mundonettech/web && NODE_ENV=test EMAIL_SEND_DISABLED=1 node scripts/test-e2e.mjs",
     "test:integration": "NODE_ENV=test EMAIL_SEND_DISABLED=1 node --test --test-concurrency=1 tests/*.test.mjs",
     "test:rls": "NODE_ENV=test EMAIL_SEND_DISABLED=1 node scripts/rls-matrix.mjs",
     "test:unit": "NODE_ENV=test EMAIL_SEND_DISABLED=1 vitest run",

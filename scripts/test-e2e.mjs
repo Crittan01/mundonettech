@@ -26,7 +26,9 @@ try {
       EMAIL_SEND_DISABLED: "1",
       DATABASE_URL: harness.databaseUrl,
       TEST_DATABASE_URL: harness.databaseUrl,
+      SUPABASE_URL: authFixture.origin,
       NEXT_PUBLIC_SUPABASE_URL: authFixture.origin,
+      MEDIA_BASE_URL: "http://127.0.0.1:4110",
       SESSION_TIMEOUT_SECRET:
         process.env.SESSION_TIMEOUT_SECRET ?? randomBytes(32).toString("base64"),
     },

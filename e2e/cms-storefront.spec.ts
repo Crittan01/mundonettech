@@ -14,6 +14,12 @@ import {
 } from "../scripts/lib/supabase-auth-fixture.mjs";
 import { createPng } from "../tests/helpers/binary-fixtures.mjs";
 
+declare global {
+  interface Window {
+    __cmsCspViolations?: string[];
+  }
+}
+
 const schedulerSecret = process.env.CMS_CRON_SECRET ?? "e2e-cms-scheduler-secret-32-chars-ok";
 const schedulerActorId = process.env.CMS_JOB_ACTOR_ID ?? "00000000-0000-4000-8000-00000000c201";
 const databaseUrl =
@@ -27,23 +33,62 @@ let cms: CmsService;
 let actorId: string;
 let actorAuthUserId: string;
 let actorEmail: string;
+let fulfillmentAuthUserId: string;
+let fulfillmentEmail: string;
 let pageId: string;
 let publishedSlug: string;
 let draftSlug: string;
 let mediaPrefix: string;
 let derivativeBodies: Record<"avif" | "webp", Buffer>;
 
-async function authenticateEditor(page: Page) {
+async function attachSecurityCollectors(page: Page) {
+  const browserErrors: string[] = [];
+  await page.addInitScript(() => {
+    window.__cmsCspViolations = [];
+    window.addEventListener("securitypolicyviolation", (event) => {
+      window.__cmsCspViolations?.push(`${event.violatedDirective}:${event.blockedURI}`);
+    });
+  });
+  page.on("pageerror", (error) => browserErrors.push(error.message));
+  page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      /Content Security Policy|Refused to|violates.*directive/i.test(message.text())
+    ) {
+      browserErrors.push(message.text());
+    }
+  });
+  return {
+    async assertClean() {
+      const cspViolations = await page.evaluate(() => window.__cmsCspViolations ?? []);
+      expect(cspViolations).toEqual([]);
+      expect(browserErrors).toEqual([]);
+    },
+  };
+}
+
+async function authenticateAdmin(
+  page: Page,
+  options: {
+    subject: string;
+    email: string;
+    aal?: "aal1" | "aal2";
+    mfaAgeSeconds?: number;
+  },
+) {
   const secret = process.env.SESSION_TIMEOUT_SECRET;
   if (!secret) throw new Error("SESSION_TIMEOUT_SECRET is required for authenticated E2E.");
+  await page.context().clearCookies();
   const session = createSupabaseFixtureSession({
-    subject: actorAuthUserId,
-    email: actorEmail,
+    subject: options.subject,
+    email: options.email,
     factorId: randomUUID(),
+    aal: options.aal ?? "aal2",
+    mfaAgeSeconds: options.mfaAgeSeconds ?? 60,
   });
   const activity = createTimeoutToken({
     kind: "admin",
-    subject: actorAuthUserId,
+    subject: options.subject,
     secret: Buffer.from(secret, "base64"),
     idleSeconds: 1800,
     absoluteSeconds: 43_200,
@@ -91,6 +136,19 @@ test.beforeAll(async () => {
   actorId = actor.id;
   actorAuthUserId = actor.authUserId;
   actorEmail = actor.email;
+
+  const fulfillment = await db.adminUser.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `cms-fulfillment-${randomUUID()}@example.test`,
+      displayName: "Operador alistamiento E2E",
+      role: "FULFILLMENT",
+      status: "ACTIVE",
+    },
+  });
+  fulfillmentAuthUserId = fulfillment.authUserId;
+  fulfillmentEmail = fulfillment.email;
+
   const audit = {
     actorAdminUserId: actorId,
     ipHash: randomBytes(32),
@@ -175,6 +233,14 @@ test.beforeAll(async () => {
         },
       },
       {
+        type: "PRODUCT_GRID",
+        content: {
+          categorySlug: "audio",
+          productSlugs: [],
+          maxItems: 2,
+        },
+      },
+      {
         type: "FAQ",
         content: {
           heading: "Preguntas editoriales",
@@ -208,9 +274,10 @@ test.afterAll(async () => {
   if (db) await db.$disconnect();
 });
 
-test("published CMS renders all six blocks, responsive media, catalog data, SEO and WCAG", async ({
+test("published CMS renders all six blocks, curated and auto grids, responsive media, SEO and WCAG", async ({
   page,
 }) => {
+  const collector = await attachSecurityCollectors(page);
   const requestedMedia = new Set<string>();
   await page.route(`**/${mediaPrefix}/**`, async (route) => {
     const url = new URL(route.request().url());
@@ -234,13 +301,17 @@ test("published CMS renders all six blocks, responsive media, catalog data, SEO 
   await expect(page.getByRole("img", { name: "Imagen editorial E2E" }).first()).toBeVisible();
   await expect.poll(() => requestedMedia.size).toBeGreaterThan(0);
 
-  const gridHeadings = page
+  const curatedGridHeadings = page
     .locator("[data-cms-block]")
     .filter({ hasText: "Selección editorial" })
     .locator("article h3");
-  await expect(gridHeadings).toHaveCount(2);
-  await expect(gridHeadings.nth(0)).toHaveText("Parlante JBL Charge 5");
-  await expect(gridHeadings.nth(1)).toHaveText("Audífonos Sony WH-1000XM5");
+  await expect(curatedGridHeadings).toHaveCount(2);
+  await expect(curatedGridHeadings.nth(0)).toHaveText("Parlante JBL Charge 5");
+  await expect(curatedGridHeadings.nth(1)).toHaveText("Audífonos Sony WH-1000XM5");
+
+  const headlessAutoGrid = page.locator("[data-cms-block]").nth(5);
+  await expect(headlessAutoGrid.locator("article h2")).toHaveCount(2);
+
   await page.getByText("¿La disponibilidad es real?").click();
   await expect(
     page.getByText("Sí, descuenta unidades comprometidas y stock de seguridad."),
@@ -276,11 +347,13 @@ test("published CMS renders all six blocks, responsive media, catalog data, SEO 
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();
   expect(accessibility.violations).toEqual([]);
+  await collector.assertClean();
 });
 
 test("scheduled publication invalidates the cached editorial page without changing history", async ({
   page,
 }) => {
+  const collector = await attachSecurityCollectors(page);
   await page.goto(`/pagina/${publishedSlug}`);
   await expect(page.getByRole("heading", { level: 1, name: initialHeading })).toBeVisible();
 
@@ -335,9 +408,14 @@ test("scheduled publication invalidates the cached editorial page without changi
   expect(persisted).toHaveLength(2);
   expect(persisted[1]?.id).toBe(scheduled.id);
   expect(persisted[1]?.status).toBe("PUBLISHED");
+  await collector.assertClean();
 });
 
-test("anonymous visitors cannot read drafts or activate Live Edit", async ({ page }) => {
+test("anonymous, malformed, aal1-only and non-editorial roles cannot read drafts or activate Live Edit", async ({
+  page,
+}) => {
+  const collector = await attachSecurityCollectors(page);
+
   await page.goto(`/pagina/${publishedSlug}?liveEdit=1`);
   await expect(page).toHaveURL(new RegExp(`/pagina/${publishedSlug}$`));
   await expect(page.locator("[data-live-edit]")).toHaveCount(0);
@@ -349,38 +427,95 @@ test("anonymous visitors cannot read drafts or activate Live Edit", async ({ pag
   await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
   await expect(page.locator("body")).not.toContainText(draftHeading);
 
-  await page.goto(`/pagina/${draftSlug}`);
-  await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
+  for (const invalidPath of [
+    "/pagina/INVALID_SLUG!?liveEdit=1",
+    "/pagina/foo%3FliveEdit%3D1?liveEdit=1",
+  ]) {
+    await page.goto(invalidPath);
+    await expect(page.locator("[data-live-edit]")).toHaveCount(0);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText(
+      "No encontramos esta página",
+    );
+    await expect(page.locator('meta[name="robots"]').first()).toHaveAttribute("content", /noindex/);
+  }
+
+  await authenticateAdmin(page, {
+    subject: actorAuthUserId,
+    email: actorEmail,
+    aal: "aal1",
+  });
+  await page.goto(`/pagina/${draftSlug}?liveEdit=1`);
+  await expect(page).toHaveURL(new RegExp(`/pagina/${draftSlug}$`));
+  await expect(page.locator("[data-live-edit]")).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText(draftHeading);
+
+  await authenticateAdmin(page, {
+    subject: fulfillmentAuthUserId,
+    email: fulfillmentEmail,
+    aal: "aal2",
+    mfaAgeSeconds: 30,
+  });
+  await page.goto(`/pagina/${draftSlug}?liveEdit=1`);
+  await expect(page).toHaveURL(new RegExp(`/pagina/${draftSlug}$`));
+  await expect(page.locator("[data-live-edit]")).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText(draftHeading);
+
+  await collector.assertClean();
 });
 
-test("authenticated CMS editor previews, edits tokens and SEO, changes slug and publishes", async ({
+test("authenticated CMS editor enforces step-up MFA, previews, edits tokens/SEO, reorders, renames slug and publishes", async ({
   page,
 }) => {
-  await authenticateEditor(page);
+  const collector = await attachSecurityCollectors(page);
+  await authenticateAdmin(page, {
+    subject: actorAuthUserId,
+    email: actorEmail,
+    aal: "aal2",
+    mfaAgeSeconds: 900,
+  });
+
   await page.goto("/admin/contenido");
   await expect(page).toHaveURL(/\/admin\/contenido$/);
   await expect(page.getByRole("heading", { name: "Contenido", exact: true })).toBeVisible();
+
   await page.goto(`/pagina/${draftSlug}?liveEdit=1`);
   await expect(page.locator("[data-live-edit]")).toBeVisible();
+  await expect(page.locator("h1")).toHaveCount(1);
   await expect(page.getByRole("heading", { name: draftHeading })).toBeVisible();
   await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
+  await expect(page.getByRole("heading", { name: /step-up MFA/i })).toBeVisible();
+
   const accessibility = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();
   expect(accessibility.violations).toEqual([]);
 
   const initialBlock = page.locator("article").filter({ hasText: "HERO · posición 1 · v1" });
-  await initialBlock.getByLabel("Contenido de la nueva versión").fill(
-    JSON.stringify(
-      {
-        heading: "{{store.name}}: edición autenticada",
-        subheading: "Vista {{store.domain}}",
-      },
-      null,
-      2,
-    ),
+  const pendingPayload = JSON.stringify(
+    {
+      heading: "{{store.name}}: edición autenticada",
+      subheading: "Vista {{store.domain}}",
+    },
+    null,
+    2,
   );
+  await initialBlock.getByLabel("Contenido de la nueva versión").fill(pendingPayload);
+  await initialBlock.getByRole("button", { name: "Crear nueva versión" }).click();
+  await expect(
+    page.getByText("Confirma tu autenticador antes de guardar este cambio."),
+  ).toBeVisible();
+  await expect(initialBlock.getByLabel("Contenido de la nueva versión")).toHaveValue(
+    /\{\{store\.name\}\}: edición autenticada/,
+  );
+
+  await page.getByLabel("Código actual del autenticador").fill("000000");
+  await page.getByRole("button", { name: "Confirmar identidad" }).click();
+  await expect(page.getByText("El código no es válido o expiró.")).toBeVisible();
+
+  await page.getByLabel("Código actual del autenticador").fill("123456");
+  await page.getByRole("button", { name: "Confirmar identidad" }).click();
+  await expect(page.getByRole("heading", { name: /step-up MFA/i })).toHaveCount(0);
+
   await initialBlock.getByRole("button", { name: "Crear nueva versión" }).click();
   await expect(page.getByText("Versión 2 creada en borrador.")).toBeVisible();
   const secondBlock = page.locator("article").filter({ hasText: "HERO · posición 1 · v2" });
@@ -391,15 +526,25 @@ test("authenticated CMS editor previews, edits tokens and SEO, changes slug and 
     page.getByRole("heading", { name: `${storeConfig.name}: edición autenticada` }),
   ).toBeVisible();
 
+  await page.locator("summary", { hasText: "Añadir bloque" }).click();
+  await page.locator("#new-block-type").selectOption("RICH_TEXT");
+  await page.getByRole("button", { name: "Añadir bloque en borrador" }).click();
+  await expect(page.getByText("Bloque añadido con su primera versión en borrador.")).toBeVisible();
+
+  const addedRichText = page.locator("article").filter({ hasText: "RICH_TEXT · posición 2 · v1" });
+  await expect(addedRichText).toBeVisible();
+  await addedRichText.getByRole("button", { name: "Ocultar bloque" }).click();
+  await expect(page.getByText("Oculto en el sitio público")).toBeVisible();
+
   const draftRecord = await db.cmsPage.findFirstOrThrow({
     where: { slug: draftSlug },
     select: { id: true },
   });
-  const draftBlock = await db.cmsSectionBlock.findFirstOrThrow({
-    where: { pageId: draftRecord.id },
+  const heroSection = await db.cmsSectionBlock.findFirstOrThrow({
+    where: { pageId: draftRecord.id, blockType: "HERO" },
   });
   const latest = await db.cmsBlockVersion.findFirstOrThrow({
-    where: { blockId: draftBlock.id },
+    where: { blockId: heroSection.id },
     orderBy: { version: "desc" },
   });
   expect(latest.version).toBe(2);
@@ -446,11 +591,20 @@ test("authenticated CMS editor previews, edits tokens and SEO, changes slug and 
 
   await page.goto(`/pagina/${draftSlug}`);
   await expect(page.locator("[data-live-edit]")).toHaveCount(0);
+  await expect(page.locator("h1")).toHaveCount(1);
   await expect(
     page.getByRole("heading", { name: `${storeConfig.name}: edición autenticada` }),
   ).toBeVisible();
   await expect(page.getByText(`Vista ${storeConfig.domain}`)).toBeVisible();
   await expect(page).toHaveTitle(`Título editorial autenticado | ${storeConfig.name}`);
+  expect(
+    await db.adminActionLog.count({
+      where: {
+        actorAdminUserId: actorId,
+        action: "ADMIN_STEP_UP_VERIFIED",
+      },
+    }),
+  ).toBeGreaterThanOrEqual(1);
   expect(
     await db.adminActionLog.count({
       where: {
@@ -460,4 +614,5 @@ test("authenticated CMS editor previews, edits tokens and SEO, changes slug and 
       },
     }),
   ).toBeGreaterThanOrEqual(2);
+  await collector.assertClean();
 });

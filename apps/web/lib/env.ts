@@ -1,9 +1,12 @@
 import { parseHmacSecret } from "@mundonettech/core";
 
 export function getSupabasePublicConfig(): { url: string; key: string } {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54421";
+  const url =
+    process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "http://127.0.0.1:54421";
   const key =
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    process.env.SUPABASE_PUBLISHABLE_KEY ??
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -49,7 +52,7 @@ export function getTurnstileKeys(): { siteKey: string; secretKey: string } {
 }
 
 export function getPublicMediaOrigin(): string | null {
-  const raw = process.env.NEXT_PUBLIC_MEDIA_BASE_URL?.trim();
+  const raw = (process.env.MEDIA_BASE_URL ?? process.env.NEXT_PUBLIC_MEDIA_BASE_URL)?.trim();
   if (!raw) return null;
   let parsed: URL;
   try {
