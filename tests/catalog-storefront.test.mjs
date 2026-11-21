@@ -111,6 +111,28 @@ describe("F1.4 — indexed public catalog and real stock", () => {
     assert.equal(await service.getAdminProduct("not-a-uuid"), null);
   });
 
+  it("resolves curated CMS grids in editorial order without N+1 or missing-product placeholders", async () => {
+    const curated = await service.getProductsBySlugs([
+      "jbl-charge-5",
+      "sony-wh-1000xm5",
+      "jbl-charge-5",
+      "producto-inexistente",
+    ]);
+    assert.deepEqual(
+      curated.map((product) => product.slug),
+      ["jbl-charge-5", "sony-wh-1000xm5"],
+    );
+    assert.equal(curated[0].available > 0, true);
+    assert.equal(typeof curated[0].priceCents, "string");
+    assert.deepEqual(await service.getProductsBySlugs([]), []);
+    assert.deepEqual(await service.getProductsBySlugs(["producto-inexistente"]), []);
+    await assert.rejects(service.getProductsBySlugs(["invalid_slug!"]), CatalogQueryError);
+    await assert.rejects(
+      service.getProductsBySlugs(Array.from({ length: 101 }, (_, index) => `producto-${index}`)),
+      CatalogQueryError,
+    );
+  });
+
   it("returns complete PDP data, N-level breadcrumbs, SPIN_360 derivatives, active bundles and soft-delete hygiene", async () => {
     const macbook = await service.getProductBySlug("macbook-air-m3-13-256gb");
     assert.ok(macbook);

@@ -117,6 +117,8 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
   it("persists pages, blocks, concurrent versions, concurrent add+reorder, visibility and audit", async () => {
     assert.equal(await service.getPage("not-a-uuid"), null);
     assert.equal(await service.getPage(randomUUID()), null);
+    assert.equal(await service.getPreviewPage(`missing-${randomUUID()}`), null);
+    await assert.rejects(service.getPreviewPage("invalid_slug!"), CmsValidationError);
 
     const slug = `editorial-${randomUUID()}`;
     const page = await service.createPage(
@@ -241,6 +243,17 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
       block.id,
       { heading: "Hola {{store.name}}", subheading: "Segundo" },
       audit,
+    );
+    const preview = await service.getPreviewPage(page.slug);
+    assert.equal(preview.blocks[0].content.subheading, "Segundo");
+    assert.equal(preview.blocks[0].content.heading, "Hola Tienda de prueba");
+    assert.equal(preview.blocks[0].sourceContent.heading, "Hola {{store.name}}");
+    assert.equal(preview.blocks[0].versionStatus, "DRAFT");
+    assert.equal(preview.blocks[0].versionId, second.id);
+    assert.equal(preview.status, "PUBLISHED");
+    assert.equal(
+      (await service.getPublishedPage(page.slug)).blocks[0].content.subheading,
+      "Primero",
     );
     const now = new Date((await db.$queryRaw`SELECT CURRENT_TIMESTAMP AS now`)[0].now);
     const future = new Date(now.getTime() + 60_000);
@@ -439,6 +452,22 @@ describe("F2.1 — CMS media with sharp-safe, R2 compensation and reference lock
         audit,
       );
       assert.ok(page.id);
+      const preview = await service.getPreviewPage(page.slug);
+      assert.equal(preview.blocks[0].versionStatus, "DRAFT");
+      assert.equal(preview.media.length, 1);
+      assert.equal(preview.media[0].id, firstRace.media.id);
+      assert.equal(preview.media[0].altText, "Texto actualizado");
+      assert.equal(preview.media[0].derivatives.length, 2);
+      assert.equal(await service.getPublishedPage(page.slug), null);
+
+      const editorialDetail = await service.getPage(page.id);
+      await service.publishVersion(editorialDetail.blocks[0].versions[0].id, audit);
+      await service.publishPage(page.id, audit);
+      const published = await service.getPublishedPage(page.slug);
+      assert.equal(published.status, "PUBLISHED");
+      assert.equal(published.blocks[0].versionStatus, "PUBLISHED");
+      assert.equal(published.media[0].storageKey, firstRace.media.storageKey);
+      assert.match(published.publishedAt, /^\d{4}-\d{2}-\d{2}T/);
       await assert.rejects(mediaService.archive(firstRace.media.id, audit), CmsConflictError);
       // Even raw SQL soft-delete is blocked by PostgreSQL trigger while referenced by CmsBlockVersion!
       await assert.rejects(

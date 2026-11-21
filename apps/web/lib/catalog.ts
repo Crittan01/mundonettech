@@ -73,6 +73,20 @@ export async function getCatalogBrand(slug: string): Promise<CatalogBrand | null
   return readCachedBrand(normalized);
 }
 
+async function readCachedProductList(slugs: readonly string[]) {
+  "use cache";
+  cacheLife(catalogLife);
+  cacheTag("catalog", "catalog:inventory", "catalog:cms-grid");
+  return catalogService().getProductsBySlugs(slugs);
+}
+
+export async function getCatalogProductsBySlugs(slugs: readonly string[]) {
+  if (slugs.length > 24) throw new Error("A CMS product grid accepts at most 24 products.");
+  const normalized = slugs.map((slug) => normalizeCacheSlug(slug));
+  if (normalized.some((slug) => slug === null)) throw new Error("Invalid CMS product slug.");
+  return readCachedProductList([...new Set(normalized as string[])]);
+}
+
 export async function compareCatalogProducts(slugs: readonly string[]) {
   "use cache";
   cacheLife(catalogLife);

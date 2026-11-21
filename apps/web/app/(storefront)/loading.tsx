@@ -5,7 +5,7 @@ export default function StorefrontLoading() {
       role="status"
       aria-live="polite"
     >
-      <p className="text-muted-foreground">Cargando el catálogo…</p>
+      <p className="text-muted-foreground">Cargando el contenido de la tienda…</p>
     </section>
   );
 }

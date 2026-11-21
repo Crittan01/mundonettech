@@ -1,10 +1,16 @@
 "use client";
 
-import { cmsBlockTypes, type CmsBlockType, type StoreSettingsInput } from "@mundonettech/cms";
+import {
+  cmsBlockTypes,
+  type CmsBlockType,
+  type CmsSeoImage,
+  type StoreSettingsInput,
+} from "@mundonettech/cms";
 import type { ReactNode } from "react";
 import { useActionState, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
+import { CmsSeoPreview } from "@/components/cms/cms-seo-preview";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -130,62 +136,83 @@ function PageFields({
   page,
   values,
   idPrefix,
+  openGraphImage,
 }: {
   page?:
     | { slug: string; title: string; seoTitle: string | null; seoDescription: string | null }
     | undefined;
   values?: Record<string, string> | undefined;
   idPrefix: string;
+  openGraphImage: CmsSeoImage | null | undefined;
 }) {
-  const slugDefault = values?.slug ?? page?.slug ?? "";
-  const titleDefault = values?.title ?? page?.title ?? "";
-  const seoTitleDefault = values?.seoTitle ?? page?.seoTitle ?? "";
-  const seoDescriptionDefault = values?.seoDescription ?? page?.seoDescription ?? "";
+  const defaults = {
+    slug: values?.slug ?? page?.slug ?? "",
+    title: values?.title ?? page?.title ?? "",
+    seoTitle: values?.seoTitle ?? page?.seoTitle ?? "",
+    seoDescription: values?.seoDescription ?? page?.seoDescription ?? "",
+  };
+  const [fields, setFields] = useState(defaults);
+  const [lastSyncedValues, setLastSyncedValues] = useState(values);
+  const [lastPage, setLastPage] = useState(page);
+  if (values !== lastSyncedValues || page !== lastPage) {
+    setLastSyncedValues(values);
+    setLastPage(page);
+    setFields(defaults);
+  }
+
+  function updateField(field: keyof typeof defaults, value: string) {
+    setFields((current) => ({ ...current, [field]: value }));
+  }
 
   return (
-    <div className="grid gap-4 sm:grid-cols-2">
-      <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-slug`}>Slug</Label>
-        <Input
-          key={`${idPrefix}-slug-${slugDefault}`}
-          id={`${idPrefix}-slug`}
-          name="slug"
-          defaultValue={slugDefault}
-          required
-          maxLength={160}
-        />
+    <div className="space-y-5">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}-slug`}>Slug</Label>
+          <Input
+            id={`${idPrefix}-slug`}
+            name="slug"
+            value={fields.slug}
+            onChange={(event) => updateField("slug", event.target.value)}
+            required
+            maxLength={160}
+            autoCapitalize="none"
+            spellCheck={false}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}-title`}>Título</Label>
+          <Input
+            id={`${idPrefix}-title`}
+            name="title"
+            value={fields.title}
+            onChange={(event) => updateField("title", event.target.value)}
+            required
+            maxLength={200}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}-seo-title`}>Título SEO</Label>
+          <Input
+            id={`${idPrefix}-seo-title`}
+            name="seoTitle"
+            value={fields.seoTitle}
+            onChange={(event) => updateField("seoTitle", event.target.value)}
+            maxLength={200}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`${idPrefix}-seo-description`}>Descripción SEO</Label>
+          <Input
+            id={`${idPrefix}-seo-description`}
+            name="seoDescription"
+            value={fields.seoDescription}
+            onChange={(event) => updateField("seoDescription", event.target.value)}
+            maxLength={300}
+          />
+        </div>
       </div>
-      <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-title`}>Título</Label>
-        <Input
-          key={`${idPrefix}-title-${titleDefault}`}
-          id={`${idPrefix}-title`}
-          name="title"
-          defaultValue={titleDefault}
-          required
-          maxLength={200}
-        />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-seo-title`}>Título SEO</Label>
-        <Input
-          key={`${idPrefix}-seo-title-${seoTitleDefault}`}
-          id={`${idPrefix}-seo-title`}
-          name="seoTitle"
-          defaultValue={seoTitleDefault}
-          maxLength={200}
-        />
-      </div>
-      <div className="space-y-2">
-        <Label htmlFor={`${idPrefix}-seo-description`}>Descripción SEO</Label>
-        <Input
-          key={`${idPrefix}-seo-description-${seoDescriptionDefault}`}
-          id={`${idPrefix}-seo-description`}
-          name="seoDescription"
-          defaultValue={seoDescriptionDefault}
-          maxLength={300}
-        />
-      </div>
+      <CmsSeoPreview values={fields} image={openGraphImage ?? null} />
     </div>
   );
 }
@@ -271,6 +298,8 @@ function BlockFields({
 
 export function CmsPageForm({
   page,
+  openGraphImage,
+  liveEdit = false,
 }: {
   page?: {
     id: string;
@@ -279,6 +308,8 @@ export function CmsPageForm({
     seoTitle: string | null;
     seoDescription: string | null;
   };
+  openGraphImage?: CmsSeoImage | null;
+  liveEdit?: boolean;
 }) {
   const action = page ? updateCmsPageAction : createCmsPageAction;
   const idPrefix = page ? `cms-page-${page.id}` : "cms-page-new";
@@ -291,7 +322,13 @@ export function CmsPageForm({
       {(values) => (
         <>
           {page ? <input type="hidden" name="pageId" value={page.id} /> : null}
-          <PageFields page={page} values={values} idPrefix={idPrefix} />
+          {page && liveEdit ? <input type="hidden" name="liveEdit" value="1" /> : null}
+          <PageFields
+            page={page}
+            values={values}
+            idPrefix={idPrefix}
+            openGraphImage={openGraphImage}
+          />
           {!page ? <BlockFields values={values} idPrefix="initial-block" /> : null}
         </>
       )}

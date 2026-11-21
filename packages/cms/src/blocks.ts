@@ -120,13 +120,8 @@ export const cmsBlockSchemas = {
   FAQ: faqSchema,
 } as const;
 
-export type CmsContent =
-  | z.infer<typeof heroSchema>
-  | z.infer<typeof richTextSchema>
-  | z.infer<typeof imageSchema>
-  | z.infer<typeof ctaSchema>
-  | z.infer<typeof productGridSchema>
-  | z.infer<typeof faqSchema>;
+export type CmsContentFor<Type extends CmsBlockType> = z.infer<(typeof cmsBlockSchemas)[Type]>;
+export type CmsContent = CmsContentFor<CmsBlockType>;
 
 export type CmsTokens = Readonly<Record<string, string>>;
 const tokenPattern = /(?<!\{)\{\{\s*([a-z][a-z0-9_.]{0,63})\s*\}\}(?!\})/g;
@@ -174,9 +169,12 @@ export function interpolateCmsText(input: string, tokens: CmsTokens): string {
   return resolved;
 }
 
-export function parseCmsBlock(type: CmsBlockType, input: unknown): CmsContent {
+export function parseCmsBlock<Type extends CmsBlockType>(
+  type: Type,
+  input: unknown,
+): CmsContentFor<Type> {
   if (!cmsBlockTypes.includes(type)) throw new Error("Unsupported CMS block type.");
-  const parsed = cmsBlockSchemas[type].parse(input) as CmsContent;
+  const parsed = cmsBlockSchemas[type].parse(input) as CmsContentFor<Type>;
   visitStrings(parsed, (value) => {
     const remainder = value.replace(tokenPattern, "");
     if (remainder.includes("{{") || remainder.includes("}}")) {
@@ -187,7 +185,11 @@ export function parseCmsBlock(type: CmsBlockType, input: unknown): CmsContent {
   return parsed;
 }
 
-export function renderCmsBlock(type: CmsBlockType, input: unknown, tokens: CmsTokens): CmsContent {
+export function renderCmsBlock<Type extends CmsBlockType>(
+  type: Type,
+  input: unknown,
+  tokens: CmsTokens,
+): CmsContentFor<Type> {
   const parsed = parseCmsBlock(type, input);
-  return visitStrings(parsed, (value) => interpolateCmsText(value, tokens)) as CmsContent;
+  return visitStrings(parsed, (value) => interpolateCmsText(value, tokens)) as CmsContentFor<Type>;
 }

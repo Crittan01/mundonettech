@@ -23,11 +23,11 @@
 - `[x]` ✅ **Fase 0 cerrada (`F0.1`–`F0.5`):** Gobernanza, Next.js 16 standalone (`'use cache'`), PG 17 + RLS *deny-by-default* + Bóveda `AES-256-GCM`, Auth OTP/HIBP/Turnstile, `/admin` MFA `aal2` + RBAC 8 roles + `pii-mask` y CI PG 17/Playwright/axe.
 - `[x]` ✅ **Fase 1 cerrada (`F1.1`–`F1.4`):** Catálogo tech PG 17 (`29` modelos + `Order`, `BigInt`, GS1/EAN, `tsvector` GIN, `685` casos RLS), `@mundonettech/media` (R2 + `Spin360`/`Model3d` *lazy*), inventario WAC/seriales/CSV, `CatalogService` (`'use cache'`), PDP/PLP/Comparador, `/admin/catalogo` MFA y seed (`ADR-023`..`ADR-026`).
 - `[x]` **`F2.1` — CMS v3 (`growth-cms.prisma`), `StoreSettings` y Mediateca R2 (`packages/cms`):** `StoreSettings` separada con RBAC (`ADR-016`), `CmsPage` + `CmsSectionBlock` (Zod + `{{tokens}}`) + `CmsBlockVersion` (versionado/programación), `CmsMedia` en R2 (`sharp-safe`), `/admin/{contenido,configuracion}` MFA y `770` casos RLS (`ADR-027`).
-- `[ ]` **`F2.2` — Renderizado `'use cache'`, Live Edit en `<Suspense>` y SERP:** bloques componibles en `(storefront)` sin penalizar LCP, modo Live Edit en `<Suspense>` (`ADR-015`) y vista previa SERP/OpenGraph.
+- `[R]` **`F2.2` — Renderizado `'use cache'`, Live Edit en `<Suspense>` y SERP:** `/pagina/[slug]` PPR con seis bloques, medios AVIF/WebP y grillas curadas; Live Edit `aal2` aislado, canonical/SERP/OpenGraph/Twitter Card e invalidación programada (`ADR-028`).
 - `[ ]` **`F2.3` — Legal CO (`packages/legal-co`), Redirecciones, JSON-LD, Sitemap y Merchant XML (`COMPLIANCE.md`):** 8 docs legales desde `config/`, retracto 5 días hábiles + 18 festivos CO, Ley 1581, `UrlRedirect`, JSON-LD, `sitemap.xml` y Google Merchant XML (`Brand`/`GTIN`).
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Implementador (`F2.2`):** rama `feat/f2-2-cms-cache-live-edit-serp`; construir renderizado componible `'use cache'` + `cacheTag` en `(storefront)`, Live Edit en `<Suspense>` (`ADR-015`) y vista previa SERP/OpenGraph, dejando `[R]` para auditoría.
+- **Siguiente turno — Auditor (`F2.2`):** auditar `git diff develop...HEAD` en `feat/f2-2-cms-cache-live-edit-serp` contra `ADR-015`/`ADR-028`, seguridad de previews, caché/PPR, tokens, grillas, SEO y completitud E2E; reejecutar `make check && pnpm test && pnpm build && pnpm test:e2e`, certificar `[x]` si no hay concesiones y seguir el protocolo de PR/merge.

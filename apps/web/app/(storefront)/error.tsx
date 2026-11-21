@@ -13,7 +13,7 @@ export default function StorefrontError({
       className="mx-auto max-w-xl rounded-2xl border border-border bg-card p-8 text-center"
       role="alert"
     >
-      <h1 className="text-2xl font-bold">No pudimos cargar el catálogo</h1>
+      <h1 className="text-2xl font-bold">No pudimos cargar el contenido</h1>
       <p className="mt-3 text-muted-foreground">
         La consulta no se completó. Inténtalo de nuevo; no se realizó ninguna modificación.
       </p>

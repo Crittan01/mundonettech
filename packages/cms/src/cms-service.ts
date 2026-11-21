@@ -9,6 +9,7 @@ import {
   renderCmsBlock,
   type CmsBlockType,
   type CmsContent,
+  type CmsContentFor,
   type CmsTokens,
 } from "./blocks.js";
 
@@ -35,6 +36,62 @@ export interface CmsPageInput {
   readonly seoTitle?: string;
   readonly seoDescription?: string;
 }
+
+export type CmsBlockView = {
+  [Type in CmsBlockType]: {
+    readonly id: string;
+    readonly type: Type;
+    readonly content: CmsContentFor<Type>;
+    readonly sourceContent?: CmsContentFor<Type>;
+    readonly position: number;
+    readonly isVisible: boolean;
+    readonly versionId: string;
+    readonly version: number;
+    readonly versionStatus: "DRAFT" | "SCHEDULED" | "PUBLISHED";
+    readonly effectiveAt: string | null;
+  };
+}[CmsBlockType];
+
+export interface CmsMediaView {
+  readonly id: string;
+  readonly storageKey: string;
+  readonly mimeType: string;
+  readonly altText: string;
+  readonly width: number | null;
+  readonly height: number | null;
+  readonly derivatives: ReadonlyArray<{
+    readonly key: string;
+    readonly byteSize: number;
+    readonly contentType: "image/avif" | "image/webp";
+    readonly width: number;
+    readonly height: number;
+    readonly format: "avif" | "webp";
+  }>;
+}
+
+export interface CmsPageView {
+  readonly id: string;
+  readonly slug: string;
+  readonly title: string;
+  readonly seoTitle: string | null;
+  readonly seoDescription: string | null;
+  readonly status: "DRAFT" | "SCHEDULED" | "PUBLISHED" | "ARCHIVED";
+  readonly publishedAt: string | null;
+  readonly blocks: CmsBlockView[];
+  readonly media: CmsMediaView[];
+}
+
+const cmsDerivativeSchema = z
+  .object({
+    key: z.string().min(1).max(500),
+    byteSize: z.int().positive(),
+    contentType: z.enum(["image/avif", "image/webp"]),
+    width: z.int().positive(),
+    height: z.int().positive(),
+    format: z.enum(["avif", "webp"]),
+  })
+  .strict();
+const cmsDerivativeListSchema = z.array(cmsDerivativeSchema).max(32);
 
 type CmsPageListRecord = Prisma.CmsPageGetPayload<{
   include: { blocks: { include: { versions: { select: { id: true } } } } };
@@ -759,7 +816,72 @@ export class CmsService {
     });
   }
 
-  async getPublishedPage(slug: string, at?: Date) {
+  private async loadMedia(contents: readonly unknown[]): Promise<CmsMediaView[]> {
+    const ids = [...new Set(contents.flatMap(mediaIds))].sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
+    if (ids.length === 0) return [];
+    const records = await this.db.cmsMedia.findMany({
+      where: { id: { in: ids }, deletedAt: null },
+      orderBy: { id: "asc" },
+    });
+    return records.map((record) => ({
+      id: record.id,
+      storageKey: record.storageKey,
+      mimeType: record.mimeType,
+      altText: record.altText,
+      width: record.width,
+      height: record.height,
+      derivatives: cmsDerivativeListSchema.parse(record.derivatives),
+    }));
+  }
+
+  async getPreviewPage(slug: string): Promise<CmsPageView | null> {
+    const normalized = pageInput({ slug, title: "query" }).slug;
+    const page = await this.db.cmsPage.findFirst({
+      where: { slug: normalized, deletedAt: null },
+      include: {
+        blocks: {
+          orderBy: [{ position: "asc" }, { id: "asc" }],
+          include: { versions: { orderBy: { version: "desc" }, take: 1 } },
+        },
+      },
+    });
+    if (!page) return null;
+    const blocks = page.blocks.flatMap((block): CmsBlockView[] => {
+      const version = block.versions[0];
+      if (!version) return [];
+      const blockType = block.blockType as CmsBlockType;
+      const sourceContent = parseCmsBlock(blockType, version.content);
+      return [
+        {
+          id: block.id,
+          type: blockType,
+          content: renderCmsBlock(blockType, sourceContent, this.tokens),
+          sourceContent,
+          position: block.position,
+          isVisible: block.isVisible,
+          versionId: version.id,
+          version: version.version,
+          versionStatus: version.status,
+          effectiveAt: version.effectiveAt?.toISOString() ?? null,
+        } as CmsBlockView,
+      ];
+    });
+    return {
+      id: page.id,
+      slug: page.slug,
+      title: page.title,
+      seoTitle: page.seoTitle,
+      seoDescription: page.seoDescription,
+      status: page.status,
+      publishedAt: page.publishedAt?.toISOString() ?? null,
+      blocks,
+      media: await this.loadMedia(blocks.map((block) => block.content)),
+    };
+  }
+
+  async getPublishedPage(slug: string, at?: Date): Promise<CmsPageView | null> {
     const normalized = pageInput({ slug, title: "query" }).slug;
     const now = await databaseNow(this.db, at);
     const page = await this.db.cmsPage.findFirst({
@@ -779,26 +901,34 @@ export class CmsService {
       },
     });
     if (!page) return null;
+    const blocks = page.blocks.flatMap((block): CmsBlockView[] => {
+      const version = block.versions[0];
+      if (!version) return [];
+      const blockType = block.blockType as CmsBlockType;
+      return [
+        {
+          id: block.id,
+          type: blockType,
+          content: renderCmsBlock(blockType, version.content, this.tokens),
+          position: block.position,
+          isVisible: block.isVisible,
+          versionId: version.id,
+          version: version.version,
+          versionStatus: version.status,
+          effectiveAt: version.effectiveAt?.toISOString() ?? null,
+        } as CmsBlockView,
+      ];
+    });
     return {
       id: page.id,
       slug: page.slug,
       title: page.title,
       seoTitle: page.seoTitle,
       seoDescription: page.seoDescription,
-      publishedAt: page.publishedAt,
-      blocks: page.blocks.flatMap((block) => {
-        const version = block.versions[0];
-        const blockType = block.blockType as CmsBlockType;
-        return version
-          ? [
-              {
-                id: block.id,
-                type: blockType,
-                content: renderCmsBlock(blockType, version.content, this.tokens),
-              },
-            ]
-          : [];
-      }),
+      status: page.status,
+      publishedAt: page.publishedAt?.toISOString() ?? null,
+      blocks,
+      media: await this.loadMedia(blocks.map((block) => block.content)),
     };
   }
 }

@@ -7,7 +7,7 @@
     "build": "next build && node scripts/prepare-standalone.mjs",
     "dev": "next dev --hostname 127.0.0.1 --port 4010",
     "start": "PORT=4010 HOSTNAME=127.0.0.1 node --env-file-if-exists=.env.local .next/standalone/apps/web/server.js",
-    "start:e2e": "PORT=4110 HOSTNAME=127.0.0.1 node --env-file-if-exists=.env.local .next/standalone/apps/web/server.js",
+    "start:e2e": "PORT=4110 HOSTNAME=127.0.0.1 node .next/standalone/apps/web/server.js",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {

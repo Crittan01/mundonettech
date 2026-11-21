@@ -92,7 +92,9 @@ export default async function AdminContentPage({ searchParams }: PageProps<"/adm
                       {item.title}
                     </Link>
                   </h2>
-                  <p className="mt-1 font-mono text-xs text-muted-foreground">/{item.slug}</p>
+                  <p className="mt-1 font-mono text-xs text-muted-foreground">
+                    /pagina/{item.slug}
+                  </p>
                 </div>
                 <div className="text-sm text-muted-foreground sm:text-right">
                   <p className="font-medium text-foreground">{pageStatusLabels[item.status]}</p>

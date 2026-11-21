@@ -16,7 +16,10 @@ import {
   CmsVisibilityForm,
 } from "@/components/admin/cms-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { getPreviewCmsPage } from "@/lib/cms";
+import { getCmsOpenGraphImage } from "@/lib/cms-media";
 import { getDatabase } from "@/lib/db";
+import { getPublicMediaOrigin } from "@/lib/env";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Editar contenido" };
@@ -61,16 +64,33 @@ export default async function CmsPageDetail({
   const canWrite = hasAdminPermission(session.profile.role, "content:write");
   const ids = page.blocks.map((block) => block.id);
   const justCreated = query.created === "1";
+  const previewPage = await getPreviewCmsPage(page.slug);
+  const openGraphImage = previewPage
+    ? getCmsOpenGraphImage(previewPage, getPublicMediaOrigin())
+    : null;
 
   return (
     <div className="space-y-8">
       <div>
-        <Link href="/admin/contenido" className="text-sm text-primary underline underline-offset-4">
-          Volver al contenido
-        </Link>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Link
+            href="/admin/contenido"
+            className="text-sm text-primary underline underline-offset-4"
+          >
+            Volver al contenido
+          </Link>
+          {canWrite ? (
+            <Link
+              href={`/pagina/${page.slug}?liveEdit=1`}
+              className="text-sm font-medium text-primary underline underline-offset-4"
+            >
+              Abrir Live Edit
+            </Link>
+          ) : null}
+        </div>
         <h1 className="mt-3 text-3xl font-bold">{page.title}</h1>
         <p className="mt-2 text-muted-foreground">
-          <span className="font-mono">/{page.slug}</span> · {pageStatusLabels[page.status]}
+          <span className="font-mono">/pagina/{page.slug}</span> · {pageStatusLabels[page.status]}
           {page.publishedAt
             ? ` · publicada ${bogotaFormatter.format(page.publishedAt)}`
             : page.scheduledFor
@@ -97,6 +117,7 @@ export default async function CmsPageDetail({
             seoTitle: page.seoTitle,
             seoDescription: page.seoDescription,
           }}
+          openGraphImage={openGraphImage}
         />
       ) : (
         <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">

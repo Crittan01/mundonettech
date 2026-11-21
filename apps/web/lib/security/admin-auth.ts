@@ -11,6 +11,7 @@ import type { AdminUser } from "@mundonettech/db";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 
 import { getDatabase } from "@/lib/db";
 import { getSessionHmacSecret } from "@/lib/env";
@@ -57,6 +58,7 @@ export async function getAdminSession(
     requireRecentMfa?: boolean;
   } = {},
 ): Promise<AdminSession> {
+  await connection();
   const supabase = await createSupabaseServerClient();
   const { data: userData, error: userError } = await supabase.auth.getUser();
   if (userError || !userData.user) throw new AdminAuthorizationError("NO_SESSION");
