@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
@@ -79,7 +79,15 @@ async function stockLevel(variantId, locationId) {
   });
 }
 
-function validImei(prefix = "35391510544011") {
+function randomTaxId() {
+  const digits = Array.from(randomBytes(12), (byte) => byte % 10);
+  digits[0] = (digits[0] % 9) + 1;
+  return `${digits.slice(0, 11).join("")}-${digits[11]}`;
+}
+
+function validImei(
+  prefix = `35${Array.from(randomBytes(12), (byte) => byte % 10).join("")}`,
+) {
   let sum = 0;
   for (let index = 0; index < 14; index += 1) {
     let digit = prefix.charCodeAt(index) - 48;
@@ -171,11 +179,13 @@ describe("F1.3 — persisted inventory schema and invariants", () => {
     );
 
     const code = `SUP-${randomUUID().slice(0, 8).toUpperCase()}`;
+    const firstTaxId = randomTaxId();
+    const secondTaxId = randomTaxId();
     const first = await db.supplier.create({
-      data: { code, legalName: "Supplier One", taxId: "901111111-1" },
+      data: { code, legalName: "Supplier One", taxId: firstTaxId },
     });
     await assert.rejects(
-      db.supplier.create({ data: { code, legalName: "Supplier Two", taxId: "902222222-2" } }),
+      db.supplier.create({ data: { code, legalName: "Supplier Two", taxId: secondTaxId } }),
       /Unique constraint|unique constraint/,
     );
     await db.supplier.update({
@@ -183,7 +193,7 @@ describe("F1.3 — persisted inventory schema and invariants", () => {
       data: { deletedAt: new Date() },
     });
     const recreated = await db.supplier.create({
-      data: { code, legalName: "Supplier Two", taxId: "902222222-2" },
+      data: { code, legalName: "Supplier Two", taxId: secondTaxId },
     });
     assert.notEqual(recreated.id, first.id);
   });
@@ -609,7 +619,7 @@ describe("F1.3 — purchase orders, serialized receipts and WAC", () => {
 
     const serials = [
       { serial: key("SERIAL-A"), imei: validImei() },
-      { serial: key("SERIAL-B"), imei: validImei("35391510544021") },
+      { serial: key("SERIAL-B"), imei: validImei() },
     ];
     const receipt = await receivePurchaseOrder(db, {
       purchaseOrderId: purchase.id,

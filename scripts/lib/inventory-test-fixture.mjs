@@ -38,10 +38,18 @@ export async function seedInventoryFixture(client, catalog) {
      ) VALUES ($1, $2, 10, 0, 2, 60000)`,
     [locationId, catalog.variantId],
   );
+  const taxDigits = Array.from(randomBytes(12), (byte) => byte % 10);
+  taxDigits[0] = (taxDigits[0] % 9) + 1;
+  const supplierTaxId = `${taxDigits.slice(0, 11).join("")}-${taxDigits[11]}`;
   await client.query(
     `INSERT INTO "Supplier" ("id", "code", "legalName", "taxId", "email", "phoneE164", "paymentTermsDays")
-     VALUES ($1, $2, 'Proveedor de Pruebas SAS', '901234567-8', $3, '+573001234567', 30)`,
-    [supplierId, `SUP-${suffix.slice(0, 8).toUpperCase()}`, `supplier-${suffix}@example.test`],
+     VALUES ($1, $2, 'Proveedor de Pruebas SAS', $3, $4, '+573001234567', 30)`,
+    [
+      supplierId,
+      `SUP-${suffix.slice(0, 8).toUpperCase()}`,
+      supplierTaxId,
+      `supplier-${suffix}@example.test`,
+    ],
   );
   await client.query(
     `INSERT INTO "PurchaseOrder" ("id", "code", "supplierId", "destinationLocationId")
