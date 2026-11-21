@@ -44,6 +44,12 @@ model AdminUser {
   cmsMedia       CmsMedia[]
   assistedCarts  Cart[]
   requestedRefunds OrderRefund[]
+  confirmedPaymentAttempts PaymentAttempt[] @relation("PaymentAttemptConfirmer")
+  blockedIdentities BlockedIdentity[] @relation("IdentityBlocker")
+  unblockedIdentities BlockedIdentity[] @relation("IdentityUnblocker")
+  remittanceBatches RemittanceBatch[]
+  codReconciliations CodReconciliation[]
+  storeCreditEntries StoreCreditEntry[]
 
   @@index([role, status])
   @@index([createdAt])
@@ -123,6 +129,7 @@ model IntegrationCredential {
   revokedAt                DateTime?              @db.Timestamptz(6)
   createdBy                AdminUser              @relation("CredentialCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
   lastRotatedBy            AdminUser?             @relation("CredentialRotator", fields: [lastRotatedByAdminUserId], references: [id], onDelete: Restrict)
+  paymentAttempts          PaymentAttempt[]
 
   @@index([environment, revokedAt])
   @@index([environment, createdAt, id])

@@ -31,7 +31,9 @@ Configura mediante el gestor de secretos correspondiente:
 | `SECURITY_EVENT_PEPPER` / `RECOVERY_CODE_PEPPER` | Hashes independientes de eventos y códigos. |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Captcha por ambiente y hostname. |
 | `TURNSTILE_EXPECTED_HOSTNAME` | Host esperado fuera de desarrollo; STG debe sobrescribirlo. |
+| `INTEGRATION_ENVIRONMENT` | Ambiente explícito de la bóveda y pagos (`LOCAL`/`STG`/`PRD`); Vercel lo infiere de forma aislada si no se define. |
 | `INTEGRATION_CREDENTIAL_KEYS_*` | Llaveros AES independientes `LOCAL`/`STG`/`PRD`. |
+| `BANK_TRANSFER_INSTRUCTIONS` | Instrucciones bancarias públicas verificadas; si falta, transferencia no se ofrece. Nunca inventar datos. |
 | `R2_*` / `NEXT_PUBLIC_MEDIA_BASE_URL` | Bucket, endpoint y credenciales de medios por ambiente; origen público HTTPS. |
 | `CMS_CRON_SECRET` / `CMS_JOB_ACTOR_ID` | Bearer del scheduler y admin activo con `content:write` para `/api/jobs/cms-publish`. |
 | `ORDER_CRON_SECRET` | Bearer independiente para `/api/jobs/orders`: abandono/expiración de carritos y liberación de reservas no pagadas. |
@@ -52,7 +54,7 @@ pnpm admin:bootstrap
 
 El bootstrap valida política y HIBP, confirma correo y crea el primer `SUPERADMIN`; el primer login exige TOTP. Vincular una cuenta Auth existente requiere `BOOTSTRAP_ADMIN_LINK_EXISTING=YES` después de verificar propiedad. Las migraciones aplicadas no se editan: cualquier cambio posterior crea una nueva migración. No hay administradores de demostración. `pnpm db:seed` carga explícitamente el catálogo canónico de `config/`, con advisory lock, sin imágenes/GTIN/seriales inventados y sin alterar stock ya existente.
 
-Programa `POST /api/jobs/orders` con `Authorization: Bearer $ORDER_CRON_SECRET` mediante el scheduler del ambiente, sin incluir el secreto en URLs ni logs. El job detecta carritos inactivos, expira carritos vencidos y libera reservas de órdenes `UNPAID` vencidas; emite únicamente eventos `DomainOutbox` sin PII para que los workers posteriores procesen efectos externos. La respuesta es `no-store` y el bearer se compara con hash en tiempo constante.
+Programa `POST /api/jobs/orders` con `Authorization: Bearer $ORDER_CRON_SECRET` mediante el scheduler del ambiente, sin incluir el secreto en URLs ni logs. El job detecta carritos inactivos, expira carritos vencidos, libera reservas de órdenes `UNPAID` vencidas y expira sus intentos abiertos. Los pagos parciales vencidos generan una revisión deduplicada sin liberar stock ni capturas; los recaudos COD reportados no se cancelan automáticamente. Emite únicamente eventos `DomainOutbox` sin PII para que los workers posteriores procesen efectos externos. La respuesta es `no-store` y el bearer se compara con hash en tiempo constante.
 
 ## 4. Gates y suites
 
@@ -61,13 +63,13 @@ make check            # docs/Git/idioma/fronteras/anti-PRD, lint, Prettier y typ
 pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
 pnpm test:unit        # contratos Vitest de guardas, catálogo, WAC, seriales, CSV e IVA dual/UVT
 pnpm test:integration # catálogo, inventario, checkout, reembolsos, RLS, concurrencia y bóveda AES-256-GCM
-pnpm test:rls         # matriz autónoma sobre PG17 real (1.110 denegaciones bajo SAVEPOINT/ROLLBACK)
+pnpm test:rls         # matriz autónoma sobre PG17 real (1.246 denegaciones bajo SAVEPOINT/ROLLBACK)
 pnpm build            # build productivo + empaquetado standalone completo
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
 ```
 
-En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 1.110 casos reales: 315 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 795 operaciones sobre `anon`, `authenticated` y `service_role` en las 63 tablas y 13 funciones RPC.
+En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 1.246 casos reales: 355 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 891 operaciones sobre `anon`, `authenticated` y `service_role` en las 71 tablas y 13 funciones RPC.
 
 `pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, carrito, checkout domicilio/Click & Collect, recibo/descarga, scheduler de órdenes, cupones, bundles, precios y venta asistida con MFA `aal2`, auth y seguridad, controles de teclado, CSP/HSTS, `no-store`/`noindex` transaccional y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
 

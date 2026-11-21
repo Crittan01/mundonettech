@@ -67,7 +67,8 @@ async function authenticateAdmin(
   await cdp.send("Network.setCookie", {
     name: "__Host-admin_activity",
     value: activity,
-    url: "http://127.0.0.1:4110/",
+    domain: "127.0.0.1",
+    path: "/",
     httpOnly: true,
     secure: true,
     sameSite: "Strict",

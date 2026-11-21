@@ -83,6 +83,9 @@ importers:
       '@mundonettech/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@mundonettech/integrations':
+        specifier: workspace:*
+        version: link:../../packages/integrations
       '@mundonettech/legal-co':
         specifier: workspace:*
         version: link:../../packages/legal-co

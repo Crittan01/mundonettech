@@ -1,9 +1,8 @@
 "use client";
 
 import { formatCopCents } from "@mundonettech/core";
-import type { CheckoutPreview } from "@mundonettech/db";
 import Link from "next/link";
-import { useActionState, useMemo, useRef, useState } from "react";
+import { startTransition, useActionState, useMemo, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -11,11 +10,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { confirmCheckoutAction } from "@/lib/actions/checkout";
 import { initialActionState } from "@/lib/action-state";
+import type { StorefrontCheckoutPreview } from "@/lib/checkout";
 
 const steps = [
   { number: 1, label: "Contacto y dirección" },
   { number: 2, label: "Entrega" },
-  { number: 3, label: "Revisión y confirmación" },
+  { number: 3, label: "Pago y confirmación" },
 ] as const;
 
 const selectClass =
@@ -25,7 +25,7 @@ export function CheckoutForm({
   preview,
   submissionId,
 }: {
-  preview: CheckoutPreview;
+  preview: StorefrontCheckoutPreview;
   submissionId: string;
 }) {
   const [state, action, pending] = useActionState(confirmCheckoutAction, initialActionState);
@@ -41,7 +41,18 @@ export function CheckoutForm({
       preview.pickupLocations.find((location) => location.available)?.id ??
       "",
   );
+  const [paymentMethod, setPaymentMethod] = useState<
+    "WOMPI" | "COD" | "BANK_TRANSFER" | "STORE_CREDIT"
+  >(
+    ["WOMPI", "BANK_TRANSFER", "STORE_CREDIT"].includes(state.values?.paymentMethod ?? "")
+      ? (state.values?.paymentMethod as "WOMPI" | "BANK_TRANSFER" | "STORE_CREDIT")
+      : "COD",
+  );
+  const [wompiCredentialId, setWompiCredentialId] = useState(
+    state.values?.wompiCredentialId ?? preview.paymentMethods.wompiAccounts[0]?.id ?? "",
+  );
   const sections = useRef<Record<number, HTMLElement | null>>({});
+  const checkoutForm = useRef<HTMLFormElement>(null);
   const values = state.values;
   const customer = preview.customer;
   const defaultRecipient =
@@ -58,6 +69,8 @@ export function CheckoutForm({
   const shippingCents = method === "HOME_DELIVERY" ? preview.homeDelivery.shippingCents : "0";
   const totalCents =
     method === "HOME_DELIVERY" ? preview.homeDelivery.totalCents : preview.merchandiseTotalCents;
+  const availableCredit = BigInt(preview.paymentMethods.storeCreditAvailableCents ?? "0");
+  const creditAmount = availableCredit < BigInt(totalCents) ? availableCredit : BigInt(totalCents);
   const reviewFingerprint =
     method === "HOME_DELIVERY"
       ? preview.homeDelivery.reviewFingerprint
@@ -110,9 +123,17 @@ export function CheckoutForm({
     setStep((current) => Math.min(3, current + 1));
   }
 
+  function completeCheckout() {
+    setLocalError("");
+    if (!validateSection(3)) return;
+    const currentForm = checkoutForm.current;
+    if (!currentForm) return;
+    startTransition(() => action(new FormData(currentForm)));
+  }
+
   return (
     <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <form action={action} className="space-y-6" noValidate>
+      <form ref={checkoutForm} action={action} className="space-y-6" noValidate>
         <input type="hidden" name="submissionId" value={submissionId} />
         <input type="hidden" name="reviewFingerprint" value={reviewFingerprint} />
         <ol aria-label="Progreso del checkout" className="grid gap-2 sm:grid-cols-3">
@@ -434,6 +455,110 @@ export function CheckoutForm({
               Volveremos a validar precio, cupón, impuestos, DANE y stock antes de crear la orden.
             </p>
           </div>
+          <fieldset className="space-y-3 border-t border-border pt-5">
+            <legend className="mb-2 font-semibold">Elige el método de pago</legend>
+            {preview.paymentMethods.wompiAccounts.length ? (
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
+                <input
+                  type="radio"
+                  name="paymentMethod"
+                  value="WOMPI"
+                  checked={paymentMethod === "WOMPI"}
+                  onChange={() => setPaymentMethod("WOMPI")}
+                  className="mt-1 size-4 accent-primary"
+                  required
+                />
+                <span>
+                  <span className="block font-semibold">Wompi</span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    Continúa en el Web Checkout seguro de Wompi. La orden se marca pagada solo tras
+                    un evento firmado o una consulta verificada en servidor.
+                  </span>
+                </span>
+              </label>
+            ) : null}
+            {paymentMethod === "WOMPI" && preview.paymentMethods.wompiAccounts.length > 1 ? (
+              <div className="space-y-2">
+                <Label htmlFor="wompi-credential">Cuenta Wompi</Label>
+                <select
+                  id="wompi-credential"
+                  name="wompiCredentialId"
+                  value={wompiCredentialId}
+                  onChange={(event) => setWompiCredentialId(event.target.value)}
+                  className={selectClass}
+                  required
+                >
+                  {preview.paymentMethods.wompiAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.accountName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <input type="hidden" name="wompiCredentialId" value={wompiCredentialId} />
+            )}
+            <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
+              <input
+                type="radio"
+                name="paymentMethod"
+                value="COD"
+                checked={paymentMethod === "COD"}
+                onChange={() => setPaymentMethod("COD")}
+                className="mt-1 size-4 accent-primary"
+                required
+              />
+              <span>
+                <span className="block font-semibold">Pago contraentrega</span>
+                <span className="mt-1 block text-sm text-muted-foreground">
+                  Reservamos el inventario durante la operación logística. El cobro se acredita
+                  únicamente cuando la recaudación y la remesa coinciden con el total.
+                </span>
+              </span>
+            </label>
+            {preview.paymentMethods.bankTransferEnabled ? (
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
+                <input
+                  type="radio"
+                  name="paymentMethod"
+                  value="BANK_TRANSFER"
+                  checked={paymentMethod === "BANK_TRANSFER"}
+                  onChange={() => setPaymentMethod("BANK_TRANSFER")}
+                  className="mt-1 size-4 accent-primary"
+                  required
+                />
+                <span>
+                  <span className="block font-semibold">Transferencia bancaria</span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    Verás las instrucciones configuradas al registrar la orden. Finanzas confirmará
+                    la referencia bancaria con MFA antes de acreditar el pago.
+                  </span>
+                </span>
+              </label>
+            ) : null}
+            {preview.paymentMethods.storeCreditAvailableCents ? (
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
+                <input
+                  type="radio"
+                  name="paymentMethod"
+                  value="STORE_CREDIT"
+                  checked={paymentMethod === "STORE_CREDIT"}
+                  onChange={() => setPaymentMethod("STORE_CREDIT")}
+                  className="mt-1 size-4 accent-primary"
+                  required
+                />
+                <span>
+                  <span className="block font-semibold">Crédito de tienda</span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    Se aplicarán {formatCopCents(creditAmount)} de tu saldo disponible.
+                    {creditAmount < BigInt(totalCents)
+                      ? ` Después podrás pagar el saldo restante de ${formatCopCents(BigInt(totalCents) - creditAmount)} con otro método.`
+                      : " Cubre el total de este pedido."}
+                  </span>
+                </span>
+              </label>
+            ) : null}
+          </fieldset>
           <dl className="grid gap-4 text-sm sm:grid-cols-2">
             <div>
               <dt className="text-muted-foreground">Modalidad</dt>
@@ -460,7 +585,11 @@ export function CheckoutForm({
             </div>
             <div>
               <dt className="text-muted-foreground">Estado inicial del pago</dt>
-              <dd className="mt-1 font-medium">Pendiente · la confirmación no acredita un cobro</dd>
+              <dd className="mt-1 font-medium">
+                {paymentMethod === "STORE_CREDIT"
+                  ? "Débito inmediato del saldo disponible"
+                  : "Pendiente hasta validar el medio de pago"}
+              </dd>
             </div>
           </dl>
           <div className="space-y-3 border-t border-border pt-5">
@@ -544,11 +673,12 @@ export function CheckoutForm({
           ) : (
             <Button
               key="submit"
-              type="submit"
+              type="button"
+              onClick={completeCheckout}
               disabled={pending || !submissionId || !reviewFingerprint}
               aria-describedby="checkout-confirmation-note"
             >
-              {pending ? "Registrando y reservando…" : "Registrar pedido y emitir comprobante"}
+              {pending ? "Registrando e iniciando el pago…" : "Registrar pedido e iniciar pago"}
             </Button>
           )}
         </div>

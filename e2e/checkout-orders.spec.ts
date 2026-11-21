@@ -44,7 +44,7 @@ async function acceptAndConfirm(page: import("@playwright/test").Page) {
   await page.getByRole("button", { name: "Continuar al paso 3" }).click();
   await page.getByLabel(/Acepto los/).check();
   await page.getByLabel(/Autorizo el tratamiento/).check();
-  await page.getByRole("button", { name: "Registrar pedido y emitir comprobante" }).click();
+  await page.getByRole("button", { name: "Registrar pedido e iniciar pago" }).click();
   await expect(page).toHaveURL(/\/recibo\/[A-Za-z0-9_-]{43}\?confirmado=1/);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Tu pedido quedó registrado");
 }
@@ -148,6 +148,13 @@ test("home delivery checkout persists DANE, totals, receipt and an accessible th
   expect(order.receipt?.contentHash).toHaveLength(32);
   expect(order.items[0]?.taxLines[0]?.rule).toBe("NOT_RESPONSABLE");
   expect(order.shipments).toHaveLength(1);
+  const attempt = await db.paymentAttempt.findFirstOrThrow({
+    where: { orderId: order.id, provider: "COD" },
+    include: { codReconciliation: true },
+  });
+  expect(attempt.status).toBe("PENDING");
+  expect(attempt.amountCents).toBe(order.totalCents);
+  expect(attempt.codReconciliation?.status).toBe("PENDING_COLLECTION");
   const token = page.url().match(/\/recibo\/([A-Za-z0-9_-]{43})/)?.[1];
   if (!token) throw new Error("Receipt token missing from confirmation URL.");
   const download = await page.request.get(`/api/recibos/${token}/descargar`);
@@ -269,4 +276,10 @@ test("order scheduler rejects anonymous callers and processes abandonment and ex
   expect((await db.order.findUniqueOrThrow({ where: { id: order.id } })).orderStatus).toBe(
     "CANCELLED",
   );
+  const expiredAttempt = await db.paymentAttempt.findFirstOrThrow({
+    where: { orderId: order.id, provider: "COD" },
+    include: { codReconciliation: true },
+  });
+  expect(expiredAttempt.status).toBe("EXPIRED");
+  expect(expiredAttempt.codReconciliation?.status).toBe("CANCELLED");
 });
