@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@mundonettech/config": "workspace:*",
+    "@mundonettech/cms": "workspace:*",
     "@mundonettech/core": "workspace:*",
     "@mundonettech/db": "workspace:*",
     "@mundonettech/media": "workspace:*",

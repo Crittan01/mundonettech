@@ -4,7 +4,7 @@ Servicios puros y compartidos, sin identidad comercial ni dependencias de aplica
 
 Contratos actuales:
 
-- RBAC de ocho roles y tres anillos, permisos (incluidos `catalog:read`/`catalog:write`), navegación autorizada y controles de asignación entre anillos. Formato COP y conversión de pesos enteros a centavos sin floats (`formatCopCents`, `parseWholeCopToCents`).
+- RBAC de ocho roles y tres anillos, permisos para catálogo, contenido y configuración (`catalog:*`, `content:*`, `settings:*`), navegación autorizada y controles de asignación entre anillos. Formato COP y conversión de pesos enteros a centavos sin floats (`formatCopCents`, `parseWholeCopToCents`).
 - Máscaras de correo, teléfono, nombre e identificadores, además de redacción profunda y acotada de metadatos de auditoría.
 - Política de contraseñas, normalización de correo y verificación HIBP k-anonymity con timeout, padding y respuestas estrictamente validadas.
 - Verificación Cloudflare Turnstile con acción/hostname y errores cerrados.

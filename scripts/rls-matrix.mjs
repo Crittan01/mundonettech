@@ -7,6 +7,7 @@ import { acquireIsolatedTestDatabase } from "./lib/postgres-test-harness.mjs";
 import { assertSafeTestDatabase } from "./lib/test-environment.mjs";
 import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mjs";
 import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixture.mjs";
+import { cmsTables, seedCmsFixture } from "./lib/cms-test-fixture.mjs";
 
 const expectedTables = [
   "AdminUser",
@@ -20,6 +21,7 @@ const expectedTables = [
   "IdempotencyKey",
   ...catalogTables,
   ...inventoryTables,
+  ...cmsTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -179,6 +181,7 @@ async function ensureMatrixFixtures(client) {
 
   const catalog = await seedCatalogFixture(client);
   await seedInventoryFixture(client, catalog);
+  await seedCmsFixture(client, adminId);
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {

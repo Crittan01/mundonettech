@@ -19,7 +19,11 @@ export type AdminPermission =
   | "security:write_own"
   | "audit:read"
   | "catalog:read"
-  | "catalog:write";
+  | "catalog:write"
+  | "content:read"
+  | "content:write"
+  | "settings:read"
+  | "settings:write";
 
 const rings: Readonly<Record<AdminRoleValue, AdminRing>> = {
   SUPERADMIN: 1,
@@ -45,6 +49,24 @@ const catalogWriters = [
   "STORE_MANAGER",
   "INVENTORY_BUYER",
 ] as const satisfies readonly AdminRoleValue[];
+const contentReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "CMS_EDITOR",
+] as const satisfies readonly AdminRoleValue[];
+const contentWriters = contentReaders;
+const settingsReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
+const settingsWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+] as const satisfies readonly AdminRoleValue[];
 
 const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> = {
   "dashboard:read": adminRoles,
@@ -55,6 +77,10 @@ const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> 
   "audit:read": ["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"],
   "catalog:read": catalogReaders,
   "catalog:write": catalogWriters,
+  "content:read": contentReaders,
+  "content:write": contentWriters,
+  "settings:read": settingsReaders,
+  "settings:write": settingsWriters,
 };
 
 export function isAdminRole(value: unknown): value is AdminRoleValue {
@@ -89,13 +115,26 @@ export function canManageAdministrator(
 }
 
 export function adminNavigation(role: AdminRoleValue): readonly {
-  href: "/admin" | "/admin/catalogo" | "/admin/usuarios" | "/admin/seguridad" | "/admin/auditoria";
+  href:
+    | "/admin"
+    | "/admin/catalogo"
+    | "/admin/contenido"
+    | "/admin/configuracion"
+    | "/admin/usuarios"
+    | "/admin/seguridad"
+    | "/admin/auditoria";
   label: string;
 }[] {
   return [
     { href: "/admin", label: "Resumen" },
     ...(hasAdminPermission(role, "catalog:read")
       ? [{ href: "/admin/catalogo" as const, label: "Catálogo" }]
+      : []),
+    ...(hasAdminPermission(role, "content:read")
+      ? [{ href: "/admin/contenido" as const, label: "Contenido" }]
+      : []),
+    ...(hasAdminPermission(role, "settings:read")
+      ? [{ href: "/admin/configuracion" as const, label: "Configuración" }]
       : []),
     ...(hasAdminPermission(role, "users:read")
       ? [{ href: "/admin/usuarios" as const, label: "Usuarios" }]
