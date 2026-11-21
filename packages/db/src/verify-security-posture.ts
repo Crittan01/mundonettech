@@ -46,6 +46,13 @@ const requiredTables = [
   "CmsSectionBlock",
   "CmsBlockVersion",
   "CmsMedia",
+  "WholesaleTier",
+  "Coupon",
+  "CouponProduct",
+  "CouponCategory",
+  "Cart",
+  "CartItem",
+  "CouponUsage",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -112,6 +119,30 @@ const requiredConstraints = [
   "CmsMedia_byteSize_positive",
   "CmsMedia_dimensions_valid",
   "CmsMedia_derivatives_array",
+  "WholesaleTier_scope_target_valid",
+  "WholesaleTier_minimumQuantity_positive",
+  "WholesaleTier_unitPrice_nonnegative",
+  "Coupon_code_valid",
+  "Coupon_name_not_blank",
+  "Coupon_discount_value_valid",
+  "Coupon_maximumDiscount_nonnegative",
+  "Coupon_minimumSubtotal_nonnegative",
+  "Coupon_schedule_valid",
+  "Coupon_usage_limits_valid",
+  "Cart_accessTokenHash_length",
+  "Cart_assistedTokenHash_length",
+  "Cart_assisted_consistent",
+  "Cart_money_nonnegative",
+  "Cart_total_balanced",
+  "Cart_itemCount_nonnegative",
+  "Cart_pricingIssues_array",
+  "CartItem_quantity_positive",
+  "CartItem_bundle_consistent",
+  "CartItem_snapshots_not_blank",
+  "CartItem_money_nonnegative",
+  "CartItem_total_balanced",
+  "CouponUsage_status_timestamps",
+  "CouponUsage_expiration_after_reservation",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -143,6 +174,12 @@ const requiredPartialIndexes = [
   "CmsPage_slug_active_key",
   "CmsMedia_storageKey_active_key",
   "CmsMedia_contentHash_active_key",
+  "WholesaleTier_scope_target_active_key",
+  "Coupon_code_active_key",
+  "Cart_assistedTokenHash_key",
+  "CartItem_standalone_variant_key",
+  "CartItem_bundle_variant_key",
+  "CouponUsage_one_reservation_per_cart_key",
 ] as const;
 const requiredCatalogIndexes = [
   "Product_searchVector_idx",
@@ -181,6 +218,7 @@ const requiredSecurityTriggers = [
   "PurchaseOrderItem_enforce_state",
   "CmsBlockVersion_immutable_history",
   "CmsMedia_immutable_identity",
+  "CouponUsage_enforce_transition",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

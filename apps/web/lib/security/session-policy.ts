@@ -11,6 +11,8 @@ export const customerActivityCookie =
   process.env.NODE_ENV === "production" ? "__Host-customer_activity" : "customer_activity";
 export const factorResetCookie =
   process.env.NODE_ENV === "production" ? "__Host-admin_factor_reset" : "admin_factor_reset";
+export const cartTokenCookie =
+  process.env.NODE_ENV === "production" ? "__Host-cart_token" : "cart_token";
 
 export const sessionCookieOptions = {
   httpOnly: true,

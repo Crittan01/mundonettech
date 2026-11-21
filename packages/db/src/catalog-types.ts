@@ -114,6 +114,7 @@ export interface CatalogProductDetail extends CatalogProductSummary {
     readonly notes: string | null;
   }>;
   readonly bundles: Array<{
+    readonly id: string;
     readonly slug: string;
     readonly name: string;
     readonly description: string | null;

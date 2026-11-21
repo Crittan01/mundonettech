@@ -8,6 +8,7 @@ import {
   adminAbsoluteSeconds,
   adminActivityCookie,
   adminIdleSeconds,
+  cartTokenCookie,
   customerAbsoluteSeconds,
   customerActivityCookie,
   customerIdleSeconds,
@@ -76,4 +77,9 @@ export async function clearActivityCookies(): Promise<void> {
   expireCookie(store, adminActivityCookie);
   expireCookie(store, customerActivityCookie);
   expireCookie(store, factorResetCookie);
+}
+
+export async function clearCustomerCartCookie(): Promise<void> {
+  const store = await cookies();
+  expireCookie(store, cartTokenCookie);
 }

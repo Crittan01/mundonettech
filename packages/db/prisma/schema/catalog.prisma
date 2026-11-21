@@ -125,6 +125,8 @@ model Category {
   children            Category[]          @relation("CategoryTree")
   products            Product[]
   attributes          CategoryAttribute[]
+  wholesaleTiers      WholesaleTier[]
+  couponCategories    CouponCategory[]
 
   @@unique([materializedPath])
   @@index([parentId, position])
@@ -194,6 +196,8 @@ model Product {
   media             ProductMedia[]
   attributeValues   ProductAttributeValue[]
   compatibility     ProductCompatibility[]
+  wholesaleTiers    WholesaleTier[]
+  couponProducts    CouponProduct[]
 
   @@index([status, deletedAt, updatedAt])
   @@index([brandId, status])
@@ -266,6 +270,8 @@ model ProductVariant {
   serializedUnits     SerializedUnit[]
   ledgerEntries       InventoryLedger[]
   purchaseOrderItems  PurchaseOrderItem[]
+  wholesaleTiers      WholesaleTier[]
+  cartItems           CartItem[]
 
   @@unique([id, productId])
   @@index([productId, status])
@@ -420,6 +426,7 @@ model Bundle {
   updatedAt     DateTime      @default(now()) @updatedAt @db.Timestamptz(6)
   deletedAt     DateTime?     @db.Timestamptz(6)
   items         BundleItem[]
+  cartItems     CartItem[]
 
   @@index([status, deletedAt])
   @@map("Bundle")

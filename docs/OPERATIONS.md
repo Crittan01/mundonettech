@@ -24,6 +24,7 @@ Configura mediante el gestor de secretos correspondiente:
 | Variable | Uso |
 | --- | --- |
 | `DATABASE_URL` | Conexión backend PostgreSQL 17; obligatoria en producción. |
+| `NEXT_PUBLIC_SITE_URL` / `SITE_URL` | Origen canónico público para metadata y enlaces server-side de venta asistida, respectivamente; `SITE_URL` se evalúa en runtime y usa HTTPS fuera de loopback. |
 | `NEXT_PUBLIC_SUPABASE_URL` / clave publicable | Auth SSR/browser; nunca clave service role. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Solo bootstrap/invitaciones/recuperación server-side. |
 | `SESSION_TIMEOUT_SECRET` | HMAC de actividad; 32 bytes base64. |
@@ -57,15 +58,15 @@ make check            # docs/Git/idioma/fronteras/anti-PRD, lint, Prettier y typ
 pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
 pnpm test:unit        # contratos Vitest de guardas, catálogo, WAC, seriales y CSV
 pnpm test:integration # catálogo, inventario, RLS, concurrencia, idempotencia y bóveda AES-256-GCM
-pnpm test:rls         # matriz autónoma sobre PG17 real (770 denegaciones bajo SAVEPOINT/ROLLBACK)
+pnpm test:rls         # matriz autónoma sobre PG17 real (889 denegaciones bajo SAVEPOINT/ROLLBACK)
 pnpm build            # build productivo + empaquetado standalone completo
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
 ```
 
-En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 770 casos reales: 215 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 555 operaciones sobre `anon`, `authenticated` y `service_role` en las 43 tablas y 13 funciones RPC.
+En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 889 casos reales: 250 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 639 operaciones sobre `anon`, `authenticated` y `service_role` en las 50 tablas y 13 funciones RPC.
 
-`pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, auth y seguridad, controles de teclado, CSP/HSTS y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
+`pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, carrito, cupones, bundles, precios y venta asistida con MFA `aal2`, auth y seguridad, controles de teclado, CSP/HSTS, `no-store`/`noindex` transaccional y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
 
 ## 5. GitHub Actions PostgreSQL 17
 

@@ -2,6 +2,7 @@ import { formatCopCents } from "@mundonettech/core";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { AddBundleToCartForm } from "@/components/cart/add-to-cart-form";
 import { ProductCard } from "@/components/catalog/product-card";
 import { ProductMediaGallery } from "@/components/catalog/product-media-gallery";
 import { ProductVariantPanel } from "@/components/catalog/product-variant-panel";
@@ -256,7 +257,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
                       {item.quantity} ×{" "}
                       <Link
                         href={`/producto/${item.productSlug}`}
-                        className="text-foreground hover:text-primary hover:underline"
+                        className="text-foreground underline underline-offset-4 hover:text-primary"
                       >
                         {item.productName}
                       </Link>{" "}
@@ -272,6 +273,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
                     Ahorras {formatCopCents(bundle.discountCents)}
                   </p>
                 ) : null}
+                <AddBundleToCartForm bundleId={bundle.id} />
               </article>
             ))}
           </div>

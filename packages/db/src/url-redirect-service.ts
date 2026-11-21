@@ -22,6 +22,7 @@ const reservedSourcePrefixes = [
   "/robots.txt",
   "/sitemap.xml",
   "/sitemaps",
+  "/carrito",
   "/checkout",
   "/pagar",
   "/pedido",

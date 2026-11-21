@@ -6,7 +6,11 @@ import { z } from "zod";
 
 import { actionError, actionSuccess, type ActionState } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
-import { establishCustomerActivity, clearActivityCookies } from "@/lib/security/activity-cookies";
+import {
+  clearActivityCookies,
+  clearCustomerCartCookie,
+  establishCustomerActivity,
+} from "@/lib/security/activity-cookies";
 import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
 import { isPasswordCompromised } from "@/lib/security/hibp";
 import { isServerOutboundEmailDisabled } from "@/lib/security/outbound-email";
@@ -225,5 +229,6 @@ export async function signOutCustomerAction(): Promise<void> {
   const supabase = await createSupabaseServerClient();
   await supabase.auth.signOut();
   await clearActivityCookies();
+  await clearCustomerCartCookie();
   redirect("/");
 }

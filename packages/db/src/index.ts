@@ -131,4 +131,50 @@ export type {
   CatalogVariantInput,
   CatalogVariantOptionItem,
 } from "./catalog-types.js";
+export {
+  CartNotFoundError,
+  CartService,
+  CartStateError,
+  CartStockError,
+  CartValidationError,
+  CouponError,
+} from "./cart-service.js";
+export type { CouponErrorCode } from "./cart-service.js";
+export type {
+  CartAccessReference,
+  CartIdReference,
+  CartLineSnapshot,
+  CartReference,
+  CartSnapshot,
+} from "./cart-types.js";
+export {
+  PricingConflictError,
+  PricingNotFoundError,
+  PricingService,
+  PricingValidationError,
+} from "./pricing-service.js";
+export type {
+  BundleInput,
+  CouponInput,
+  PricingListOptions,
+  PricingMutationAudit,
+  WholesaleTierInput,
+} from "./pricing-types.js";
+export {
+  CartKind,
+  CartStatus,
+  CouponDiscountType,
+  CouponStatus,
+  CouponUsageStatus,
+  WholesaleTierScope,
+} from "./generated/client.js";
+export type {
+  Cart,
+  CartItem,
+  Coupon,
+  CouponCategory,
+  CouponProduct,
+  CouponUsage,
+  WholesaleTier,
+} from "./generated/client.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";

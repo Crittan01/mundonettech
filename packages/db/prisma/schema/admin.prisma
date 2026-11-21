@@ -42,6 +42,7 @@ model AdminUser {
   storeSettings  StoreSettings[]
   cmsVersions    CmsBlockVersion[]
   cmsMedia       CmsMedia[]
+  assistedCarts  Cart[]
 
   @@index([role, status])
   @@index([createdAt])

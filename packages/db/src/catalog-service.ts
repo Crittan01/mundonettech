@@ -1230,6 +1230,7 @@ export class CatalogService {
         const effectivePrice =
           basePrice > bundle.discountCents ? basePrice - bundle.discountCents : 0n;
         bundleMap.set(bundle.id, {
+          id: bundle.id,
           slug: bundle.slug,
           name: bundle.name,
           description: bundle.description,

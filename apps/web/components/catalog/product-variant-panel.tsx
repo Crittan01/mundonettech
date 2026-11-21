@@ -5,6 +5,8 @@ import type { CatalogVariant } from "@mundonettech/db";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
+import { AddToCartForm } from "@/components/cart/add-to-cart-form";
+
 export function ProductVariantPanel({
   productSlug,
   defaultVariantId,
@@ -207,6 +209,8 @@ export function ProductVariantPanel({
           </dd>
         </div>
       </dl>
+
+      <AddToCartForm variantId={selected.id} available={selected.available} />
 
       <Link
         href={`/comparar?productos=${encodeURIComponent(productSlug)}`}

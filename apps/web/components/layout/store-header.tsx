@@ -31,6 +31,9 @@ export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }>
             <Link href="/comparar" className="hover:text-primary">
               Comparar
             </Link>
+            <Link href="/carrito" className="hover:text-primary">
+              Carrito
+            </Link>
           </nav>
           <span className="hidden text-sm text-muted-foreground sm:inline">
             {storeConfig.domain}

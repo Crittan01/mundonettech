@@ -25,6 +25,7 @@ if (!publishableKey || !serviceRoleKey) throw new Error("Local Supabase keys are
 const secret = () => randomBytes(32).toString("base64");
 const contents = [
   'NEXT_PUBLIC_SITE_URL="http://127.0.0.1:4010"',
+  'SITE_URL="http://127.0.0.1:4010"',
   'NEXT_PUBLIC_SUPABASE_URL="http://127.0.0.1:54421"',
   `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY="${publishableKey}"`,
   `SUPABASE_SERVICE_ROLE_KEY="${serviceRoleKey}"`,

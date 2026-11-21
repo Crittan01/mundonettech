@@ -72,6 +72,31 @@ export {
 export type { CsvCell, CsvParseOptions, CsvRow, InventoryStockCsvRow } from "./csv.js";
 export { formatCopCents, parseWholeCopToCents } from "./money.js";
 export {
+  allocateProportionally,
+  assertCartQuantity,
+  assertMoney,
+  calculateCartPricing,
+  maxCartLines,
+  maxCartLineQuantity,
+  maxSignedBigInt,
+  normalizeCouponCode,
+  normalizePromotionSlug,
+  parseMoneyCents,
+  selectWholesaleTier,
+} from "./pricing.js";
+export type {
+  CalculatedPricingLine,
+  CartPricingIssue,
+  CartPricingResult,
+  CouponDiscountType,
+  PricingBundle,
+  PricingCoupon,
+  PricingIssueCode,
+  PricingLineInput,
+  PricingTier,
+  WholesaleScope,
+} from "./pricing.js";
+export {
   buildBreadcrumbJsonLd,
   buildFaqJsonLd,
   buildOrganizationJsonLd,

@@ -16,6 +16,7 @@ const webServerEnv: Record<string, string> = {
   HOSTNAME: "127.0.0.1",
   PORT: "4110",
   NEXT_PUBLIC_SITE_URL: "http://127.0.0.1:4110",
+  SITE_URL: process.env.SITE_URL ?? "http://127.0.0.1:4110",
   MEDIA_BASE_URL:
     process.env.MEDIA_BASE_URL ?? process.env.NEXT_PUBLIC_MEDIA_BASE_URL ?? "http://127.0.0.1:4110",
   NEXT_PUBLIC_MEDIA_BASE_URL: process.env.NEXT_PUBLIC_MEDIA_BASE_URL ?? "http://127.0.0.1:4110",
