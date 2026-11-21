@@ -117,10 +117,17 @@ export class CodReconciliationService {
         const reconciledAttemptIds: string[] = [];
         const discrepancyAttemptIds: string[] = [];
         for (const item of items) {
+          const attemptMeta = attempts.find((entry) => entry.id === item.paymentAttemptId)!;
+          const order = await lockPaymentOrder(tx, attemptMeta.orderId);
+          if (order.orderStatus === "CANCELLED") {
+            throw new PaymentConflictError("Cannot reconcile COD for a cancelled order.");
+          }
           const attempt = await lockPaymentAttempt(tx, item.paymentAttemptId);
           if (attempt.provider !== PaymentProvider.COD)
             throw new PaymentConflictError("A remittance item is not a COD attempt.");
-          await lockPaymentOrder(tx, attempt.orderId);
+          if (!["PENDING", "PROCESSING"].includes(attempt.status)) {
+            throw new PaymentConflictError("COD payment attempt is not open for reconciliation.");
+          }
           const reconciliation = await tx.codReconciliation.findUnique({
             where: { paymentAttemptId: attempt.id },
           });

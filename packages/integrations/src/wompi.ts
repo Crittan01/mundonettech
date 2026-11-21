@@ -356,7 +356,7 @@ export class WompiPaymentProvider implements PaymentProvider {
   }
 
   async start(input: ProviderStartInput): Promise<ProviderStartResult> {
-    return { checkoutUrl: createWompiCheckoutUrl(this.credentials, input) };
+    return { checkoutUrl: createWompiCheckoutUrl(this.credentials, input, input.now) };
   }
 
   private async request(

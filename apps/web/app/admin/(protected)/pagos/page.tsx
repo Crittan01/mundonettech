@@ -85,7 +85,16 @@ export default async function PaymentsPage() {
         take: 100,
       }),
       db.paymentAttempt.findMany({
-        where: { status: "SUCCEEDED" },
+        where: {
+          status: "SUCCEEDED",
+          provider: { not: "STORE_CREDIT" },
+          transactions: {
+            none: {
+              kind: { in: ["REFUND", "VOID"] },
+              status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+            },
+          },
+        },
         include: { order: { select: { orderNumber: true } } },
         orderBy: { createdAt: "desc" },
         take: 100,
@@ -93,6 +102,7 @@ export default async function PaymentsPage() {
       blockedIdentityService().list(100),
     ]);
   const canWrite = hasAdminPermission(session.profile.role, "payments:write");
+  const creditOperationKey = `admin-credit:${randomUUID()}`;
   return (
     <div className="space-y-10">
       <div>
@@ -261,7 +271,7 @@ export default async function PaymentsPage() {
               Abonos y retiros con libro consecutivo, locks por cliente e idempotencia persistente.
             </p>
           </div>
-          <StoreCreditAdjustmentForm operationKey={`admin-credit:${randomUUID()}`} />
+          <StoreCreditAdjustmentForm key={creditOperationKey} operationKey={creditOperationKey} />
         </section>
       ) : null}
       <section aria-labelledby="blocked-identities" className="space-y-4">

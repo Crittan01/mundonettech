@@ -3,7 +3,12 @@
 import { randomUUID } from "node:crypto";
 
 import { normalizeEmail } from "@mundonettech/core";
-import { OrderRefundService } from "@mundonettech/db";
+import {
+  OrderRefundService,
+  RefundConflictError,
+  RefundNotFoundError,
+  RefundValidationError,
+} from "@mundonettech/db";
 import {
   PaymentAuthorizationError,
   PaymentConflictError,
@@ -75,8 +80,11 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
       values,
     );
   }
-  if (error instanceof PaymentNotFoundError)
+  if (error instanceof PaymentNotFoundError || error instanceof RefundNotFoundError)
     return actionError("El registro financiero ya no existe o no está disponible.", values);
+  if (error instanceof RefundConflictError) {
+    return actionError("El estado del reembolso cambió. Recarga y revisa la operación.", values);
+  }
   if (error instanceof PaymentProviderError) {
     return actionError(
       "El proveedor no confirmó un resultado válido. Revisa el estado antes de reintentar.",
@@ -85,6 +93,7 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
   }
   if (
     error instanceof PaymentValidationError ||
+    error instanceof RefundValidationError ||
     error instanceof z.ZodError ||
     error instanceof TypeError
   ) {
@@ -113,10 +122,11 @@ export async function confirmBankTransferAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const audit = await authorize();
     const result = await paymentService().confirmBankTransfer({
       paymentAttemptId: z.string().uuid().parse(formString(formData, "paymentAttemptId")),
       externalReference: formString(formData, "externalReference").trim(),
-      audit: await authorize(),
+      audit,
     });
     revalidatePath("/admin/pagos");
     return actionSuccess(
@@ -133,6 +143,7 @@ export async function reconcileCodAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const audit = await authorize();
     const result = await codReconciliationService().reconcile({
       carrier: formString(formData, "carrier").trim(),
       reference: formString(formData, "reference").trim(),
@@ -144,7 +155,7 @@ export async function reconcileCodAction(
           carrierReference: formString(formData, "carrierReference").trim(),
         },
       ],
-      audit: await authorize(),
+      audit,
     });
     revalidatePath("/admin/pagos");
     return actionSuccess(
@@ -163,13 +174,14 @@ export async function executeRefundAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
-    const refundId = z.string().uuid().parse(formString(formData, "refundId"));
     const audit = await authorize();
+    const refundId = z.string().uuid().parse(formString(formData, "refundId"));
     const db = getDatabase();
-    const existing = await db.orderRefund.findUniqueOrThrow({
+    const existing = await db.orderRefund.findUnique({
       where: { id: refundId },
       select: { status: true },
     });
+    if (!existing) throw new PaymentNotFoundError("Order refund not found.");
     if (existing.status === "REQUESTED") {
       await new OrderRefundService(db).approve({ refundId, audit });
     }
@@ -191,10 +203,11 @@ export async function completeCompensationAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const audit = await authorize();
     await paymentRefundService().completeManualTransaction({
       transactionId: z.string().uuid().parse(formString(formData, "transactionId")),
       externalId: formString(formData, "externalId").trim(),
-      audit: await authorize(),
+      audit,
     });
     revalidatePath("/admin/pagos");
     return actionSuccess("Compensación verificada y conciliada.");
@@ -209,9 +222,10 @@ export async function voidPaymentAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const audit = await authorize();
     const result = await paymentRefundService().void(
       z.string().uuid().parse(formString(formData, "paymentAttemptId")),
-      await authorize(),
+      audit,
     );
     revalidatePath("/admin/pagos");
     return actionSuccess(
@@ -230,6 +244,7 @@ export async function adjustStoreCreditAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const audit = await authorize();
     const email = normalizeEmail(formString(formData, "customerEmail"));
     const customer = await getDatabase().customer.findFirst({
       where: { email, status: "ACTIVE", deletedAt: null },
@@ -242,7 +257,7 @@ export async function adjustStoreCreditAction(
       amountCents: cents(formString(formData, "amountCents")),
       operationKey: formString(formData, "operationKey"),
       reason: formString(formData, "reason").trim(),
-      audit: await authorize(),
+      audit,
     });
     revalidatePath("/admin/pagos");
     return actionSuccess(
@@ -259,6 +274,7 @@ export async function blockIdentityAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const audit = await authorize();
     const kind = z.enum(["EMAIL", "PHONE", "DOCUMENT"]).parse(formString(formData, "kind"));
     const identity = formString(formData, "identity").trim();
     const identityHash =
@@ -280,7 +296,7 @@ export async function blockIdentityAction(
       identityHash,
       reason: formString(formData, "reason").trim(),
       ...(expiresAt ? { expiresAt } : {}),
-      audit: await authorize(),
+      audit,
     });
     revalidatePath("/admin/pagos");
     return actionSuccess("Identidad bloqueada para COD; solo se persistió su hash HMAC.");
@@ -295,9 +311,10 @@ export async function unblockIdentityAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const audit = await authorize();
     await blockedIdentityService().unblock(
       z.string().uuid().parse(formString(formData, "blockedIdentityId")),
-      await authorize(),
+      audit,
     );
     revalidatePath("/admin/pagos");
     return actionSuccess("Bloqueo desactivado sin borrar el historial.");

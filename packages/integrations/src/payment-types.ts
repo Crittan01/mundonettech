@@ -93,6 +93,7 @@ export interface ProviderStartInput {
   readonly amountCents: bigint;
   readonly returnUrl?: string;
   readonly expiresAt?: Date;
+  readonly now?: Date;
 }
 
 export interface ProviderStartResult {

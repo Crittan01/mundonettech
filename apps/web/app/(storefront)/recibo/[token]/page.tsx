@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { formatCopCents } from "@mundonettech/core";
 import { ReceiptBalanceError, type OrderStatus, type PaymentStatus } from "@mundonettech/db";
 import Link from "next/link";
@@ -93,8 +95,19 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
   ]
     .filter(Boolean)
     .join(" · ");
-  const [attempts, order, customerId, credentials] = await Promise.all([
+  const [attempts, rawAttempts, order, customerId, credentials] = await Promise.all([
     paymentService().listOrderPayments(receipt.orderId),
+    getDatabase().paymentAttempt.findMany({
+      where: { orderId: receipt.orderId },
+      select: {
+        id: true,
+        provider: true,
+        status: true,
+        amountCents: true,
+        expiresAt: true,
+        transactions: { where: { kind: "CAPTURE" }, select: { id: true } },
+      },
+    }),
     getDatabase().order.findUnique({
       where: { id: receipt.orderId },
       select: { customerId: true },
@@ -106,9 +119,36 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
     customerId && order?.customerId === customerId
       ? await storeCreditService().get(customerId)
       : null;
+  const now = new Date();
+  const capturedCents = rawAttempts
+    .filter((attempt) => attempt.status === "SUCCEEDED")
+    .reduce((sum, attempt) => sum + attempt.amountCents, 0n);
+  const committedCents = rawAttempts
+    .filter((attempt) => {
+      if (!["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"].includes(attempt.status)) {
+        return false;
+      }
+      const expiredUntouched =
+        ["REQUIRES_ACTION", "PENDING"].includes(attempt.status) &&
+        attempt.expiresAt !== null &&
+        attempt.expiresAt.getTime() <= now.getTime() &&
+        attempt.transactions.length === 0;
+      return !expiredUntouched;
+    })
+    .reduce((sum, attempt) => sum + attempt.amountCents, 0n);
+  const rawRemaining = BigInt(receipt.totalCents) - capturedCents - committedCents;
+  const uncommittedCents = rawRemaining > 0n ? rawRemaining.toString() : "0";
+  const resumableWompiAttemptId =
+    rawAttempts.find(
+      (attempt) =>
+        attempt.provider === "WOMPI" &&
+        attempt.status === "REQUIRES_ACTION" &&
+        (attempt.expiresAt === null || attempt.expiresAt.getTime() > now.getTime()),
+    )?.id ?? null;
   const allowNewPayment =
     receipt.orderStatus !== "CANCELLED" &&
-    ["UNPAID", "PARTIALLY_PAID", "FAILED"].includes(receipt.paymentStatus);
+    ["UNPAID", "PARTIALLY_PAID", "FAILED"].includes(receipt.paymentStatus) &&
+    rawRemaining > 0n;
   return (
     <div className="mx-auto max-w-4xl space-y-8 print:max-w-none">
       <div className="flex flex-wrap items-start justify-between gap-4 print:block">
@@ -147,8 +187,27 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
         </p>
       ) : null}
 
+      {query.pago === "pendiente" ? (
+        <p role="status" className="rounded-xl border border-warning bg-card p-4 text-sm">
+          Tu pedido quedó registrado, pero el método de pago inicial no pudo abrirse. Selecciona un
+          medio disponible abajo para completar el pago sin perder tu reserva.
+        </p>
+      ) : null}
+      {query.pago === "iniciado" ? (
+        <p role="status" className="rounded-xl border border-border bg-card p-4 text-sm">
+          Intento de pago registrado. Revisa el estado y las instrucciones en el panel de pagos.
+        </p>
+      ) : null}
+      {query.verificado === "1" ? (
+        <p role="status" className="rounded-xl border border-border bg-card p-4 text-sm">
+          Consultamos el estado de la transacción con Wompi y actualizamos el comprobante.
+        </p>
+      ) : null}
+
       <ReceiptPaymentPanel
         token={token}
+        operationId={randomUUID()}
+        orderNumber={receipt.orderNumber}
         attempts={attempts}
         wompiAccounts={credentials.items
           .filter((credential) => credential.provider === "wompi" && !credential.revokedAt)
@@ -158,6 +217,8 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
           credit?.active && BigInt(credit.availableCents) > 0n ? credit.availableCents : null
         }
         allowNewPayment={allowNewPayment}
+        uncommittedCents={uncommittedCents}
+        resumableWompiAttemptId={resumableWompiAttemptId}
         externalId={typeof query.id === "string" ? query.id : ""}
         paymentStatus={receipt.paymentStatus}
       />

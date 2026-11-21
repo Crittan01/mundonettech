@@ -1,4 +1,5 @@
 import {
+  hasUniqueViolation,
   inInventoryTransaction,
   type BlockedIdentityKind,
   type PrismaClient,
@@ -55,44 +56,79 @@ export class BlockedIdentityService {
     }
     const identityHash = paymentHash(options.identityHash, "identityHash");
     const reason = paymentText(options.reason, "reason", 500);
-    return inInventoryTransaction(this.db, async (tx) => {
-      await assertFinancialActor(tx, options.audit.actorAdminUserId);
-      const now = await databaseNow(tx);
-      if (options.expiresAt && options.expiresAt.getTime() <= now.getTime()) {
-        throw new PaymentConflictError("A blocked identity expiration must be in the future.");
-      }
-      const existing = await tx.blockedIdentity.findFirst({
-        where: { kind: options.kind, identityHash, active: true },
-      });
-      if (existing) {
-        if (
-          existing.reason !== reason ||
-          existing.expiresAt?.getTime() !== options.expiresAt?.getTime()
-        ) {
-          throw new PaymentConflictError(
-            "An active block already exists for this identity.",
-            "DUPLICATE_REFERENCE",
-          );
+    try {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        await assertFinancialActor(tx, options.audit.actorAdminUserId);
+        const now = await databaseNow(tx);
+        if (options.expiresAt && options.expiresAt.getTime() <= now.getTime()) {
+          throw new PaymentConflictError("A blocked identity expiration must be in the future.");
         }
-        return descriptor(existing);
+        const existing = await tx.blockedIdentity.findFirst({
+          where: { kind: options.kind, identityHash, active: true },
+        });
+        if (existing) {
+          if (
+            existing.reason !== reason ||
+            existing.expiresAt?.getTime() !== options.expiresAt?.getTime()
+          ) {
+            throw new PaymentConflictError(
+              "An active block already exists for this identity.",
+              "DUPLICATE_REFERENCE",
+            );
+          }
+          return descriptor(existing);
+        }
+        const created = await tx.blockedIdentity.create({
+          data: {
+            kind: options.kind,
+            identityHash,
+            reason,
+            expiresAt: options.expiresAt ?? null,
+            blockedByAdminUserId: options.audit.actorAdminUserId,
+          },
+        });
+        await writePaymentAudit(tx, {
+          action: "PAYMENT_IDENTITY_BLOCKED",
+          targetType: "BlockedIdentity",
+          targetId: created.id,
+          audit: options.audit,
+          metadata: { kind: options.kind, expiresAt: options.expiresAt?.toISOString() ?? null },
+        });
+        return descriptor(created);
+      });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        throw new PaymentConflictError(
+          "An active block already exists for this identity.",
+          "DUPLICATE_REFERENCE",
+        );
       }
-      const created = await tx.blockedIdentity.create({
-        data: {
-          kind: options.kind,
-          identityHash,
-          reason,
-          expiresAt: options.expiresAt ?? null,
-          blockedByAdminUserId: options.audit.actorAdminUserId,
+      throw error;
+    }
+  }
+
+  async isBlocked(identities: Partial<Record<BlockedIdentityKind, Uint8Array>>): Promise<boolean> {
+    const entries = Object.entries(identities).filter(
+      (entry): entry is [BlockedIdentityKind, Uint8Array] => entry[1] !== undefined,
+    );
+    if (entries.length === 0) return false;
+    const criteria = entries.map(([kind, hash]) => {
+      if (!Object.values(["EMAIL", "PHONE", "DOCUMENT"]).includes(kind)) {
+        throw new PaymentConflictError("Unknown blocked identity kind.");
+      }
+      return { kind, identityHash: paymentHash(hash, `${kind}Hash`) };
+    });
+    return inInventoryTransaction(this.db, async (tx) => {
+      const now = await databaseNow(tx);
+      const record = await tx.blockedIdentity.findFirst({
+        where: {
+          active: true,
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+          AND: { OR: criteria },
         },
+        select: { id: true },
       });
-      await writePaymentAudit(tx, {
-        action: "PAYMENT_IDENTITY_BLOCKED",
-        targetType: "BlockedIdentity",
-        targetId: created.id,
-        audit: options.audit,
-        metadata: { kind: options.kind, expiresAt: options.expiresAt?.toISOString() ?? null },
-      });
-      return descriptor(created);
+      return record !== null;
     });
   }
 

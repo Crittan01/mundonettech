@@ -32,6 +32,7 @@ import {
 } from "./payment-shared.js";
 import {
   PaymentConflictError,
+  PaymentNotFoundError,
   PaymentValidationError,
   type PaymentAttemptSnapshot,
   type PaymentAuditContext,
@@ -137,7 +138,7 @@ export class PaymentService {
             "IDEMPOTENCY_CONFLICT",
           );
         }
-        return { attempt: existing, replayed: true };
+        return { attempt: existing, replayed: true, now };
       }
       if (order.orderStatus !== "CONFIRMED") {
         throw new PaymentConflictError("Payments require a confirmed, non-cancelled order.");
@@ -147,6 +148,43 @@ export class PaymentService {
       }
       if (order.reservationExpiresAt && order.reservationExpiresAt <= now) {
         throw new PaymentConflictError("The order inventory reservation has expired.");
+      }
+      const staleAttempts = await tx.paymentAttempt.findMany({
+        where: {
+          orderId: order.id,
+          status: { in: ["REQUIRES_ACTION", "PENDING"] },
+          expiresAt: { not: null, lte: now },
+          transactions: { none: { kind: "CAPTURE" } },
+          OR: [
+            { codReconciliation: null },
+            { codReconciliation: { status: "PENDING_COLLECTION" } },
+          ],
+        },
+        select: { id: true, provider: true },
+      });
+      for (const stale of staleAttempts) {
+        await tx.paymentAttempt.update({
+          where: { id: stale.id },
+          data: { status: "EXPIRED", completedAt: now },
+        });
+        if (stale.provider === PaymentProvider.COD) {
+          await tx.codReconciliation.updateMany({
+            where: { paymentAttemptId: stale.id, status: "PENDING_COLLECTION" },
+            data: { status: "CANCELLED" },
+          });
+        }
+        await writePaymentOutbox(tx, {
+          eventType: "payment.attempt.expired.v1",
+          aggregateType: "PaymentAttempt",
+          aggregateId: stale.id,
+          deduplicationKey: `payment-attempt:${stale.id}:expired:v1`,
+          payload: {
+            attemptId: stale.id,
+            orderId: order.id,
+            provider: stale.provider,
+            expiredAt: now.toISOString(),
+          },
+        });
       }
       if (amount !== undefined) assertPaymentMoney(amount);
       const totals = await tx.$queryRaw<Array<{ captured: bigint; committed: bigint }>>`
@@ -333,19 +371,25 @@ export class PaymentService {
           status: attempt.status,
         },
       });
-      return { attempt, replayed: false };
+      return { attempt, replayed: false, now };
     });
     let checkoutUrl: string | null = null;
     if (result.attempt.provider === PaymentProvider.WOMPI && wompi) {
-      checkoutUrl = (
-        await wompi.provider.start({
-          attemptId: result.attempt.id,
-          reference: result.attempt.reference,
-          amountCents: result.attempt.amountCents,
-          ...(input.returnUrl ? { returnUrl: input.returnUrl } : {}),
-          ...(result.attempt.expiresAt ? { expiresAt: result.attempt.expiresAt } : {}),
-        })
-      ).checkoutUrl;
+      if (
+        result.attempt.status === "REQUIRES_ACTION" &&
+        (!result.attempt.expiresAt || result.attempt.expiresAt.getTime() > result.now.getTime())
+      ) {
+        checkoutUrl = (
+          await wompi.provider.start({
+            attemptId: result.attempt.id,
+            reference: result.attempt.reference,
+            amountCents: result.attempt.amountCents,
+            ...(input.returnUrl ? { returnUrl: input.returnUrl } : {}),
+            ...(result.attempt.expiresAt ? { expiresAt: result.attempt.expiresAt } : {}),
+            now: result.now,
+          })
+        ).checkoutUrl;
+      }
     } else if (result.attempt.provider === PaymentProvider.STORE_CREDIT) {
       checkoutUrl = (
         await new StoreCreditPaymentProvider().start({
@@ -369,6 +413,72 @@ export class PaymentService {
     return paymentAttemptSnapshot(result.attempt, result.replayed, checkoutUrl);
   }
 
+  async resumeWompiCheckout(options: {
+    paymentAttemptId: string;
+    orderId: string;
+    returnUrl: string;
+  }): Promise<PaymentAttemptSnapshot> {
+    assertPaymentUuid(options.paymentAttemptId, "paymentAttemptId");
+    assertPaymentUuid(options.orderId, "orderId");
+    const checked = await inInventoryTransaction(this.db, async (tx) => {
+      await acquireOperationLocks(tx, [`order-payment:${options.orderId}`]);
+      const order = await lockPaymentOrder(tx, options.orderId);
+      const attempt = await lockPaymentAttempt(tx, options.paymentAttemptId);
+      if (attempt.orderId !== order.id || attempt.provider !== PaymentProvider.WOMPI) {
+        throw new PaymentNotFoundError("Wompi payment attempt not found for this order.");
+      }
+      if (order.orderStatus !== "CONFIRMED") {
+        throw new PaymentConflictError("Payments require a confirmed, non-cancelled order.");
+      }
+      const now = await databaseNow(tx);
+      if (attempt.status !== "REQUIRES_ACTION") {
+        throw new PaymentConflictError("Wompi payment attempt is no longer awaiting checkout.");
+      }
+      if (attempt.expiresAt && attempt.expiresAt.getTime() <= now.getTime()) {
+        const hasCapture = await tx.paymentTransaction.findFirst({
+          where: { attemptId: attempt.id, kind: "CAPTURE" },
+          select: { id: true },
+        });
+        if (!hasCapture) {
+          await tx.paymentAttempt.update({
+            where: { id: attempt.id },
+            data: { status: "EXPIRED", completedAt: now },
+          });
+          await writePaymentOutbox(tx, {
+            eventType: "payment.attempt.expired.v1",
+            aggregateType: "PaymentAttempt",
+            aggregateId: attempt.id,
+            deduplicationKey: `payment-attempt:${attempt.id}:expired:v1`,
+            payload: {
+              attemptId: attempt.id,
+              orderId: order.id,
+              provider: attempt.provider,
+              expiredAt: now.toISOString(),
+            },
+          });
+        }
+        return { expired: true as const };
+      }
+      return { expired: false as const, attempt, now };
+    });
+    if (checked.expired) {
+      throw new PaymentConflictError("The Wompi payment window has expired.");
+    }
+    const wompi = await this.wompi(
+      checked.attempt.environment,
+      checked.attempt.credentialId ?? undefined,
+    );
+    const { checkoutUrl } = await wompi.provider.start({
+      attemptId: checked.attempt.id,
+      reference: checked.attempt.reference,
+      amountCents: checked.attempt.amountCents,
+      returnUrl: options.returnUrl,
+      ...(checked.attempt.expiresAt ? { expiresAt: checked.attempt.expiresAt } : {}),
+      now: checked.now,
+    });
+    return paymentAttemptSnapshot(checked.attempt, true, checkoutUrl);
+  }
+
   async confirmBankTransfer(options: {
     paymentAttemptId: string;
     externalReference: string;
@@ -381,15 +491,20 @@ export class PaymentService {
     }
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
-        const attempt = await lockPaymentAttempt(tx, options.paymentAttemptId);
-        if (attempt.provider !== PaymentProvider.BANK_TRANSFER) {
+        const peek = await tx.paymentAttempt.findUnique({
+          where: { id: options.paymentAttemptId },
+          select: { orderId: true, provider: true },
+        });
+        if (!peek) throw new PaymentNotFoundError("Payment attempt not found.");
+        if (peek.provider !== PaymentProvider.BANK_TRANSFER) {
           throw new PaymentConflictError("Only bank transfer attempts can be confirmed manually.");
         }
         await acquireOperationLocks(tx, [
-          `order-payment:${attempt.orderId}`,
+          `order-payment:${peek.orderId}`,
           `bank-reference:${externalReference}`,
         ]);
-        await lockPaymentOrder(tx, attempt.orderId);
+        await lockPaymentOrder(tx, peek.orderId);
+        const attempt = await lockPaymentAttempt(tx, options.paymentAttemptId);
         await assertFinancialActor(tx, options.audit.actorAdminUserId);
         const capture = await tx.paymentTransaction.findFirst({
           where: { attemptId: attempt.id, kind: "CAPTURE" },

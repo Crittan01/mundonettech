@@ -113,15 +113,16 @@ export async function createWompiCredentialAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = publicValues(formData);
-  const parsed = parseInput(formData);
-  if (!parsed.success)
-    return actionError(
-      "Completa la cuenta y las cuatro llaves Wompi sin espacios adicionales.",
-      values,
-    );
   let sealed: Uint8Array<ArrayBuffer> | undefined;
   try {
     const audit = await authorize();
+    const parsed = parseInput(formData);
+    if (!parsed.success) {
+      return actionError(
+        "Completa la cuenta y las cuatro llaves Wompi sin espacios adicionales.",
+        values,
+      );
+    }
     const environment = getIntegrationEnvironment();
     sealed = plaintext(parsed.data);
     parseWompiCredentials(sealed, environment);
@@ -152,13 +153,14 @@ export async function rotateWompiCredentialAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = publicValues(formData);
-  const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
-  const parsed = parseInput(formData);
-  if (!id.success || !parsed.success)
-    return actionError("Completa todos los campos de rotación.", values);
   let sealed: Uint8Array<ArrayBuffer> | undefined;
   try {
     const audit = await authorize();
+    const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
+    const parsed = parseInput(formData);
+    if (!id.success || !parsed.success) {
+      return actionError("Completa todos los campos de rotación.", values);
+    }
     const environment = getIntegrationEnvironment();
     sealed = plaintext(parsed.data);
     parseWompiCredentials(sealed, environment);
@@ -196,10 +198,10 @@ export async function reencryptCredentialAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = publicValues(formData);
-  const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
-  if (!id.success) return actionError("La credencial seleccionada no es válida.", values);
   try {
     const audit = await authorize();
+    const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
+    if (!id.success) return actionError("La credencial seleccionada no es válida.", values);
     await getIntegrationCredentialVault().reencryptWithActiveKey(
       id.data,
       audit.actorAdminUserId,
@@ -217,12 +219,12 @@ export async function revokeCredentialAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = publicValues(formData);
-  const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
-  if (!id.success || formString(formData, "confirmation") !== "REVOCAR") {
-    return actionError("Escribe REVOCAR para confirmar la revocación irreversible.", values);
-  }
   try {
     const audit = await authorize();
+    const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
+    if (!id.success || formString(formData, "confirmation") !== "REVOCAR") {
+      return actionError("Escribe REVOCAR para confirmar la revocación irreversible.", values);
+    }
     await getIntegrationCredentialVault().revoke(id.data, audit.actorAdminUserId, audit);
     revalidatePath("/admin/integraciones");
     return actionSuccess("Credencial revocada. Los nuevos pagos ya no podrán usarla.");

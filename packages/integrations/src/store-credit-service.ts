@@ -152,6 +152,9 @@ export class StoreCreditService {
       });
       if (!account) throw new PaymentNotFoundError("Store credit account not found.");
       if (account.active === active) return snapshot(account);
+      if (!account.active && active) {
+        throw new PaymentConflictError("Deactivated store credit accounts cannot be reactivated.");
+      }
       if (!active && account.heldCents > 0n) {
         throw new PaymentConflictError(
           "An account with held credit cannot change lifecycle state.",

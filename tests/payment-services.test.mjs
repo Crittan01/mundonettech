@@ -11,6 +11,8 @@ import {
   OrderService,
   PaymentProvider,
   createDatabaseClient,
+  markPurchaseOrderOrdered,
+  receivePurchaseOrder,
 } from "../packages/db/dist/index.js";
 import {
   BlockedIdentityService,
@@ -655,6 +657,204 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       }),
       (error) =>
         error instanceof PaymentConflictError && error.message.includes("reservation has expired"),
+    );
+  });
+
+  it("auto-expires untouched stale attempts, supports safe Wompi replay/resume and routes multi-account webhooks by reference", async () => {
+    await markPurchaseOrderOrdered(db, inventory.purchaseOrderId);
+    await receivePurchaseOrder(db, {
+      purchaseOrderId: inventory.purchaseOrderId,
+      operationKey: `po-replenish:${randomUUID()}`,
+      items: [
+        {
+          variantId: catalog.variantId,
+          quantity: 10,
+          serials: Array.from({ length: 10 }, (_, index) => ({
+            serial: `SERIAL-REPLENISH-${String(index + 1).padStart(2, "0")}`,
+          })),
+        },
+      ],
+    });
+    const orderId = await makeOrder();
+    const activeAccounts = (await vault.list({ includeRevoked: false, limit: 100 })).items.filter(
+      (item) => item.provider === "wompi",
+    );
+    const chosenCredentialId = activeAccounts[0].id;
+    assert.ok(activeAccounts.length >= 2);
+    const startInput = {
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: chosenCredentialId,
+      idempotencyKey: `wompi-stale:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const first = await payments.start(startInput);
+    assert.equal(first.status, "REQUIRES_ACTION");
+    assert.ok(first.checkoutUrl?.includes("checkout.wompi.co"));
+    const resumed = await payments.resumeWompiCheckout({
+      paymentAttemptId: first.id,
+      orderId,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    assert.ok(resumed.checkoutUrl?.includes("checkout.wompi.co"));
+
+    await sql.query(
+      `UPDATE "PaymentAttempt" SET "expiresAt" = "createdAt" + interval '1 millisecond' WHERE "id" = $1`,
+      [first.id],
+    );
+    const expiredReplay = await payments.start(startInput);
+    assert.equal(expiredReplay.replayed, true);
+    assert.equal(expiredReplay.checkoutUrl, null);
+    await assert.rejects(
+      payments.resumeWompiCheckout({
+        paymentAttemptId: first.id,
+        orderId,
+        returnUrl: "https://mundonettech.co/recibo/token",
+      }),
+      (error) => error instanceof PaymentConflictError && error.message.includes("expired"),
+    );
+    assert.equal(
+      (await db.paymentAttempt.findUniqueOrThrow({ where: { id: first.id } })).status,
+      "EXPIRED",
+    );
+
+    const replacement = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: chosenCredentialId,
+      idempotencyKey: `wompi-fresh:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    assert.equal(replacement.status, "REQUIRES_ACTION");
+    const approved = wompiEvent(replacement, "APPROVED");
+    const routedWithoutExplicitCredential = await webhooks.process({
+      body: approved.body,
+      environment: "LOCAL",
+      headerChecksum: approved.checksum,
+    });
+    assert.equal(routedWithoutExplicitCredential.status, "PROCESSED");
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "PAID",
+    );
+
+    const otherOrderId = await makeOrder();
+    const syncGateway = new WompiWebhookService(db, {
+      vault,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              id: approved.externalId,
+              reference: replacement.reference,
+              status: "APPROVED",
+              amount_in_cents: 100000,
+              currency: "COP",
+              status_message: "Aprobada",
+            },
+          }),
+          { status: 200 },
+        ),
+    });
+    await assert.rejects(
+      syncGateway.synchronize({
+        externalId: approved.externalId,
+        environment: "LOCAL",
+        credentialId: chosenCredentialId,
+        expectedOrderId: otherOrderId,
+      }),
+      PaymentValidationError,
+    );
+  });
+
+  it("marks deterministic HTTP void rejections as FAILED, supersedes them on order refund and blocks voids after partial refunds", async () => {
+    const activeAccounts = (await vault.list({ includeRevoked: false, limit: 100 })).items.filter(
+      (item) => item.provider === "wompi",
+    );
+    const chosenCredentialId = activeAccounts[0].id;
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: chosenCredentialId,
+      idempotencyKey: `wompi-void-http:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved = wompiEvent(attempt, "APPROVED");
+    await webhooks.process({ body: approved.body, environment: "LOCAL" });
+
+    const rejectingVoidGateway = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: "cutoff_passed" }), { status: 422 }),
+    });
+    await assert.rejects(
+      rejectingVoidGateway.void(attempt.id, audit),
+      (error) => error instanceof PaymentProviderError && error.code === "HTTP_ERROR",
+    );
+    const failedVoid = await db.paymentTransaction.findFirstOrThrow({
+      where: { attemptId: attempt.id, kind: "VOID" },
+    });
+    assert.equal(failedVoid.status, "FAILED");
+
+    const refundId = await requestFullRefund(orderId);
+    const refundGateway = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              id: 8891,
+              v2_refund_id: `v2-${randomUUID()}`,
+              status: "APPROVED",
+              status_message: "",
+              amount_in_cents: 100000,
+              transaction_id: approved.externalId,
+            },
+          }),
+          { status: 201 },
+        ),
+    });
+    const completedRefund = await refundGateway.refund(refundId, audit);
+    assert.equal(completedRefund.status, "COMPLETED");
+    const supersededVoid = await db.paymentTransaction.findUniqueOrThrow({
+      where: { id: failedVoid.id },
+    });
+    assert.equal(supersededVoid.status, "CANCELLED");
+    await assert.rejects(
+      refundGateway.void(attempt.id, audit),
+      (error) => error instanceof PaymentConflictError && error.code === "AMOUNT_EXCEEDED",
+    );
+
+    const emailHash = hash();
+    assert.equal(await blocked.isBlocked({ EMAIL: emailHash }), false);
+    const blockEntry = await blocked.block({
+      kind: "EMAIL",
+      identityHash: emailHash,
+      reason: "Rechazo reiterado COD",
+      audit,
+    });
+    assert.equal(await blocked.isBlocked({ EMAIL: emailHash }), true);
+    await blocked.unblock(blockEntry.id, audit);
+    assert.equal(await blocked.isBlocked({ EMAIL: emailHash }), false);
+
+    const deactivatedCustomer = await makeCustomer();
+    await credits.adjust({
+      customerId: deactivatedCustomer.id,
+      type: "GRANT",
+      amountCents: 10000n,
+      operationKey: `credit:${randomUUID()}`,
+      reason: "Bono",
+      audit,
+    });
+    await credits.setActive(deactivatedCustomer.id, false, audit);
+    await assert.rejects(
+      credits.setActive(deactivatedCustomer.id, true, audit),
+      PaymentConflictError,
     );
   });
 });

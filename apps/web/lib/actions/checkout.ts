@@ -4,6 +4,12 @@ import { createHash } from "node:crypto";
 
 import { legalConfig } from "@mundonettech/config/legal";
 import { PaymentProvider, type CheckoutFulfillmentInput } from "@mundonettech/db";
+import {
+  PaymentConflictError,
+  PaymentNotFoundError,
+  PaymentProviderError,
+  PaymentValidationError,
+} from "@mundonettech/integrations";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -13,6 +19,9 @@ import { clearCartAccessToken, optionalCustomerId } from "@/lib/cart";
 import { orderService, readCheckoutCartReference, receiptTokenForSubmission } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
 import {
+  blockedIdentityService,
+  getBankTransferInstructions,
+  getIntegrationCredentialVault,
   getIntegrationEnvironment,
   getPublicSiteUrl,
   paymentService,
@@ -158,11 +167,48 @@ export async function confirmCheckoutAction(
     const creditCustomerId =
       input.paymentMethod === "STORE_CREDIT" ? await optionalCustomerId() : null;
     const credit = creditCustomerId ? await storeCreditService().get(creditCustomerId) : null;
-    if (input.paymentMethod === "STORE_CREDIT" && (!creditCustomerId || !credit)) {
+    if (
+      input.paymentMethod === "STORE_CREDIT" &&
+      (!creditCustomerId || !credit?.active || BigInt(credit.availableCents) <= 0n)
+    ) {
       return actionError(
         "Inicia sesión con una cuenta que tenga saldo disponible para usar crédito de tienda.",
         values,
       );
+    }
+    if (input.paymentMethod === "BANK_TRANSFER" && getBankTransferInstructions() === null) {
+      return actionError(
+        "La transferencia bancaria no está disponible en este momento. Elige otro método de pago.",
+        values,
+      );
+    }
+    const codIdentityHashes =
+      input.paymentMethod === "COD"
+        ? {
+            EMAIL: emailIdentityHash(input.email),
+            PHONE: phoneIdentityHash(input.phoneE164),
+          }
+        : undefined;
+    if (codIdentityHashes && (await blockedIdentityService().isBlocked(codIdentityHashes))) {
+      return actionError(
+        "El pago contraentrega no está disponible para tus datos de contacto. Elige otro método de pago antes de confirmar.",
+        values,
+      );
+    }
+    if (input.paymentMethod === "WOMPI") {
+      const credentials = await getIntegrationCredentialVault().list({ limit: 100 });
+      const activeWompi = credentials.items.filter(
+        (item) => item.provider === "wompi" && !item.revokedAt,
+      );
+      const validSelection = input.wompiCredentialId
+        ? activeWompi.some((item) => item.id === input.wompiCredentialId)
+        : activeWompi.length === 1;
+      if (!validSelection) {
+        return actionError(
+          "Selecciona una cuenta Wompi activa o elige otro método de pago antes de confirmar.",
+          values,
+        );
+      }
     }
     const receiptToken = receiptTokenForSubmission(input.submissionId);
     const checkout = await orderService().checkout({
@@ -189,43 +235,51 @@ export async function confirmCheckoutAction(
       receiptAccessTokenHash: digest(receiptToken),
       expectedReviewFingerprint: input.reviewFingerprint,
     });
-    const payment = await paymentService().start({
-      orderId: checkout.orderId,
-      provider: PaymentProvider[input.paymentMethod],
-      environment: getIntegrationEnvironment(),
-      idempotencyKey: `checkout:${input.submissionId}`,
-      ...(input.paymentMethod === "STORE_CREDIT" && credit
-        ? {
-            amountCents:
-              BigInt(credit.availableCents) < BigInt(checkout.totalCents)
-                ? BigInt(credit.availableCents)
-                : BigInt(checkout.totalCents),
-          }
-        : {}),
-      ...(input.paymentMethod === "WOMPI" && input.wompiCredentialId
-        ? { credentialId: input.wompiCredentialId }
-        : {}),
-      ...(input.paymentMethod === "WOMPI"
-        ? { returnUrl: `${getPublicSiteUrl()}/recibo/${receiptToken}` }
-        : {}),
-      ...(input.paymentMethod === "COD"
-        ? {
-            identityHashes: {
-              EMAIL: emailIdentityHash(input.email),
-              PHONE: phoneIdentityHash(input.phoneE164),
-            },
-          }
-        : {}),
-    });
-    await clearCartAccessToken();
-    revalidatePath("/carrito");
-    if (input.paymentMethod === "WOMPI" && !payment.checkoutUrl) {
-      throw new Error("Wompi did not produce its signed checkout URL.");
+    try {
+      const payment = await paymentService().start({
+        orderId: checkout.orderId,
+        provider: PaymentProvider[input.paymentMethod],
+        environment: getIntegrationEnvironment(),
+        idempotencyKey: `checkout:${input.submissionId}`,
+        ...(input.paymentMethod === "STORE_CREDIT" && credit
+          ? {
+              amountCents:
+                BigInt(credit.availableCents) < BigInt(checkout.totalCents)
+                  ? BigInt(credit.availableCents)
+                  : BigInt(checkout.totalCents),
+            }
+          : {}),
+        ...(input.paymentMethod === "WOMPI" && input.wompiCredentialId
+          ? { credentialId: input.wompiCredentialId }
+          : {}),
+        ...(input.paymentMethod === "WOMPI"
+          ? { returnUrl: `${getPublicSiteUrl()}/recibo/${receiptToken}` }
+          : {}),
+        ...(codIdentityHashes ? { identityHashes: codIdentityHashes } : {}),
+      });
+      await clearCartAccessToken();
+      revalidatePath("/carrito");
+      if (input.paymentMethod === "WOMPI" && !payment.checkoutUrl && !payment.replayed) {
+        throw new PaymentValidationError("Wompi did not produce its signed checkout URL.");
+      }
+      receiptUrl =
+        input.paymentMethod === "WOMPI" && payment.checkoutUrl
+          ? payment.checkoutUrl
+          : `/recibo/${receiptToken}?confirmado=1`;
+    } catch (paymentError) {
+      if (
+        paymentError instanceof PaymentConflictError ||
+        paymentError instanceof PaymentNotFoundError ||
+        paymentError instanceof PaymentProviderError ||
+        paymentError instanceof PaymentValidationError
+      ) {
+        await clearCartAccessToken();
+        revalidatePath("/carrito");
+        receiptUrl = `/recibo/${receiptToken}?confirmado=1&pago=pendiente`;
+      } else {
+        throw paymentError;
+      }
     }
-    receiptUrl =
-      input.paymentMethod === "WOMPI" && payment.checkoutUrl
-        ? payment.checkoutUrl
-        : `/recibo/${receiptToken}?confirmado=1`;
   } catch (error) {
     return actionError(checkoutMutationMessage(error), values);
   }

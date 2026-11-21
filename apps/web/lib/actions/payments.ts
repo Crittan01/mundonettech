@@ -59,22 +59,24 @@ export async function startReceiptPaymentAction(
   const parsed = z
     .object({
       token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      operationId: z.string().uuid(),
       paymentMethod: z.enum(["WOMPI", "COD", "BANK_TRANSFER", "STORE_CREDIT"]),
       wompiCredentialId: z.union([z.string().uuid(), z.literal("")]),
     })
     .safeParse({
       token: formString(formData, "token"),
+      operationId: formString(formData, "operationId"),
       paymentMethod: formString(formData, "paymentMethod"),
       wompiCredentialId: formString(formData, "wompiCredentialId"),
     });
   if (!parsed.success) return actionError("La solicitud de pago no es válida.");
-  const { token, paymentMethod, wompiCredentialId } = parsed.data;
+  const { token, operationId, paymentMethod, wompiCredentialId } = parsed.data;
   let checkoutUrl: string | null = null;
   try {
     const receipt = await orderService().getReceiptByToken(hashCartToken(token));
     if (!receipt) return actionError("El comprobante ya no está disponible.");
     if (
-      ["PAID", "REFUNDED"].includes(receipt.paymentStatus) ||
+      ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"].includes(receipt.paymentStatus) ||
       receipt.orderStatus === "CANCELLED"
     ) {
       return actionError("Este pedido no admite nuevos intentos de pago.");
@@ -84,8 +86,37 @@ export async function startReceiptPaymentAction(
         where: { id: receipt.orderId },
         select: { customerId: true },
       }),
-      paymentService().listOrderPayments(receipt.orderId),
+      getDatabase().paymentAttempt.findMany({
+        where: { orderId: receipt.orderId },
+        select: {
+          status: true,
+          amountCents: true,
+          expiresAt: true,
+          transactions: { where: { kind: "CAPTURE" }, select: { status: true } },
+        },
+      }),
     ]);
+    const now = new Date();
+    const captured = attempts
+      .filter((attempt) => attempt.status === "SUCCEEDED")
+      .reduce((sum, attempt) => sum + attempt.amountCents, 0n);
+    const committed = attempts
+      .filter((attempt) => {
+        if (!["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"].includes(attempt.status)) {
+          return false;
+        }
+        const expiredUntouched =
+          ["REQUIRES_ACTION", "PENDING"].includes(attempt.status) &&
+          attempt.expiresAt !== null &&
+          attempt.expiresAt.getTime() <= now.getTime() &&
+          attempt.transactions.length === 0;
+        return !expiredUntouched;
+      })
+      .reduce((sum, attempt) => sum + attempt.amountCents, 0n);
+    const remaining = BigInt(receipt.totalCents) - captured - committed;
+    if (remaining <= 0n) {
+      return actionError("El saldo del pedido ya tiene un intento activo en curso.");
+    }
     let amountCents: bigint | undefined;
     if (paymentMethod === "STORE_CREDIT") {
       const customerId = await optionalCustomerId();
@@ -98,10 +129,6 @@ export async function startReceiptPaymentAction(
       if (!credit?.active || BigInt(credit.availableCents) <= 0n) {
         return actionError("Tu cuenta ya no tiene saldo disponible.");
       }
-      const captured = attempts
-        .filter((attempt) => attempt.status === "SUCCEEDED")
-        .reduce((sum, attempt) => sum + BigInt(attempt.amountCents), 0n);
-      const remaining = BigInt(receipt.totalCents) - captured;
       const available = BigInt(credit.availableCents);
       amountCents = available < remaining ? available : remaining;
     }
@@ -109,7 +136,7 @@ export async function startReceiptPaymentAction(
       orderId: receipt.orderId,
       provider: PaymentProvider[paymentMethod],
       environment: getIntegrationEnvironment(),
-      idempotencyKey: `receipt:${receipt.orderId}:${paymentMethod}:${attempts.length}`,
+      idempotencyKey: `receipt:${receipt.orderId}:${operationId}`,
       ...(amountCents !== undefined ? { amountCents } : {}),
       ...(paymentMethod === "WOMPI" && wompiCredentialId
         ? { credentialId: wompiCredentialId }
@@ -133,6 +160,40 @@ export async function startReceiptPaymentAction(
   redirect(`/recibo/${token}?pago=iniciado`);
 }
 
+export async function resumeWompiPaymentAction(
+  _previous: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const parsed = z
+    .object({
+      token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      paymentAttemptId: z.string().uuid(),
+    })
+    .safeParse({
+      token: formString(formData, "token"),
+      paymentAttemptId: formString(formData, "paymentAttemptId"),
+    });
+  if (!parsed.success) return actionError("El intento de pago Wompi no es válido.");
+  const { token, paymentAttemptId } = parsed.data;
+  let checkoutUrl: string | null = null;
+  try {
+    const receipt = await orderService().getReceiptByToken(hashCartToken(token));
+    if (!receipt) return actionError("El comprobante ya no está disponible.");
+    const resumed = await paymentService().resumeWompiCheckout({
+      paymentAttemptId,
+      orderId: receipt.orderId,
+      returnUrl: `${getPublicSiteUrl()}/recibo/${token}`,
+    });
+    checkoutUrl = resumed.checkoutUrl;
+    revalidatePath(`/recibo/${token}`);
+  } catch (error) {
+    revalidatePath(`/recibo/${token}`);
+    return failure(error);
+  }
+  if (checkoutUrl) redirect(checkoutUrl);
+  redirect(`/recibo/${token}`);
+}
+
 export async function verifyWompiPaymentAction(
   _previous: ActionState,
   formData: FormData,
@@ -151,17 +212,29 @@ export async function verifyWompiPaymentAction(
   try {
     const receipt = await orderService().getReceiptByToken(hashCartToken(token));
     if (!receipt) return actionError("El comprobante ya no está disponible.");
-    const attempt = await getDatabase().paymentAttempt.findFirst({
-      where: { orderId: receipt.orderId, provider: "WOMPI" },
-      orderBy: { createdAt: "desc" },
-      select: { credentialId: true },
+    const db = getDatabase();
+    const matchedTx = await db.paymentTransaction.findFirst({
+      where: {
+        provider: "WOMPI",
+        externalId,
+        attempt: { orderId: receipt.orderId },
+      },
+      select: { attempt: { select: { credentialId: true } } },
     });
+    const attempt =
+      matchedTx?.attempt ??
+      (await db.paymentAttempt.findFirst({
+        where: { orderId: receipt.orderId, provider: "WOMPI" },
+        orderBy: { createdAt: "desc" },
+        select: { credentialId: true },
+      }));
     if (!attempt?.credentialId)
       return actionError("No hay un intento Wompi asociado a este pedido.");
     await wompiWebhookService().synchronize({
       externalId,
       environment: getIntegrationEnvironment(),
       credentialId: attempt.credentialId,
+      expectedOrderId: receipt.orderId,
     });
     revalidatePath(`/recibo/${token}`);
   } catch (error) {

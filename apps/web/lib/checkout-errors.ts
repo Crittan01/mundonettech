@@ -8,8 +8,30 @@ import {
   OrderValidationError,
   ReceiptBalanceError,
 } from "@mundonettech/db";
+import {
+  PaymentConflictError,
+  PaymentNotFoundError,
+  PaymentProviderError,
+  PaymentValidationError,
+} from "@mundonettech/integrations";
 
 export function checkoutMutationMessage(error: unknown): string {
+  if (error instanceof PaymentConflictError) {
+    if (error.code === "BLOCKED_IDENTITY") {
+      return "El pago contraentrega no está disponible para tus datos de contacto. Elige otro método de pago antes de confirmar.";
+    }
+    if (error.code === "INSUFFICIENT_CREDIT") {
+      return "Tu saldo disponible de crédito de tienda cambió. Recarga el checkout o elige otro método de pago.";
+    }
+    return "El método de pago seleccionado cambió de disponibilidad. Recarga el checkout y elige otra opción.";
+  }
+  if (
+    error instanceof PaymentNotFoundError ||
+    error instanceof PaymentProviderError ||
+    error instanceof PaymentValidationError
+  ) {
+    return "No pudimos validar el método de pago seleccionado. Revisa tu selección o elige otro medio de pago.";
+  }
   if (error instanceof CheckoutReviewRequiredError) {
     return "Los precios, impuestos o condiciones de entrega cambiaron. Recarga el checkout y revisa nuevamente antes de confirmar.";
   }

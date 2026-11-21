@@ -217,6 +217,7 @@ export class OrderLifecycleService {
         if (!order) return null;
         await acquireOperationLocks(tx, [
           order.reservationKey!,
+          `order-payment:${order.id}`,
           `order-release:${order.id}`,
           ...(order.couponId ? [`coupon-redemption:${order.couponId}`] : []),
         ]);
@@ -366,6 +367,22 @@ export class OrderLifecycleService {
           await tx.paymentAttempt.update({
             where: { id: attempt.id },
             data: { status: "EXPIRED", completedAt: now },
+          });
+          await tx.domainOutbox.upsert({
+            where: { deduplicationKey: `payment-attempt:${attempt.id}:expired:v1` },
+            create: {
+              eventType: "payment.attempt.expired.v1",
+              aggregateType: "PaymentAttempt",
+              aggregateId: attempt.id,
+              deduplicationKey: `payment-attempt:${attempt.id}:expired:v1`,
+              payload: {
+                attemptId: attempt.id,
+                orderId: order.id,
+                provider: attempt.provider,
+                expiredAt: now.toISOString(),
+              },
+            },
+            update: {},
           });
         }
         await tx.codReconciliation.updateMany({

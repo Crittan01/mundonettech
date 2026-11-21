@@ -1,9 +1,11 @@
 import {
   acquireOperationLocks,
+  hasUniqueViolation,
   inInventoryTransaction,
   PaymentProvider,
   type OrderRefund,
   type PaymentAttempt,
+  type PaymentTransaction as PaymentTransactionModel,
   type PrismaClient,
 } from "@mundonettech/db";
 
@@ -83,9 +85,14 @@ export class PaymentRefundService {
     audit: PaymentAuditContext,
   ): Promise<RefundExecutionResult> {
     return inInventoryTransaction(this.db, async (tx) => {
+      const peek = await tx.orderRefund.findUnique({
+        where: { id: refundId },
+        select: { orderId: true },
+      });
+      if (!peek) throw new PaymentNotFoundError("Order refund not found.");
+      await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
+      await lockPaymentOrder(tx, peek.orderId);
       const refund = await this.lockRefund(tx, refundId);
-      await acquireOperationLocks(tx, [`order-payment:${refund.orderId}`]);
-      await lockPaymentOrder(tx, refund.orderId);
       const transactions = await tx.paymentTransaction.findMany({
         where: { refundId, kind: "REFUND" },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -143,6 +150,16 @@ export class PaymentRefundService {
     audit: PaymentAuditContext,
   ): Promise<void> {
     const prepared = await inInventoryTransaction(this.db, async (tx) => {
+      const peek = await tx.paymentTransaction.findUnique({
+        where: { id: transactionId },
+        select: { attempt: { select: { orderId: true } } },
+      });
+      if (!peek) throw new PaymentNotFoundError("Refund transaction not found.");
+      await acquireOperationLocks(tx, [
+        `order-payment:${peek.attempt.orderId}`,
+        `provider-refund:${transactionId}`,
+      ]);
+      await lockPaymentOrder(tx, peek.attempt.orderId);
       const transaction = await tx.paymentTransaction.findUnique({
         where: { id: transactionId },
         include: { attempt: { include: { transactions: true } } },
@@ -157,10 +174,6 @@ export class PaymentRefundService {
           "PROVIDER_UNCERTAIN",
         );
       }
-      await acquireOperationLocks(tx, [
-        `order-payment:${transaction.attempt.orderId}`,
-        `provider-refund:${transaction.id}`,
-      ]);
       if (
         transaction.attempt.provider === PaymentProvider.WOMPI ||
         transaction.status === "FAILED"
@@ -195,6 +208,8 @@ export class PaymentRefundService {
     } catch (error) {
       if (error instanceof PaymentProviderError && error.code === "HTTP_ERROR") {
         await inInventoryTransaction(this.db, async (tx) => {
+          await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
+          await lockPaymentOrder(tx, prepared.attempt.orderId);
           await tx.paymentTransaction.update({
             where: { id: prepared.id },
             data: {
@@ -211,6 +226,7 @@ export class PaymentRefundService {
     if (prepared.attempt.provider !== PaymentProvider.WOMPI && result.status === "PENDING") return;
     await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
+      await lockPaymentOrder(tx, prepared.attempt.orderId);
       const current = await tx.paymentTransaction.findUniqueOrThrow({
         where: { id: prepared.id },
         include: { attempt: true },
@@ -275,8 +291,8 @@ export class PaymentRefundService {
       });
       if (!peek) throw new PaymentNotFoundError("Order refund not found.");
       await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
+      await lockPaymentOrder(tx, peek.orderId);
       const refund = await this.lockRefund(tx, refundId);
-      await lockPaymentOrder(tx, refund.orderId);
       await assertFinancialActor(tx, audit.actorAdminUserId);
       if (refund.status === "COMPLETED") {
         return tx.paymentTransaction.findMany({ where: { refundId }, include: { attempt: true } });
@@ -302,9 +318,20 @@ export class PaymentRefundService {
         include: { transactions: true },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       });
+      if (
+        captures.some((attempt) =>
+          attempt.transactions.some((item) => item.kind === "VOID" && item.status === "PROCESSING"),
+        )
+      ) {
+        throw new PaymentConflictError(
+          "A payment void has an uncertain outcome and requires reconciliation before refunding.",
+          "PROVIDER_UNCERTAIN",
+        );
+      }
       let allocated = existing.reduce((sum, item) => sum + item.amountCents, 0n);
       if (allocated > refund.totalCents)
         throw new PaymentConflictError("Persisted provider refunds exceed the order refund.");
+      const now = await databaseNow(tx);
       for (const attempt of captures) {
         if (allocated === refund.totalCents) break;
         const capture = attempt.transactions.find(
@@ -312,10 +339,23 @@ export class PaymentRefundService {
         );
         if (!capture) continue;
         const compensated = attempt.transactions
-          .filter((item) => ["REFUND", "VOID"].includes(item.kind) && item.status !== "CANCELLED")
+          .filter(
+            (item) =>
+              (item.kind === "REFUND" && item.status !== "CANCELLED") ||
+              (item.kind === "VOID" && !["FAILED", "CANCELLED"].includes(item.status)),
+          )
           .reduce((sum, item) => sum + item.amountCents, 0n);
         const available = capture.amountCents - compensated;
         if (available <= 0n) continue;
+        const failedVoid = attempt.transactions.find(
+          (item) => item.kind === "VOID" && item.status === "FAILED",
+        );
+        if (failedVoid) {
+          await tx.paymentTransaction.update({
+            where: { id: failedVoid.id },
+            data: { status: "CANCELLED", completedAt: now },
+          });
+        }
         const amount =
           available < refund.totalCents - allocated ? available : refund.totalCents - allocated;
         await tx.paymentTransaction.create({
@@ -374,59 +414,85 @@ export class PaymentRefundService {
     if (!/^[A-Za-z0-9._:-]+$/.test(externalId)) {
       throw new PaymentValidationError("External transaction ID contains unsupported characters.");
     }
-    const outcome = await inInventoryTransaction(this.db, async (tx) => {
-      const transaction = await tx.paymentTransaction.findUnique({
-        where: { id: options.transactionId },
-        include: { attempt: true },
-      });
-      if (!transaction || transaction.kind === "CAPTURE")
-        throw new PaymentNotFoundError("Compensation transaction not found.");
-      if (transaction.status === "SUCCEEDED") {
-        if (transaction.externalId !== externalId)
+    let outcome: { refundId: string | null; replayed: boolean; orderId?: string };
+    try {
+      outcome = await inInventoryTransaction(this.db, async (tx) => {
+        const peek = await tx.paymentTransaction.findUnique({
+          where: { id: options.transactionId },
+          select: { kind: true, attempt: { select: { orderId: true, provider: true } } },
+        });
+        if (!peek || peek.kind === "CAPTURE") {
+          throw new PaymentNotFoundError("Compensation transaction not found.");
+        }
+        if (peek.attempt.provider === PaymentProvider.STORE_CREDIT) {
           throw new PaymentConflictError(
-            "Transaction already has another external ID.",
-            "DUPLICATE_REFERENCE",
+            "Store credit compensations cannot be reconciled manually.",
           );
-        return { refundId: transaction.refundId, replayed: true };
-      }
-      if (!["PENDING", "PROCESSING"].includes(transaction.status)) {
+        }
+        await acquireOperationLocks(tx, [`order-payment:${peek.attempt.orderId}`]);
+        await lockPaymentOrder(tx, peek.attempt.orderId);
+        const lockedRows = await tx.$queryRaw<
+          PaymentTransactionModel[]
+        >`SELECT * FROM "PaymentTransaction" WHERE "id" = ${options.transactionId}::uuid FOR UPDATE`;
+        const transaction = lockedRows[0];
+        if (!transaction || transaction.kind === "CAPTURE") {
+          throw new PaymentNotFoundError("Compensation transaction not found.");
+        }
+        if (transaction.status === "SUCCEEDED") {
+          if (transaction.externalId !== externalId)
+            throw new PaymentConflictError(
+              "Transaction already has another external ID.",
+              "DUPLICATE_REFERENCE",
+            );
+          return { refundId: transaction.refundId, replayed: true };
+        }
+        if (!["PENDING", "PROCESSING"].includes(transaction.status)) {
+          throw new PaymentConflictError(
+            "Only pending or uncertain compensations can be reconciled manually.",
+          );
+        }
+        await assertFinancialActor(tx, options.audit.actorAdminUserId);
+        const now = await databaseNow(tx);
+        await tx.paymentTransaction.update({
+          where: { id: transaction.id },
+          data: {
+            status: "SUCCEEDED",
+            externalId,
+            providerReference: externalId,
+            statusMessage: "Verified and reconciled by an authorized operator.",
+            completedAt: now,
+          },
+        });
+        await writePaymentAudit(tx, {
+          action:
+            transaction.kind === "REFUND" ? "PAYMENT_REFUND_RECONCILED" : "PAYMENT_VOID_RECONCILED",
+          targetType: "PaymentTransaction",
+          targetId: transaction.id,
+          audit: options.audit,
+          metadata: {
+            orderId: peek.attempt.orderId,
+            amountCents: transaction.amountCents.toString(),
+          },
+        });
+        return {
+          refundId: transaction.refundId,
+          replayed: false,
+          orderId: peek.attempt.orderId,
+        };
+      });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
         throw new PaymentConflictError(
-          "Only pending or uncertain compensations can be reconciled manually.",
+          "External transaction ID is already used by another compensation.",
+          "DUPLICATE_REFERENCE",
         );
       }
-      await acquireOperationLocks(tx, [`order-payment:${transaction.attempt.orderId}`]);
-      await assertFinancialActor(tx, options.audit.actorAdminUserId);
-      const now = await databaseNow(tx);
-      await tx.paymentTransaction.update({
-        where: { id: transaction.id },
-        data: {
-          status: "SUCCEEDED",
-          externalId,
-          providerReference: externalId,
-          statusMessage: "Verified and reconciled by an authorized operator.",
-          completedAt: now,
-        },
-      });
-      await writePaymentAudit(tx, {
-        action:
-          transaction.kind === "REFUND" ? "PAYMENT_REFUND_RECONCILED" : "PAYMENT_VOID_RECONCILED",
-        targetType: "PaymentTransaction",
-        targetId: transaction.id,
-        audit: options.audit,
-        metadata: {
-          orderId: transaction.attempt.orderId,
-          amountCents: transaction.amountCents.toString(),
-        },
-      });
-      return {
-        refundId: transaction.refundId,
-        replayed: false,
-        orderId: transaction.attempt.orderId,
-      };
-    });
+      throw error;
+    }
     if (outcome.refundId) return this.finalizeRefund(outcome.refundId, options.audit);
     if (outcome.orderId) {
       await inInventoryTransaction(this.db, async (tx) => {
+        await acquireOperationLocks(tx, [`order-payment:${outcome.orderId!}`]);
         await refreshOrderPaymentStatus(tx, outcome.orderId!);
       });
     }
@@ -441,22 +507,49 @@ export class PaymentRefundService {
   async void(paymentAttemptId: string, audit: PaymentAuditContext): Promise<RefundExecutionResult> {
     assertPaymentUuid(paymentAttemptId, "paymentAttemptId");
     const prepared = await inInventoryTransaction(this.db, async (tx) => {
+      const peek = await tx.paymentAttempt.findUnique({
+        where: { id: paymentAttemptId },
+        select: { orderId: true },
+      });
+      if (!peek) throw new PaymentNotFoundError("Payment attempt not found.");
+      await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
+      await lockPaymentOrder(tx, peek.orderId);
       const attempt = await lockPaymentAttempt(tx, paymentAttemptId);
-      await acquireOperationLocks(tx, [`order-payment:${attempt.orderId}`]);
-      await lockPaymentOrder(tx, attempt.orderId);
       await assertFinancialActor(tx, audit.actorAdminUserId);
       if (attempt.provider === PaymentProvider.STORE_CREDIT) {
         throw new PaymentConflictError(
           "Captured store credit must be reversed with an order refund.",
         );
       }
+      const activeRefund = await tx.paymentTransaction.findFirst({
+        where: { attemptId: attempt.id, kind: "REFUND", status: { not: "CANCELLED" } },
+        select: { id: true },
+      });
+      if (activeRefund) {
+        throw new PaymentConflictError(
+          "Partially or fully refunded payment attempts cannot be voided; use an order refund.",
+          "AMOUNT_EXCEEDED",
+        );
+      }
       const existing = await tx.paymentTransaction.findFirst({
         where: { attemptId: attempt.id, kind: "VOID" },
       });
-      if (existing) return { attempt, transaction: existing };
       const capture = await tx.paymentTransaction.findFirst({
         where: { attemptId: attempt.id, kind: "CAPTURE", status: "SUCCEEDED" },
       });
+      if (existing) {
+        if (existing.status === "CANCELLED") {
+          throw new PaymentConflictError("Payment void was superseded by an order refund.");
+        }
+        if (existing.status === "FAILED" && attempt.provider === PaymentProvider.WOMPI && capture) {
+          const retried = await tx.paymentTransaction.update({
+            where: { id: existing.id },
+            data: { status: "PROCESSING", completedAt: null },
+          });
+          return { attempt, transaction: retried, captureExternalId: capture.externalId };
+        }
+        return { attempt, transaction: existing };
+      }
       if (!capture) {
         if (
           attempt.provider === PaymentProvider.WOMPI ||
@@ -557,14 +650,46 @@ export class PaymentRefundService {
       );
     }
     const provider = await this.providerFor(prepared.attempt);
-    const result = await provider.void({
-      transactionId: prepared.transaction.id,
-      paymentReference: prepared.attempt.reference,
-      externalCaptureId: prepared.captureExternalId ?? prepared.transaction.externalId,
-      amountCents: prepared.transaction.amountCents,
-      reason: "Payment void requested by an authorized operator.",
-    });
+    let result: ProviderOperationResult;
+    try {
+      result = await provider.void({
+        transactionId: prepared.transaction.id,
+        paymentReference: prepared.attempt.reference,
+        externalCaptureId: prepared.captureExternalId ?? prepared.transaction.externalId,
+        amountCents: prepared.transaction.amountCents,
+        reason: "Payment void requested by an authorized operator.",
+      });
+    } catch (error) {
+      if (error instanceof PaymentProviderError && error.code === "HTTP_ERROR") {
+        await inInventoryTransaction(this.db, async (tx) => {
+          await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
+          await lockPaymentOrder(tx, prepared.attempt.orderId);
+          await tx.paymentTransaction.update({
+            where: { id: prepared.transaction.id },
+            data: {
+              status: "FAILED",
+              statusMessage: error.code,
+              completedAt: await databaseNow(tx),
+            },
+          });
+          await writePaymentAudit(tx, {
+            action: "PAYMENT_VOID_RESULT_RECORDED",
+            targetType: "PaymentAttempt",
+            targetId: prepared.attempt.id,
+            audit,
+            metadata: {
+              orderId: prepared.attempt.orderId,
+              amountCents: prepared.attempt.amountCents.toString(),
+              status: "FAILED",
+            },
+          });
+        });
+      }
+      throw error;
+    }
     await inInventoryTransaction(this.db, async (tx) => {
+      await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
+      await lockPaymentOrder(tx, prepared.attempt.orderId);
       const now = await databaseNow(tx);
       await tx.paymentTransaction.update({
         where: { id: prepared.transaction.id },

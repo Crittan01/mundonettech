@@ -36,6 +36,26 @@ function externalErrorCode(error: unknown): string {
   return "PAYMENT_WEBHOOK_ERROR";
 }
 
+function peekReference(body: string): string | null {
+  if (typeof body !== "string" || body.length === 0 || body.length > 1_000_000) return null;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const data = (parsed as Record<string, unknown>).data;
+    if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+    const transaction = (data as Record<string, unknown>).transaction;
+    if (typeof transaction !== "object" || transaction === null || Array.isArray(transaction)) {
+      return null;
+    }
+    const reference = (transaction as Record<string, unknown>).reference;
+    return typeof reference === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(reference)
+      ? reference
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export class WompiWebhookService {
   constructor(
     private readonly db: PrismaClient,
@@ -67,7 +87,24 @@ export class WompiWebhookService {
     headerChecksum?: string | null;
     now?: Date;
   }): Promise<WompiWebhookResult> {
-    const resolution = await this.resolve(options.environment, options.credentialId);
+    let credentialId = options.credentialId;
+    if (!credentialId) {
+      const reference = peekReference(options.body);
+      if (reference) {
+        const owner = await this.db.paymentAttempt.findUnique({
+          where: { reference },
+          select: { credentialId: true, provider: true, environment: true },
+        });
+        if (
+          owner?.provider === PaymentProvider.WOMPI &&
+          owner.environment === options.environment &&
+          owner.credentialId
+        ) {
+          credentialId = owner.credentialId;
+        }
+      }
+    }
+    const resolution = await this.resolve(options.environment, credentialId);
     const event = resolution.provider.verifyWebhook({
       body: options.body,
       ...(options.headerChecksum !== undefined ? { headerChecksum: options.headerChecksum } : {}),
@@ -80,9 +117,19 @@ export class WompiWebhookService {
     externalId: string;
     environment: IntegrationEnvironment;
     credentialId?: string;
+    expectedOrderId?: string;
   }): Promise<WompiWebhookResult> {
     const resolution = await this.resolve(options.environment, options.credentialId);
     const transaction = await resolution.provider.getTransaction(options.externalId);
+    if (options.expectedOrderId) {
+      const owner = await this.db.paymentAttempt.findUnique({
+        where: { reference: transaction.reference },
+        select: { orderId: true },
+      });
+      if (!owner || owner.orderId !== options.expectedOrderId) {
+        throw new PaymentValidationError("Wompi transaction does not belong to this order.");
+      }
+    }
     const payloadHash = paymentDigest({ source: "WOMPI_API", transaction });
     return this.apply(
       {
@@ -203,8 +250,8 @@ export class WompiWebhookService {
         if (!referenceAttempt)
           throw new PaymentNotFoundError("Wompi payment reference is unknown.");
         await acquireOperationLocks(tx, [`order-payment:${referenceAttempt.orderId}`]);
+        const order = await lockPaymentOrder(tx, referenceAttempt.orderId);
         const attempt = await lockPaymentAttempt(tx, referenceAttempt.id);
-        const order = await lockPaymentOrder(tx, attempt.orderId);
         if (
           attempt.provider !== PaymentProvider.WOMPI ||
           attempt.amountCents !== transaction.amountCents ||

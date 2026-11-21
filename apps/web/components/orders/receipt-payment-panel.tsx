@@ -8,7 +8,11 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { startReceiptPaymentAction, verifyWompiPaymentAction } from "@/lib/actions/payments";
+import {
+  resumeWompiPaymentAction,
+  startReceiptPaymentAction,
+  verifyWompiPaymentAction,
+} from "@/lib/actions/payments";
 import { initialActionState } from "@/lib/action-state";
 
 const providerLabels = {
@@ -34,24 +38,36 @@ const selectClass =
 
 export function ReceiptPaymentPanel({
   token,
+  operationId,
+  orderNumber,
   attempts,
   wompiAccounts,
   bankTransferInstructions,
   storeCreditAvailableCents,
   allowNewPayment,
+  uncommittedCents,
+  resumableWompiAttemptId,
   externalId,
   paymentStatus,
 }: {
   token: string;
+  operationId: string;
+  orderNumber: string;
   attempts: readonly PaymentAttemptSnapshot[];
   wompiAccounts: readonly { id: string; accountName: string }[];
   bankTransferInstructions: string | null;
   storeCreditAvailableCents: string | null;
   allowNewPayment: boolean;
+  uncommittedCents: string;
+  resumableWompiAttemptId: string | null;
   externalId: string;
   paymentStatus: string;
 }) {
   const [state, action, pending] = useActionState(startReceiptPaymentAction, initialActionState);
+  const [resumeState, resumeAction, resuming] = useActionState(
+    resumeWompiPaymentAction,
+    initialActionState,
+  );
   const [verificationState, verificationAction, verifying] = useActionState(
     verifyWompiPaymentAction,
     initialActionState,
@@ -61,6 +77,10 @@ export function ReceiptPaymentPanel({
   >("COD");
   const [credentialId, setCredentialId] = useState(wompiAccounts[0]?.id ?? "");
   const hasWompi = attempts.some((attempt) => attempt.provider === "WOMPI");
+  const activeBankTransfer = attempts.find(
+    (attempt) =>
+      attempt.provider === "BANK_TRANSFER" && ["PENDING", "PROCESSING"].includes(attempt.status),
+  );
   return (
     <section
       aria-labelledby="payment-panel"
@@ -98,14 +118,40 @@ export function ReceiptPaymentPanel({
           No hay intentos registrados. Elige un método para iniciar el pago de forma idempotente.
         </p>
       )}
+      {activeBankTransfer && bankTransferInstructions ? (
+        <div className="rounded-lg bg-secondary/40 p-4">
+          <h3 className="text-sm font-semibold">Instrucciones para transferir</h3>
+          <pre className="mt-2 font-sans text-sm whitespace-pre-wrap text-muted-foreground">
+            {bankTransferInstructions}
+          </pre>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Usa el pedido <span className="font-mono">{orderNumber}</span> como referencia. Finanzas
+            verificará el movimiento antes de acreditarlo.
+          </p>
+        </div>
+      ) : null}
+      {resumableWompiAttemptId ? (
+        <form action={resumeAction} className="space-y-3 border-t border-border pt-5">
+          <input type="hidden" name="token" value={token} />
+          <input type="hidden" name="paymentAttemptId" value={resumableWompiAttemptId} />
+          <p className="text-sm text-muted-foreground">
+            Tienes un intento Wompi vigente pendiente de completar en el checkout seguro.
+          </p>
+          <Button type="submit" disabled={resuming}>
+            {resuming ? "Abriendo Wompi…" : "Continuar pago en Wompi"}
+          </Button>
+          <FormMessage state={resumeState} />
+        </form>
+      ) : null}
       {allowNewPayment ? (
         <form action={action} className="space-y-4 border-t border-border pt-5">
           <input type="hidden" name="token" value={token} />
+          <input type="hidden" name="operationId" value={operationId} />
           <fieldset className="space-y-3">
             <legend className="font-medium">
               {paymentStatus === "PARTIALLY_PAID"
-                ? "Completa el saldo con otro intento"
-                : "Inicia un intento de pago"}
+                ? `Completa el saldo pendiente (${formatCopCents(uncommittedCents)})`
+                : `Inicia un intento de pago (${formatCopCents(uncommittedCents)})`}
             </legend>
             {wompiAccounts.length ? (
               <label className="flex items-center gap-3 text-sm">
@@ -183,15 +229,15 @@ export function ReceiptPaymentPanel({
           ) : (
             <input type="hidden" name="wompiCredentialId" value={credentialId} />
           )}
-          {paymentMethod === "BANK_TRANSFER" && bankTransferInstructions ? (
+          {paymentMethod === "BANK_TRANSFER" && bankTransferInstructions && !activeBankTransfer ? (
             <div className="rounded-lg bg-secondary/40 p-4">
               <h3 className="text-sm font-semibold">Instrucciones para transferir</h3>
               <pre className="mt-2 font-sans text-sm whitespace-pre-wrap text-muted-foreground">
                 {bankTransferInstructions}
               </pre>
               <p className="mt-2 text-xs text-muted-foreground">
-                Usa el número de pedido como referencia. Finanzas verificará el movimiento antes de
-                acreditarlo.
+                Usa el pedido <span className="font-mono">{orderNumber}</span> como referencia.
+                Finanzas verificará el movimiento antes de acreditarlo.
               </p>
             </div>
           ) : null}
