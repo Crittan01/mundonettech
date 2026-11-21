@@ -23,7 +23,11 @@ export type AdminPermission =
   | "content:read"
   | "content:write"
   | "settings:read"
-  | "settings:write";
+  | "settings:write"
+  | "pricing:read"
+  | "pricing:write"
+  | "sales:read"
+  | "sales:write";
 
 const rings: Readonly<Record<AdminRoleValue, AdminRing>> = {
   SUPERADMIN: 1,
@@ -67,6 +71,25 @@ const settingsWriters = [
   "OPERATIONS_MANAGER",
   "STORE_MANAGER",
 ] as const satisfies readonly AdminRoleValue[];
+const pricingReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "INVENTORY_BUYER",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
+const pricingWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+] as const satisfies readonly AdminRoleValue[];
+const salesReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "CUSTOMER_SUPPORT",
+] as const satisfies readonly AdminRoleValue[];
+const salesWriters = salesReaders;
 
 const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> = {
   "dashboard:read": adminRoles,
@@ -81,6 +104,10 @@ const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> 
   "content:write": contentWriters,
   "settings:read": settingsReaders,
   "settings:write": settingsWriters,
+  "pricing:read": pricingReaders,
+  "pricing:write": pricingWriters,
+  "sales:read": salesReaders,
+  "sales:write": salesWriters,
 };
 
 export function isAdminRole(value: unknown): value is AdminRoleValue {
@@ -118,6 +145,8 @@ export function adminNavigation(role: AdminRoleValue): readonly {
   href:
     | "/admin"
     | "/admin/catalogo"
+    | "/admin/precios"
+    | "/admin/venta-asistida"
     | "/admin/contenido"
     | "/admin/configuracion"
     | "/admin/usuarios"
@@ -129,6 +158,12 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     { href: "/admin", label: "Resumen" },
     ...(hasAdminPermission(role, "catalog:read")
       ? [{ href: "/admin/catalogo" as const, label: "Catálogo" }]
+      : []),
+    ...(hasAdminPermission(role, "pricing:read")
+      ? [{ href: "/admin/precios" as const, label: "Precios" }]
+      : []),
+    ...(hasAdminPermission(role, "sales:read")
+      ? [{ href: "/admin/venta-asistida" as const, label: "Venta asistida" }]
       : []),
     ...(hasAdminPermission(role, "content:read")
       ? [{ href: "/admin/contenido" as const, label: "Contenido" }]

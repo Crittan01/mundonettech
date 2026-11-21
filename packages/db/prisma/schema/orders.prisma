@@ -21,25 +21,98 @@ enum FulfillmentStatus {
   CANCELLED
 }
 
+enum CartStatus {
+  ACTIVE
+  CONVERTED
+  CANCELLED
+  EXPIRED
+}
+
+enum CartKind {
+  STOREFRONT
+  ASSISTED
+}
+
 model Order {
-  id                    String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderNumber           String            @unique @db.VarChar(32)
-  customerId            String?           @db.Uuid
-  orderStatus           OrderStatus       @default(PENDING)
-  paymentStatus         PaymentStatus     @default(UNPAID)
-  fulfillmentStatus     FulfillmentStatus @default(UNFULFILLED)
-  subtotalCents         BigInt            @default(0)
-  discountCents         BigInt            @default(0)
-  taxCents              BigInt            @default(0)
-  shippingCents         BigInt            @default(0)
-  totalCents            BigInt            @default(0)
-  createdAt             DateTime          @default(now()) @db.Timestamptz(6)
-  updatedAt             DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
-  customer              Customer?         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  id                     String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderNumber            String            @unique @db.VarChar(32)
+  customerId             String?           @db.Uuid
+  orderStatus            OrderStatus       @default(PENDING)
+  paymentStatus          PaymentStatus     @default(UNPAID)
+  fulfillmentStatus      FulfillmentStatus @default(UNFULFILLED)
+  subtotalCents          BigInt            @default(0)
+  discountCents          BigInt            @default(0)
+  taxCents               BigInt            @default(0)
+  shippingCents          BigInt            @default(0)
+  totalCents             BigInt            @default(0)
+  createdAt              DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  customer               Customer?         @relation(fields: [customerId], references: [id], onDelete: Restrict)
   inventoryLedgerEntries InventoryLedger[]
-  serializedUnits       SerializedUnit[]
+  serializedUnits        SerializedUnit[]
 
   @@index([customerId, createdAt])
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
   @@map("Order")
+}
+
+model Cart {
+  id                     String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accessTokenHash        Bytes         @unique @db.ByteA
+  kind                   CartKind      @default(STOREFRONT)
+  status                 CartStatus    @default(ACTIVE)
+  customerId             String?       @db.Uuid
+  couponId               String?       @db.Uuid
+  assistedByAdminUserId  String?       @db.Uuid
+  assistedTokenHash      Bytes?        @unique @db.ByteA
+  assistedExpiresAt      DateTime?     @db.Timestamptz(6)
+  assistedClaimedAt      DateTime?     @db.Timestamptz(6)
+  subtotalCents          BigInt        @default(0)
+  wholesaleDiscountCents BigInt        @default(0)
+  bundleDiscountCents    BigInt        @default(0)
+  couponDiscountCents    BigInt        @default(0)
+  totalCents             BigInt        @default(0)
+  itemCount              Int           @default(0)
+  pricingIssues          Json          @default("[]") @db.JsonB
+  priceRevalidatedAt     DateTime?     @db.Timestamptz(6)
+  expiresAt              DateTime      @db.Timestamptz(6)
+  createdAt              DateTime      @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime      @default(now()) @updatedAt @db.Timestamptz(6)
+  customer               Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  coupon                 Coupon?       @relation(fields: [couponId], references: [id], onDelete: Restrict)
+  assistedBy             AdminUser?    @relation(fields: [assistedByAdminUserId], references: [id], onDelete: Restrict)
+  items                  CartItem[]
+  couponUsages           CouponUsage[]
+
+  @@index([customerId, status, updatedAt])
+  @@index([kind, status, updatedAt])
+  @@index([status, expiresAt])
+  @@map("Cart")
+}
+
+model CartItem {
+  id                     String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cartId                 String         @db.Uuid
+  variantId              String         @db.Uuid
+  bundleId               String?        @db.Uuid
+  quantity               Int
+  bundleQuantity         Int?
+  productNameSnapshot    String         @db.VarChar(200)
+  productSlugSnapshot    String         @db.VarChar(160)
+  skuSnapshot            String         @db.VarChar(64)
+  unitPriceCents         BigInt
+  wholesaleDiscountCents BigInt         @default(0)
+  bundleDiscountCents    BigInt         @default(0)
+  couponDiscountCents    BigInt         @default(0)
+  lineTotalCents         BigInt
+  createdAt              DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  cart                   Cart           @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  variant                ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  bundle                 Bundle?        @relation(fields: [bundleId], references: [id], onDelete: Restrict)
+
+  @@index([cartId, bundleId, id])
+  @@index([variantId, cartId])
+  @@index([bundleId, cartId])
+  @@map("CartItem")
 }

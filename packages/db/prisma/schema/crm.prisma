@@ -33,6 +33,8 @@ model Customer {
   wishlistItems            WishlistItem[]
   backInStockSubscriptions BackInStockSubscription[]
   orders                   Order[]
+  carts                    Cart[]
+  couponUsages             CouponUsage[]
 
   @@index([status, createdAt])
   @@index([deletedAt])
