@@ -25,6 +25,11 @@ export interface OrderReservationReleaseResult {
   readonly orderIds: readonly string[];
 }
 
+export interface PartialPaymentReviewResult {
+  readonly reviewedOrders: number;
+  readonly orderIds: readonly string[];
+}
+
 function boundedInteger(value: number, field: string, minimum: number, maximum: number): number {
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new RangeError(`${field} must be an integer between ${minimum} and ${maximum}.`);
@@ -198,6 +203,12 @@ export class OrderLifecycleService {
           WHERE "orderStatus" = 'CONFIRMED' AND "paymentStatus" = 'UNPAID'
             AND "reservationExpiresAt" IS NOT NULL AND "reservationExpiresAt" <= ${now}
             AND "reservationKey" IS NOT NULL AND "cartId" IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM "CodReconciliation" reconciliation
+              JOIN "PaymentAttempt" attempt ON attempt."id" = reconciliation."paymentAttemptId"
+              WHERE attempt."orderId" = "Order"."id"
+                AND reconciliation."status" IN ('COLLECTED', 'REMITTED', 'DISCREPANCY', 'RECONCILED')
+            )
           ORDER BY "reservationExpiresAt", "id"
           FOR UPDATE SKIP LOCKED
           LIMIT 1
@@ -240,6 +251,36 @@ export class OrderLifecycleService {
         );
         if (movements.length === 0)
           throw new OrderLifecycleError(`Order ${order.id} has no stock reservations to release.`);
+        const paymentAttempts = await tx.paymentAttempt.findMany({
+          where: {
+            orderId: order.id,
+            status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
+          },
+        });
+        for (const attempt of paymentAttempts) {
+          await tx.paymentAttempt.update({
+            where: { id: attempt.id },
+            data: { status: "EXPIRED", completedAt: now },
+          });
+          await tx.domainOutbox.create({
+            data: {
+              eventType: "payment.attempt.expired.v1",
+              aggregateType: "PaymentAttempt",
+              aggregateId: attempt.id,
+              deduplicationKey: `payment-attempt:${attempt.id}:expired:v1`,
+              payload: {
+                attemptId: attempt.id,
+                orderId: order.id,
+                provider: attempt.provider,
+                expiredAt: now.toISOString(),
+              },
+            },
+          });
+        }
+        await tx.codReconciliation.updateMany({
+          where: { paymentAttempt: { orderId: order.id }, status: "PENDING_COLLECTION" },
+          data: { status: "CANCELLED" },
+        });
         await releaseStock(tx, {
           operationKey: `order-release:${order.id}`,
           reservationKey: order.reservationKey!,
@@ -289,5 +330,66 @@ export class OrderLifecycleService {
       orderIds.push(released);
     }
     return { releasedOrders: orderIds.length, orderIds };
+  }
+
+  async flagExpiredPartialPaymentReviews(
+    options: { limit?: number } = {},
+  ): Promise<PartialPaymentReviewResult> {
+    const limit = boundedInteger(options.limit ?? 50, "limit", 1, 200);
+    const orderIds: string[] = [];
+    while (orderIds.length < limit) {
+      const reviewed = await inInventoryTransaction(this.db, async (tx): Promise<string | null> => {
+        const now = await databaseNow(tx);
+        const candidates = await tx.$queryRaw<Order[]>`
+          SELECT * FROM "Order"
+          WHERE "orderStatus" = 'CONFIRMED' AND "paymentStatus" = 'PARTIALLY_PAID'
+            AND "reservationExpiresAt" IS NOT NULL AND "reservationExpiresAt" <= ${now}
+            AND "reservationKey" IS NOT NULL AND "cartId" IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM "DomainOutbox" outbox
+              WHERE outbox."deduplicationKey" = concat('order:', "Order"."id", ':partial-payment-expired-review:v1')
+            )
+          ORDER BY "reservationExpiresAt", "id"
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        `;
+        const order = candidates[0];
+        if (!order) return null;
+        await acquireOperationLocks(tx, [order.reservationKey!, `order-payment:${order.id}`]);
+        const attempts = await tx.paymentAttempt.findMany({
+          where: {
+            orderId: order.id,
+            status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
+          },
+        });
+        for (const attempt of attempts) {
+          await tx.paymentAttempt.update({
+            where: { id: attempt.id },
+            data: { status: "EXPIRED", completedAt: now },
+          });
+        }
+        await tx.codReconciliation.updateMany({
+          where: { paymentAttempt: { orderId: order.id }, status: "PENDING_COLLECTION" },
+          data: { status: "CANCELLED" },
+        });
+        await tx.domainOutbox.create({
+          data: {
+            eventType: "order.payment.partial-expired-review-required.v1",
+            aggregateType: "Order",
+            aggregateId: order.id,
+            deduplicationKey: `order:${order.id}:partial-payment-expired-review:v1`,
+            payload: {
+              orderId: order.id,
+              expiredAt: now.toISOString(),
+              expiredAttemptIds: attempts.map((attempt) => attempt.id),
+            },
+          },
+        });
+        return order.id;
+      });
+      if (!reviewed) break;
+      orderIds.push(reviewed);
+    }
+    return { reviewedOrders: orderIds.length, orderIds };
   }
 }

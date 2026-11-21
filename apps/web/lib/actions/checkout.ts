@@ -3,15 +3,22 @@
 import { createHash } from "node:crypto";
 
 import { legalConfig } from "@mundonettech/config/legal";
-import type { CheckoutFulfillmentInput } from "@mundonettech/db";
+import { PaymentProvider, type CheckoutFulfillmentInput } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
 import { actionError, formSnapshot, formString, type ActionState } from "@/lib/action-state";
-import { clearCartAccessToken } from "@/lib/cart";
+import { clearCartAccessToken, optionalCustomerId } from "@/lib/cart";
 import { orderService, readCheckoutCartReference, receiptTokenForSubmission } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
+import {
+  getIntegrationEnvironment,
+  getPublicSiteUrl,
+  paymentService,
+  storeCreditService,
+} from "@/lib/integrations";
+import { emailIdentityHash, phoneIdentityHash } from "@/lib/payment-identities";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const optionalText = (maximumLength: number) =>
@@ -29,6 +36,8 @@ const submissionSchema = z
     submissionId: z.string().uuid(),
     reviewFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
     fulfillmentMethod: z.enum(["HOME_DELIVERY", "CLICK_COLLECT"]),
+    paymentMethod: z.enum(["WOMPI", "COD", "BANK_TRANSFER", "STORE_CREDIT"]),
+    wompiCredentialId: z.union([z.string().uuid(), z.literal("")]),
     email: z.string().trim().email().max(320),
     givenName: z.string().trim().min(2).max(100),
     familyName: z.string().trim().min(2).max(100),
@@ -77,6 +86,8 @@ export async function confirmCheckoutAction(
     submissionId: formString(formData, "submissionId"),
     reviewFingerprint: formString(formData, "reviewFingerprint"),
     fulfillmentMethod: formString(formData, "fulfillmentMethod"),
+    paymentMethod: formString(formData, "paymentMethod"),
+    wompiCredentialId: formString(formData, "wompiCredentialId"),
     email: formString(formData, "email"),
     givenName: formString(formData, "givenName"),
     familyName: formString(formData, "familyName"),
@@ -144,8 +155,17 @@ export async function confirmCheckoutAction(
         recipientName: input.recipientName,
       }),
     );
+    const creditCustomerId =
+      input.paymentMethod === "STORE_CREDIT" ? await optionalCustomerId() : null;
+    const credit = creditCustomerId ? await storeCreditService().get(creditCustomerId) : null;
+    if (input.paymentMethod === "STORE_CREDIT" && (!creditCustomerId || !credit)) {
+      return actionError(
+        "Inicia sesión con una cuenta que tenga saldo disponible para usar crédito de tienda.",
+        values,
+      );
+    }
     const receiptToken = receiptTokenForSubmission(input.submissionId);
-    await orderService().checkout({
+    const checkout = await orderService().checkout({
       cart: reference,
       contact: {
         email: input.email,
@@ -169,9 +189,43 @@ export async function confirmCheckoutAction(
       receiptAccessTokenHash: digest(receiptToken),
       expectedReviewFingerprint: input.reviewFingerprint,
     });
+    const payment = await paymentService().start({
+      orderId: checkout.orderId,
+      provider: PaymentProvider[input.paymentMethod],
+      environment: getIntegrationEnvironment(),
+      idempotencyKey: `checkout:${input.submissionId}`,
+      ...(input.paymentMethod === "STORE_CREDIT" && credit
+        ? {
+            amountCents:
+              BigInt(credit.availableCents) < BigInt(checkout.totalCents)
+                ? BigInt(credit.availableCents)
+                : BigInt(checkout.totalCents),
+          }
+        : {}),
+      ...(input.paymentMethod === "WOMPI" && input.wompiCredentialId
+        ? { credentialId: input.wompiCredentialId }
+        : {}),
+      ...(input.paymentMethod === "WOMPI"
+        ? { returnUrl: `${getPublicSiteUrl()}/recibo/${receiptToken}` }
+        : {}),
+      ...(input.paymentMethod === "COD"
+        ? {
+            identityHashes: {
+              EMAIL: emailIdentityHash(input.email),
+              PHONE: phoneIdentityHash(input.phoneE164),
+            },
+          }
+        : {}),
+    });
     await clearCartAccessToken();
     revalidatePath("/carrito");
-    receiptUrl = `/recibo/${receiptToken}?confirmado=1`;
+    if (input.paymentMethod === "WOMPI" && !payment.checkoutUrl) {
+      throw new Error("Wompi did not produce its signed checkout URL.");
+    }
+    receiptUrl =
+      input.paymentMethod === "WOMPI" && payment.checkoutUrl
+        ? payment.checkoutUrl
+        : `/recibo/${receiptToken}?confirmado=1`;
   } catch (error) {
     return actionError(checkoutMutationMessage(error), values);
   }

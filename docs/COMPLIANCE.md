@@ -39,7 +39,7 @@ Las cookies actuales se documentan como necesarias para Auth, actividad y seguri
 
 ## 4. Régimen tributario y comprobantes
 
-La configuración inicia en `NO_RESPONSABLE_IVA` con vigilancia de `3.500 UVT` y valor UVT configurable (año 2026: **$52.374 COP**, Resolución DIAN 000238 de 2025). `F3.2` ya implementa el cambio a `RESPONSABLE_IVA`, topes tech `50`/`22 UVT` por unidad neta, `OrderItemTaxLine[]` selladas y `OrderReceipt` no fiscal verificado. El recibo distingue pedido registrado de pago pendiente y no equivale a factura electrónica; mientras `paymentStatus = UNPAID`, la aceptación definitiva queda sujeta a validación de pago, inventario y condiciones de la operación. DIAN UBL 2.1 y Notas Crédito siguen en `F3.3`–`F3.4`.
+La configuración inicia en `NO_RESPONSABLE_IVA` con vigilancia de `3.500 UVT` y valor UVT configurable (año 2026: **$52.374 COP**, Resolución DIAN 000238 de 2025). `F3.2` ya implementa el cambio a `RESPONSABLE_IVA`, topes tech `50`/`22 UVT` por unidad neta, `OrderItemTaxLine[]` selladas y `OrderReceipt` no fiscal verificado. El recibo distingue pedido registrado de pago pendiente y no equivale a factura electrónica; mientras `paymentStatus = UNPAID`, la aceptación definitiva queda sujeta a validación de pago, inventario y condiciones de la operación. DIAN UBL 2.1 y Notas Crédito siguen en `F3.4`.
 
 El checkout valida en PostgreSQL la DIVIPOLA oficial DANE con corte al 30 de diciembre de 2024 (`33` departamentos y `1.122` municipios/áreas), sin depender de llamadas externas en tiempo de compra. Aceptación de términos/privacidad, promesa de entrega, snapshots DANE, régimen y UVT quedan persistidos por orden.
 

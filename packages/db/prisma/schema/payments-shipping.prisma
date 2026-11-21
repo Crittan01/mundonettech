@@ -1,3 +1,74 @@
+enum PaymentProvider {
+  WOMPI
+  COD
+  BANK_TRANSFER
+  STORE_CREDIT
+}
+
+enum PaymentAttemptStatus {
+  REQUIRES_ACTION
+  PENDING
+  PROCESSING
+  AUTHORIZED
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+enum PaymentTransactionKind {
+  CAPTURE
+  REFUND
+  VOID
+}
+
+enum PaymentTransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum PaymentWebhookStatus {
+  RECEIVED
+  PROCESSED
+  IGNORED
+  FAILED
+}
+
+enum CodReconciliationStatus {
+  PENDING_COLLECTION
+  COLLECTED
+  REMITTED
+  RECONCILED
+  DISCREPANCY
+  CANCELLED
+}
+
+enum RemittanceBatchStatus {
+  OPEN
+  CLOSED
+  RECONCILED
+  DISCREPANCY
+  CANCELLED
+}
+
+enum BlockedIdentityKind {
+  EMAIL
+  PHONE
+  DOCUMENT
+}
+
+enum StoreCreditEntryType {
+  GRANT
+  WITHDRAWAL
+  HOLD
+  CAPTURE
+  RELEASE
+  REFUND
+}
+
 enum ShipmentKind {
   DELIVERY
   CLICK_COLLECT
@@ -87,6 +158,8 @@ model OrderRefund {
   order                   Order             @relation(fields: [orderId], references: [id], onDelete: Restrict)
   requestedBy             AdminUser         @relation(fields: [requestedByAdminUserId], references: [id], onDelete: Restrict)
   items                   OrderRefundItem[]
+  paymentTransactions     PaymentTransaction[]
+  storeCreditEntries      StoreCreditEntry[]
 
   @@index([orderId, status, createdAt])
   @@index([requestedByAdminUserId, createdAt])
@@ -108,4 +181,196 @@ model OrderRefundItem {
   @@unique([refundId, orderItemId])
   @@index([orderItemId, refundId])
   @@map("OrderRefundItem")
+}
+
+
+model PaymentAttempt {
+  id                      String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId                 String                @db.Uuid
+  provider                PaymentProvider
+  environment             IntegrationEnvironment
+  status                  PaymentAttemptStatus  @default(PENDING)
+  idempotencyKey          String                @db.VarChar(128)
+  requestHash             Bytes                 @db.ByteA
+  reference               String                @unique @db.VarChar(64)
+  amountCents             BigInt
+  currency                String                @default("COP") @db.Char(3)
+  credentialId            String?               @db.Uuid
+  storeCreditAccountId    String?               @db.Uuid
+  providerStatus          String?               @db.VarChar(40)
+  providerOccurredAt      DateTime?             @db.Timestamptz(6)
+  failureCode             String?               @db.VarChar(100)
+  expiresAt               DateTime?             @db.Timestamptz(6)
+  confirmedByAdminUserId  String?               @db.Uuid
+  confirmedAt             DateTime?             @db.Timestamptz(6)
+  completedAt             DateTime?             @db.Timestamptz(6)
+  createdAt               DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  order                   Order                 @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  credential              IntegrationCredential? @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  storeCreditAccount      StoreCreditAccount?   @relation(fields: [storeCreditAccountId], references: [id], onDelete: Restrict)
+  confirmedBy             AdminUser?            @relation("PaymentAttemptConfirmer", fields: [confirmedByAdminUserId], references: [id], onDelete: Restrict)
+  transactions            PaymentTransaction[]
+  webhookEvents           PaymentWebhookEvent[]
+  codReconciliation       CodReconciliation?
+  storeCreditEntries      StoreCreditEntry[]
+
+  @@unique([orderId, idempotencyKey])
+  @@index([orderId, status, createdAt])
+  @@index([provider, status, expiresAt])
+  @@index([credentialId, createdAt])
+  @@index([storeCreditAccountId, status])
+  @@map("PaymentAttempt")
+}
+
+model PaymentTransaction {
+  id                 String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  attemptId          String                   @db.Uuid
+  refundId           String?                  @db.Uuid
+  provider           PaymentProvider
+  kind               PaymentTransactionKind
+  status             PaymentTransactionStatus @default(PENDING)
+  amountCents        BigInt
+  externalId         String?                  @db.VarChar(128)
+  providerReference  String?                  @db.VarChar(255)
+  requestHash        Bytes                    @db.ByteA
+  statusMessage      String?                  @db.VarChar(500)
+  createdAt          DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime                 @default(now()) @updatedAt @db.Timestamptz(6)
+  completedAt        DateTime?                @db.Timestamptz(6)
+  attempt            PaymentAttempt           @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+  refund             OrderRefund?             @relation(fields: [refundId], references: [id], onDelete: Restrict)
+
+  @@unique([provider, kind, externalId])
+  @@index([attemptId, kind, status, createdAt])
+  @@index([refundId, status, createdAt])
+  @@index([provider, externalId])
+  @@map("PaymentTransaction")
+}
+
+model PaymentWebhookEvent {
+  id                    String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider              PaymentProvider
+  attemptId             String?             @db.Uuid
+  eventKey              String              @db.Char(64)
+  payloadHash           Bytes               @db.ByteA
+  transactionExternalId String?             @db.VarChar(128)
+  status                PaymentWebhookStatus @default(RECEIVED)
+  errorCode             String?             @db.VarChar(100)
+  receivedAt            DateTime            @default(now()) @db.Timestamptz(6)
+  processedAt           DateTime?           @db.Timestamptz(6)
+  attempt               PaymentAttempt?     @relation(fields: [attemptId], references: [id], onDelete: Restrict)
+
+  @@unique([provider, eventKey])
+  @@index([attemptId, receivedAt])
+  @@index([status, receivedAt])
+  @@map("PaymentWebhookEvent")
+}
+
+model BlockedIdentity {
+  id                      String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kind                    BlockedIdentityKind
+  identityHash            Bytes               @db.ByteA
+  reason                  String              @db.VarChar(500)
+  active                  Boolean             @default(true)
+  expiresAt               DateTime?           @db.Timestamptz(6)
+  blockedByAdminUserId    String              @db.Uuid
+  blockedAt               DateTime            @default(now()) @db.Timestamptz(6)
+  unblockedByAdminUserId  String?             @db.Uuid
+  unblockedAt             DateTime?           @db.Timestamptz(6)
+  blockedBy               AdminUser           @relation("IdentityBlocker", fields: [blockedByAdminUserId], references: [id], onDelete: Restrict)
+  unblockedBy             AdminUser?          @relation("IdentityUnblocker", fields: [unblockedByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([kind, identityHash, active, expiresAt])
+  @@index([blockedByAdminUserId, blockedAt])
+  @@map("BlockedIdentity")
+}
+
+model RemittanceBatch {
+  id                      String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  carrier                 String                @db.VarChar(120)
+  reference               String                @unique @db.VarChar(128)
+  requestHash             Bytes                 @db.ByteA
+  status                  RemittanceBatchStatus @default(OPEN)
+  expectedCents           BigInt                @default(0)
+  receivedCents           BigInt                @default(0)
+  receivedAt              DateTime?             @db.Timestamptz(6)
+  createdByAdminUserId    String                @db.Uuid
+  createdAt               DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  createdBy               AdminUser             @relation(fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  reconciliations         CodReconciliation[]
+
+  @@index([carrier, status, createdAt])
+  @@map("RemittanceBatch")
+}
+
+model CodReconciliation {
+  id                        String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  paymentAttemptId          String                 @unique @db.Uuid
+  remittanceBatchId         String?                @db.Uuid
+  status                    CodReconciliationStatus @default(PENDING_COLLECTION)
+  expectedCents             BigInt
+  collectedCents            BigInt                 @default(0)
+  remittedCents             BigInt                 @default(0)
+  carrierReference          String?                @db.VarChar(128)
+  collectedAt               DateTime?              @db.Timestamptz(6)
+  remittedAt                DateTime?              @db.Timestamptz(6)
+  reconciledAt              DateTime?              @db.Timestamptz(6)
+  reconciledByAdminUserId   String?                @db.Uuid
+  createdAt                 DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt                 DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  paymentAttempt            PaymentAttempt         @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+  remittanceBatch           RemittanceBatch?       @relation(fields: [remittanceBatchId], references: [id], onDelete: Restrict)
+  reconciledBy              AdminUser?             @relation(fields: [reconciledByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([remittanceBatchId, status])
+  @@map("CodReconciliation")
+}
+
+model StoreCreditAccount {
+  id                 String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId         String              @db.Uuid
+  currency           String              @default("COP") @db.Char(3)
+  availableCents     BigInt              @default(0)
+  heldCents          BigInt              @default(0)
+  active             Boolean             @default(true)
+  version            Int                 @default(0)
+  createdAt          DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  customer           Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  paymentAttempts    PaymentAttempt[]
+  entries            StoreCreditEntry[]
+
+  @@unique([customerId, currency])
+  @@index([active, updatedAt])
+  @@map("StoreCreditAccount")
+}
+
+model StoreCreditEntry {
+  id                    String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId             String              @db.Uuid
+  paymentAttemptId      String?             @db.Uuid
+  refundId              String?             @db.Uuid
+  actorAdminUserId      String?             @db.Uuid
+  type                  StoreCreditEntryType
+  operationKey          String              @unique @db.VarChar(128)
+  sequence              Int
+  requestHash           Bytes               @db.ByteA
+  amountCents           BigInt
+  availableAfterCents   BigInt
+  heldAfterCents        BigInt
+  reason                String              @db.VarChar(500)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(6)
+  account               StoreCreditAccount  @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  paymentAttempt        PaymentAttempt?     @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+  refund                OrderRefund?        @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  actor                 AdminUser?          @relation(fields: [actorAdminUserId], references: [id], onDelete: Restrict)
+
+  @@unique([accountId, sequence])
+  @@index([accountId, createdAt, id])
+  @@index([paymentAttemptId, type])
+  @@index([refundId, type])
+  @@map("StoreCreditEntry")
 }

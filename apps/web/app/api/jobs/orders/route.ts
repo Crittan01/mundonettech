@@ -27,10 +27,12 @@ export async function POST(request: Request) {
   const service = new OrderLifecycleService(getDatabase());
   const abandoned = await service.captureAbandonedCarts();
   const reservations = await service.releaseExpiredOrderReservations();
+  const partialPaymentReviews = await service.flagExpiredPartialPaymentReviews();
   return Response.json(
     {
       abandonedCarts: abandoned,
       expiredReservations: reservations,
+      partialPaymentReviews,
     },
     { headers: noStoreHeaders },
   );

@@ -117,6 +117,7 @@ model Order {
   statusEvents             OrderStatusEvent[]
   shipments                Shipment[]
   refunds                  OrderRefund[]
+  paymentAttempts          PaymentAttempt[]
 
   @@index([customerId, createdAt])
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])

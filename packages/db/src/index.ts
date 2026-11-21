@@ -9,6 +9,15 @@ export {
   IdempotencyStatus,
   IntegrationEnvironment,
   InventoryLedgerEntryType,
+  PaymentProvider,
+  PaymentAttemptStatus,
+  PaymentTransactionKind,
+  PaymentTransactionStatus,
+  PaymentWebhookStatus,
+  CodReconciliationStatus,
+  RemittanceBatchStatus,
+  BlockedIdentityKind,
+  StoreCreditEntryType,
   PurchaseOrderStatus,
   SerializedUnitStatus,
   StockLocationType,
@@ -47,6 +56,13 @@ export {
   PurchaseOrderStateError,
 } from "./inventory-shared.js";
 export type { InventoryOperationResult, StockMovementInput } from "./inventory-shared.js";
+export {
+  acquireOperationLocks,
+  compareStrings,
+  hasUniqueViolation,
+  inInventoryTransaction,
+  normalizeStockMovements,
+} from "./inventory-shared.js";
 export {
   fulfillStock,
   getStockAvailability,
@@ -238,6 +254,14 @@ export type {
   OrderStatusEvent,
   Shipment,
   ShipmentItem,
+  PaymentAttempt,
+  PaymentTransaction,
+  PaymentWebhookEvent,
+  BlockedIdentity,
+  RemittanceBatch,
+  CodReconciliation,
+  StoreCreditAccount,
+  StoreCreditEntry,
 } from "./generated/client.js";
 export {
   OrderRefundService,
@@ -249,5 +273,6 @@ export { OrderLifecycleError, OrderLifecycleService } from "./order-lifecycle-se
 export type {
   AbandonedCartCaptureResult,
   OrderReservationReleaseResult,
+  PartialPaymentReviewResult,
 } from "./order-lifecycle-service.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";

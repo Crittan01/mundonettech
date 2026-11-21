@@ -27,7 +27,11 @@ export type AdminPermission =
   | "pricing:read"
   | "pricing:write"
   | "sales:read"
-  | "sales:write";
+  | "sales:write"
+  | "integrations:read"
+  | "integrations:write"
+  | "payments:read"
+  | "payments:write";
 
 const rings: Readonly<Record<AdminRoleValue, AdminRing>> = {
   SUPERADMIN: 1,
@@ -90,6 +94,23 @@ const salesReaders = [
   "CUSTOMER_SUPPORT",
 ] as const satisfies readonly AdminRoleValue[];
 const salesWriters = salesReaders;
+const integrationReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
+const integrationWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+] as const satisfies readonly AdminRoleValue[];
+const paymentReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "CUSTOMER_SUPPORT",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
+const paymentWriters = integrationReaders;
 
 const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> = {
   "dashboard:read": adminRoles,
@@ -108,6 +129,10 @@ const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> 
   "pricing:write": pricingWriters,
   "sales:read": salesReaders,
   "sales:write": salesWriters,
+  "integrations:read": integrationReaders,
+  "integrations:write": integrationWriters,
+  "payments:read": paymentReaders,
+  "payments:write": paymentWriters,
 };
 
 export function isAdminRole(value: unknown): value is AdminRoleValue {
@@ -147,6 +172,8 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/catalogo"
     | "/admin/precios"
     | "/admin/venta-asistida"
+    | "/admin/integraciones"
+    | "/admin/pagos"
     | "/admin/contenido"
     | "/admin/configuracion"
     | "/admin/usuarios"
@@ -164,6 +191,12 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       : []),
     ...(hasAdminPermission(role, "sales:read")
       ? [{ href: "/admin/venta-asistida" as const, label: "Venta asistida" }]
+      : []),
+    ...(hasAdminPermission(role, "integrations:read")
+      ? [{ href: "/admin/integraciones" as const, label: "Integraciones" }]
+      : []),
+    ...(hasAdminPermission(role, "payments:read")
+      ? [{ href: "/admin/pagos" as const, label: "Pagos" }]
       : []),
     ...(hasAdminPermission(role, "content:read")
       ? [{ href: "/admin/contenido" as const, label: "Contenido" }]

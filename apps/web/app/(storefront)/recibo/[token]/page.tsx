@@ -5,9 +5,18 @@ import { notFound } from "next/navigation";
 import { connection } from "next/server";
 
 import { PrintReceiptButton } from "@/components/orders/receipt-actions";
+import { ReceiptPaymentPanel } from "@/components/orders/receipt-payment-panel";
 import { Button } from "@/components/ui/button";
+import { optionalCustomerId } from "@/lib/cart";
 import { hashCartToken } from "@/lib/cart-token";
 import { orderService } from "@/lib/checkout";
+import { getDatabase } from "@/lib/db";
+import {
+  getBankTransferInstructions,
+  getIntegrationCredentialVault,
+  paymentService,
+  storeCreditService,
+} from "@/lib/integrations";
 
 const paymentStatusLabels: Record<PaymentStatus, string> = {
   UNPAID: "Pago pendiente",
@@ -84,6 +93,22 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
   ]
     .filter(Boolean)
     .join(" · ");
+  const [attempts, order, customerId, credentials] = await Promise.all([
+    paymentService().listOrderPayments(receipt.orderId),
+    getDatabase().order.findUnique({
+      where: { id: receipt.orderId },
+      select: { customerId: true },
+    }),
+    optionalCustomerId(),
+    getIntegrationCredentialVault().list({ limit: 100 }),
+  ]);
+  const credit =
+    customerId && order?.customerId === customerId
+      ? await storeCreditService().get(customerId)
+      : null;
+  const allowNewPayment =
+    receipt.orderStatus !== "CANCELLED" &&
+    ["UNPAID", "PARTIALLY_PAID", "FAILED"].includes(receipt.paymentStatus);
   return (
     <div className="mx-auto max-w-4xl space-y-8 print:max-w-none">
       <div className="flex flex-wrap items-start justify-between gap-4 print:block">
@@ -121,6 +146,21 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
           una venta vigente ni un pago.
         </p>
       ) : null}
+
+      <ReceiptPaymentPanel
+        token={token}
+        attempts={attempts}
+        wompiAccounts={credentials.items
+          .filter((credential) => credential.provider === "wompi" && !credential.revokedAt)
+          .map((credential) => ({ id: credential.id, accountName: credential.accountName }))}
+        bankTransferInstructions={getBankTransferInstructions()}
+        storeCreditAvailableCents={
+          credit?.active && BigInt(credit.availableCents) > 0n ? credit.availableCents : null
+        }
+        allowNewPayment={allowNewPayment}
+        externalId={typeof query.id === "string" ? query.id : ""}
+        paymentStatus={receipt.paymentStatus}
+      />
 
       <section className="grid gap-5 rounded-xl border border-border bg-card p-5 sm:grid-cols-2">
         <div>

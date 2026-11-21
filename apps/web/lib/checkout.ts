@@ -8,6 +8,19 @@ import { OrderService, type CheckoutPreview } from "@mundonettech/db";
 import { checkoutCartReference, existingCartReference } from "@/lib/cart";
 import { getDatabase } from "@/lib/db";
 import { getSessionHmacSecret } from "@/lib/env";
+import {
+  getBankTransferInstructions,
+  getIntegrationCredentialVault,
+  storeCreditService,
+} from "@/lib/integrations";
+
+export interface StorefrontCheckoutPreview extends CheckoutPreview {
+  readonly paymentMethods: {
+    readonly wompiAccounts: readonly { id: string; accountName: string }[];
+    readonly bankTransferEnabled: boolean;
+    readonly storeCreditAvailableCents: string | null;
+  };
+}
 
 export function orderService(): OrderService {
   return new OrderService(getDatabase(), {
@@ -25,10 +38,28 @@ export function orderService(): OrderService {
   });
 }
 
-export async function readCheckoutPreview(): Promise<CheckoutPreview | null> {
+export async function readCheckoutPreview(): Promise<StorefrontCheckoutPreview | null> {
   const reference = await existingCartReference();
   if (!reference) return null;
-  return orderService().preview(reference);
+  const preview = await orderService().preview(reference);
+  if (!preview) return null;
+  const [credentials, credit] = await Promise.all([
+    getIntegrationCredentialVault().list({ limit: 100 }),
+    preview.customer?.authenticated
+      ? storeCreditService().get(preview.customer.id)
+      : Promise.resolve(null),
+  ]);
+  return {
+    ...preview,
+    paymentMethods: {
+      wompiAccounts: credentials.items
+        .filter((credential) => credential.provider === "wompi" && !credential.revokedAt)
+        .map((credential) => ({ id: credential.id, accountName: credential.accountName })),
+      bankTransferEnabled: getBankTransferInstructions() !== null,
+      storeCreditAvailableCents:
+        credit?.active && BigInt(credit.availableCents) > 0n ? credit.availableCents : null,
+    },
+  };
 }
 
 export async function readCheckoutCartReference() {

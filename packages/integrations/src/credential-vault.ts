@@ -58,7 +58,7 @@ export type CredentialDescriptor = Omit<IntegrationCredential, "nonce" | "cipher
 export interface CredentialAuditContext {
   readonly requestId?: string;
   readonly ipHash?: Uint8Array;
-  readonly userAgentHash?: Uint8Array;
+  readonly userAgentHash?: Uint8Array | null | undefined;
 }
 
 function descriptor(record: IntegrationCredential): CredentialDescriptor {
@@ -95,10 +95,10 @@ function validateIdentity(provider: string, accountName: string, actorId: string
 }
 
 function normalizeAuditBytes(
-  value: Uint8Array | undefined,
+  value: Uint8Array | null | undefined,
   field: string,
 ): Uint8Array<ArrayBuffer> | null {
-  if (value === undefined) return null;
+  if (value === undefined || value === null) return null;
   if (!(value instanceof Uint8Array) || value.length !== 32) {
     throw new TypeError(`${field} must be a 32-byte Uint8Array.`);
   }

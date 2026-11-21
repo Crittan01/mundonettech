@@ -1,5 +1,16 @@
 import { randomBytes, randomUUID } from "node:crypto";
 
+export const paymentTables = [
+  "PaymentAttempt",
+  "PaymentTransaction",
+  "PaymentWebhookEvent",
+  "BlockedIdentity",
+  "RemittanceBatch",
+  "CodReconciliation",
+  "StoreCreditAccount",
+  "StoreCreditEntry",
+];
+
 export const checkoutTables = [
   "OrderItem",
   "OrderItemTaxLine",
@@ -125,4 +136,79 @@ export async function seedCheckoutFixture(client, { catalog, inventory, pricing,
     [refundId, orderItemId],
   );
   return { orderId, orderItemId, shipmentId, refundId };
+}
+
+export async function seedPaymentFixture(client, { checkout, catalog, adminId }) {
+  const credentialId = randomUUID();
+  const wompiAttemptId = randomUUID();
+  const codAttemptId = randomUUID();
+  const creditAccountId = randomUUID();
+  await client.query(
+    `INSERT INTO "IntegrationCredential" (
+      "id", "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+    ) VALUES ($1, 'wompi', 'LOCAL', 'matrix-payments', 1, $2, $3, $4, $5)`,
+    [credentialId, randomBytes(12), randomBytes(32), randomBytes(16), adminId],
+  );
+  await client.query(
+    `INSERT INTO "PaymentAttempt" (
+      "id", "orderId", "provider", "environment", "status", "idempotencyKey", "requestHash",
+      "reference", "amountCents", "credentialId", "providerStatus", "completedAt"
+    ) VALUES ($1, $2, 'WOMPI', 'LOCAL', 'SUCCEEDED', $3, $4, $5, 195000, $6, 'APPROVED', CURRENT_TIMESTAMP)`,
+    [
+      wompiAttemptId,
+      checkout.orderId,
+      `rls-wompi-${randomUUID()}`,
+      randomBytes(32),
+      randomUUID(),
+      credentialId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO "PaymentTransaction" (
+      "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+    ) VALUES ($1, 'WOMPI', 'CAPTURE', 'SUCCEEDED', 195000, $2, $3, CURRENT_TIMESTAMP)`,
+    [wompiAttemptId, `trx-${randomUUID()}`, randomBytes(32)],
+  );
+  await client.query(
+    `INSERT INTO "PaymentWebhookEvent" (
+      "provider", "attemptId", "eventKey", "payloadHash", "transactionExternalId", "status", "processedAt"
+    ) VALUES ('WOMPI', $1, $2, $3, $4, 'PROCESSED', CURRENT_TIMESTAMP)`,
+    [wompiAttemptId, randomBytes(32).toString("hex"), randomBytes(32), `trx-${randomUUID()}`],
+  );
+  await client.query(
+    `INSERT INTO "BlockedIdentity" ("kind", "identityHash", "reason", "blockedByAdminUserId")
+     VALUES ('EMAIL', $1, 'Revisión de fraude confirmada', $2)`,
+    [randomBytes(32), adminId],
+  );
+  const remittance = await client.query(
+    `INSERT INTO "RemittanceBatch" ("carrier", "reference", "requestHash", "expectedCents", "createdByAdminUserId")
+     VALUES ('Transportadora matriz', $1, $2, 1000, $3) RETURNING "id"`,
+    [`RLS-REMIT-${randomUUID()}`, randomBytes(32), adminId],
+  );
+  await client.query(
+    `INSERT INTO "PaymentAttempt" (
+      "id", "orderId", "provider", "environment", "idempotencyKey", "requestHash", "reference", "amountCents"
+    ) VALUES ($1, $2, 'COD', 'LOCAL', $3, $4, $5, 1000)`,
+    [codAttemptId, checkout.orderId, `rls-cod-${randomUUID()}`, randomBytes(32), randomUUID()],
+  );
+  await client.query(
+    `INSERT INTO "CodReconciliation" ("paymentAttemptId", "remittanceBatchId", "expectedCents")
+     VALUES ($1, $2, 1000)`,
+    [codAttemptId, remittance.rows[0].id],
+  );
+  await client.query(`INSERT INTO "StoreCreditAccount" ("id", "customerId") VALUES ($1, $2)`, [
+    creditAccountId,
+    catalog.customerId,
+  ]);
+  await client.query(
+    `UPDATE "StoreCreditAccount" SET "availableCents" = 50000, "version" = 1 WHERE "id" = $1`,
+    [creditAccountId],
+  );
+  await client.query(
+    `INSERT INTO "StoreCreditEntry" (
+      "accountId", "actorAdminUserId", "type", "operationKey", "sequence", "requestHash", "amountCents",
+      "availableAfterCents", "heldAfterCents", "reason"
+    ) VALUES ($1, $2, 'GRANT', $3, 1, $4, 50000, 50000, 0, 'Abono de conciliación')`,
+    [creditAccountId, adminId, `rls-credit-${randomUUID()}`, randomBytes(32)],
+  );
 }

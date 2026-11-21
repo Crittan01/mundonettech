@@ -71,7 +71,16 @@ pnpm admin:bootstrap
 ## 7. Checkout, recibos y ciclo de vida de órdenes
 
 - La conversión exige el carrito aislado por token/cliente, validación Server Action cerrada, fingerprint de precios/impuestos/entrega y `IdempotencyKey` con hashes de clave, sujeto y request. Una repetición equivalente recupera la misma orden; reutilizar la clave con otro payload se rechaza.
-- DANE, contacto, aceptación legal, UVT, régimen, dinero y WAC quedan en snapshots relacionales inmutables. RLS permanece *deny-by-default* en las 63 tablas y los payloads `DomainOutbox` contienen identificadores/importes operativos, nombres de sede permitidos y jamás correo, teléfono, dirección ni notas del cliente.
+- DANE, contacto, aceptación legal, UVT, régimen, dinero y WAC quedan en snapshots relacionales inmutables. RLS permanece *deny-by-default* en las 71 tablas y los payloads `DomainOutbox` contienen identificadores/importes operativos, nombres de sede permitidos y jamás correo, teléfono, dirección ni notas del cliente.
 - `/recibo/[token]` y su descarga usan un token de 256 bits; la BD guarda solo SHA-256. La emisión y cada lectura recalculan hash y cuadre aritmético. El token de reintento se deriva con HMAC de servidor y no se almacena en claro. Las rutas son `noindex`/`no-store` y no se admiten como orígenes de `UrlRedirect`.
 - `UNPAID` se presenta siempre como pago pendiente, nunca como cobro confirmado. El comprobante es no fiscal. Reembolsos exigen actor activo autorizado y orden pagada; su request hash, montos, cantidades y transiciones se validan en PostgreSQL.
 - `/api/jobs/orders` exige bearer independiente `ORDER_CRON_SECRET`. La expiración libera stock y cupones en una transacción, nunca borra historial y no ejecuta correo ni APIs externas; los workers consumen el outbox con leases y dueños ya verificados por las primitivas de F0.
+
+
+## 8. Bóveda y libro de pagos
+
+- `/admin/integraciones` exige `aal2` y step-up en cada creación, rotación, recifrado o revocación. Los formularios no devuelven secretos en su estado de error; los descriptores omiten nonce, ciphertext y authTag. El AAD liga UUID, proveedor, cuenta y ambiente, y PRD solo acepta llaves Wompi `prod`.
+- `/admin/pagos` separa `payments:read`/`payments:write`; las mutaciones exigen MFA reciente y actor financiero activo. `integrations:write` queda limitado al Anillo 1. Las referencias externas y las conciliaciones manuales escriben `AdminActionLog` sin PII ni secretos.
+- Wompi valida propiedades variables, timestamp, ambiente y checksum antes de tocar el libro. Los eventos se deduplican por hash, se ordenan por fecha del proveedor y descartan estados obsoletos; un pago tardío sobre una orden cancelada genera revisión y no mueve stock.
+- Los intentos comprometen como máximo el saldo restante bajo lock. Las transiciones, capturas, compensaciones, versiones de crédito y totales de reembolso se validan en PostgreSQL, también bajo requests concurrentes.
+- COD usa hashes HMAC de correo/teléfono/documento, nunca el valor en claro. Recaudos y remesas con diferencias permanecen como discrepancia y no se capturan. Los reembolsos externos con resultado incierto no se reintentan: requieren un ID externo verificado con MFA.

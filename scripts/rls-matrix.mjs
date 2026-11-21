@@ -9,7 +9,12 @@ import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mj
 import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixture.mjs";
 import { cmsTables, seedCmsFixture } from "./lib/cms-test-fixture.mjs";
 import { pricingTables, seedPricingFixture } from "./lib/pricing-test-fixture.mjs";
-import { checkoutTables, seedCheckoutFixture } from "./lib/checkout-test-fixture.mjs";
+import {
+  checkoutTables,
+  paymentTables,
+  seedCheckoutFixture,
+  seedPaymentFixture,
+} from "./lib/checkout-test-fixture.mjs";
 
 const expectedTables = [
   "AdminUser",
@@ -26,6 +31,7 @@ const expectedTables = [
   ...cmsTables,
   ...pricingTables,
   ...checkoutTables,
+  ...paymentTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -187,7 +193,8 @@ async function ensureMatrixFixtures(client) {
   const inventory = await seedInventoryFixture(client, catalog);
   await seedCmsFixture(client, adminId);
   const pricing = await seedPricingFixture(client, catalog);
-  await seedCheckoutFixture(client, { catalog, inventory, pricing, adminId });
+  const checkout = await seedCheckoutFixture(client, { catalog, inventory, pricing, adminId });
+  await seedPaymentFixture(client, { checkout, catalog, adminId });
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {
