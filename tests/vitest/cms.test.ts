@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { adminNavigation, hasAdminPermission } from "../../packages/core/dist/index.js";
+import { adminNavigation, adminRoles, hasAdminPermission } from "../../packages/core/dist/index.js";
 import {
   cmsBlockTypes,
   interpolateCmsText,
@@ -9,24 +9,48 @@ import {
 } from "../../packages/cms/dist/index.js";
 
 describe("F2.1 — typed composable CMS blocks", () => {
-  it("accepts all six production block contracts", () => {
+  it("accepts all six production block contracts including safe numeric comparisons", () => {
     expect(cmsBlockTypes).toHaveLength(6);
     parseCmsBlock("HERO", {
-      heading: "Título",
+      heading: "Tecnología con latencia < 5 ms",
+      subheading: "Cobertura nacional\nEnvíos asegurados",
       primaryCta: { label: "Explorar", href: "/productos" },
     });
-    parseCmsBlock("RICH_TEXT", { body: "Texto plano" });
-    parseCmsBlock("IMAGE", { mediaId: crypto.randomUUID() });
-    parseCmsBlock("CTA", {
-      title: "Actúa",
-      primaryCta: { label: "Ir", href: "https://example.co" },
+    parseCmsBlock("RICH_TEXT", {
+      heading: "Respaldo técnico",
+      body: "Potencia < 100 W para equipaje de cabina.\nSoporte directo.",
     });
-    parseCmsBlock("PRODUCT_GRID", { productSlugs: ["sony-wh-1000xm5"], maxItems: 8 });
-    parseCmsBlock("FAQ", { items: [{ question: "Pregunta", answer: "Respuesta" }] });
+    parseCmsBlock("IMAGE", {
+      mediaId: crypto.randomUUID(),
+      caption: "Vista lateral del equipo",
+    });
+    parseCmsBlock("CTA", {
+      title: "Actúa hoy",
+      body: "Consulta unidades disponibles.",
+      primaryCta: { label: "Ir", href: "https://example.co/catalogo" },
+      secondaryCta: { label: "Comparar", href: "/comparar" },
+    });
+    parseCmsBlock("PRODUCT_GRID", {
+      heading: "Destacados",
+      categorySlug: "audio",
+      productSlugs: ["sony-wh-1000xm5"],
+      maxItems: 8,
+    });
+    parseCmsBlock("FAQ", {
+      heading: "Preguntas frecuentes",
+      items: [{ question: "¿Cuál es el tiempo de respuesta?", answer: "Respuesta < 24 horas." }],
+    });
   });
 
-  it("rejects unknown fields, unsafe links, duplicate products and empty FAQ", () => {
+  it("rejects unknown fields, arbitrary HTML/SVG/comments, control chars, unsafe links and invalid grids", () => {
     expect(() => parseCmsBlock("HERO", { heading: "X", unexpected: true })).toThrow();
+    expect(() => parseCmsBlock("HERO", { heading: "<script>alert(1)</script>" })).toThrow();
+    expect(() => parseCmsBlock("RICH_TEXT", { body: "Texto con <img src=x onerror=1>" })).toThrow();
+    expect(() => parseCmsBlock("RICH_TEXT", { body: "Comentario <!-- oculto -->" })).toThrow();
+    expect(() => parseCmsBlock("RICH_TEXT", { body: "Cierre suelto </p>" })).toThrow();
+    expect(() => parseCmsBlock("HERO", { heading: "Salto\nde línea en heading" })).toThrow();
+    expect(() => parseCmsBlock("RICH_TEXT", { body: "Null byte \u0000 prohibido" })).toThrow();
+    expect(() => parseCmsBlock("RICH_TEXT", { heading: "   ", body: "Texto válido" })).toThrow();
     expect(() =>
       parseCmsBlock("HERO", {
         heading: "X",
@@ -34,36 +58,82 @@ describe("F2.1 — typed composable CMS blocks", () => {
       }),
     ).toThrow();
     expect(() =>
+      parseCmsBlock("HERO", {
+        heading: "X",
+        primaryCta: { label: "X", href: "http://insecure.example.co" },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseCmsBlock("HERO", {
+        heading: "X",
+        primaryCta: { label: "X", href: "https://user:pass@example.co/path" },
+      }),
+    ).toThrow();
+    expect(() =>
       parseCmsBlock("HERO", { heading: "X", primaryCta: { label: "X", href: "//external.co" } }),
     ).toThrow();
+    expect(() =>
+      parseCmsBlock("HERO", { heading: "X", primaryCta: { label: "X", href: "/ruta\\mala" } }),
+    ).toThrow();
     expect(() => parseCmsBlock("PRODUCT_GRID", { productSlugs: ["same", "same"] })).toThrow();
+    expect(() => parseCmsBlock("PRODUCT_GRID", { categorySlug: "a".repeat(161) })).toThrow();
     expect(() => parseCmsBlock("FAQ", { items: [] })).toThrow();
     expect(() => parseCmsBlock("IMAGE", { mediaId: "invalid" })).toThrow();
   });
 
-  it("interpolates only known tokens and blocks unknown or malformed expressions", () => {
-    const tokens = { "store.name": "Tienda", "store.domain": "tienda.co" };
-    expect(interpolateCmsText("Hola {{store.name}}", tokens)).toBe("Hola Tienda");
+  it("interpolates only known safe tokens and blocks unknown, malformed or HTML-bearing values", () => {
+    const tokens = { "store.name": "Tienda Oficial", "store.domain": "tienda.co" };
+    expect(interpolateCmsText("Hola {{ store.name }} en {{store.domain}}", tokens)).toBe(
+      "Hola Tienda Oficial en tienda.co",
+    );
     expect(() => interpolateCmsText("{{store.secret}}", tokens)).toThrow(/Unknown/);
     expect(() => interpolateCmsText("{{store.name", tokens)).toThrow(/Malformed/);
-    const rendered = renderCmsBlock("HERO", { heading: "Hola {{store.name}}" }, tokens);
-    expect(rendered).toMatchObject({ heading: "Hola Tienda" });
+    expect(() => interpolateCmsText("{{{store.name}}}", tokens)).toThrow(/Malformed/);
+    expect(() =>
+      interpolateCmsText("Hola {{store.name}}", { "store.name": "<b>Inyección</b>" }),
+    ).toThrow(/Unsafe/);
+    expect(() => interpolateCmsText("Hola {{store.name}}", { "store.name": "{{nested}}" })).toThrow(
+      /Unsafe/,
+    );
+
+    const rendered = renderCmsBlock(
+      "HERO",
+      { heading: "Hola {{store.name}}", subheading: "Visita {{store.domain}}" },
+      tokens,
+    );
+    expect(rendered).toMatchObject({
+      heading: "Hola Tienda Oficial",
+      subheading: "Visita tienda.co",
+    });
     expect(() => parseCmsBlock("HERO", { heading: "{{broken" })).toThrow(/Malformed/);
   });
 });
 
-describe("F2.1 — CMS and settings RBAC", () => {
-  it("allows CMS editors to write content but never operational settings", () => {
-    expect(hasAdminPermission("CMS_EDITOR", "content:write")).toBe(true);
-    expect(hasAdminPermission("CMS_EDITOR", "settings:read")).toBe(false);
-    expect(hasAdminPermission("FINANCE_ANALYST", "settings:write")).toBe(false);
-    expect(hasAdminPermission("STORE_MANAGER", "settings:write")).toBe(true);
-    expect(hasAdminPermission("FULFILLMENT", "content:read")).toBe(false);
-    expect(adminNavigation("CMS_EDITOR").some((item) => item.href === "/admin/contenido")).toBe(
-      true,
-    );
-    expect(
-      adminNavigation("FINANCE_ANALYST").some((item) => item.href === "/admin/configuracion"),
-    ).toBe(true);
+describe("F2.1 — CMS and settings RBAC matrix across all 8 retail roles", () => {
+  it("enforces strict separation between editorial content and operational StoreSettings", () => {
+    const expectedContent = new Set([
+      "SUPERADMIN",
+      "OPERATIONS_MANAGER",
+      "STORE_MANAGER",
+      "CMS_EDITOR",
+    ]);
+    const expectedSettingsRead = new Set([
+      "SUPERADMIN",
+      "OPERATIONS_MANAGER",
+      "STORE_MANAGER",
+      "FINANCE_ANALYST",
+    ]);
+    const expectedSettingsWrite = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"]);
+
+    for (const role of adminRoles) {
+      expect(hasAdminPermission(role, "content:read")).toBe(expectedContent.has(role));
+      expect(hasAdminPermission(role, "content:write")).toBe(expectedContent.has(role));
+      expect(hasAdminPermission(role, "settings:read")).toBe(expectedSettingsRead.has(role));
+      expect(hasAdminPermission(role, "settings:write")).toBe(expectedSettingsWrite.has(role));
+
+      const nav = adminNavigation(role).map((item) => item.href);
+      expect(nav.includes("/admin/contenido")).toBe(expectedContent.has(role));
+      expect(nav.includes("/admin/configuracion")).toBe(expectedSettingsRead.has(role));
+    }
   });
 });

@@ -14,21 +14,35 @@ export interface StoreSettingsInput {
   readonly localDeliveryEnabled: boolean;
 }
 
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ianaTimeZonePattern = /^(?:UTC|[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){1,2})$/;
+
 function validateSettings(input: StoreSettingsInput) {
   if (!["NO_RESPONSABLE_IVA", "RESPONSABLE_IVA"].includes(input.taxRegime)) {
     throw new CmsValidationError("Invalid tax regime.");
   }
-  if (!Number.isInteger(input.annualRevenueAlertUvt) || input.annualRevenueAlertUvt < 1) {
-    throw new CmsValidationError("Annual revenue alert must be a positive integer.");
+  if (
+    !Number.isSafeInteger(input.annualRevenueAlertUvt) ||
+    input.annualRevenueAlertUvt < 1 ||
+    input.annualRevenueAlertUvt > 2_147_483_647
+  ) {
+    throw new CmsValidationError("Annual revenue alert must be a positive 32-bit integer.");
   }
-  if (!/^[A-Z]{3}$/.test(input.currency))
+  const currency = input.currency.trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) {
     throw new CmsValidationError("Currency must use ISO 4217 uppercase letters.");
+  }
+  const timeZone = input.timeZone.trim();
+  if (!timeZone || timeZone.length > 64 || !ianaTimeZonePattern.test(timeZone)) {
+    throw new CmsValidationError("Invalid IANA time zone.");
+  }
   try {
-    new Intl.DateTimeFormat("es-CO", { timeZone: input.timeZone }).format(0);
+    new Intl.DateTimeFormat("es-CO", { timeZone }).format(0);
   } catch {
     throw new CmsValidationError("Invalid IANA time zone.");
   }
-  if (!/^[A-Z][A-Z0-9-]{0,11}$/.test(input.orderNumberPrefix)) {
+  const orderNumberPrefix = input.orderNumberPrefix.trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9-]{0,11}$/.test(orderNumberPrefix)) {
     throw new CmsValidationError("Invalid order number prefix.");
   }
   if (
@@ -46,8 +60,9 @@ function validateSettings(input: StoreSettingsInput) {
   }
   return {
     ...input,
-    currency: input.currency.toUpperCase(),
-    orderNumberPrefix: input.orderNumberPrefix.toUpperCase(),
+    currency,
+    timeZone,
+    orderNumberPrefix,
   };
 }
 
@@ -66,6 +81,9 @@ export class StoreSettingsService {
   }
 
   async save(input: StoreSettingsInput, audit: CmsAudit): Promise<StoreSettings> {
+    if (!uuidPattern.test(audit.actorAdminUserId)) {
+      throw new CmsValidationError("actorAdminUserId must be a canonical UUID.");
+    }
     const settings = validateSettings(input);
     return this.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('store-settings-default'))`;
@@ -87,6 +105,8 @@ export class StoreSettingsService {
             annualRevenueAlertUvt: saved.annualRevenueAlertUvt,
             currency: saved.currency,
             timeZone: saved.timeZone,
+            orderNumberPrefix: saved.orderNumberPrefix,
+            orderNumberPadding: saved.orderNumberPadding,
             clickAndCollectEnabled: saved.clickAndCollectEnabled,
             localDeliveryEnabled: saved.localDeliveryEnabled,
           },

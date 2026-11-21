@@ -1,5 +1,5 @@
+import { CmsMediaService, CmsNotFoundError, CmsValidationError } from "@mundonettech/cms";
 import { hasAdminPermission, maskEmail } from "@mundonettech/core";
-import { CmsMediaService } from "@mundonettech/cms";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -15,13 +15,30 @@ export const metadata = { title: "Mediateca CMS" };
 export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/contenido/medios">) {
   const session = await requireAdminPage("content:read");
   const raw = await searchParams;
-  const cursor = typeof raw.cursor === "string" ? raw.cursor : undefined;
-  const result = await new CmsMediaService(getDatabase(), null).list({
-    limit: 24,
-    ...(cursor ? { cursor } : {}),
-  });
+  const cursor =
+    typeof raw.cursor === "string" && raw.cursor.trim() ? raw.cursor.trim() : undefined;
+  const mediaService = new CmsMediaService(getDatabase(), null);
+
+  let cursorWarning: string | null = null;
+  let result: Awaited<ReturnType<CmsMediaService["list"]>>;
+  try {
+    result = await mediaService.list({
+      limit: 24,
+      ...(cursor ? { cursor } : {}),
+    });
+  } catch (error) {
+    if (error instanceof CmsValidationError || error instanceof CmsNotFoundError) {
+      cursorWarning =
+        "El marcador de paginación ya no es válido; te mostramos el inicio de la mediateca.";
+      result = await mediaService.list({ limit: 24 });
+    } else {
+      throw error;
+    }
+  }
+
   const canWrite = hasAdminPermission(session.profile.role, "content:write");
   const origin = getPublicMediaOrigin();
+
   return (
     <div className="space-y-8">
       <div>
@@ -33,6 +50,14 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
           Imágenes procesadas con sharp-safe, almacenadas en R2 y auditadas.
         </p>
       </div>
+      {cursorWarning ? (
+        <p
+          role="alert"
+          className="rounded-xl border border-border bg-card p-4 text-sm text-destructive"
+        >
+          {cursorWarning}
+        </p>
+      ) : null}
       {canWrite ? (
         <>
           <CmsStepUp session={session} />
@@ -47,6 +72,7 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
         <section aria-label="Activos CMS" className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {result.items.map((media) => {
             const src = resolveCatalogMediaUrl(media.storageKey, origin);
+            const derivativeCount = Array.isArray(media.derivatives) ? media.derivatives.length : 0;
             return (
               <article
                 key={media.id}
@@ -70,10 +96,11 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
                 </div>
                 <div>
                   <h2 className="font-semibold">{media.originalFilename}</h2>
+                  <p className="mt-1 font-mono text-xs text-muted-foreground">ID: {media.id}</p>
                   <p className="mt-1 text-xs break-all text-muted-foreground">{media.storageKey}</p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {media.mimeType} · {media.byteSize} bytes · {media.derivatives.length} derivados
-                    · {maskEmail(media.createdBy.email)}
+                    {media.mimeType} · {media.byteSize} bytes · {derivativeCount} derivados ·{" "}
+                    {maskEmail(media.createdBy.email)}
                   </p>
                 </div>
                 {canWrite ? <CmsMediaEditForm mediaId={media.id} altText={media.altText} /> : null}
@@ -91,7 +118,7 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
       )}
       {result.nextCursor ? (
         <Link
-          href={`/admin/contenido/medios?cursor=${result.nextCursor}`}
+          href={`/admin/contenido/medios?cursor=${encodeURIComponent(result.nextCursor)}`}
           className="inline-flex min-h-10 items-center text-primary underline underline-offset-4"
         >
           Siguiente página

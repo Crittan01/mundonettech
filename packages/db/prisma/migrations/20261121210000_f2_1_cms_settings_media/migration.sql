@@ -100,18 +100,24 @@ ALTER TABLE "StoreSettings"
   ADD CONSTRAINT "StoreSettings_key_valid" CHECK ("key" ~ '^[a-z][a-z0-9._-]{0,39}$'),
   ADD CONSTRAINT "StoreSettings_revenue_threshold_positive" CHECK ("annualRevenueAlertUvt" > 0),
   ADD CONSTRAINT "StoreSettings_currency_valid" CHECK ("currency" ~ '^[A-Z]{3}$'),
-  ADD CONSTRAINT "StoreSettings_timeZone_valid" CHECK ("timeZone" ~ '^[A-Za-z]+/[A-Za-z_+-]+$'),
+  ADD CONSTRAINT "StoreSettings_timeZone_valid" CHECK ("timeZone" ~ '^(?:UTC|[A-Za-z]+(?:/[A-Za-z0-9_+-]+){1,2})$'),
   ADD CONSTRAINT "StoreSettings_order_prefix_valid" CHECK ("orderNumberPrefix" ~ '^[A-Z][A-Z0-9-]{0,11}$'),
   ADD CONSTRAINT "StoreSettings_order_padding_valid" CHECK ("orderNumberPadding" BETWEEN 1 AND 12);
 
 ALTER TABLE "CmsPage"
   ADD CONSTRAINT "CmsPage_slug_valid" CHECK ("slug" ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'),
   ADD CONSTRAINT "CmsPage_title_not_blank" CHECK ("title" = btrim("title") AND char_length("title") > 0),
+  ADD CONSTRAINT "CmsPage_seo_not_blank" CHECK (
+    ("seoTitle" IS NULL OR ("seoTitle" = btrim("seoTitle") AND char_length("seoTitle") > 0)) AND
+    ("seoDescription" IS NULL OR ("seoDescription" = btrim("seoDescription") AND char_length("seoDescription") > 0))
+  ),
   ADD CONSTRAINT "CmsPage_publication_consistent" CHECK (
-    ("status" = 'DRAFT' AND "publishedAt" IS NULL AND "scheduledFor" IS NULL) OR
-    ("status" = 'SCHEDULED' AND "publishedAt" IS NULL AND "scheduledFor" IS NOT NULL) OR
-    ("status" = 'PUBLISHED' AND "publishedAt" IS NOT NULL AND "scheduledFor" IS NULL) OR
-    ("status" = 'ARCHIVED' AND "scheduledFor" IS NULL)
+    ("deletedAt" IS NULL OR "scheduledFor" IS NULL) AND (
+      ("status" = 'DRAFT' AND "publishedAt" IS NULL AND "scheduledFor" IS NULL) OR
+      ("status" = 'SCHEDULED' AND "publishedAt" IS NULL AND "scheduledFor" IS NOT NULL) OR
+      ("status" = 'PUBLISHED' AND "publishedAt" IS NOT NULL AND "scheduledFor" IS NULL) OR
+      ("status" = 'ARCHIVED' AND "scheduledFor" IS NULL)
+    )
   );
 
 ALTER TABLE "CmsSectionBlock"
@@ -165,8 +171,11 @@ CREATE TRIGGER "CmsBlockVersion_immutable_history" BEFORE UPDATE OR DELETE ON "C
 FOR EACH ROW EXECUTE FUNCTION "enforce_cms_version_immutability"();
 
 CREATE FUNCTION "enforce_cms_media_immutability"() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'CMS media records use soft-delete and cannot be physically deleted' USING ERRCODE = '55000';
+  END IF;
   IF NEW."storageKey" IS DISTINCT FROM OLD."storageKey" OR
      NEW."contentHash" IS DISTINCT FROM OLD."contentHash" OR
      NEW."originalFilename" IS DISTINCT FROM OLD."originalFilename" OR
@@ -175,13 +184,23 @@ BEGIN
      NEW."width" IS DISTINCT FROM OLD."width" OR
      NEW."height" IS DISTINCT FROM OLD."height" OR
      NEW."derivatives" IS DISTINCT FROM OLD."derivatives" OR
-     NEW."createdByAdminUserId" IS DISTINCT FROM OLD."createdByAdminUserId" THEN
+     NEW."createdByAdminUserId" IS DISTINCT FROM OLD."createdByAdminUserId" OR
+     NEW."createdAt" IS DISTINCT FROM OLD."createdAt" THEN
     RAISE EXCEPTION 'Stored CMS media identity is immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."deletedAt" IS NOT NULL AND NEW."deletedAt" IS DISTINCT FROM OLD."deletedAt" THEN
+    RAISE EXCEPTION 'Archived CMS media cannot be restored in place' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."deletedAt" IS NULL AND NEW."deletedAt" IS NOT NULL AND EXISTS (
+    SELECT 1 FROM public."CmsBlockVersion"
+    WHERE jsonb_path_exists("content", '$.**.mediaId ? (@ == $id)', jsonb_build_object('id', OLD."id"::text))
+  ) THEN
+    RAISE EXCEPTION 'CMS media referenced by version history cannot be archived' USING ERRCODE = '55000';
   END IF;
   RETURN NEW;
 END;
 $$;
-CREATE TRIGGER "CmsMedia_immutable_identity" BEFORE UPDATE ON "CmsMedia"
+CREATE TRIGGER "CmsMedia_immutable_identity" BEFORE UPDATE OR DELETE ON "CmsMedia"
 FOR EACH ROW EXECUTE FUNCTION "enforce_cms_media_immutability"();
 
 DO $$

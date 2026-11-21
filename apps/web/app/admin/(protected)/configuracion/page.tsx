@@ -1,6 +1,6 @@
-import { hasAdminPermission } from "@mundonettech/core";
 import { StoreSettingsService } from "@mundonettech/cms";
 import { storeConfig } from "@mundonettech/config/store";
+import { hasAdminPermission, maskEmail } from "@mundonettech/core";
 
 import { StoreSettingsForm } from "@/components/admin/cms-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -8,6 +8,17 @@ import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Configuración de tienda" };
+
+const taxRegimeLabels = {
+  NO_RESPONSABLE_IVA: "No responsable de IVA",
+  RESPONSABLE_IVA: "Responsable de IVA",
+} as const;
+
+const bogotaFormatter = new Intl.DateTimeFormat("es-CO", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "America/Bogota",
+});
 
 export default async function StoreSettingsPage() {
   const session = await requireAdminPage("settings:read");
@@ -40,7 +51,7 @@ export default async function StoreSettingsPage() {
       ) : (
         <dl className="grid gap-4 rounded-xl border border-border bg-card p-5 sm:grid-cols-2">
           {Object.entries({
-            "Régimen tributario": settings.taxRegime,
+            "Régimen tributario": taxRegimeLabels[settings.taxRegime],
             "Alerta UVT": String(settings.annualRevenueAlertUvt),
             Moneda: settings.currency,
             "Zona horaria": settings.timeZone,
@@ -58,7 +69,8 @@ export default async function StoreSettingsPage() {
       )}
       {stored?.updatedBy ? (
         <p className="text-sm text-muted-foreground">
-          Última actualización: {stored.updatedAt.toISOString()} · {stored.updatedBy.displayName}
+          Última actualización (hora de Colombia): {bogotaFormatter.format(stored.updatedAt)} ·{" "}
+          {stored.updatedBy.displayName} ({maskEmail(stored.updatedBy.email)})
         </p>
       ) : (
         <p className="text-sm text-muted-foreground">

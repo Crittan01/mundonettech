@@ -24,8 +24,8 @@ import {
 import { getDatabase } from "@/lib/db";
 import { createCmsMediaStorage } from "@/lib/media-storage";
 import {
-  getAdminSession,
   AdminAuthorizationError,
+  getAdminSession,
   type AdminSession,
 } from "@/lib/security/admin-auth";
 import {
@@ -56,21 +56,44 @@ function audit(session: AdminSession, request: RequestSecurityContext) {
 }
 
 function errorMessage(error: unknown, values: Record<string, string>): ActionState {
-  if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE")
+  if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de guardar este cambio.", values);
-  if (error instanceof AdminAuthorizationError)
+  }
+  if (error instanceof AdminAuthorizationError) {
     return actionError("Tu sesión no está autorizada para esta operación.", values);
-  if (error instanceof CmsNotFoundError)
+  }
+  if (error instanceof CmsNotFoundError) {
     return actionError("El contenido solicitado ya no existe. Recarga la página.", values);
-  if (error instanceof CmsConflictError)
-    return actionError("El cambio entra en conflicto con el estado o contenido existente.", values);
-  if (error instanceof CmsValidationError || error instanceof z.ZodError)
+  }
+  if (error instanceof CmsConflictError) {
+    if (error.message.includes("slug")) {
+      return actionError("Ese slug ya está en uso por otra página activa.", values);
+    }
+    if (error.message.includes("visible published block")) {
+      return actionError(
+        "Para publicar la página necesitas al menos un bloque visible con versión publicada vigente.",
+        values,
+      );
+    }
+    if (error.message.includes("referenced by CMS version history")) {
+      return actionError(
+        "No puedes archivar este activo porque forma parte del historial de versiones del CMS.",
+        values,
+      );
+    }
     return actionError(
-      "Revisa los campos y la estructura JSON del bloque. Los tokens y enlaces deben ser válidos.",
+      "Esta transición no es válida para el estado actual del registro editorial.",
       values,
     );
+  }
+  if (error instanceof CmsValidationError || error instanceof z.ZodError) {
+    return actionError(
+      "Revisa los campos, fechas futuras y estructura JSON del bloque: se permiten tokens conocidos y enlaces locales o HTTPS, sin HTML arbitrario.",
+      values,
+    );
+  }
   return actionError(
-    "No pudimos completar la operación. Inténtalo de nuevo sin perder los datos.",
+    "No pudimos completar la operación. Inténtalo de nuevo; tus cambios siguen en pantalla.",
     values,
   );
 }
@@ -85,8 +108,9 @@ function contentJson(formData: FormData): unknown {
 }
 
 function localDate(value: string): Date {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value))
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) {
     throw new CmsValidationError("Invalid local date.");
+  }
   const date = new Date(`${value}:00-05:00`);
   if (Number.isNaN(date.getTime())) throw new CmsValidationError("Invalid local date.");
   return date;
@@ -101,10 +125,33 @@ function pageInput(formData: FormData) {
   };
 }
 
-function invalidateCms(slug?: string): void {
+function invalidateCms(options: { pageId?: string; slugs?: readonly (string | undefined)[] } = {}) {
   updateTag("cms");
-  if (slug) updateTag(`cms:page:${slug}`);
+  for (const slug of new Set(options.slugs ?? [])) {
+    if (slug) updateTag(`cms:page:${slug}`);
+  }
   revalidatePath("/admin/contenido");
+  if (options.pageId) {
+    revalidatePath(`/admin/contenido/${options.pageId}`);
+  }
+}
+
+async function resolvePageByBlock(blockId: string): Promise<{ id: string; slug: string } | null> {
+  const block = await getDatabase().cmsSectionBlock.findUnique({
+    where: { id: blockId },
+    select: { page: { select: { id: true, slug: true } } },
+  });
+  return block?.page ?? null;
+}
+
+async function resolvePageByVersion(
+  versionId: string,
+): Promise<{ id: string; slug: string } | null> {
+  const version = await getDatabase().cmsBlockVersion.findUnique({
+    where: { id: versionId },
+    select: { block: { select: { page: { select: { id: true, slug: true } } } } },
+  });
+  return version?.block.page ?? null;
 }
 
 export async function createCmsPageAction(
@@ -121,7 +168,7 @@ export async function createCmsPageAction(
       [{ type, content: contentJson(formData), isVisible: true }],
       audit(session, request),
     );
-    invalidateCms(page.slug);
+    invalidateCms({ pageId: page.id, slugs: [page.slug] });
     createdId = page.id;
   } catch (error) {
     return errorMessage(error, values);
@@ -137,8 +184,12 @@ export async function updateCmsPageAction(
   try {
     const { session, request } = await authorize("content:write");
     const id = z.uuid().parse(formString(formData, "pageId"));
+    const previous = await getDatabase().cmsPage.findFirst({
+      where: { id, deletedAt: null },
+      select: { slug: true },
+    });
     const page = await cmsService().updatePage(id, pageInput(formData), audit(session, request));
-    invalidateCms(page.slug);
+    invalidateCms({ pageId: id, slugs: [previous?.slug, page.slug] });
     return actionSuccess("Página actualizada y cambio registrado en auditoría.");
   } catch (error) {
     return errorMessage(error, values);
@@ -162,8 +213,11 @@ export async function addCmsBlockAction(
       },
       audit(session, request),
     );
-    invalidateCms();
-    revalidatePath(`/admin/contenido/${pageId}`);
+    const page = await getDatabase().cmsPage.findUnique({
+      where: { id: pageId },
+      select: { slug: true },
+    });
+    invalidateCms({ pageId, slugs: [page?.slug] });
     return actionSuccess("Bloque añadido con su primera versión en borrador.");
   } catch (error) {
     return errorMessage(error, values);
@@ -183,7 +237,8 @@ export async function createCmsVersionAction(
       contentJson(formData),
       audit(session, request),
     );
-    invalidateCms();
+    const page = await resolvePageByBlock(blockId);
+    invalidateCms({ ...(page ? { pageId: page.id, slugs: [page.slug] } : {}) });
     return actionSuccess(`Versión ${version.version} creada en borrador.`);
   } catch (error) {
     return errorMessage(error, values);
@@ -197,11 +252,10 @@ export async function publishCmsVersionAction(
   const values = formSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
-    await cmsService().publishVersion(
-      z.uuid().parse(formString(formData, "versionId")),
-      audit(session, request),
-    );
-    invalidateCms();
+    const versionId = z.uuid().parse(formString(formData, "versionId"));
+    await cmsService().publishVersion(versionId, audit(session, request));
+    const page = await resolvePageByVersion(versionId);
+    invalidateCms({ ...(page ? { pageId: page.id, slugs: [page.slug] } : {}) });
     return actionSuccess("Versión publicada. La página usará la versión vigente más reciente.");
   } catch (error) {
     return errorMessage(error, values);
@@ -221,7 +275,8 @@ export async function scheduleCmsVersionAction(
       localDate(formString(formData, "effectiveAt")),
       audit(session, request),
     );
-    invalidateCms();
+    const page = await resolvePageByVersion(versionId);
+    invalidateCms({ ...(page ? { pageId: page.id, slugs: [page.slug] } : {}) });
     return actionSuccess("Publicación de la versión programada.");
   } catch (error) {
     return errorMessage(error, values);
@@ -235,11 +290,9 @@ export async function publishCmsPageAction(
   const values = formSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
-    const page = await cmsService().publishPage(
-      z.uuid().parse(formString(formData, "pageId")),
-      audit(session, request),
-    );
-    invalidateCms(page.slug);
+    const pageId = z.uuid().parse(formString(formData, "pageId"));
+    const page = await cmsService().publishPage(pageId, audit(session, request));
+    invalidateCms({ pageId, slugs: [page.slug] });
     return actionSuccess("Página publicada con sus bloques vigentes.");
   } catch (error) {
     return errorMessage(error, values);
@@ -253,12 +306,13 @@ export async function scheduleCmsPageAction(
   const values = formSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
+    const pageId = z.uuid().parse(formString(formData, "pageId"));
     const page = await cmsService().schedulePage(
-      z.uuid().parse(formString(formData, "pageId")),
+      pageId,
       localDate(formString(formData, "scheduledFor")),
       audit(session, request),
     );
-    invalidateCms(page.slug);
+    invalidateCms({ pageId, slugs: [page.slug] });
     return actionSuccess("Publicación de la página programada.");
   } catch (error) {
     return errorMessage(error, values);
@@ -272,11 +326,9 @@ export async function archiveCmsPageAction(
   const values = formSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
-    const page = await cmsService().archivePage(
-      z.uuid().parse(formString(formData, "pageId")),
-      audit(session, request),
-    );
-    invalidateCms(page.slug);
+    const pageId = z.uuid().parse(formString(formData, "pageId"));
+    const page = await cmsService().archivePage(pageId, audit(session, request));
+    invalidateCms({ pageId, slugs: [page.slug] });
     return actionSuccess("Página archivada; su historial permanece disponible.");
   } catch (error) {
     return errorMessage(error, values);
@@ -293,7 +345,11 @@ export async function reorderCmsBlocksAction(
     const pageId = z.uuid().parse(formString(formData, "pageId"));
     const blockIds = z.array(z.uuid()).parse(JSON.parse(formString(formData, "blockIds")));
     await cmsService().reorderBlocks(pageId, blockIds, audit(session, request));
-    invalidateCms();
+    const page = await getDatabase().cmsPage.findUnique({
+      where: { id: pageId },
+      select: { slug: true },
+    });
+    invalidateCms({ pageId, slugs: [page?.slug] });
     return actionSuccess("Orden de bloques actualizado.");
   } catch (error) {
     return errorMessage(error, values);
@@ -307,12 +363,14 @@ export async function setCmsBlockVisibilityAction(
   const values = formSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
+    const blockId = z.uuid().parse(formString(formData, "blockId"));
     await cmsService().setBlockVisibility(
-      z.uuid().parse(formString(formData, "blockId")),
+      blockId,
       formString(formData, "isVisible") === "true",
       audit(session, request),
     );
-    invalidateCms();
+    const page = await resolvePageByBlock(blockId);
+    invalidateCms({ ...(page ? { pageId: page.id, slugs: [page.slug] } : {}) });
     return actionSuccess("Visibilidad del bloque actualizada.");
   } catch (error) {
     return errorMessage(error, values);
@@ -345,8 +403,10 @@ export async function saveStoreSettingsAction(
           .min(1)
           .max(12)
           .parse(formString(formData, "orderNumberPadding")),
-        clickAndCollectEnabled: formData.get("clickAndCollectEnabled") === "on",
-        localDeliveryEnabled: formData.get("localDeliveryEnabled") === "on",
+        clickAndCollectEnabled: ["on", "true"].includes(
+          formString(formData, "clickAndCollectEnabled"),
+        ),
+        localDeliveryEnabled: ["on", "true"].includes(formString(formData, "localDeliveryEnabled")),
       },
       audit(session, request),
     );
@@ -370,13 +430,14 @@ export async function uploadCmsMediaAction(
     const { session, request } = await authorize("content:write");
     storage = createCmsMediaStorage();
     const file = formData.get("file");
-    if (!(file instanceof File) || file.size === 0)
+    if (!(file instanceof File) || file.size === 0) {
       throw new CmsValidationError("An image file is required.");
+    }
     const result = await new CmsMediaService(getDatabase(), storage).upload(
       {
         bytes: new Uint8Array(await file.arrayBuffer()),
         filename: file.name,
-        altText: formString(formData, "altText"),
+        altText: formString(formData, "altText").trim(),
       },
       audit(session, request),
     );
@@ -403,9 +464,11 @@ export async function updateCmsMediaAltAction(
     const { session, request } = await authorize("content:write");
     await new CmsMediaService(getDatabase(), null).updateAltText(
       z.uuid().parse(formString(formData, "mediaId")),
-      formString(formData, "altText"),
+      formString(formData, "altText").trim(),
       audit(session, request),
     );
+    updateTag("cms:media");
+    updateTag("cms");
     revalidatePath("/admin/contenido/medios");
     return actionSuccess("Texto alternativo actualizado.");
   } catch (error) {
@@ -424,6 +487,7 @@ export async function archiveCmsMediaAction(
       z.uuid().parse(formString(formData, "mediaId")),
       audit(session, request),
     );
+    updateTag("cms:media");
     revalidatePath("/admin/contenido/medios");
     return actionSuccess("Activo archivado sin borrar su objeto ni el historial editorial.");
   } catch (error) {

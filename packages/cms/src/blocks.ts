@@ -3,68 +3,109 @@ import { z } from "zod";
 export const cmsBlockTypes = ["HERO", "RICH_TEXT", "IMAGE", "CTA", "PRODUCT_GRID", "FAQ"] as const;
 export type CmsBlockType = (typeof cmsBlockTypes)[number];
 
-const text = (max: number) => z.string().trim().min(1).max(max);
-const optionalText = (max: number) => z.string().trim().max(max).optional();
+const singleLineControlPattern = /[\u0000-\u001f\u007f]/;
+const multiLineControlPattern = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const htmlTagOrCommentPattern = /<(?:[a-zA-Z!/])/;
+const slugValuePattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+function safePlainText(max: number, multiline = false) {
+  const controlPattern = multiline ? multiLineControlPattern : singleLineControlPattern;
+  return z
+    .string()
+    .trim()
+    .min(1)
+    .max(max)
+    .refine((value) => !controlPattern.test(value), "Control characters are not allowed.")
+    .refine((value) => !htmlTagOrCommentPattern.test(value), "Arbitrary HTML is not allowed.");
+}
+
+function optionalPlainText(max: number, multiline = false) {
+  return safePlainText(max, multiline).optional();
+}
+
+const slugSchema = z.string().trim().min(1).max(160).regex(slugValuePattern);
+
 const linkSchema = z
   .object({
-    label: text(120),
+    label: safePlainText(120),
     href: z
       .string()
       .trim()
+      .min(1)
       .max(2048)
       .refine((value) => {
+        if (/[\s\\\u0000-\u001f\u007f]/.test(value) || htmlTagOrCommentPattern.test(value)) {
+          return false;
+        }
         if (value.startsWith("/")) {
-          return !value.startsWith("//") && !/[\s\\\u0000-\u001f\u007f]/.test(value);
+          return !value.startsWith("//");
         }
         try {
-          return new URL(value).protocol === "https:";
+          const parsed = new URL(value);
+          return parsed.protocol === "https:" && !parsed.username && !parsed.password;
         } catch {
           return false;
         }
-      }, "Only local paths or HTTPS links are allowed."),
+      }, "Only safe local paths or HTTPS links without embedded credentials are allowed."),
   })
   .strict();
 
 const heroSchema = z
   .object({
-    heading: text(160),
-    subheading: optionalText(500),
+    heading: safePlainText(160),
+    subheading: optionalPlainText(500, true),
     mediaId: z.uuid().optional(),
     primaryCta: linkSchema.optional(),
   })
   .strict();
-const richTextSchema = z.object({ heading: optionalText(200), body: text(20_000) }).strict();
-const imageSchema = z.object({ mediaId: z.uuid(), caption: optionalText(500) }).strict();
+
+const richTextSchema = z
+  .object({
+    heading: optionalPlainText(200),
+    body: safePlainText(20_000, true),
+  })
+  .strict();
+
+const imageSchema = z
+  .object({
+    mediaId: z.uuid(),
+    caption: optionalPlainText(500, true),
+  })
+  .strict();
+
 const ctaSchema = z
   .object({
-    title: text(200),
-    body: optionalText(1000),
+    title: safePlainText(200),
+    body: optionalPlainText(1000, true),
     primaryCta: linkSchema,
     secondaryCta: linkSchema.optional(),
   })
   .strict();
+
 const productGridSchema = z
   .object({
-    heading: optionalText(200),
-    categorySlug: z
-      .string()
-      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
-      .optional(),
-    productSlugs: z
-      .array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/))
-      .max(24)
-      .default([]),
+    heading: optionalPlainText(200),
+    categorySlug: slugSchema.optional(),
+    productSlugs: z.array(slugSchema).max(24).default([]),
     maxItems: z.int().min(1).max(24).default(8),
   })
   .strict()
   .refine((value) => new Set(value.productSlugs).size === value.productSlugs.length, {
     message: "Product slugs must be unique.",
   });
+
 const faqSchema = z
   .object({
-    heading: optionalText(200),
+    heading: optionalPlainText(200),
     items: z
-      .array(z.object({ question: text(500), answer: text(5000) }).strict())
+      .array(
+        z
+          .object({
+            question: safePlainText(500),
+            answer: safePlainText(5000, true),
+          })
+          .strict(),
+      )
       .min(1)
       .max(30),
   })
@@ -88,7 +129,7 @@ export type CmsContent =
   | z.infer<typeof faqSchema>;
 
 export type CmsTokens = Readonly<Record<string, string>>;
-const tokenPattern = /\{\{\s*([a-z][a-z0-9_.]{0,63})\s*\}\}/g;
+const tokenPattern = /(?<!\{)\{\{\s*([a-z][a-z0-9_.]{0,63})\s*\}\}(?!\})/g;
 
 function visitStrings(
   value: unknown,
@@ -111,9 +152,21 @@ function visitStrings(
 }
 
 export function interpolateCmsText(input: string, tokens: CmsTokens): string {
+  if (multiLineControlPattern.test(input) || htmlTagOrCommentPattern.test(input)) {
+    throw new Error("Arbitrary HTML or control characters are not allowed in CMS text.");
+  }
   const resolved = input.replace(tokenPattern, (_match, token: string) => {
     if (!Object.hasOwn(tokens, token)) throw new Error(`Unknown CMS token: ${token}.`);
-    return tokens[token]!;
+    const replacement = tokens[token]!;
+    if (
+      replacement.includes("{{") ||
+      replacement.includes("}}") ||
+      multiLineControlPattern.test(replacement) ||
+      htmlTagOrCommentPattern.test(replacement)
+    ) {
+      throw new Error(`Unsafe value for CMS token: ${token}.`);
+    }
+    return replacement;
   });
   if (resolved.includes("{{") || resolved.includes("}}")) {
     throw new Error("Malformed CMS token expression.");

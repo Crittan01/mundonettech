@@ -1,5 +1,5 @@
-import { hasAdminPermission } from "@mundonettech/core";
-import { CmsService } from "@mundonettech/cms";
+import { CmsService, type CmsBlockType } from "@mundonettech/cms";
+import { hasAdminPermission, maskEmail } from "@mundonettech/core";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -21,13 +21,47 @@ import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Editar contenido" };
 
-export default async function CmsPageDetail({ params }: PageProps<"/admin/contenido/[id]">) {
-  const { id } = await params;
+const pageStatusLabels = {
+  DRAFT: "Borrador",
+  SCHEDULED: "Programada",
+  PUBLISHED: "Publicada",
+  ARCHIVED: "Archivada",
+} as const;
+
+const versionStatusLabels = {
+  DRAFT: "Borrador",
+  SCHEDULED: "Programada",
+  PUBLISHED: "Publicada",
+} as const;
+
+const blockTypeLabels: Record<CmsBlockType, string> = {
+  HERO: "Portada principal (HERO)",
+  RICH_TEXT: "Texto editorial (RICH_TEXT)",
+  IMAGE: "Imagen (IMAGE)",
+  CTA: "Llamado a la acción (CTA)",
+  PRODUCT_GRID: "Grilla de productos (PRODUCT_GRID)",
+  FAQ: "Preguntas frecuentes (FAQ)",
+};
+
+const bogotaFormatter = new Intl.DateTimeFormat("es-CO", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "America/Bogota",
+});
+
+export default async function CmsPageDetail({
+  params,
+  searchParams,
+}: PageProps<"/admin/contenido/[id]">) {
+  const [{ id }, query] = await Promise.all([params, searchParams]);
   const session = await requireAdminPage("content:read");
   const page = await new CmsService(getDatabase()).getPage(id);
   if (!page) notFound();
+
   const canWrite = hasAdminPermission(session.profile.role, "content:write");
   const ids = page.blocks.map((block) => block.id);
+  const justCreated = query.created === "1";
+
   return (
     <div className="space-y-8">
       <div>
@@ -36,12 +70,34 @@ export default async function CmsPageDetail({ params }: PageProps<"/admin/conten
         </Link>
         <h1 className="mt-3 text-3xl font-bold">{page.title}</h1>
         <p className="mt-2 text-muted-foreground">
-          /{page.slug} · {page.status}
+          <span className="font-mono">/{page.slug}</span> · {pageStatusLabels[page.status]}
+          {page.publishedAt
+            ? ` · publicada ${bogotaFormatter.format(page.publishedAt)}`
+            : page.scheduledFor
+              ? ` · programada ${bogotaFormatter.format(page.scheduledFor)}`
+              : ""}
         </p>
       </div>
+      {justCreated ? (
+        <p
+          role="status"
+          className="rounded-xl border border-border bg-card p-4 text-sm font-medium text-foreground"
+        >
+          Página creada en borrador con su primer bloque versionado y cambio registrado en
+          auditoría.
+        </p>
+      ) : null}
       {canWrite ? <CmsStepUp session={session} /> : null}
       {canWrite ? (
-        <CmsPageForm page={page} />
+        <CmsPageForm
+          page={{
+            id: page.id,
+            slug: page.slug,
+            title: page.title,
+            seoTitle: page.seoTitle,
+            seoDescription: page.seoDescription,
+          }}
+        />
       ) : (
         <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
           Vista de solo lectura: tu rol no permite modificar contenido.
@@ -50,8 +106,10 @@ export default async function CmsPageDetail({ params }: PageProps<"/admin/conten
       {canWrite ? (
         <section className="flex flex-wrap gap-4 rounded-xl border border-border bg-card p-5">
           <CmsPublishPageForm pageId={page.id} />
-          <CmsSchedulePageForm pageId={page.id} />
-          <CmsArchivePageForm pageId={page.id} />
+          {page.status === "DRAFT" || page.status === "SCHEDULED" ? (
+            <CmsSchedulePageForm pageId={page.id} />
+          ) : null}
+          {page.status !== "ARCHIVED" ? <CmsArchivePageForm pageId={page.id} /> : null}
         </section>
       ) : null}
       <section aria-labelledby="blocks-title" className="space-y-5">
@@ -60,6 +118,8 @@ export default async function CmsPageDetail({ params }: PageProps<"/admin/conten
         </h2>
         {page.blocks.map((block, index) => {
           const latest = block.versions[0];
+          const blockLabel =
+            blockTypeLabels[block.blockType as CmsBlockType] ?? String(block.blockType);
           return (
             <article
               key={block.id}
@@ -68,7 +128,7 @@ export default async function CmsPageDetail({ params }: PageProps<"/admin/conten
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-lg font-semibold">
-                    {block.blockType} · posición {block.position + 1}
+                    {blockLabel} · posición {block.position + 1}
                   </h3>
                   <p className="text-sm text-muted-foreground">
                     {block.isVisible ? "Visible" : "Oculto"} · {block.versions.length} versiones
@@ -107,9 +167,9 @@ export default async function CmsPageDetail({ params }: PageProps<"/admin/conten
               {latest ? (
                 <div className="space-y-4">
                   <p className="text-sm font-medium">
-                    Versión {latest.version} · {latest.status}
+                    Versión {latest.version} · {versionStatusLabels[latest.status]}
                     {latest.effectiveAt
-                      ? ` · vigente desde ${latest.effectiveAt.toISOString()}`
+                      ? ` · vigencia ${bogotaFormatter.format(latest.effectiveAt)}`
                       : ""}
                   </p>
                   <pre className="max-h-80 overflow-auto rounded-lg bg-secondary p-4 text-xs whitespace-pre-wrap">
@@ -131,18 +191,22 @@ export default async function CmsPageDetail({ params }: PageProps<"/admin/conten
                   ) : null}
                 </div>
               ) : (
-                <p>No hay versiones.</p>
+                <p className="text-sm text-muted-foreground">No hay versiones registradas.</p>
               )}
               {block.versions.length > 1 ? (
                 <details>
                   <summary className="cursor-pointer text-sm font-medium">
-                    Historial de versiones
+                    Historial inmutable de versiones ({block.versions.length})
                   </summary>
                   <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
                     {block.versions.map((version) => (
                       <li key={version.id}>
-                        v{version.version} · {version.status} · {version.createdBy.displayName} ·{" "}
-                        {version.createdAt.toISOString()}
+                        v{version.version} · {versionStatusLabels[version.status]}
+                        {version.effectiveAt
+                          ? ` (vigencia ${bogotaFormatter.format(version.effectiveAt)})`
+                          : ""}{" "}
+                        · {version.createdBy.displayName} ({maskEmail(version.createdBy.email)}) ·{" "}
+                        {bogotaFormatter.format(version.createdAt)}
                       </li>
                     ))}
                   </ul>
@@ -153,7 +217,7 @@ export default async function CmsPageDetail({ params }: PageProps<"/admin/conten
         })}
         {page.blocks.length === 0 ? (
           <p className="rounded-xl border border-border p-5 text-muted-foreground">
-            La página no tiene bloques.
+            La página no tiene bloques todavía.
           </p>
         ) : null}
       </section>

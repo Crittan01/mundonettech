@@ -1,5 +1,5 @@
-import { hasAdminPermission } from "@mundonettech/core";
 import { CmsService } from "@mundonettech/cms";
+import { hasAdminPermission } from "@mundonettech/core";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,19 @@ import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Contenido editorial" };
+
+const pageStatusLabels = {
+  DRAFT: "Borrador",
+  SCHEDULED: "Programada",
+  PUBLISHED: "Publicada",
+  ARCHIVED: "Archivada",
+} as const;
+
+const bogotaFormatter = new Intl.DateTimeFormat("es-CO", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "America/Bogota",
+});
 
 export default async function AdminContentPage({ searchParams }: PageProps<"/admin/contenido">) {
   const session = await requireAdminPage("content:read");
@@ -70,24 +83,25 @@ export default async function AdminContentPage({ searchParams }: PageProps<"/adm
       </p>
       {result.items.length ? (
         <section className="space-y-3" aria-label="Páginas editoriales">
-          {result.items.map((page) => (
-            <article key={page.id} className="rounded-xl border border-border bg-card p-5">
+          {result.items.map((item) => (
+            <article key={item.id} className="rounded-xl border border-border bg-card p-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="text-lg font-semibold">
-                    <Link href={`/admin/contenido/${page.id}`} className="hover:underline">
-                      {page.title}
+                    <Link href={`/admin/contenido/${item.id}`} className="hover:underline">
+                      {item.title}
                     </Link>
                   </h2>
-                  <p className="mt-1 font-mono text-xs text-muted-foreground">/{page.slug}</p>
+                  <p className="mt-1 font-mono text-xs text-muted-foreground">/{item.slug}</p>
                 </div>
-                <div className="text-sm text-muted-foreground">
-                  <p>{page.status}</p>
+                <div className="text-sm text-muted-foreground sm:text-right">
+                  <p className="font-medium text-foreground">{pageStatusLabels[item.status]}</p>
                   <p>
-                    {page.blocks.length} bloques ·{" "}
-                    {page.blocks.reduce((total, block) => total + block.versions.length, 0)}{" "}
+                    {item.blocks.length} bloques ·{" "}
+                    {item.blocks.reduce((total, block) => total + block.versions.length, 0)}{" "}
                     versiones
                   </p>
+                  <p className="text-xs">Actualizada: {bogotaFormatter.format(item.updatedAt)}</p>
                 </div>
               </div>
             </article>

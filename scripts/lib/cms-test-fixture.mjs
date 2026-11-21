@@ -16,8 +16,8 @@ export async function seedCmsFixture(client, adminId) {
     `INSERT INTO "StoreSettings" (
        "key", "taxRegime", "annualRevenueAlertUvt", "currency", "timeZone",
        "orderNumberPrefix", "orderNumberPadding", "updatedByAdminUserId"
-     ) VALUES ('default', 'NO_RESPONSABLE_IVA', 3500, 'COP', 'America/Bogota', 'MNT', 4, $1)`,
-    [adminId],
+     ) VALUES ($1, 'NO_RESPONSABLE_IVA', 3500, 'COP', 'America/Bogota', 'MNT', 4, $2)`,
+    [`matrix-${suffix.slice(0, 24)}`, adminId],
   );
   await client.query(
     `INSERT INTO "CmsPage" ("id", "slug", "title") VALUES ($1, $2, 'Página editorial')`,

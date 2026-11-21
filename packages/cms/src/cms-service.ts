@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { Prisma, PrismaClient, type CmsBlockVersion, type CmsPage } from "@mundonettech/db";
+import { z } from "zod";
 
 import {
   cmsBlockTypes,
@@ -12,7 +13,9 @@ import {
 } from "./blocks.js";
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const htmlTagOrCommentPattern = /<(?:[a-zA-Z!/])/;
+const maxBlocksPerPage = 100;
 
 export interface CmsAudit {
   readonly actorAdminUserId: string;
@@ -84,7 +87,8 @@ function text(
   if (
     (!normalized && required) ||
     normalized.length > max ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(normalized)
+    /[\u0000-\u001f\u007f]/.test(normalized) ||
+    htmlTagOrCommentPattern.test(normalized)
   ) {
     throw new CmsValidationError(`${field} has invalid content or length.`);
   }
@@ -180,21 +184,43 @@ export class CmsService {
   ) {}
 
   private content(type: CmsBlockType, input: unknown): CmsContent {
-    const parsed = parseCmsBlock(type, input);
-    if (Object.keys(this.tokens).length > 0) renderCmsBlock(type, parsed, this.tokens);
-    return parsed;
+    if (!cmsBlockTypes.includes(type)) throw new CmsValidationError("Unsupported block type.");
+    try {
+      const parsed = parseCmsBlock(type, input);
+      if (Object.keys(this.tokens).length > 0) renderCmsBlock(type, parsed, this.tokens);
+      return parsed;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw new CmsValidationError(
+          error.issues[0]?.message ?? "Invalid CMS block schema payload.",
+        );
+      }
+      if (error instanceof Error) {
+        throw new CmsValidationError(error.message);
+      }
+      throw new CmsValidationError("Invalid CMS block content.");
+    }
   }
 
   private async validateMediaReferences(
     tx: Prisma.TransactionClient,
     content: unknown,
   ): Promise<void> {
-    const ids = mediaIds(content);
+    const ids = [...new Set(mediaIds(content))].sort((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
     for (const id of ids) assertUuid(id, "mediaId");
     if (ids.length === 0) return;
-    const active = await tx.cmsMedia.count({ where: { id: { in: ids }, deletedAt: null } });
-    if (active !== ids.length)
+    const locked = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "CmsMedia"
+      WHERE "id" = ANY(${ids}::uuid[]) AND "deletedAt" IS NULL
+      ORDER BY "id"
+      FOR SHARE
+    `;
+    if (locked.length !== ids.length) {
       throw new CmsValidationError("CMS content references missing or archived media.");
+    }
   }
 
   async listPages(
@@ -241,7 +267,12 @@ export class CmsService {
     const page = Math.min(requestedPage, totalPages);
     const items = await this.db.cmsPage.findMany({
       where,
-      include: { blocks: { include: { versions: { select: { id: true } } } } },
+      include: {
+        blocks: {
+          orderBy: [{ position: "asc" }, { id: "asc" }],
+          include: { versions: { select: { id: true } } },
+        },
+      },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       skip: (page - 1) * pageSize,
       take: pageSize,
@@ -250,7 +281,7 @@ export class CmsService {
   }
 
   async getPage(id: string): Promise<CmsPageDetailRecord | null> {
-    assertUuid(id, "pageId");
+    if (!uuidPattern.test(id)) return null;
     return this.db.cmsPage.findFirst({
       where: { id, deletedAt: null },
       include: {
@@ -272,54 +303,65 @@ export class CmsService {
     blocks: readonly CmsBlockInput[],
     context: CmsAudit,
   ): Promise<CmsPage> {
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     const page = pageInput(input);
-    if (!Array.isArray(blocks) || blocks.length > 100)
-      throw new CmsValidationError("A CMS page accepts at most 100 blocks.");
+    if (!Array.isArray(blocks) || blocks.length > maxBlocksPerPage) {
+      throw new CmsValidationError(`A CMS page accepts at most ${maxBlocksPerPage} blocks.`);
+    }
+    const validatedBlocks = blocks.map((block) => ({
+      type: block.type,
+      content: this.content(block.type, block.content),
+      isVisible: block.isVisible ?? true,
+    }));
     try {
       return await this.db.$transaction(async (tx) => {
         const created = await tx.cmsPage.create({ data: page });
-        for (const [position, block] of blocks.entries()) {
-          if (!cmsBlockTypes.includes(block.type))
-            throw new CmsValidationError("Unsupported block type.");
-          const content = this.content(block.type, block.content);
-          await this.validateMediaReferences(tx, content);
+        for (const [position, block] of validatedBlocks.entries()) {
+          await this.validateMediaReferences(tx, block.content);
           const section = await tx.cmsSectionBlock.create({
             data: {
               pageId: created.id,
               blockType: block.type,
               position,
-              isVisible: block.isVisible ?? true,
+              isVisible: block.isVisible,
             },
           });
           await tx.cmsBlockVersion.create({
             data: {
               blockId: section.id,
               version: 1,
-              content: content as Prisma.JsonObject,
-              contentHash: Uint8Array.from(contentHash(content)),
+              content: block.content as Prisma.JsonObject,
+              contentHash: Uint8Array.from(contentHash(block.content)),
               createdByAdminUserId: context.actorAdminUserId,
             },
           });
         }
         await audit(tx, context, "CMS_PAGE_CREATED", "CmsPage", created.id, {
           slug: created.slug,
-          blockCount: blocks.length,
+          blockCount: validatedBlocks.length,
         });
         return created;
       });
     } catch (error) {
-      if (hasErrorCode(error, "P2002"))
+      if (hasErrorCode(error, "P2002")) {
         throw new CmsConflictError("The active CMS page slug already exists.");
+      }
       throw error;
     }
   }
 
   async updatePage(id: string, input: CmsPageInput, context: CmsAudit): Promise<CmsPage> {
     assertUuid(id, "pageId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     const page = pageInput(input);
     try {
       return await this.db.$transaction(async (tx) => {
-        const existing = await tx.cmsPage.findFirst({ where: { id, deletedAt: null } });
+        const locked = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
+          SELECT "id", "slug" FROM "CmsPage"
+          WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
+          FOR UPDATE
+        `;
+        const existing = locked[0];
         if (!existing) throw new CmsNotFoundError("CMS page not found.");
         const updated = await tx.cmsPage.update({ where: { id }, data: page });
         await audit(tx, context, "CMS_PAGE_UPDATED", "CmsPage", id, {
@@ -329,8 +371,9 @@ export class CmsService {
         return updated;
       });
     } catch (error) {
-      if (hasErrorCode(error, "P2002"))
+      if (hasErrorCode(error, "P2002")) {
         throw new CmsConflictError("The active CMS page slug already exists.");
+      }
       throw error;
     }
   }
@@ -341,15 +384,18 @@ export class CmsService {
     context: CmsAudit,
   ): Promise<Prisma.CmsSectionBlockGetPayload<Record<never, never>>> {
     assertUuid(pageId, "pageId");
-    if (!cmsBlockTypes.includes(input.type))
-      throw new CmsValidationError("Unsupported block type.");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     const content = this.content(input.type, input.content);
     return this.db.$transaction(async (tx) => {
-      await this.validateMediaReferences(tx, content);
       const rows = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT "id" FROM "CmsPage" WHERE "id" = ${pageId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;
       if (!rows[0]) throw new CmsNotFoundError("CMS page not found.");
+      await this.validateMediaReferences(tx, content);
+      const count = await tx.cmsSectionBlock.count({ where: { pageId } });
+      if (count >= maxBlocksPerPage) {
+        throw new CmsValidationError(`A CMS page accepts at most ${maxBlocksPerPage} blocks.`);
+      }
       const latest = await tx.cmsSectionBlock.findFirst({
         where: { pageId },
         orderBy: { position: "desc" },
@@ -386,9 +432,14 @@ export class CmsService {
     context: CmsAudit,
   ): Promise<CmsBlockVersion> {
     assertUuid(blockId, "blockId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const blocks = await tx.$queryRaw<Array<{ id: string; blockType: CmsBlockType }>>`
-        SELECT "id", "blockType" FROM "CmsSectionBlock" WHERE "id" = ${blockId}::uuid FOR UPDATE
+        SELECT b."id", b."blockType"
+        FROM "CmsSectionBlock" b
+        JOIN "CmsPage" p ON p."id" = b."pageId"
+        WHERE b."id" = ${blockId}::uuid AND p."deletedAt" IS NULL
+        FOR UPDATE OF b
       `;
       const block = blocks[0];
       if (!block) throw new CmsNotFoundError("CMS block not found.");
@@ -418,6 +469,7 @@ export class CmsService {
 
   async publishVersion(versionId: string, context: CmsAudit, at?: Date): Promise<CmsBlockVersion> {
     assertUuid(versionId, "versionId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<
         Array<{
@@ -427,8 +479,12 @@ export class CmsService {
           status: "DRAFT" | "SCHEDULED" | "PUBLISHED";
         }>
       >`
-        SELECT "id", "blockId", "version", "status" FROM "CmsBlockVersion"
-        WHERE "id" = ${versionId}::uuid FOR UPDATE
+        SELECT v."id", v."blockId", v."version", v."status"
+        FROM "CmsBlockVersion" v
+        JOIN "CmsSectionBlock" b ON b."id" = v."blockId"
+        JOIN "CmsPage" p ON p."id" = b."pageId"
+        WHERE v."id" = ${versionId}::uuid AND p."deletedAt" IS NULL
+        FOR UPDATE OF v
       `;
       const existing = rows[0];
       if (!existing) throw new CmsNotFoundError("CMS version not found.");
@@ -454,15 +510,23 @@ export class CmsService {
     context: CmsAudit,
   ): Promise<CmsBlockVersion> {
     assertUuid(versionId, "versionId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<
         Array<{ id: string; status: "DRAFT" | "SCHEDULED" | "PUBLISHED" }>
       >`
-        SELECT "id", "status" FROM "CmsBlockVersion" WHERE "id" = ${versionId}::uuid FOR UPDATE
+        SELECT v."id", v."status"
+        FROM "CmsBlockVersion" v
+        JOIN "CmsSectionBlock" b ON b."id" = v."blockId"
+        JOIN "CmsPage" p ON p."id" = b."pageId"
+        WHERE v."id" = ${versionId}::uuid AND p."deletedAt" IS NULL
+        FOR UPDATE OF v
       `;
       const existing = rows[0];
-      if (!existing || existing.status === "PUBLISHED")
+      if (!existing) throw new CmsNotFoundError("CMS version not found.");
+      if (existing.status === "PUBLISHED") {
         throw new CmsConflictError("Only draft or scheduled versions can be scheduled.");
+      }
       const now = await databaseNow(tx);
       if (
         !(effectiveAt instanceof Date) ||
@@ -484,6 +548,7 @@ export class CmsService {
 
   async publishPage(pageId: string, context: CmsAudit, at?: Date): Promise<CmsPage> {
     assertUuid(pageId, "pageId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const now = await databaseNow(tx, at);
       const rows = await tx.$queryRaw<Array<{ id: string }>>`
@@ -498,10 +563,11 @@ export class CmsService {
           block: { pageId, isVisible: true },
         },
       });
-      if (publishable === 0)
+      if (publishable === 0) {
         throw new CmsConflictError(
           "A published page requires at least one visible published block.",
         );
+      }
       const updated = await tx.cmsPage.update({
         where: { id: pageId },
         data: { status: "PUBLISHED", publishedAt: now, scheduledFor: null },
@@ -515,6 +581,7 @@ export class CmsService {
 
   async schedulePage(pageId: string, scheduledFor: Date, context: CmsAudit): Promise<CmsPage> {
     assertUuid(pageId, "pageId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<
         Array<{ id: string; status: "DRAFT" | "SCHEDULED" | "PUBLISHED" | "ARCHIVED" }>
@@ -522,8 +589,10 @@ export class CmsService {
         SELECT "id", "status" FROM "CmsPage" WHERE "id" = ${pageId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;
       const page = rows[0];
-      if (!page || page.status !== "DRAFT")
-        throw new CmsConflictError("Only draft pages can be scheduled.");
+      if (!page) throw new CmsNotFoundError("CMS page not found.");
+      if (page.status !== "DRAFT" && page.status !== "SCHEDULED") {
+        throw new CmsConflictError("Only draft or scheduled pages can be scheduled.");
+      }
       const now = await databaseNow(tx);
       if (
         !(scheduledFor instanceof Date) ||
@@ -545,6 +614,7 @@ export class CmsService {
 
   async archivePage(pageId: string, context: CmsAudit): Promise<CmsPage> {
     assertUuid(pageId, "pageId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<
         Array<{ id: string; status: "DRAFT" | "SCHEDULED" | "PUBLISHED" | "ARCHIVED" }>
@@ -566,9 +636,16 @@ export class CmsService {
 
   async reorderBlocks(pageId: string, blockIds: readonly string[], context: CmsAudit) {
     assertUuid(pageId, "pageId");
-    if (new Set(blockIds).size !== blockIds.length)
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
+    for (const id of blockIds) assertUuid(id, "blockId");
+    if (new Set(blockIds).size !== blockIds.length) {
       throw new CmsValidationError("Duplicate block ids in reorder.");
+    }
     return this.db.$transaction(async (tx) => {
+      const pages = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "CmsPage" WHERE "id" = ${pageId}::uuid AND "deletedAt" IS NULL FOR UPDATE
+      `;
+      if (!pages[0]) throw new CmsNotFoundError("CMS page not found.");
       const blocks = await tx.cmsSectionBlock.findMany({ where: { pageId } });
       if (
         blocks.length !== blockIds.length ||
@@ -582,7 +659,6 @@ export class CmsService {
           data: { position: { increment: 1_000_000 } },
         });
         for (const [position, id] of blockIds.entries()) {
-          assertUuid(id, "blockId");
           await tx.cmsSectionBlock.update({ where: { id }, data: { position } });
         }
       }
@@ -598,10 +674,17 @@ export class CmsService {
 
   async setBlockVisibility(blockId: string, isVisible: boolean, context: CmsAudit) {
     assertUuid(blockId, "blockId");
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     if (typeof isVisible !== "boolean") throw new CmsValidationError("isVisible must be boolean.");
     return this.db.$transaction(async (tx) => {
-      const existing = await tx.cmsSectionBlock.findUnique({ where: { id: blockId } });
-      if (!existing) throw new CmsNotFoundError("CMS block not found.");
+      const rows = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT b."id"
+        FROM "CmsSectionBlock" b
+        JOIN "CmsPage" p ON p."id" = b."pageId"
+        WHERE b."id" = ${blockId}::uuid AND p."deletedAt" IS NULL
+        FOR UPDATE OF b
+      `;
+      if (!rows[0]) throw new CmsNotFoundError("CMS block not found.");
       const updated = await tx.cmsSectionBlock.update({
         where: { id: blockId },
         data: { isVisible },
@@ -614,30 +697,38 @@ export class CmsService {
   }
 
   async publishScheduled(context: CmsAudit, at?: Date) {
+    assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const now = await databaseNow(tx, at);
-      const versions = await tx.$queryRaw<Array<{ id: string; createdByAdminUserId: string }>>`
-        SELECT "id", "createdByAdminUserId" FROM "CmsBlockVersion"
-        WHERE "status" = 'SCHEDULED' AND "effectiveAt" <= ${now}
-        ORDER BY "id" FOR UPDATE
+      const affectedSlugs = new Set<string>();
+      const versions = await tx.$queryRaw<
+        Array<{ id: string; createdByAdminUserId: string; slug: string }>
+      >`
+        SELECT v."id", v."createdByAdminUserId", p."slug"
+        FROM "CmsBlockVersion" v
+        JOIN "CmsSectionBlock" b ON b."id" = v."blockId"
+        JOIN "CmsPage" p ON p."id" = b."pageId"
+        WHERE v."status" = 'SCHEDULED' AND v."effectiveAt" <= ${now} AND p."deletedAt" IS NULL
+        ORDER BY v."id"
+        FOR UPDATE OF v
       `;
       for (const version of versions) {
         await tx.cmsBlockVersion.update({
           where: { id: version.id },
           data: { status: "PUBLISHED", publishedAt: now },
         });
-        await audit(
-          tx,
-          { actorAdminUserId: version.createdByAdminUserId },
-          "CMS_BLOCK_VERSION_PUBLISHED",
-          "CmsBlockVersion",
-          version.id,
-          { scheduled: true },
-        );
+        affectedSlugs.add(version.slug);
+        await audit(tx, context, "CMS_BLOCK_VERSION_PUBLISHED", "CmsBlockVersion", version.id, {
+          scheduled: true,
+          scheduledByAdminUserId: version.createdByAdminUserId,
+        });
       }
-      const pages = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "CmsPage" WHERE "status" = 'SCHEDULED' AND "scheduledFor" <= ${now}
-        ORDER BY "id" FOR UPDATE
+      const pages = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
+        SELECT "id", "slug"
+        FROM "CmsPage"
+        WHERE "status" = 'SCHEDULED' AND "scheduledFor" <= ${now} AND "deletedAt" IS NULL
+        ORDER BY "id"
+        FOR UPDATE
       `;
       let deferred = 0;
       for (const page of pages) {
@@ -656,9 +747,15 @@ export class CmsService {
           where: { id: page.id },
           data: { status: "PUBLISHED", publishedAt: now, scheduledFor: null },
         });
+        affectedSlugs.add(page.slug);
         await audit(tx, context, "CMS_PAGE_PUBLISHED", "CmsPage", page.id, { scheduled: true });
       }
-      return { versions: versions.length, pages: pages.length - deferred, pagesDeferred: deferred };
+      return {
+        versions: versions.length,
+        pages: pages.length - deferred,
+        pagesDeferred: deferred,
+        affectedSlugs: [...affectedSlugs],
+      };
     });
   }
 

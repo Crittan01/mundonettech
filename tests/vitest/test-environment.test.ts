@@ -78,6 +78,26 @@ describe("F0.5 — production database, Supabase endpoint, and outbound email gu
         DIRECT_URL: "postgresql://user:pass@remote.db.internal:5432/postgres",
       }),
     ).toThrow();
+
+    expect(() =>
+      assertSafeTestEnvironment({
+        ...safeEnvironment,
+        R2_ENDPOINT: "https://account.r2.cloudflarestorage.com",
+      }),
+    ).toThrow();
+    expect(() =>
+      assertSafeTestEnvironment({
+        ...safeEnvironment,
+        R2_BUCKET: "media-production",
+      }),
+    ).toThrow();
+    expect(
+      assertSafeTestEnvironment({
+        ...safeEnvironment,
+        R2_ENDPOINT: "http://127.0.0.1:4555",
+        R2_BUCKET: "media-test",
+      }).database,
+    ).toBe("postgres");
   });
 
   it("fails closed without explicit test mode, outbound email blocking, or isolated key rings", () => {
