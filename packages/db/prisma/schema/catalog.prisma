@@ -272,6 +272,7 @@ model ProductVariant {
   purchaseOrderItems  PurchaseOrderItem[]
   wholesaleTiers      WholesaleTier[]
   cartItems           CartItem[]
+  orderItems          OrderItem[]
 
   @@unique([id, productId])
   @@index([productId, status])
@@ -427,6 +428,7 @@ model Bundle {
   deletedAt     DateTime?     @db.Timestamptz(6)
   items         BundleItem[]
   cartItems     CartItem[]
+  orderItems    OrderItem[]
 
   @@index([status, deletedAt])
   @@map("Bundle")

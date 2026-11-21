@@ -177,4 +177,75 @@ export type {
   CouponUsage,
   WholesaleTier,
 } from "./generated/client.js";
+export {
+  CheckoutAuthenticationRequiredError,
+  CheckoutConflictError,
+  CheckoutCouponError,
+  CheckoutReviewRequiredError,
+  CheckoutStockError,
+  OrderNotFoundError,
+  OrderService,
+  OrderValidationError,
+  ReceiptBalanceError,
+} from "./order-service.js";
+export type {
+  CheckoutContactInput,
+  CheckoutConversionInput,
+  CheckoutDefaults,
+  CheckoutFulfillmentInput,
+  CheckoutIdempotencyInput,
+  CheckoutPreview,
+  CheckoutResult,
+  CheckoutTaxLineSnapshot,
+  ClickCollectInput,
+  DaneDepartmentSnapshot,
+  DaneMunicipalitySnapshot,
+  HomeDeliveryInput,
+  OrderReceiptSnapshot,
+  PickupLocationSnapshot,
+  ReceiptItemSnapshot,
+  ReceiptTaxLineSnapshot,
+  RefundAudit,
+  RefundItemRequest,
+  RefundRequestInput,
+  RefundRequestResult,
+} from "./order-types.js";
+export {
+  AbandonedCartStatus,
+  OrderFulfillmentMethod,
+  OrderRefundReason,
+  OrderRefundStatus,
+  OrderStatus,
+  OrderTaxRule,
+  PaymentStatus,
+  FulfillmentStatus,
+  ShipmentKind,
+  ShipmentStatus,
+} from "./generated/client.js";
+export type {
+  AbandonedCart,
+  DaneDepartment,
+  DaneMunicipality,
+  OrderItem,
+  OrderItemReservation,
+  OrderItemTaxLine,
+  OrderNumberSequence,
+  OrderReceipt,
+  OrderRefund,
+  OrderRefundItem,
+  OrderStatusEvent,
+  Shipment,
+  ShipmentItem,
+} from "./generated/client.js";
+export {
+  OrderRefundService,
+  RefundConflictError,
+  RefundNotFoundError,
+  RefundValidationError,
+} from "./order-refund-service.js";
+export { OrderLifecycleError, OrderLifecycleService } from "./order-lifecycle-service.js";
+export type {
+  AbandonedCartCaptureResult,
+  OrderReservationReleaseResult,
+} from "./order-lifecycle-service.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";

@@ -34,6 +34,7 @@ Configura mediante el gestor de secretos correspondiente:
 | `INTEGRATION_CREDENTIAL_KEYS_*` | Llaveros AES independientes `LOCAL`/`STG`/`PRD`. |
 | `R2_*` / `NEXT_PUBLIC_MEDIA_BASE_URL` | Bucket, endpoint y credenciales de medios por ambiente; origen público HTTPS. |
 | `CMS_CRON_SECRET` / `CMS_JOB_ACTOR_ID` | Bearer del scheduler y admin activo con `content:write` para `/api/jobs/cms-publish`. |
+| `ORDER_CRON_SECRET` | Bearer independiente para `/api/jobs/orders`: abandono/expiración de carritos y liberación de reservas no pagadas. |
 
 `EMAIL_SEND_DISABLED=1` y `NODE_ENV=test` son obligatorios para pruebas y nunca se activan en STG/PRD. Tanto las guardas de entorno como el runtime (`@mundonettech/core` y acciones de Auth/Admin) bloquean despachos de correo saliente cuando `EMAIL_SEND_DISABLED=1` está presente, y rechazan hosts remotos (`DATABASE_URL`, `DIRECT_URL`, `NEXT_PUBLIC_SUPABASE_URL`), banderas productivas, llaveros `PRD` y nombres `prd/prod/production/live`. Mailpit es la única bandeja local.
 
@@ -51,22 +52,24 @@ pnpm admin:bootstrap
 
 El bootstrap valida política y HIBP, confirma correo y crea el primer `SUPERADMIN`; el primer login exige TOTP. Vincular una cuenta Auth existente requiere `BOOTSTRAP_ADMIN_LINK_EXISTING=YES` después de verificar propiedad. Las migraciones aplicadas no se editan: cualquier cambio posterior crea una nueva migración. No hay administradores de demostración. `pnpm db:seed` carga explícitamente el catálogo canónico de `config/`, con advisory lock, sin imágenes/GTIN/seriales inventados y sin alterar stock ya existente.
 
+Programa `POST /api/jobs/orders` con `Authorization: Bearer $ORDER_CRON_SECRET` mediante el scheduler del ambiente, sin incluir el secreto en URLs ni logs. El job detecta carritos inactivos, expira carritos vencidos y libera reservas de órdenes `UNPAID` vencidas; emite únicamente eventos `DomainOutbox` sin PII para que los workers posteriores procesen efectos externos. La respuesta es `no-store` y el bearer se compara con hash en tiempo constante.
+
 ## 4. Gates y suites
 
 ```bash
 make check            # docs/Git/idioma/fronteras/anti-PRD, lint, Prettier y typecheck total (incl. Vitest/E2E)
 pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
-pnpm test:unit        # contratos Vitest de guardas, catálogo, WAC, seriales y CSV
-pnpm test:integration # catálogo, inventario, RLS, concurrencia, idempotencia y bóveda AES-256-GCM
-pnpm test:rls         # matriz autónoma sobre PG17 real (889 denegaciones bajo SAVEPOINT/ROLLBACK)
+pnpm test:unit        # contratos Vitest de guardas, catálogo, WAC, seriales, CSV e IVA dual/UVT
+pnpm test:integration # catálogo, inventario, checkout, reembolsos, RLS, concurrencia y bóveda AES-256-GCM
+pnpm test:rls         # matriz autónoma sobre PG17 real (1.110 denegaciones bajo SAVEPOINT/ROLLBACK)
 pnpm build            # build productivo + empaquetado standalone completo
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
 ```
 
-En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 889 casos reales: 250 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 639 operaciones sobre `anon`, `authenticated` y `service_role` en las 50 tablas y 13 funciones RPC.
+En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 1.110 casos reales: 315 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 795 operaciones sobre `anon`, `authenticated` y `service_role` en las 63 tablas y 13 funciones RPC.
 
-`pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, carrito, cupones, bundles, precios y venta asistida con MFA `aal2`, auth y seguridad, controles de teclado, CSP/HSTS, `no-store`/`noindex` transaccional y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
+`pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, carrito, checkout domicilio/Click & Collect, recibo/descarga, scheduler de órdenes, cupones, bundles, precios y venta asistida con MFA `aal2`, auth y seguridad, controles de teclado, CSP/HSTS, `no-store`/`noindex` transaccional y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
 
 ## 5. GitHub Actions PostgreSQL 17
 

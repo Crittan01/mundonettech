@@ -25,6 +25,11 @@ model StoreSettings {
   timeZone               String          @db.VarChar(64)
   orderNumberPrefix      String          @db.VarChar(12)
   orderNumberPadding     Int
+  uvtValueCents          BigInt            @default(5237400)
+  uvtYear                Int               @default(2026)
+  standardShippingCents  BigInt            @default(0)
+  deliveryPromiseDays    Int               @default(30)
+  reservationMinutes     Int               @default(120)
   clickAndCollectEnabled Boolean         @default(false)
   localDeliveryEnabled   Boolean         @default(false)
   updatedByAdminUserId   String?         @db.Uuid

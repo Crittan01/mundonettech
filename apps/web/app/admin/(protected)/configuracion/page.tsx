@@ -30,6 +30,12 @@ export default async function StoreSettingsPage() {
     timeZone: stored?.timeZone ?? storeConfig.timeZone,
     orderNumberPrefix: stored?.orderNumberPrefix ?? storeConfig.orderNumber.prefix,
     orderNumberPadding: stored?.orderNumberPadding ?? 4,
+    uvtValueCents: stored?.uvtValueCents.toString() ?? storeConfig.tax.uvtValueCents,
+    uvtYear: stored?.uvtYear ?? storeConfig.tax.uvtYear,
+    standardShippingCents:
+      stored?.standardShippingCents.toString() ?? storeConfig.checkout.standardShippingCents,
+    deliveryPromiseDays: stored?.deliveryPromiseDays ?? storeConfig.checkout.deliveryPromiseDays,
+    reservationMinutes: stored?.reservationMinutes ?? storeConfig.checkout.reservationMinutes,
     clickAndCollectEnabled: stored?.clickAndCollectEnabled ?? false,
     localDeliveryEnabled: stored?.localDeliveryEnabled ?? false,
   };
@@ -57,6 +63,10 @@ export default async function StoreSettingsPage() {
             "Zona horaria": settings.timeZone,
             "Prefijo de orden": settings.orderNumberPrefix,
             "Dígitos del consecutivo": String(settings.orderNumberPadding),
+            "UVT vigente": `${settings.uvtYear} · ${settings.uvtValueCents} centavos`,
+            "Envío estándar": `${settings.standardShippingCents} centavos`,
+            "Promesa de entrega": `${settings.deliveryPromiseDays} días calendario`,
+            "Reserva de inventario": `${settings.reservationMinutes} minutos`,
             "Click & Collect": settings.clickAndCollectEnabled ? "Sí" : "No",
             "Entrega Flex": settings.localDeliveryEnabled ? "Sí" : "No",
           }).map(([label, value]) => (

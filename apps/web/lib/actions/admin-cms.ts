@@ -408,6 +408,27 @@ export async function saveStoreSettingsAction(
           .min(1)
           .max(12)
           .parse(formString(formData, "orderNumberPadding")),
+        uvtValueCents: z
+          .string()
+          .regex(/^[0-9]+$/)
+          .parse(formString(formData, "uvtValueCents")),
+        uvtYear: z.coerce.number().int().min(2000).max(9999).parse(formString(formData, "uvtYear")),
+        standardShippingCents: z
+          .string()
+          .regex(/^[0-9]+$/)
+          .parse(formString(formData, "standardShippingCents")),
+        deliveryPromiseDays: z.coerce
+          .number()
+          .int()
+          .min(1)
+          .max(365)
+          .parse(formString(formData, "deliveryPromiseDays")),
+        reservationMinutes: z.coerce
+          .number()
+          .int()
+          .min(5)
+          .max(10_080)
+          .parse(formString(formData, "reservationMinutes")),
         clickAndCollectEnabled: ["on", "true"].includes(
           formString(formData, "clickAndCollectEnabled"),
         ),

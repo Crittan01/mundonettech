@@ -37,6 +37,11 @@ model StockLocation {
   code            String            @db.VarChar(40)
   name            String            @db.VarChar(120)
   type            StockLocationType
+  addressLine1    String?           @db.VarChar(200)
+  departmentCode  String?           @db.Char(2)
+  municipalityCode String?          @db.Char(5)
+  phoneE164       String?           @db.VarChar(16)
+  pickupInstructions String?        @db.VarChar(500)
   createdAt       DateTime          @default(now()) @db.Timestamptz(6)
   updatedAt       DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
   deletedAt       DateTime?         @db.Timestamptz(6)
@@ -44,6 +49,10 @@ model StockLocation {
   serializedUnits SerializedUnit[]
   ledgerEntries   InventoryLedger[]
   purchaseOrders  PurchaseOrder[]
+  orderReservations OrderItemReservation[]
+  clickCollectOrders Order[]
+  shipments       Shipment[]
+  municipality    DaneMunicipality? @relation(fields: [municipalityCode], references: [code], onDelete: Restrict)
 
   @@index([type, deletedAt])
   @@map("StockLocation")

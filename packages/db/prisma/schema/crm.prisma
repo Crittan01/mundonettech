@@ -35,6 +35,7 @@ model Customer {
   orders                   Order[]
   carts                    Cart[]
   couponUsages             CouponUsage[]
+  abandonedCarts           AbandonedCart[]
 
   @@index([status, createdAt])
   @@index([deletedAt])

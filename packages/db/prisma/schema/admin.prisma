@@ -43,6 +43,7 @@ model AdminUser {
   cmsVersions    CmsBlockVersion[]
   cmsMedia       CmsMedia[]
   assistedCarts  Cart[]
+  requestedRefunds OrderRefund[]
 
   @@index([role, status])
   @@index([createdAt])

@@ -487,7 +487,7 @@ function repricedQuantityData(
 }
 
 export class CartService {
-  constructor(private readonly db: PrismaClient) {}
+  constructor(private readonly db: PrismaClient | Prisma.TransactionClient) {}
 
   private async revalidateLocked(
     tx: Prisma.TransactionClient,

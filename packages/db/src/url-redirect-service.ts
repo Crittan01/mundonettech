@@ -24,6 +24,7 @@ const reservedSourcePrefixes = [
   "/sitemaps",
   "/carrito",
   "/checkout",
+  "/recibo",
   "/pagar",
   "/pedido",
   "/propuesta",
