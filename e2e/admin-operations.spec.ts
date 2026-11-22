@@ -52,6 +52,7 @@ async function authenticateAdmin(page: Page, profile = admin, mfaAgeSeconds = 30
     sameSite: "Strict",
     sourceScheme: "Secure",
   });
+  await cdp.detach();
   await page.context().addCookies([
     {
       name: "sb-127-auth-token",

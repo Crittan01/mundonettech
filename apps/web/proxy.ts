@@ -123,7 +123,6 @@ export async function proxy(request: NextRequest) {
   let redirectResponse: NextResponse | null = null;
 
   const isPrefetch =
-    request.headers.get("next-router-prefetch") === "1" ||
     request.headers.get("purpose") === "prefetch" ||
     request.headers.get("sec-purpose")?.includes("prefetch") === true;
 
@@ -151,7 +150,7 @@ export async function proxy(request: NextRequest) {
       }
     } catch {
       redirectResponse = loginRedirect(request, isAdmin ? "/admin/login" : "/ingresar", "timeout");
-      if (!isPrefetch) {
+      if (token && !isPrefetch) {
         response.cookies.set(cookieName, "", { ...sessionCookieOptions, maxAge: 0 });
       }
     }
