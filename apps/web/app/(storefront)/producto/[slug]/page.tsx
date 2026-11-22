@@ -1,6 +1,7 @@
 import { formatCopCents } from "@mundonettech/core";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { Suspense } from "react";
 import { z } from "zod";
 
 import { AddBundleToCartForm } from "@/components/cart/add-to-cart-form";
@@ -24,6 +25,14 @@ const retractLabels = {
   STANDARD: "Retracto estándar (Ley 1480)",
   LEGAL_EXCEPTION_REVIEW: "Sujeto a revisión de excepción legal",
 } as const;
+
+export async function generateStaticParams() {
+  const result = await searchCatalog({ pageSize: 48, sort: "newest" });
+  if (result.items.length === 0) {
+    return [{ slug: "__empty_catalog__" }];
+  }
+  return result.items.map((product) => ({ slug: product.slug }));
+}
 
 export async function generateMetadata({ params }: PageProps<"/producto/[slug]">) {
   const { slug } = await params;
@@ -54,15 +63,16 @@ export async function generateMetadata({ params }: PageProps<"/producto/[slug]">
   };
 }
 
-export default async function ProductPage({ params, searchParams }: PageProps<"/producto/[slug]">) {
-  const [{ slug }, query] = await Promise.all([params, searchParams]);
-  const product = await getCatalogProduct(slug);
-  if (!product) notFound();
-  const rawVariant = Array.isArray(query.variant) ? query.variant[0] : query.variant;
-  const requestedVariant = typeof rawVariant === "string" ? rawVariant : null;
-  const defaultVariantId = product.variants.some((variant) => variant.id === requestedVariant)
-    ? requestedVariant!
-    : product.defaultVariantId;
+async function ProductReviewsSlot({
+  slug,
+  initialReviews,
+  searchParams,
+}: {
+  readonly slug: string;
+  readonly initialReviews: Awaited<ReturnType<typeof getPublicReviews>>;
+  readonly searchParams: PageProps<"/producto/[slug]">["searchParams"];
+}) {
+  const query = await searchParams;
   const rawReviewCursor = Array.isArray(query.reviewCursor)
     ? query.reviewCursor[0]
     : query.reviewCursor;
@@ -70,7 +80,16 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
     .string()
     .uuid()
     .safeParse(typeof rawReviewCursor === "string" ? rawReviewCursor : undefined);
-  const reviewCursor = parsedReviewCursor.success ? parsedReviewCursor.data : undefined;
+  const reviews = parsedReviewCursor.success
+    ? await getPublicReviews(slug, parsedReviewCursor.data)
+    : initialReviews;
+  return <ProductReviews slug={slug} reviews={reviews} />;
+}
+
+export default async function ProductPage({ params, searchParams }: PageProps<"/producto/[slug]">) {
+  const { slug } = await params;
+  const product = await getCatalogProduct(slug);
+  if (!product) notFound();
   const [related, reviews] = await Promise.all([
     searchCatalog({
       categorySlug: product.category.slug,
@@ -78,7 +97,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
       pageSize: 3,
       sort: "newest",
     }),
-    getPublicReviews(slug, reviewCursor),
+    getPublicReviews(slug),
   ]);
   const mediaOrigin = getPublicMediaOrigin();
   const reviewSummary =
@@ -136,7 +155,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
           ) : null}
           <ProductVariantPanel
             productSlug={product.slug}
-            defaultVariantId={defaultVariantId}
+            defaultVariantId={product.defaultVariantId}
             variants={product.variants}
           />
           {product.description ? <p className="leading-7">{product.description}</p> : null}
@@ -298,7 +317,15 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
         </section>
       ) : null}
 
-      <ProductReviews slug={slug} reviews={reviews} />
+      <Suspense
+        fallback={
+          <p role="status" className="rounded-xl border border-border bg-card p-5 text-sm">
+            Cargando reseñas verificadas…
+          </p>
+        }
+      >
+        <ProductReviewsSlot slug={slug} initialReviews={reviews} searchParams={searchParams} />
+      </Suspense>
 
       {related.items.length ? (
         <section aria-labelledby="related-title">

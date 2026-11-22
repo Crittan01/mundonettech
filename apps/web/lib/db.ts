@@ -10,7 +10,11 @@ const databaseState = globalThis as typeof globalThis & {
 
 export function getDatabase(): PrismaClient {
   if (!databaseState.__applicationDatabase) {
-    const client = createDatabaseClient({ databaseUrl: getDatabaseUrl(), maxConnections: 10 });
+    const isBuildPhase = process.env.NEXT_PHASE === "phase-production-build";
+    const client = createDatabaseClient({
+      databaseUrl: getDatabaseUrl(),
+      maxConnections: isBuildPhase ? 2 : 10,
+    });
     databaseState.__applicationDatabase = client;
     return client;
   }

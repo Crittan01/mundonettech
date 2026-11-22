@@ -29,6 +29,14 @@ export default defineConfig([
       },
     },
   },
+  {
+    files: ["scripts/load/**/*.js"],
+    languageOptions: {
+      globals: {
+        __ENV: "readonly",
+      },
+    },
+  },
   ...nextVitals,
   ...nextTypeScript,
   {

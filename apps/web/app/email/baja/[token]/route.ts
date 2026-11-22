@@ -6,9 +6,9 @@ import { emailService } from "@/lib/integrations";
 const headers = {
   "Cache-Control": "no-store",
   "Content-Security-Policy":
-    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; manifest-src 'none'",
   "X-Content-Type-Options": "nosniff",
-  "X-Robots-Tag": "noindex, nofollow",
+  "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
 function escapeHtml(value: string): string {

@@ -93,6 +93,47 @@ export function assertRedirectAllowed(
   }
 }
 
+export const reservedRedirectSourcePrefixes = [
+  "/api",
+  "/_next",
+  "/admin",
+  "/email",
+  "/mi-cuenta",
+  "/ingresar",
+  "/registro",
+  "/recuperar",
+  "/verificar-correo",
+  "/legal",
+  "/robots.txt",
+  "/sitemap.xml",
+  "/sitemaps",
+  "/carrito",
+  "/checkout",
+  "/recibo",
+  "/pagar",
+  "/pedido",
+  "/propuesta",
+] as const;
+
+export const reservedRedirectTargetPrefixes = ["/api", "/_next", "/admin", "/email"] as const;
+
+function hasRedirectPathPrefix(path: string, prefix: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+export function isReservedRedirectSource(normalizedPath: string): boolean {
+  return (
+    normalizedPath === "/" ||
+    reservedRedirectSourcePrefixes.some((prefix) => hasRedirectPathPrefix(normalizedPath, prefix))
+  );
+}
+
+export function isReservedRedirectTarget(normalizedPath: string): boolean {
+  return reservedRedirectTargetPrefixes.some((prefix) =>
+    hasRedirectPathPrefix(normalizedPath, prefix),
+  );
+}
+
 export function isRedirectStatus(value: number): boolean {
   return [301, 302, 307, 308].includes(value);
 }

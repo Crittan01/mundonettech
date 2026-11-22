@@ -21,6 +21,9 @@ make dev
 make check && pnpm test && pnpm build
 pnpm exec playwright install chromium
 pnpm test:e2e
+pnpm test:owasp
+pnpm test:lighthouse
+pnpm test:k6
 ```
 
 `make db-start` levanta Supabase/PostgreSQL 17, aplica la cadena Prisma y crea `apps/web/.env.local` solo si no existe. Verifica la postura con `make db-verify`, consulta servicios con `make db-status` y detén solo los contenedores del proyecto con `make db-stop` (conserva el volumen). Las pruebas usan otro PostgreSQL 17 desechable en `:54428`.

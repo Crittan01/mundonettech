@@ -4,6 +4,11 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
+  experimental: {
+    staticGenerationMaxConcurrency: 4,
+    staticGenerationMinPagesPerWorker: 25,
+  },
+  htmlLimitedBots: /.*/,
   images: {
     unoptimized: true,
   },

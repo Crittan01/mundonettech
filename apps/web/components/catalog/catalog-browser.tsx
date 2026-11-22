@@ -22,6 +22,7 @@ export function CatalogBrowser({
   compareSlugs = [],
   error,
   fixedFilter,
+  showHeader = true,
 }: {
   result: CatalogSearchResult;
   params: Record<string, string>;
@@ -32,13 +33,16 @@ export function CatalogBrowser({
   compareSlugs?: readonly string[];
   error?: string;
   fixedFilter?: { kind: "categoria" | "marca"; value: string };
+  showHeader?: boolean;
 }) {
   return (
     <div className="space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">{title}</h1>
-        <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">{description}</p>
-      </div>
+      {showHeader ? (
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">{title}</h1>
+          <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">{description}</p>
+        </div>
+      ) : null}
       <form action={basePath} className="grid gap-4 rounded-2xl border border-border bg-card p-5">
         {fixedFilter ? (
           <input type="hidden" name={fixedFilter.kind} value={fixedFilter.value} />

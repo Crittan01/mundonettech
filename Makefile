@@ -1,6 +1,6 @@
 PNPM ?= pnpm
 
-.PHONY: install dev build check test test-unit test-integration test-rls test-e2e lint format format-check typecheck guards clean-tmp db-start db-stop db-status db-migrate db-validate db-verify
+.PHONY: install dev build check test test-unit test-integration test-rls test-e2e test-owasp test-lighthouse test-k6 lint format format-check typecheck guards clean-tmp db-start db-stop db-status db-migrate db-validate db-verify release-verify audit-dependencies
 
 install:
 	$(PNPM) install --frozen-lockfile
@@ -28,6 +28,21 @@ test-rls:
 
 test-e2e:
 	$(PNPM) test:e2e
+
+test-owasp:
+	$(PNPM) test:owasp
+
+test-lighthouse:
+	$(PNPM) test:lighthouse
+
+test-k6:
+	$(PNPM) test:k6
+
+release-verify:
+	$(PNPM) release:verify
+
+audit-dependencies:
+	$(PNPM) audit:dependencies
 
 lint:
 	$(PNPM) lint
