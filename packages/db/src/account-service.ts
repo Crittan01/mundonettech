@@ -170,7 +170,7 @@ export class AccountService {
     const customer = await this.db.customer.findFirst({
       where: { id: customerId, status: "ACTIVE", deletedAt: null },
       include: {
-        consents: { orderBy: { occurredAt: "desc" }, take: 20 },
+        consents: { orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 20 },
         addresses: {
           where: { deletedAt: null },
           include: { municipality: { include: { department: true } } },
@@ -188,11 +188,16 @@ export class AccountService {
     const audit = this.audit(auditInput);
     return inInventoryTransaction(this.db, async (tx) => {
       const customer = await this.lockActiveCustomer(tx, customerId);
-      const latestConsent = await tx.consent.findFirst({
-        where: { customerId, purpose: "MARKETING_EMAIL" },
-        orderBy: { occurredAt: "desc" },
+      const unrevokedGrant = await tx.consent.findFirst({
+        where: {
+          customerId,
+          purpose: "MARKETING_EMAIL",
+          status: "GRANTED",
+          revokedBy: null,
+        },
+        orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
       });
-      const currentlyGranted = latestConsent?.status === "GRANTED";
+      const currentlyGranted = unrevokedGrant !== null;
       const proofHash = createHash("sha256")
         .update(
           JSON.stringify({
@@ -214,9 +219,6 @@ export class AccountService {
         },
       });
       if (currentlyGranted !== values.marketingEmail) {
-        if (!values.marketingEmail && !latestConsent) {
-          throw new AccountError("CONFLICT", "The active marketing consent could not be resolved.");
-        }
         await tx.consent.create({
           data: {
             customerId,
@@ -227,7 +229,7 @@ export class AccountService {
             proofHash,
             ipHash: audit.ipHash,
             userAgentHash: audit.userAgentHash,
-            revokesId: values.marketingEmail ? null : latestConsent!.id,
+            revokesId: values.marketingEmail ? null : unrevokedGrant!.id,
           },
         });
       }
@@ -423,14 +425,73 @@ export class AccountService {
           "Use or resolve store credit before deleting the account.",
         );
       }
+      const [blockingOrder, blockingPayment, blockingRefund, blockingReturn, blockingWarranty] =
+        await Promise.all([
+          tx.order.findFirst({
+            where: {
+              customerId,
+              OR: [
+                { orderStatus: "PENDING" },
+                {
+                  orderStatus: "CONFIRMED",
+                  OR: [
+                    { fulfillmentStatus: { not: "FULFILLED" } },
+                    { paymentStatus: { in: ["UNPAID", "PARTIALLY_PAID"] } },
+                    { shipments: { some: { status: { notIn: ["DELIVERED", "CANCELLED"] } } } },
+                  ],
+                },
+              ],
+            },
+            select: { id: true },
+          }),
+          tx.paymentAttempt.findFirst({
+            where: { order: { customerId }, status: { in: ["PENDING", "PROCESSING"] } },
+            select: { id: true },
+          }),
+          tx.orderRefund.findFirst({
+            where: {
+              order: { customerId },
+              status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
+            },
+            select: { id: true },
+          }),
+          tx.returnRequest.findFirst({
+            where: {
+              order: { customerId },
+              status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
+            },
+            select: { id: true },
+          }),
+          tx.warrantyClaim.findFirst({
+            where: {
+              order: { customerId },
+              status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
+            },
+            select: { id: true },
+          }),
+        ]);
+      if (
+        blockingOrder ||
+        blockingPayment ||
+        blockingRefund ||
+        blockingReturn ||
+        blockingWarranty
+      ) {
+        throw new AccountError(
+          "CONFLICT",
+          "Complete or resolve active orders, payments, refunds and post-sale requests before deleting the account.",
+        );
+      }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
+      const previousEmail = customer.email;
       const anonymizedEmail = `anon-${customerId.replaceAll("-", "")}@anonymized.invalid`;
       const activeConsents = await tx.consent.findMany({
         where: {
           customerId,
           purpose: { in: ["MARKETING_EMAIL", "MARKETING_SMS", "ANALYTICS"] },
           status: "GRANTED",
+          revokedBy: null,
         },
       });
       for (const consent of activeConsents) {
@@ -505,7 +566,10 @@ export class AccountService {
         },
       });
       await tx.emailEvent.updateMany({
-        where: { order: { customerId }, anonymizedAt: null },
+        where: {
+          anonymizedAt: null,
+          OR: [{ order: { customerId } }, { orderId: null, recipientEmail: previousEmail }],
+        },
         data: { recipientEmail: anonymizedEmail, anonymizedAt: now },
       });
       await tx.supportTicket.updateMany({
@@ -547,12 +611,11 @@ export class AccountService {
   }
 
   async marketingEmailGranted(customerId: string): Promise<boolean> {
-    const latest = await this.db.consent.findFirst({
-      where: { customerId, purpose: "MARKETING_EMAIL" },
-      orderBy: { occurredAt: "desc" },
-      select: { status: true },
+    const unrevoked = await this.db.consent.findFirst({
+      where: { customerId, purpose: "MARKETING_EMAIL", status: "GRANTED", revokedBy: null },
+      select: { id: true },
     });
-    return latest?.status === "GRANTED";
+    return unrevoked !== null;
   }
 
   anonymizedEmailFor(customerId: string): string {

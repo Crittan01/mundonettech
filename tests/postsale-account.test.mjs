@@ -7,10 +7,12 @@ import pg from "pg";
 import {
   AccountError,
   AccountService,
+  OperationsService,
   OrderRefundService,
   PostSaleAdminService,
   PostSaleError,
   PostSaleService,
+  RefundConflictError,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
 import {
@@ -936,12 +938,222 @@ describe("F4A.2 — account anonymization and concurrency", () => {
     const outbox = await db.domainOutbox.findUniqueOrThrow({
       where: { deduplicationKey: `customer:${customerId}:auth-erasure:v1` },
     });
-    assert.deepEqual(outbox.payload, { customerId, authUserId });
+    assert.equal(outbox.payload.authUserId, authUserId);
+    assert.equal(outbox.payload.customerId, customerId);
     await assert.rejects(
       db.customer.update({ where: { id: customerId }, data: { authUserId: randomUUID() } }),
       /immutable/,
     );
     await assert.rejects(accounts.getProfile(customerId), AccountError);
+  });
+
+  it("survives repeated consent toggles before anonymization, anonymizes non-order support emails, and blocks erasure while obligations remain open", async () => {
+    const customerId = randomUUID();
+    const customerEmail = `toggle-erase-${randomUUID()}@example.test`;
+    const context = { ipHash: bytes(), userAgentHash: bytes() };
+    await db.customer.create({
+      data: {
+        id: customerId,
+        authUserId: randomUUID(),
+        email: customerEmail,
+        status: "ACTIVE",
+        givenName: "Ciclo",
+        familyName: "Consentimiento",
+        phoneE164: "+573001234567",
+      },
+    });
+    await accounts.updateProfile(
+      customerId,
+      { givenName: "Ciclo", familyName: "Uno", phoneE164: "+573001234567", marketingEmail: true },
+      context,
+    );
+    await accounts.updateProfile(
+      customerId,
+      { givenName: "Ciclo", familyName: "Dos", phoneE164: "+573001234567", marketingEmail: false },
+      context,
+    );
+    await accounts.updateProfile(
+      customerId,
+      { givenName: "Ciclo", familyName: "Tres", phoneE164: "+573001234567", marketingEmail: true },
+      context,
+    );
+    assert.equal(await accounts.marketingEmailGranted(customerId), true);
+
+    const undeliveredId = randomUUID();
+    await db.order.create({
+      data: {
+        id: undeliveredId,
+        orderNumber: `UNDELIV-${randomUUID().replaceAll("-", "").slice(0, 14).toUpperCase()}`,
+        customerId,
+        orderStatus: "CONFIRMED",
+        paymentStatus: "PAID",
+        fulfillmentStatus: "UNFULFILLED",
+        taxRegime: "NO_RESPONSABLE_IVA",
+        emailSnapshot: customerEmail,
+        recipientNameSnapshot: "Ciclo Consentimiento",
+        phoneE164Snapshot: "+573001234567",
+        subtotalCents: 50_000n,
+        discountCents: 0n,
+        taxCents: 0n,
+        shippingCents: 0n,
+        totalCents: 50_000n,
+        confirmedAt: new Date(),
+      },
+    });
+    await assert.rejects(
+      accounts.anonymize(customerId, "ELIMINAR MI CUENTA", context),
+      (error) => error instanceof AccountError && error.code === "CONFLICT",
+    );
+    await db.order.update({
+      where: { id: undeliveredId },
+      data: { orderStatus: "CANCELLED", cancelledAt: new Date() },
+    });
+
+    const credential = await db.integrationCredential.create({
+      data: {
+        provider: "resend",
+        environment: "LOCAL",
+        accountName: `nonorder-${randomUUID().slice(0, 8)}`,
+        keyVersion: 1,
+        nonce: randomBytes(12),
+        ciphertext: randomBytes(32),
+        authTag: randomBytes(16),
+        createdByAdminUserId: adminId,
+      },
+    });
+    const nonOrderEmail = await db.emailEvent.create({
+      data: {
+        orderId: null,
+        credentialId: credential.id,
+        templateKey: "support.ticket",
+        topic: "support",
+        subjectSnapshot: "PQR sin pedido",
+        htmlBodySnapshot: "<p>PQR</p>",
+        textBodySnapshot: "PQR",
+        variablesSnapshot: {},
+        recipientEmail: customerEmail,
+        recipientHash: bytes(),
+        idempotencyKey: `nonorder-email-${randomUUID()}`,
+        unsubscribeTokenHash: bytes(),
+      },
+    });
+    await accounts.anonymize(customerId, "ELIMINAR MI CUENTA", context);
+    const updatedNonOrderEmail = await db.emailEvent.findUniqueOrThrow({
+      where: { id: nonOrderEmail.id },
+    });
+    assert.ok(updatedNonOrderEmail.anonymizedAt);
+    assert.equal(updatedNonOrderEmail.recipientEmail, accounts.anonymizedEmailFor(customerId));
+    assert.equal(
+      await db.consent.count({
+        where: { customerId, purpose: "MARKETING_EMAIL", status: "GRANTED", revokedBy: null },
+      }),
+      0,
+    );
+  });
+
+  it("keeps verified guest sessions alive across unverified OTP requests and synchronizes RMA cancellation with OrderRefund and /admin/hoy", async () => {
+    const order = await createDeliveredOrder();
+    const firstOtp = await guestAccess.requestCode({
+      token: order.token,
+      idempotencyKey: `guest-dos-1-${randomUUID()}`,
+      ipHash: bytes(),
+    });
+    const firstCode = sentEmails.at(-1).text.match(/es (\d{6})\./)[1];
+    await sql.query(
+      `UPDATE "GuestOrderChallenge" SET "lastSentAt" = CURRENT_TIMESTAMP - INTERVAL '2 minutes' WHERE "id" = $1`,
+      [firstOtp.challengeId],
+    );
+    const verified = await guestAccess.verifyCode({
+      token: order.token,
+      challengeId: firstOtp.challengeId,
+      code: firstCode,
+      ipHash: bytes(),
+    });
+    const secondOtp = await guestAccess.requestCode({
+      token: order.token,
+      idempotencyKey: `guest-dos-2-${randomUUID()}`,
+      ipHash: bytes(),
+    });
+    const secondCode = sentEmails.at(-1).text.match(/es (\d{6})\./)[1];
+    const activeSession = await guestAccess.getSession({
+      token: order.token,
+      sessionToken: verified.sessionToken,
+    });
+    assert.equal(activeSession.sessionId, verified.sessionId);
+    await guestAccess.verifyCode({
+      token: order.token,
+      challengeId: secondOtp.challengeId,
+      code: secondCode,
+      ipHash: bytes(),
+    });
+    await assert.rejects(
+      guestAccess.getSession({
+        token: order.token,
+        sessionToken: verified.sessionToken,
+      }),
+      GuestOrderAccessError,
+    );
+
+    const createdReturn = await postsale.requestReturn(
+      { kind: "CUSTOMER", customerId: catalog.customerId },
+      {
+        orderId: order.orderId,
+        kind: "REFUND",
+        reason: "Solicito retracto y luego cancelación coordinada antes de devolver.",
+        idempotencyKey: `sync-cancel-${randomUUID()}`,
+        items: [
+          {
+            shipmentItemId: order.shipmentItemId,
+            quantity: 1,
+            serializedUnitIds: order.serializedUnitIds,
+          },
+        ],
+      },
+    );
+    const cmsEditor = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `cms-ops-${randomUUID()}@example.test`,
+        displayName: "Editor CMS Posventa",
+        role: "CMS_EDITOR",
+        status: "ACTIVE",
+      },
+    });
+    const operations = new OperationsService(db);
+    const superSnap = await operations.snapshot(adminId);
+    const cmsSnap = await operations.snapshot(cmsEditor.id);
+    assert.ok(superSnap.notifications.some((item) => item.category === "postsale.returns"));
+    assert.equal(
+      cmsSnap.notifications.some((item) => item.category.startsWith("postsale.")),
+      false,
+    );
+
+    await admin.transitionReturn({
+      returnRequestId: createdReturn.id,
+      transition: "APPROVE",
+      expectedVersion: 0,
+      note: "Aprobada inicialmente.",
+      audit,
+    });
+    const approvedReturn = await db.returnRequest.findUniqueOrThrow({
+      where: { id: createdReturn.id },
+    });
+    assert.ok(approvedReturn.refundId);
+    await assert.rejects(
+      new OrderRefundService(db).cancel({ refundId: approvedReturn.refundId, audit }),
+      RefundConflictError,
+    );
+    await admin.transitionReturn({
+      returnRequestId: createdReturn.id,
+      transition: "CANCEL",
+      expectedVersion: 1,
+      note: "El cliente decidió conservar la unidad.",
+      audit,
+    });
+    assert.equal(
+      (await db.orderRefund.findUniqueOrThrow({ where: { id: approvedReturn.refundId } })).status,
+      "CANCELLED",
+    );
   });
 
   it("serializes duplicate submissions and approvals without duplicate returns or refunds", async () => {

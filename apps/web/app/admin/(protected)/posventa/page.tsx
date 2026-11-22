@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
 import { PostSaleAdminService } from "@mundonettech/db";
+import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import {
@@ -22,7 +23,9 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 export default async function PostSaleAdminPage() {
   const session = await requireAdminPage("postsale:read");
   const queue = await new PostSaleAdminService(getDatabase()).queue();
+  const canWrite = hasAdminPermission(session.profile.role, "postsale:write");
   const canRefund = hasAdminPermission(session.profile.role, "payments:write");
+  const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
   return (
     <div className="space-y-10">
       <div>
@@ -32,7 +35,13 @@ export default async function PostSaleAdminPage() {
           versiones, PII enmascarada y MFA reciente.
         </p>
       </div>
-      <CmsStepUp session={session} />
+      {canWrite ? (
+        <CmsStepUp session={session} />
+      ) : (
+        <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+          Vista de solo lectura para tu rol actual.
+        </p>
+      )}
       <section aria-labelledby="admin-returns" className="space-y-4">
         <h2 id="admin-returns" className="text-2xl font-semibold">
           Devoluciones y cambios
@@ -43,11 +52,15 @@ export default async function PostSaleAdminPage() {
           </p>
         ) : (
           queue.returns.map((request) => {
+            const canCancelLinked =
+              !request.refund || !["PROCESSING", "COMPLETED"].includes(request.refund.status);
             const transitions =
               request.status === "REQUESTED"
                 ? (["APPROVE", "REJECT", "CANCEL"] as const)
                 : request.status === "AWAITING_RETURN"
-                  ? (["RECEIVE"] as const)
+                  ? canCancelLinked
+                    ? (["RECEIVE", "CANCEL"] as const)
+                    : (["RECEIVE"] as const)
                   : request.status === "RECEIVED" &&
                       (request.kind === "EXCHANGE" || request.refund?.status === "COMPLETED")
                     ? (["COMPLETE"] as const)
@@ -59,7 +72,14 @@ export default async function PostSaleAdminPage() {
               >
                 <div>
                   <h3 className="font-semibold">
-                    {request.order.orderNumber} · {request.kind} · {request.status}
+                    {canReadOrders ? (
+                      <Link href={`/admin/pedidos/${request.order.id}`} className="underline">
+                        {request.order.orderNumber}
+                      </Link>
+                    ) : (
+                      request.order.orderNumber
+                    )}{" "}
+                    · {request.kind} · {request.status}
                   </h3>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {request.order.emailSnapshot} · {dateFormatter.format(request.createdAt)} ·
@@ -75,6 +95,16 @@ export default async function PostSaleAdminPage() {
                     <li key={item.id} className="rounded-lg bg-secondary p-3">
                       {item.orderItem.titleSnapshot} · {item.quantity} unidades · entrega{" "}
                       {dateFormatter.format(item.deliveredAt)}
+                      {item.replacementVariant ? (
+                        <span className="block text-xs font-medium">
+                          Reemplazo solicitado: {item.replacementVariant.sku}
+                        </span>
+                      ) : null}
+                      {item.orderItem.variant.product.retractPolicy === "LEGAL_EXCEPTION_REVIEW" ? (
+                        <span className="block text-xs font-medium text-destructive">
+                          Revisar excepción legal de retracto (Ley 1480 art. 47)
+                        </span>
+                      ) : null}
                       {item.units.length ? (
                         <span className="block text-xs">
                           {item.units.map((unit) => unit.serializedUnit.serial).join(", ")}
@@ -88,13 +118,16 @@ export default async function PostSaleAdminPage() {
                     Reembolso {request.refund.status} · {formatCopCents(request.refund.totalCents)}
                   </p>
                 ) : null}
-                <ReturnModerationForm
-                  id={request.id}
-                  version={request.version}
-                  kind={request.kind}
-                  canRefund={canRefund}
-                  transitions={transitions}
-                />
+                {canWrite ? (
+                  <ReturnModerationForm
+                    id={request.id}
+                    version={request.version}
+                    kind={request.kind}
+                    hasLinkedRefund={Boolean(request.refund)}
+                    canRefund={canRefund}
+                    transitions={transitions}
+                  />
+                ) : null}
               </article>
             );
           })
@@ -110,14 +143,20 @@ export default async function PostSaleAdminPage() {
           </p>
         ) : (
           queue.warranties.map((claim) => {
+            const canCancelLinked =
+              !claim.refund || !["PROCESSING", "COMPLETED"].includes(claim.refund.status);
             const transitions =
               claim.status === "REQUESTED"
                 ? (["UNDER_REVIEW", "APPROVE", "REJECT", "CANCEL"] as const)
                 : claim.status === "UNDER_REVIEW"
                   ? (["APPROVE", "REJECT", "CANCEL"] as const)
-                  : claim.status === "APPROVED" &&
-                      (claim.remedy !== "REFUND" || claim.refund?.status === "COMPLETED")
-                    ? (["RESOLVE"] as const)
+                  : claim.status === "APPROVED"
+                    ? [
+                        ...(claim.remedy !== "REFUND" || claim.refund?.status === "COMPLETED"
+                          ? (["RESOLVE"] as const)
+                          : []),
+                        ...(canCancelLinked ? (["CANCEL"] as const) : []),
+                      ]
                     : [];
             return (
               <article
@@ -126,7 +165,14 @@ export default async function PostSaleAdminPage() {
               >
                 <div>
                   <h3 className="font-semibold">
-                    {claim.order.orderNumber} · {claim.remedy} · {claim.status}
+                    {canReadOrders ? (
+                      <Link href={`/admin/pedidos/${claim.order.id}`} className="underline">
+                        {claim.order.orderNumber}
+                      </Link>
+                    ) : (
+                      claim.order.orderNumber
+                    )}{" "}
+                    · {claim.remedy} · {claim.status}
                   </h3>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {claim.orderItem.titleSnapshot} · Serial {claim.serializedUnit.serial}
@@ -140,13 +186,16 @@ export default async function PostSaleAdminPage() {
                     Reembolso {claim.refund.status} · {formatCopCents(claim.refund.totalCents)}
                   </p>
                 ) : null}
-                <WarrantyModerationForm
-                  id={claim.id}
-                  version={claim.version}
-                  remedy={claim.remedy}
-                  canRefund={canRefund}
-                  transitions={transitions}
-                />
+                {canWrite ? (
+                  <WarrantyModerationForm
+                    id={claim.id}
+                    version={claim.version}
+                    remedy={claim.remedy}
+                    hasLinkedRefund={Boolean(claim.refund)}
+                    canRefund={canRefund}
+                    transitions={transitions}
+                  />
+                ) : null}
               </article>
             );
           })
@@ -186,11 +235,12 @@ export default async function PostSaleAdminPage() {
                   </li>
                 ))}
               </ol>
-              {!["RESOLVED", "CLOSED"].includes(ticket.status) || ticket.status === "RESOLVED" ? (
+              {canWrite && ticket.status !== "CLOSED" ? (
                 <SupportAdminForm
                   id={ticket.id}
                   version={ticket.version}
                   idempotencyKey={randomUUID()}
+                  canReply={ticket.status !== "RESOLVED"}
                   canClose={ticket.status === "RESOLVED"}
                 />
               ) : null}

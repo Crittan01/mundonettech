@@ -1,20 +1,21 @@
 import Link from "next/link";
 
-import { getPublicReviews } from "@/lib/reviews";
+import type { getPublicReviews } from "@/lib/reviews";
 
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "long",
 });
 
-export async function ProductReviews({
+type PublicReviewsData = Awaited<ReturnType<typeof getPublicReviews>>;
+
+export function ProductReviews({
   slug,
-  cursor,
+  reviews,
 }: {
   readonly slug: string;
-  readonly cursor?: string;
+  readonly reviews: PublicReviewsData;
 }) {
-  const reviews = await getPublicReviews(slug, cursor);
   return (
     <section aria-labelledby="reviews-public-title" id="resenas" className="space-y-5">
       <div>

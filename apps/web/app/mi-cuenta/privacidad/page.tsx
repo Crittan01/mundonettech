@@ -9,6 +9,22 @@ export const metadata = {
   robots: { index: false, follow: false },
 };
 
+const dateFormatter = new Intl.DateTimeFormat("es-CO", {
+  timeZone: "America/Bogota",
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+const purposeLabels: Record<string, string> = {
+  DATA_PROCESSING: "Tratamiento de datos contractuales",
+  MARKETING_EMAIL: "Comunicaciones comerciales por correo",
+  MARKETING_SMS: "Comunicaciones comerciales por SMS",
+  ANALYTICS: "Analítica opcional",
+};
+const consentStatusLabels: Record<string, string> = {
+  GRANTED: "Otorgado",
+  REVOKED: "Revocado",
+};
+
 export default async function PrivacyPage() {
   const { profile } = await requireCustomerPage();
   const account = await accountService().getProfile(profile.id);
@@ -31,9 +47,10 @@ export default async function PrivacyPage() {
           <ol className="space-y-3">
             {account.consents.map((consent) => (
               <li key={consent.id} className="rounded-xl border border-border bg-card p-4 text-sm">
-                <strong>{consent.purpose}</strong> · {consent.status} · {consent.policyVersion}
+                <strong>{purposeLabels[consent.purpose] ?? consent.purpose}</strong> ·{" "}
+                {consentStatusLabels[consent.status] ?? consent.status} · v{consent.policyVersion}
                 <span className="block text-muted-foreground">
-                  {consent.occurredAt.toISOString()} · {consent.source}
+                  {dateFormatter.format(consent.occurredAt)} · {consent.source}
                 </span>
               </li>
             ))}

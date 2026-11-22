@@ -84,14 +84,32 @@ export class PostSaleAdminService {
     });
   }
 
+  async reviewQueue() {
+    return this.db.review.findMany({
+      include: {
+        product: { select: { name: true, slug: true } },
+        orderItem: { select: { titleSnapshot: true, order: { select: { orderNumber: true } } } },
+      },
+      orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+      take: 200,
+    });
+  }
+
   async queue() {
     const [returns, warranties, tickets, reviews] = await Promise.all([
       this.db.returnRequest.findMany({
         include: {
-          order: { select: { orderNumber: true, emailSnapshot: true } },
+          order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
           items: {
             include: {
-              orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
+              orderItem: {
+                select: {
+                  titleSnapshot: true,
+                  skuSnapshot: true,
+                  variant: { select: { product: { select: { retractPolicy: true } } } },
+                },
+              },
+              replacementVariant: { select: { sku: true } },
               units: {
                 include: { serializedUnit: { select: { id: true, serial: true, imei: true } } },
               },
@@ -104,7 +122,7 @@ export class PostSaleAdminService {
       }),
       this.db.warrantyClaim.findMany({
         include: {
-          order: { select: { orderNumber: true, emailSnapshot: true } },
+          order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
           orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
           serializedUnit: { select: { serial: true, imei: true } },
           refund: { select: { id: true, status: true, totalCents: true } },
@@ -114,21 +132,14 @@ export class PostSaleAdminService {
       }),
       this.db.supportTicket.findMany({
         include: {
-          order: { select: { orderNumber: true } },
+          order: { select: { id: true, orderNumber: true } },
           messages: { orderBy: { createdAt: "asc" } },
           assignedTo: { select: { id: true, displayName: true } },
         },
         orderBy: [{ status: "asc" }, { slaDueAt: "asc" }, { id: "asc" }],
         take: 200,
       }),
-      this.db.review.findMany({
-        include: {
-          product: { select: { name: true, slug: true } },
-          orderItem: { select: { titleSnapshot: true, order: { select: { orderNumber: true } } } },
-        },
-        orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-        take: 200,
-      }),
+      this.reviewQueue(),
     ]);
     return {
       returns: returns.map((item) => ({
@@ -165,6 +176,7 @@ export class PostSaleAdminService {
       });
       if (!peek) throw new PostSaleError("NOT_FOUND", "Return request not found.");
       await acquireOperationLocks(tx, [
+        ...(input.transition === "CANCEL" ? [`order-payment:${peek.orderId}`] : []),
         `order-refund:${peek.orderId}`,
         `postsale:${peek.orderId}`,
         `return:${input.returnRequestId}`,
@@ -189,7 +201,9 @@ export class PostSaleAdminService {
         throw new PostSaleError("CONFLICT", "The return request changed in another session.");
       const allowed =
         (input.transition === "APPROVE" && current.status === "REQUESTED") ||
-        (["REJECT", "CANCEL"].includes(input.transition) && current.status === "REQUESTED") ||
+        (input.transition === "REJECT" && current.status === "REQUESTED") ||
+        (input.transition === "CANCEL" &&
+          ["REQUESTED", "AWAITING_RETURN"].includes(current.status)) ||
         (input.transition === "RECEIVE" && current.status === "AWAITING_RETURN") ||
         (input.transition === "COMPLETE" && current.status === "RECEIVED");
       if (!allowed)
@@ -214,6 +228,18 @@ export class PostSaleAdminService {
           audit: input.audit,
         });
         refundId = refund.id;
+      }
+      if (
+        input.transition === "CANCEL" &&
+        current.refund &&
+        current.refund.status !== "CANCELLED"
+      ) {
+        await new OrderRefundService(this.db).cancelInTransaction(tx, {
+          refundId: current.refund.id,
+          ...(resolutionNote ? { note: resolutionNote } : {}),
+          audit: input.audit,
+          allowLinkedPostSale: true,
+        });
       }
       if (input.transition === "RECEIVE") {
         const unitIds = current.items
@@ -295,6 +321,7 @@ export class PostSaleAdminService {
       });
       if (!peek) throw new PostSaleError("NOT_FOUND", "Warranty claim not found.");
       await acquireOperationLocks(tx, [
+        ...(input.transition === "CANCEL" ? [`order-payment:${peek.orderId}`] : []),
         `order-refund:${peek.orderId}`,
         `postsale:${peek.orderId}`,
         `warranty:${input.warrantyClaimId}`,
@@ -321,8 +348,9 @@ export class PostSaleAdminService {
         (input.transition === "UNDER_REVIEW" && current.status === "REQUESTED") ||
         (input.transition === "APPROVE" &&
           ["REQUESTED", "UNDER_REVIEW"].includes(current.status)) ||
-        (["REJECT", "CANCEL"].includes(input.transition) &&
-          ["REQUESTED", "UNDER_REVIEW"].includes(current.status)) ||
+        (input.transition === "REJECT" && ["REQUESTED", "UNDER_REVIEW"].includes(current.status)) ||
+        (input.transition === "CANCEL" &&
+          ["REQUESTED", "UNDER_REVIEW", "APPROVED"].includes(current.status)) ||
         (input.transition === "RESOLVE" && current.status === "APPROVED");
       if (!allowed)
         throw new PostSaleError(
@@ -343,6 +371,18 @@ export class PostSaleAdminService {
           audit: input.audit,
         });
         refundId = refund.id;
+      }
+      if (
+        input.transition === "CANCEL" &&
+        current.refund &&
+        current.refund.status !== "CANCELLED"
+      ) {
+        await new OrderRefundService(this.db).cancelInTransaction(tx, {
+          refundId: current.refund.id,
+          ...(resolutionNote ? { note: resolutionNote } : {}),
+          audit: input.audit,
+          allowLinkedPostSale: true,
+        });
       }
       if (
         input.transition === "RESOLVE" &&

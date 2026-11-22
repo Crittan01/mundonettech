@@ -1,3 +1,4 @@
+import { hasAdminPermission } from "@mundonettech/core";
 import { PostSaleAdminService } from "@mundonettech/db";
 import Link from "next/link";
 
@@ -15,7 +16,8 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 
 export default async function ReviewAdminPage() {
   const session = await requireAdminPage("reviews:read");
-  const queue = await new PostSaleAdminService(getDatabase()).queue();
+  const canWrite = hasAdminPermission(session.profile.role, "reviews:write");
+  const reviews = await new PostSaleAdminService(getDatabase()).reviewQueue();
   return (
     <div className="space-y-8">
       <div>
@@ -25,14 +27,20 @@ export default async function ReviewAdminPage() {
           reciente y deja auditoría.
         </p>
       </div>
-      <CmsStepUp session={session} />
-      {queue.reviews.length === 0 ? (
+      {canWrite ? (
+        <CmsStepUp session={session} />
+      ) : (
+        <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+          Vista de solo lectura para tu rol actual.
+        </p>
+      )}
+      {reviews.length === 0 ? (
         <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
           No hay reseñas para moderar.
         </p>
       ) : (
         <section aria-label="Cola de reseñas" className="space-y-4">
-          {queue.reviews.map((review) => (
+          {reviews.map((review) => (
             <article
               key={review.id}
               className="space-y-4 rounded-xl border border-border bg-card p-5"
@@ -55,10 +63,12 @@ export default async function ReviewAdminPage() {
               {review.moderationNote ? (
                 <p className="text-sm">Nota previa: {review.moderationNote}</p>
               ) : null}
-              <ReviewModerationForm
-                id={review.id}
-                expectedUpdatedAt={review.updatedAt.toISOString()}
-              />
+              {canWrite ? (
+                <ReviewModerationForm
+                  id={review.id}
+                  expectedUpdatedAt={review.updatedAt.toISOString()}
+                />
+              ) : null}
             </article>
           ))}
         </section>

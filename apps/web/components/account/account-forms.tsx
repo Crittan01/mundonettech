@@ -29,16 +29,23 @@ export function ProfileForm({
   };
 }) {
   const [state, action, pending] = useActionState(updateProfileAction, initialActionState);
-  const values = state.values ?? initial;
+  const errorValues = state.status === "error" ? state.values : undefined;
+  const givenName = errorValues?.givenName ?? initial.givenName;
+  const familyName = errorValues?.familyName ?? initial.familyName;
+  const phoneE164 = errorValues?.phoneE164 ?? initial.phoneE164;
+  const marketingEmail = errorValues
+    ? errorValues.marketingEmail === "on" || errorValues.marketingEmail === "true"
+    : initial.marketingEmail;
   return (
     <form action={action} className="space-y-5 rounded-xl border border-border bg-card p-6">
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="givenName">Nombres</Label>
           <Input
+            key={`givenName-${givenName}`}
             id="givenName"
             name="givenName"
-            defaultValue={values.givenName ?? ""}
+            defaultValue={givenName}
             maxLength={100}
             autoComplete="given-name"
             disabled={pending}
@@ -47,9 +54,10 @@ export function ProfileForm({
         <div className="space-y-2">
           <Label htmlFor="familyName">Apellidos</Label>
           <Input
+            key={`familyName-${familyName}`}
             id="familyName"
             name="familyName"
-            defaultValue={values.familyName ?? ""}
+            defaultValue={familyName}
             maxLength={100}
             autoComplete="family-name"
             disabled={pending}
@@ -59,10 +67,11 @@ export function ProfileForm({
       <div className="space-y-2">
         <Label htmlFor="phoneE164">Teléfono en formato internacional</Label>
         <Input
+          key={`phoneE164-${phoneE164}`}
           id="phoneE164"
           name="phoneE164"
           type="tel"
-          defaultValue={values.phoneE164 ?? ""}
+          defaultValue={phoneE164}
           placeholder="+573001234567"
           maxLength={16}
           autoComplete="tel"
@@ -71,9 +80,10 @@ export function ProfileForm({
       </div>
       <label className="flex items-start gap-3 text-sm">
         <input
+          key={`marketing-${String(marketingEmail)}`}
           type="checkbox"
           name="marketingEmail"
-          defaultChecked={values.marketingEmail === "on" || values.marketingEmail === true}
+          defaultChecked={marketingEmail}
           className="mt-1"
           disabled={pending}
         />
@@ -120,7 +130,11 @@ export function AddressForm({
   readonly initial?: Partial<AddressFormValue>;
 }) {
   const [state, action, pending] = useActionState(saveAddressAction, initialActionState);
-  const values = { ...initial, ...state.values };
+  const errorValues = state.status === "error" ? state.values : undefined;
+  const values = errorValues ? { ...initial, ...errorValues } : (initial ?? {});
+  const isDefaultChecked = errorValues
+    ? errorValues.isDefault === "on" || errorValues.isDefault === "true"
+    : Boolean(initial?.isDefault);
   const [departmentCode, setDepartmentCode] = useState(
     values.departmentCode ?? departments[0]?.code ?? "",
   );
@@ -271,9 +285,10 @@ export function AddressForm({
       </div>
       <label className="flex items-center gap-2 text-sm">
         <input
+          key={`default-${formId}-${String(isDefaultChecked)}`}
           type="checkbox"
           name="isDefault"
-          defaultChecked={Boolean(values.isDefault)}
+          defaultChecked={isDefaultChecked}
           disabled={pending}
         />
         Usar como dirección predeterminada

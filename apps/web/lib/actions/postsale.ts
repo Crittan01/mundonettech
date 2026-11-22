@@ -26,8 +26,19 @@ import { guestOrderAccessService } from "@/lib/integrations";
 const tokenSchema = z.string().regex(/^[A-Za-z0-9_-]{32,128}$/);
 const keySchema = z.string().min(3).max(128);
 
+function isNextRedirect(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "digest" in error &&
+    typeof error.digest === "string" &&
+    error.digest.startsWith("NEXT_REDIRECT")
+  );
+}
+
 function failure(error: unknown, values?: Record<string, string>): ActionState {
-  if (error instanceof z.ZodError) {
+  if (isNextRedirect(error)) throw error;
+  if (error instanceof z.ZodError || error instanceof SyntaxError) {
     return actionError(
       "Revisa los campos, cantidades enteras e identificadores de la solicitud.",
       values,
@@ -126,6 +137,7 @@ export async function verifyGuestCodeAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = { challengeId: formString(formData, "challengeId") };
+  let destination: string;
   try {
     const token = tokenSchema.parse(formString(formData, "token"));
     const context = await getRequestSecurityContext();
@@ -139,10 +151,11 @@ export async function verifyGuestCodeAction(
       ipHash: context.ipHash,
     });
     await establishGuestOrderSession(result.sessionToken, result.expiresAt);
-    redirect(`/pedido/${token}`);
+    destination = `/pedido/${token}`;
   } catch (error) {
     return failure(error, values);
   }
+  redirect(destination);
 }
 
 export async function signOutGuestOrderAction(formData: FormData): Promise<void> {

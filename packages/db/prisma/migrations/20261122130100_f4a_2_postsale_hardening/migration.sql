@@ -31,10 +31,16 @@ BEGIN
        to_jsonb(OLD) - ARRAY['recipientEmail', 'anonymizedAt', 'updatedAt'] THEN
       RAISE EXCEPTION 'Email anonymization only removes the recipient identity' USING ERRCODE = '55000';
     END IF;
-    IF NEW."recipientEmail" !~ '^anon-[0-9a-f]{32}@anonymized\.invalid$' OR NOT EXISTS (
-      SELECT 1 FROM "Order" parent_order
-      JOIN "Customer" customer ON customer."id" = parent_order."customerId"
-      WHERE parent_order."id" = NEW."orderId" AND customer."status" = 'ANONYMIZED' AND customer."email" = NEW."recipientEmail"
+    IF NEW."recipientEmail" !~ '^anon-[0-9a-f]{32}@anonymized\.invalid$' OR (
+      (NEW."orderId" IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM "Order" parent_order
+        JOIN "Customer" customer ON customer."id" = parent_order."customerId"
+        WHERE parent_order."id" = NEW."orderId" AND customer."status" = 'ANONYMIZED' AND customer."email" = NEW."recipientEmail"
+      )) OR
+      (NEW."orderId" IS NULL AND NOT EXISTS (
+        SELECT 1 FROM "Customer" customer
+        WHERE customer."status" = 'ANONYMIZED' AND customer."email" = NEW."recipientEmail"
+      ))
     ) THEN RAISE EXCEPTION 'Email recipient anonymization does not match the customer erasure' USING ERRCODE = '55000'; END IF;
     RETURN NEW;
   END IF;

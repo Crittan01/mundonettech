@@ -1,4 +1,5 @@
 import { formatCopCents } from "@mundonettech/core";
+import { AccountError } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -10,6 +11,17 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "medium",
 });
+const orderStatusLabels: Record<string, string> = {
+  PENDING: "Pendiente",
+  CONFIRMED: "Confirmado",
+  CANCELLED: "Cancelado",
+  COMPLETED: "Completado",
+};
+const fulfillmentStatusLabels: Record<string, string> = {
+  UNFULFILLED: "Sin despachar",
+  PARTIALLY_FULFILLED: "Despacho parcial",
+  FULFILLED: "Despachado",
+};
 
 export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi-cuenta/pedidos">) {
   const { profile } = await requireCustomerPage();
@@ -20,11 +32,20 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
     .uuid()
     .optional()
     .safeParse(cursorValue || undefined);
+  let cursorError = !parsed.success;
   const result = parsed.success
-    ? await accountService().listOrders(profile.id, {
-        ...(parsed.data ? { cursor: parsed.data } : {}),
-        limit: 10,
-      })
+    ? await accountService()
+        .listOrders(profile.id, {
+          ...(parsed.data ? { cursor: parsed.data } : {}),
+          limit: 10,
+        })
+        .catch((error: unknown) => {
+          if (error instanceof AccountError) {
+            cursorError = true;
+            return [];
+          }
+          throw error;
+        })
     : [];
   const orders = result.slice(0, 10);
   const nextCursor = result.length > 10 ? orders.at(-1)?.id : null;
@@ -36,7 +57,7 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
           Consulta entregas, devoluciones, garantías, reseñas y PQR de cada pedido.
         </p>
       </div>
-      {!parsed.success ? (
+      {cursorError ? (
         <p role="alert" className="rounded-xl border border-destructive bg-card p-4 text-sm">
           El cursor de paginación no es válido. Vuelve al inicio del historial.
         </p>
@@ -64,7 +85,8 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
                 <span className="mt-2 block text-sm text-muted-foreground">
                   {dateFormatter.format(order.createdAt)} ·{" "}
                   {order.items.reduce((sum, item) => sum + item.quantity, 0)} unidades ·{" "}
-                  {order.orderStatus} · {order.fulfillmentStatus}
+                  {orderStatusLabels[order.orderStatus] ?? order.orderStatus} ·{" "}
+                  {fulfillmentStatusLabels[order.fulfillmentStatus] ?? order.fulfillmentStatus}
                 </span>
                 <span className="mt-3 block text-sm font-medium">Ver entregas y posventa →</span>
               </Link>

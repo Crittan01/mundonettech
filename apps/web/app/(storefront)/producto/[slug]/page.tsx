@@ -1,6 +1,7 @@
 import { formatCopCents } from "@mundonettech/core";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { z } from "zod";
 
 import { AddBundleToCartForm } from "@/components/cart/add-to-cart-form";
 import { ProductCard } from "@/components/catalog/product-card";
@@ -65,7 +66,11 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
   const rawReviewCursor = Array.isArray(query.reviewCursor)
     ? query.reviewCursor[0]
     : query.reviewCursor;
-  const reviewCursor = typeof rawReviewCursor === "string" ? rawReviewCursor : undefined;
+  const parsedReviewCursor = z
+    .string()
+    .uuid()
+    .safeParse(typeof rawReviewCursor === "string" ? rawReviewCursor : undefined);
+  const reviewCursor = parsedReviewCursor.success ? parsedReviewCursor.data : undefined;
   const [related, reviews] = await Promise.all([
     searchCatalog({
       categorySlug: product.category.slug,
@@ -293,7 +298,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
         </section>
       ) : null}
 
-      <ProductReviews slug={slug} {...(reviewCursor ? { cursor: reviewCursor } : {})} />
+      <ProductReviews slug={slug} reviews={reviews} />
 
       {related.items.length ? (
         <section aria-labelledby="related-title">

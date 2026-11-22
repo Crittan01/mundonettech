@@ -110,7 +110,9 @@ export function ReturnRequestForm({
       <fieldset className="space-y-4">
         <legend className="font-semibold">Unidades entregadas que quieres devolver</legend>
         {deliveries.map((delivery) => {
-          const quantity = quantities[delivery.shipmentItemId] ?? 0;
+          const canExchange = delivery.replacements.length > 0;
+          const rawQuantity = quantities[delivery.shipmentItemId] ?? 0;
+          const quantity = kind === "EXCHANGE" && !canExchange ? 0 : rawQuantity;
           const selectedSerials = serials[delivery.shipmentItemId] ?? [];
           return (
             <div
@@ -121,6 +123,9 @@ export function ReturnRequestForm({
                 <p className="font-medium">{delivery.title}</p>
                 <p className="text-xs text-muted-foreground">
                   {delivery.sku} · hasta {delivery.maximum} unidades en esta entrega
+                  {kind === "EXCHANGE" && !canExchange
+                    ? " · sin variantes alternas para cambio"
+                    : ""}
                 </p>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
@@ -142,10 +147,10 @@ export function ReturnRequestForm({
                         : 0;
                       setQuantities((current) => ({ ...current, [delivery.shipmentItemId]: next }));
                     }}
-                    disabled={pending}
+                    disabled={pending || (kind === "EXCHANGE" && !canExchange)}
                   />
                 </div>
-                {kind === "EXCHANGE" ? (
+                {kind === "EXCHANGE" && canExchange ? (
                   <div className="space-y-2">
                     <Label htmlFor={`replacement-${delivery.shipmentItemId}`}>
                       Variante de reemplazo

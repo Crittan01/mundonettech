@@ -16,7 +16,10 @@ const runSuffix = randomUUID().slice(0, 8).toUpperCase();
 const guestCode = "654321";
 let db: ReturnType<typeof createDatabaseClient>;
 let customer: { id: string; authUserId: string; email: string };
+let erasableCustomer: { id: string; authUserId: string; email: string };
 let admin: { id: string; authUserId: string; email: string };
+let fulfillmentAdmin: { id: string; authUserId: string; email: string };
+let cmsAdmin: { id: string; authUserId: string; email: string };
 let order: {
   id: string;
   orderNumber: string;
@@ -25,6 +28,7 @@ let order: {
   orderItemId: string;
   productSlug: string;
 };
+let erasableOrderToken: string;
 
 function secret(): Buffer {
   const value = process.env.SESSION_TIMEOUT_SECRET;
@@ -52,16 +56,19 @@ async function authenticate(
     idleSeconds: kind === "admin" ? 1800 : 2_592_000,
     absoluteSeconds: kind === "admin" ? 43_200 : 2_592_000,
   });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Network.setCookie", {
+    name: `__Host-${kind}_activity`,
+    value: activity,
+    domain: "127.0.0.1",
+    path: "/",
+    httpOnly: true,
+    secure: true,
+    sameSite: "Strict",
+    sourceScheme: "Secure",
+  });
+  await cdp.detach();
   await page.context().addCookies([
-    {
-      name: `__Host-${kind}_activity`,
-      value: activity,
-      domain: "127.0.0.1",
-      path: "/",
-      httpOnly: true,
-      secure: true,
-      sameSite: "Strict",
-    },
     {
       name: `${kind}_activity`,
       value: activity,
@@ -109,6 +116,73 @@ test.beforeAll(async () => {
       displayName: "Administrador posventa E2E",
       role: "SUPERADMIN",
       status: "ACTIVE",
+    },
+  });
+  fulfillmentAdmin = await db.adminUser.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `postsale-fulfillment-${randomUUID()}@example.test`,
+      displayName: "Alistamiento posventa E2E",
+      role: "FULFILLMENT",
+      status: "ACTIVE",
+    },
+  });
+  cmsAdmin = await db.adminUser.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `postsale-cms-${randomUUID()}@example.test`,
+      displayName: "Editor CMS posventa E2E",
+      role: "CMS_EDITOR",
+      status: "ACTIVE",
+    },
+  });
+  const createdErasable = await db.customer.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `erase-e2e-${randomUUID()}@example.test`,
+      status: "ACTIVE",
+      givenName: "Cliente",
+      familyName: "Anonimizable",
+    },
+  });
+  erasableCustomer = {
+    id: createdErasable.id,
+    authUserId: createdErasable.authUserId!,
+    email: createdErasable.email,
+  };
+  erasableOrderToken = randomBytes(32).toString("base64url");
+  const erasableOrder = await db.order.create({
+    data: {
+      orderNumber: `E2E-ERASE-${runSuffix}`,
+      customerId: erasableCustomer.id,
+      orderStatus: "CONFIRMED",
+      paymentStatus: "PAID",
+      fulfillmentStatus: "FULFILLED",
+      taxRegime: "NO_RESPONSABLE_IVA",
+      emailSnapshot: erasableCustomer.email,
+      recipientNameSnapshot: "Cliente Anonimizable",
+      phoneE164Snapshot: "+573001234567",
+      subtotalCents: 50_000_000n,
+      discountCents: 0n,
+      taxCents: 0n,
+      shippingCents: 0n,
+      totalCents: 50_000_000n,
+      confirmedAt: new Date(),
+    },
+  });
+  await db.orderReceipt.create({
+    data: {
+      orderId: erasableOrder.id,
+      receiptNumber: `R-E2E-ERASE-${runSuffix}`,
+      accessTokenHash: createHash("sha256").update(erasableOrderToken).digest(),
+      taxRegime: "NO_RESPONSABLE_IVA",
+      currency: "COP",
+      subtotalCents: 50_000_000n,
+      discountCents: 0n,
+      taxCents: 0n,
+      shippingCents: 0n,
+      totalCents: 50_000_000n,
+      contentHash: randomBytes(32),
     },
   });
   const variant = await db.productVariant.findFirstOrThrow({
@@ -361,4 +435,60 @@ test("admin moderates RMA, reviews and support with recent MFA and publishes onl
   await expect(page.getByRole("heading", { name: "Compra verificada E2E" })).toBeVisible();
   await expect(page.getByText("5/5")).toBeVisible();
   await expectAccessible(page);
+
+  await page.goto(`/producto/${order.productSlug}?reviewCursor=not-a-valid-uuid#resenas`);
+  await expect(page.getByRole("heading", { name: "Compra verificada E2E" })).toBeVisible();
+  await page.goto(`/producto/${order.productSlug}?reviewCursor=${randomUUID()}#resenas`);
+  await expect(page.getByRole("heading", { name: "Compra verificada E2E" })).toBeVisible();
+
+  await authenticate(page, fulfillmentAdmin, "admin");
+  await page.goto("/admin/posventa");
+  await expect(page.getByText("Vista de solo lectura para tu rol actual.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Aplicar transición" })).toHaveCount(0);
+  await expectAccessible(page);
+  await page.goto("/admin/resenas");
+  await expect(page.getByText("Vista de solo lectura para tu rol actual.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Aplicar decisión" })).toHaveCount(0);
+
+  await authenticate(page, cmsAdmin, "admin");
+  await page.goto("/admin/posventa");
+  await expect(page).toHaveURL(/\/admin\/login\?.*reason=security/);
+  await authenticate(page, cmsAdmin, "admin");
+  await page.goto("/admin/resenas");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Reseñas verificadas");
+});
+
+test("customer account validates bad cursors and anonymizes irreversibly with clean session sign-out", async ({
+  page,
+}) => {
+  await authenticate(page, erasableCustomer, "customer");
+  await page.goto(`/mi-cuenta/pedidos?cursor=${randomUUID()}`);
+  await expect(page.locator("main").getByRole("alert")).toContainText(
+    "El cursor de paginación no es válido",
+  );
+  await expectAccessible(page);
+
+  await page.goto("/mi-cuenta");
+  await page.getByLabel("Autorizo correos comerciales opcionales", { exact: false }).check();
+  await page.getByRole("button", { name: "Guardar perfil" }).click();
+  await expect(page.getByRole("status")).toContainText("Perfil y preferencias");
+  await page.getByLabel("Autorizo correos comerciales opcionales", { exact: false }).uncheck();
+  await page.getByRole("button", { name: "Guardar perfil" }).click();
+  await expect(page.getByRole("status")).toContainText("Perfil y preferencias");
+
+  await page.goto("/mi-cuenta/privacidad");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Privacidad y eliminación");
+  await expect(page.getByText("Comunicaciones comerciales por correo").first()).toBeVisible();
+  await expectAccessible(page);
+  await page.getByLabel("Escribe ELIMINAR MI CUENTA para confirmar").fill("ELIMINAR MI CUENTA");
+  await page.getByRole("button", { name: "Anonimizar mi cuenta definitivamente" }).click();
+  await expect(page).toHaveURL(/\/ingresar\?reason=anonymized/);
+  await expect(page.getByRole("status")).toContainText("Tu cuenta quedó anonimizada");
+  await expectAccessible(page);
+
+  await page.goto("/mi-cuenta");
+  await expect(page).toHaveURL(/\/ingresar\?.*reason=security/);
+  await page.goto(`/pedido/${erasableOrderToken}`);
+  await page.getByRole("button", { name: "Enviar código de acceso" }).click();
+  await expect(page.getByLabel("Código de seis dígitos")).toBeDisabled();
 });

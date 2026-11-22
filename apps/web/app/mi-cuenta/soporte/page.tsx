@@ -11,6 +11,14 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 
+const ticketStatusLabels: Record<string, string> = {
+  OPEN: "Abierta",
+  IN_PROGRESS: "En gestión",
+  WAITING_CUSTOMER: "Espera tu respuesta",
+  RESOLVED: "Resuelta",
+  CLOSED: "Cerrada",
+};
+
 export default async function SupportPage() {
   const { profile } = await requireCustomerPage();
   const tickets = await postSaleService().listSupportTickets({
@@ -31,6 +39,7 @@ export default async function SupportPage() {
           Nueva PQR
         </h2>
         <SupportTicketForm
+          key={tickets.length}
           channel={{ channel: "account", orderId: "" }}
           idempotencyKey={randomUUID()}
         />
@@ -51,7 +60,7 @@ export default async function SupportPage() {
             >
               <div>
                 <h3 className="font-semibold">
-                  {ticket.ticketNumber} · {ticket.status}
+                  {ticket.ticketNumber} · {ticketStatusLabels[ticket.status] ?? ticket.status}
                 </h3>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {ticket.subject}

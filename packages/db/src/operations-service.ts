@@ -13,12 +13,22 @@ const managedCategories = [
   "shipping.promise",
   "payments.review",
   "refunds.review",
+  "postsale.returns",
+  "postsale.warranties",
+  "postsale.support",
+  "reviews.moderation",
   "outbox.failed",
 ] as const;
 
 export function canReadNotificationCategory(role: AdminRoleValue, category: string): boolean {
   if (category.startsWith("orders.") || category.startsWith("shipping.")) {
     return hasAdminPermission(role, "orders:read");
+  }
+  if (category.startsWith("postsale.")) {
+    return hasAdminPermission(role, "postsale:read");
+  }
+  if (category.startsWith("reviews.")) {
+    return hasAdminPermission(role, "reviews:read");
   }
   if (category.startsWith("payments.") || category.startsWith("refunds.")) {
     return hasAdminPermission(role, "payments:read");
@@ -36,6 +46,12 @@ export function notificationWhereForRole(role: AdminRoleValue): Prisma.Notificat
   const excludedPrefixes: string[] = [];
   if (!hasAdminPermission(role, "orders:read")) {
     excludedPrefixes.push("orders.", "shipping.");
+  }
+  if (!hasAdminPermission(role, "postsale:read")) {
+    excludedPrefixes.push("postsale.");
+  }
+  if (!hasAdminPermission(role, "reviews:read")) {
+    excludedPrefixes.push("reviews.");
   }
   if (!hasAdminPermission(role, "payments:read")) {
     excludedPrefixes.push("payments.", "refunds.");
@@ -132,6 +148,41 @@ export class OperationsService {
         FROM "PaymentAttempt" attempts
         JOIN "Order" orders ON orders."id" = attempts."orderId"
         WHERE attempts."provider" = 'BANK_TRANSFER' AND attempts."status" IN ('PENDING', 'PROCESSING')
+        UNION ALL
+        SELECT 'return-pending:' || returns."id", 'postsale.returns', 'WARNING',
+          'Devolución por gestionar ' || orders."orderNumber",
+          'Una devolución o cambio espera revisión o cierre operativo en posventa.',
+          '/admin/posventa', 'ReturnRequest', returns."id"::text
+        FROM "ReturnRequest" returns
+        JOIN "Order" orders ON orders."id" = returns."orderId"
+        WHERE returns."status" IN ('REQUESTED', 'RECEIVED')
+        UNION ALL
+        SELECT 'warranty-pending:' || warranties."id", 'postsale.warranties', 'WARNING',
+          'Garantía por revisar ' || orders."orderNumber",
+          'Una garantía por serial espera evaluación técnica o decisión en posventa.',
+          '/admin/posventa', 'WarrantyClaim', warranties."id"::text
+        FROM "WarrantyClaim" warranties
+        JOIN "Order" orders ON orders."id" = warranties."orderId"
+        WHERE warranties."status" IN ('REQUESTED', 'UNDER_REVIEW')
+        UNION ALL
+        SELECT 'support-sla:' || tickets."id", 'postsale.support',
+          CASE WHEN tickets."slaDueAt" < CURRENT_TIMESTAMP THEN 'CRITICAL' ELSE 'WARNING' END,
+          CASE WHEN tickets."slaDueAt" < CURRENT_TIMESTAMP
+            THEN 'SLA vencido en ' || tickets."ticketNumber"
+            ELSE 'PQR pendiente ' || tickets."ticketNumber"
+          END,
+          'Una PQR abierta requiere respuesta o cierre dentro del término legal.',
+          '/admin/posventa', 'SupportTicket', tickets."id"::text
+        FROM "SupportTicket" tickets
+        WHERE tickets."status" = 'OPEN'
+          OR (tickets."status" IN ('IN_PROGRESS', 'WAITING_CUSTOMER') AND tickets."slaDueAt" < CURRENT_TIMESTAMP)
+        UNION ALL
+        SELECT 'review-pending:' || reviews."id", 'reviews.moderation', 'INFO',
+          'Reseña verificada por moderar',
+          'Una reseña de compra entregada espera aprobación o rechazo.',
+          '/admin/resenas', 'Review', reviews."id"::text
+        FROM "Review" reviews
+        WHERE reviews."status" = 'PENDING'
         UNION ALL
         SELECT 'outbox-failed:' || outbox."id", 'outbox.failed', 'CRITICAL',
           'Evento de integración fallido',

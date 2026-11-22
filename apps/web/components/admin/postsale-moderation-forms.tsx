@@ -21,18 +21,22 @@ export function ReturnModerationForm({
   id,
   version,
   kind,
+  hasLinkedRefund = false,
   canRefund,
   transitions,
 }: {
   readonly id: string;
   readonly version: number;
   readonly kind: "REFUND" | "EXCHANGE";
+  readonly hasLinkedRefund?: boolean;
   readonly canRefund: boolean;
   readonly transitions: readonly ("APPROVE" | "REJECT" | "RECEIVE" | "COMPLETE" | "CANCEL")[];
 }) {
   const [state, action, pending] = useActionState(transitionReturnAction, initialActionState);
   const available = transitions.filter(
-    (transition) => transition !== "APPROVE" || kind === "EXCHANGE" || canRefund,
+    (transition) =>
+      (transition !== "APPROVE" || kind === "EXCHANGE" || canRefund) &&
+      (transition !== "CANCEL" || !hasLinkedRefund || canRefund),
   );
   if (available.length === 0) return null;
   return (
@@ -78,18 +82,22 @@ export function WarrantyModerationForm({
   id,
   version,
   remedy,
+  hasLinkedRefund = false,
   canRefund,
   transitions,
 }: {
   readonly id: string;
   readonly version: number;
   readonly remedy: "REFUND" | "REPAIR" | "REPLACEMENT";
+  readonly hasLinkedRefund?: boolean;
   readonly canRefund: boolean;
   readonly transitions: readonly ("UNDER_REVIEW" | "APPROVE" | "REJECT" | "RESOLVE" | "CANCEL")[];
 }) {
   const [state, action, pending] = useActionState(transitionWarrantyAction, initialActionState);
   const available = transitions.filter(
-    (transition) => transition !== "APPROVE" || remedy !== "REFUND" || canRefund,
+    (transition) =>
+      (transition !== "APPROVE" || remedy !== "REFUND" || canRefund) &&
+      (transition !== "CANCEL" || !hasLinkedRefund || canRefund),
   );
   if (available.length === 0) return null;
   return (
@@ -135,11 +143,13 @@ export function SupportAdminForm({
   id,
   version,
   idempotencyKey,
+  canReply = true,
   canClose,
 }: {
   readonly id: string;
   readonly version: number;
   readonly idempotencyKey: string;
+  readonly canReply?: boolean;
   readonly canClose: boolean;
 }) {
   const [state, action, pending] = useActionState(replySupportAdminAction, initialActionState);
@@ -147,42 +157,45 @@ export function SupportAdminForm({
     closeSupportAdminAction,
     initialActionState,
   );
+  if (!canReply && !canClose) return null;
   return (
     <div className="space-y-4 rounded-lg border border-border p-4">
-      <form action={action} className="space-y-3">
-        <input type="hidden" name="ticketId" value={id} />
-        <input type="hidden" name="expectedVersion" value={version} />
-        <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
-        <div className="space-y-2">
-          <Label htmlFor={`admin-reply-${id}`}>Respuesta al cliente</Label>
-          <Textarea
-            id={`admin-reply-${id}`}
-            name="body"
-            defaultValue={state.values?.body ?? ""}
-            minLength={2}
-            maxLength={5000}
-            required
-            disabled={pending}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor={`admin-ticket-status-${id}`}>Nuevo estado</Label>
-          <select
-            id={`admin-ticket-status-${id}`}
-            name="status"
-            className={selectClass}
-            disabled={pending}
-          >
-            <option value="IN_PROGRESS">En gestión</option>
-            <option value="WAITING_CUSTOMER">Espera respuesta del cliente</option>
-            <option value="RESOLVED">Resuelta</option>
-          </select>
-        </div>
-        <Button type="submit" size="sm" disabled={pending}>
-          {pending ? "Respondiendo…" : "Responder con MFA"}
-        </Button>
-        <FormMessage state={state} />
-      </form>
+      {canReply ? (
+        <form action={action} className="space-y-3">
+          <input type="hidden" name="ticketId" value={id} />
+          <input type="hidden" name="expectedVersion" value={version} />
+          <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
+          <div className="space-y-2">
+            <Label htmlFor={`admin-reply-${id}`}>Respuesta al cliente</Label>
+            <Textarea
+              id={`admin-reply-${id}`}
+              name="body"
+              defaultValue={state.values?.body ?? ""}
+              minLength={2}
+              maxLength={5000}
+              required
+              disabled={pending}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor={`admin-ticket-status-${id}`}>Nuevo estado</Label>
+            <select
+              id={`admin-ticket-status-${id}`}
+              name="status"
+              className={selectClass}
+              disabled={pending}
+            >
+              <option value="IN_PROGRESS">En gestión</option>
+              <option value="WAITING_CUSTOMER">Espera respuesta del cliente</option>
+              <option value="RESOLVED">Resuelta</option>
+            </select>
+          </div>
+          <Button type="submit" size="sm" disabled={pending}>
+            {pending ? "Respondiendo…" : "Responder con MFA"}
+          </Button>
+          <FormMessage state={state} />
+        </form>
+      ) : null}
       {canClose ? (
         <form action={closeAction} className="space-y-2">
           <input type="hidden" name="ticketId" value={id} />

@@ -49,7 +49,18 @@ function revalidateAccount(): void {
   revalidatePath("/mi-cuenta/privacidad");
 }
 
+function isNextRedirect(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "digest" in error &&
+    typeof error.digest === "string" &&
+    error.digest.startsWith("NEXT_REDIRECT")
+  );
+}
+
 function failure(error: unknown, values: Record<string, string>): ActionState {
+  if (isNextRedirect(error)) throw error;
   if (error instanceof z.ZodError) {
     return actionError("Revisa los campos: hay datos incompletos o con formato inválido.", values);
   }
@@ -183,8 +194,8 @@ export async function anonymizeAccountAction(
     await clearActivityCookies();
     await clearCustomerCartCookie();
     await clearGuestOrderSession();
-    redirect("/?cuenta=anonimizada");
   } catch (error) {
     return failure(error, values);
   }
+  redirect("/ingresar?reason=anonymized");
 }

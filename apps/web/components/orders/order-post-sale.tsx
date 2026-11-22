@@ -1,5 +1,6 @@
 import { formatCopCents } from "@mundonettech/core";
 import type { PostSaleService } from "@mundonettech/db";
+import { addColombianCalendarMonths, evaluateRetractWindow } from "@mundonettech/legal-co";
 import Link from "next/link";
 
 import {
@@ -48,6 +49,12 @@ const statusLabels: Record<string, string> = {
   DELIVERED: "Entregado",
 };
 
+const remedyLabels: Record<string, string> = {
+  REFUND: "Reembolso",
+  REPAIR: "Reparación",
+  REPLACEMENT: "Reemplazo",
+};
+
 function label(status: string): string {
   return statusLabels[status] ?? status;
 }
@@ -63,15 +70,23 @@ export function OrderPostSaleView({
   readonly channel: OrderActionChannel;
   readonly idempotencySeed: string;
 }) {
-  const deliveries: ReturnDeliveryOption[] = order.items.flatMap((item) => {
-    const returned = item.returnRequestItems
-      .filter((entry) =>
-        ["REQUESTED", "AWAITING_RETURN", "RECEIVED", "COMPLETED"].includes(
-          entry.returnRequest.status,
-        ),
+  const now = new Date();
+  const activeReturnSerialIds = new Set(
+    order.returnRequests
+      .filter((request) =>
+        ["REQUESTED", "AWAITING_RETURN", "RECEIVED", "COMPLETED"].includes(request.status),
       )
-      .reduce((sum, entry) => sum + entry.quantity, 0);
-    const manualRefunded = order.refunds
+      .flatMap((request) =>
+        request.items.flatMap((item) => item.units.map((unit) => unit.serializedUnitId)),
+      ),
+  );
+  const activeWarrantySerialIds = new Set(
+    order.warrantyClaims
+      .filter((claim) => !["REJECTED", "CANCELLED"].includes(claim.status))
+      .map((claim) => claim.serializedUnitId),
+  );
+  const deliveries: ReturnDeliveryOption[] = order.items.flatMap((item) => {
+    let remainingManualRefunded = order.refunds
       .filter(
         (refund) =>
           !refund.returnRequest &&
@@ -81,43 +96,80 @@ export function OrderPostSaleView({
       .flatMap((refund) => refund.items)
       .filter((refundItem) => refundItem.orderItemId === item.id)
       .reduce((sum, refundItem) => sum + refundItem.quantity, 0);
-    const delivered = item.shipmentItems
+    const deliveredBatches = [...item.shipmentItems]
       .filter((entry) => entry.shipment.status === "DELIVERED" && entry.shipment.deliveredAt)
-      .reduce((sum, entry) => sum + entry.quantity, 0);
-    const available = Math.max(0, delivered - returned - manualRefunded);
-    return item.shipmentItems
-      .filter((entry) => entry.shipment.status === "DELIVERED" && entry.shipment.deliveredAt)
-      .map((delivery) => ({
-        shipmentItemId: delivery.id,
-        orderItemId: item.id,
-        title: item.titleSnapshot,
-        sku: item.skuSnapshot,
-        maximum: Math.min(delivery.quantity, available),
-        trackSerial: item.variant.product.trackSerial,
-        replacements: item.variant.product.variants
-          .filter((variant) => variant.id !== item.variantId)
-          .map((variant) => ({ id: variant.id, sku: variant.sku })),
-        serials: order.serializedUnits
-          .filter(
-            (unit) =>
-              unit.shipmentId === delivery.shipmentId &&
-              unit.variantId === item.variantId &&
-              unit.status === "SOLD",
-          )
-          .map((unit) => ({
-            id: unit.id,
-            label: `${unit.serial}${unit.imei ? ` · IMEI ${unit.imei}` : ""}`,
-          })),
-      }))
-      .filter((delivery) => delivery.maximum > 0);
+      .sort((left, right) => {
+        const diff = left.shipment.deliveredAt!.getTime() - right.shipment.deliveredAt!.getTime();
+        return diff !== 0 ? diff : left.id.localeCompare(right.id);
+      });
+    return deliveredBatches.flatMap((delivery) => {
+      const batchReturned = item.returnRequestItems
+        .filter(
+          (entry) =>
+            entry.shipmentItemId === delivery.id &&
+            ["REQUESTED", "AWAITING_RETURN", "RECEIVED", "COMPLETED"].includes(
+              entry.returnRequest.status,
+            ),
+        )
+        .reduce((sum, entry) => sum + entry.quantity, 0);
+      const beforeManual = Math.max(0, delivery.quantity - batchReturned);
+      const manualConsumed = Math.min(beforeManual, remainingManualRefunded);
+      remainingManualRefunded -= manualConsumed;
+      const maximum = beforeManual - manualConsumed;
+      const retractOpen = evaluateRetractWindow(delivery.shipment.deliveredAt!, now).isOpen;
+      const serials = order.serializedUnits
+        .filter(
+          (unit) =>
+            unit.shipmentId === delivery.shipmentId &&
+            unit.variantId === item.variantId &&
+            unit.status === "SOLD" &&
+            !activeReturnSerialIds.has(unit.id) &&
+            !activeWarrantySerialIds.has(unit.id),
+        )
+        .map((unit) => ({
+          id: unit.id,
+          label: `${unit.serial}${unit.imei ? ` · IMEI ${unit.imei}` : ""}`,
+        }));
+      const effectiveMaximum = item.variant.product.trackSerial
+        ? Math.min(maximum, serials.length)
+        : maximum;
+      if (!retractOpen || effectiveMaximum <= 0) return [];
+      return [
+        {
+          shipmentItemId: delivery.id,
+          orderItemId: item.id,
+          title: item.titleSnapshot,
+          sku: item.skuSnapshot,
+          maximum: effectiveMaximum,
+          trackSerial: item.variant.product.trackSerial,
+          replacements: item.variant.product.variants
+            .filter((variant) => variant.id !== item.variantId)
+            .map((variant) => ({ id: variant.id, sku: variant.sku })),
+          serials,
+        },
+      ];
+    });
   });
-  const warrantyUnits = order.serializedUnits.filter(
-    (unit) =>
-      unit.status === "SOLD" &&
-      order.shipments.some(
-        (shipment) => shipment.id === unit.shipmentId && shipment.status === "DELIVERED",
-      ),
-  );
+  const warrantyUnits = order.serializedUnits.filter((unit) => {
+    if (
+      unit.status !== "SOLD" ||
+      activeReturnSerialIds.has(unit.id) ||
+      activeWarrantySerialIds.has(unit.id)
+    ) {
+      return false;
+    }
+    const shipment = order.shipments.find(
+      (candidate) =>
+        candidate.id === unit.shipmentId &&
+        candidate.status === "DELIVERED" &&
+        candidate.deliveredAt !== null,
+    );
+    const matchingItem = order.items.find((item) => item.variantId === unit.variantId);
+    if (!shipment?.deliveredAt || !matchingItem) return false;
+    const months = matchingItem.variant.product.warrantyMonths;
+    if (months < 1) return false;
+    return now.getTime() <= addColombianCalendarMonths(shipment.deliveredAt, months).getTime();
+  });
   return (
     <div className="space-y-10">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -240,6 +292,7 @@ export function OrderPostSaleView({
         )}
         {deliveries.length ? (
           <ReturnRequestForm
+            key={order.returnRequests.length}
             channel={channel}
             deliveries={deliveries}
             idempotencyKey={`${idempotencySeed}:return`}
@@ -268,7 +321,7 @@ export function OrderPostSaleView({
                   </p>
                   <p className="mt-1 text-sm text-muted-foreground">
                     Vigencia calculada hasta {dateFormatter.format(claim.warrantyDueAt)} · Remedio:{" "}
-                    {claim.remedy}
+                    {remedyLabels[claim.remedy] ?? claim.remedy}
                   </p>
                   <p className="mt-3 text-sm whitespace-pre-wrap">{claim.issueDescription}</p>
                   {claim.resolutionNote ? (
@@ -283,6 +336,7 @@ export function OrderPostSaleView({
         )}
         {warrantyUnits.length ? (
           <WarrantyClaimForm
+            key={order.warrantyClaims.length}
             channel={channel}
             units={warrantyUnits.map((unit) => ({
               id: unit.id,
@@ -370,7 +424,11 @@ export function OrderPostSaleView({
             ) : null}
           </article>
         ))}
-        <SupportTicketForm channel={channel} idempotencyKey={`${idempotencySeed}:support`} />
+        <SupportTicketForm
+          key={order.supportTickets.length}
+          channel={channel}
+          idempotencyKey={`${idempotencySeed}:support`}
+        />
       </section>
     </div>
   );

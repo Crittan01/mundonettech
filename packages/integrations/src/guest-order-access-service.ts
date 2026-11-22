@@ -161,10 +161,6 @@ export class GuestOrderAccessService {
         where: { orderId: order.id, status: { in: ["PENDING", "SENT", "FAILED"] } },
         data: { status: "EXPIRED" },
       });
-      await tx.guestOrderSession.updateMany({
-        where: { orderId: order.id, revokedAt: null },
-        data: { revokedAt: now },
-      });
       const id = randomUUID();
       const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
       await tx.guestOrderChallenge.create({
@@ -208,11 +204,14 @@ export class GuestOrderAccessService {
         html: `<p>Tu código para consultar el pedido <strong>${orderNumber}</strong> en ${storeName} es:</p><p style="font-size:28px;font-weight:700;letter-spacing:6px">${prepared.code}</p><p>Expira en 10 minutos. No lo compartas. Si no solicitaste este código, puedes ignorar este mensaje.</p>`,
         text: `Tu código para consultar el pedido ${prepared.orderNumber} en ${this.options.storeName} es ${prepared.code}. Expira en 10 minutos. No lo compartas.`,
       });
+      const sentNowRows = await this.db.$queryRaw<
+        Array<{ now: Date }>
+      >`SELECT CURRENT_TIMESTAMP AS now`;
       await this.db.guestOrderChallenge.update({
         where: { id: prepared.challengeId },
         data: {
           status: "SENT",
-          lastSentAt: new Date(),
+          lastSentAt: sentNowRows[0]!.now,
           providerMessageId: result.providerMessageId,
           failureCode: null,
         },
@@ -314,22 +313,26 @@ export class GuestOrderAccessService {
   async getSession(input: { token: string; sessionToken: string }) {
     const receiptHash = tokenHash(input.token);
     const sessionHash = tokenHash(input.sessionToken);
-    const session = await this.db.guestOrderSession.findFirst({
-      where: { tokenHash: sessionHash, revokedAt: null },
-      include: { order: { include: { receipt: true } } },
-    });
+    const [session, nowRows] = await Promise.all([
+      this.db.guestOrderSession.findFirst({
+        where: { tokenHash: sessionHash, revokedAt: null },
+        include: { order: { include: { receipt: true } } },
+      }),
+      this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`,
+    ]);
+    const now = nowRows[0]!.now;
     if (
       !session?.order.receipt ||
-      session.expiresAt <= new Date() ||
+      session.expiresAt <= now ||
       session.order.anonymizedAt ||
       !timingSafeEqual(Uint8Array.from(session.order.receipt.accessTokenHash), receiptHash)
     ) {
       throw new GuestOrderAccessError("INVALID", "The guest order session is invalid or expired.");
     }
-    if (Date.now() - session.lastUsedAt.getTime() > 60_000) {
-      await this.db.guestOrderSession.update({
-        where: { id: session.id },
-        data: { lastUsedAt: new Date() },
+    if (now.getTime() - session.lastUsedAt.getTime() > 60_000) {
+      await this.db.guestOrderSession.updateMany({
+        where: { id: session.id, revokedAt: null, lastUsedAt: { lte: now } },
+        data: { lastUsedAt: now },
       });
     }
     return { sessionId: session.id, orderId: session.orderId, expiresAt: session.expiresAt };
@@ -337,9 +340,10 @@ export class GuestOrderAccessService {
 
   async revokeSession(sessionToken: string): Promise<void> {
     const sessionHash = tokenHash(sessionToken);
+    const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     await this.db.guestOrderSession.updateMany({
       where: { tokenHash: sessionHash, revokedAt: null },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: nowRows[0]!.now },
     });
   }
 }
