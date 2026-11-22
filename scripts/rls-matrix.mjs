@@ -8,6 +8,7 @@ import { assertSafeTestDatabase } from "./lib/test-environment.mjs";
 import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mjs";
 import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixture.mjs";
 import { cmsTables, seedCmsFixture } from "./lib/cms-test-fixture.mjs";
+import { crmTables, seedCrmFixture } from "./lib/crm-test-fixture.mjs";
 import { operationsTables, seedOperationsFixture } from "./lib/operations-test-fixture.mjs";
 import { postsaleTables, seedPostSaleFixture } from "./lib/postsale-test-fixture.mjs";
 import { pricingTables, seedPricingFixture } from "./lib/pricing-test-fixture.mjs";
@@ -39,6 +40,7 @@ const expectedTables = [
   ...logisticsTables,
   ...operationsTables,
   ...postsaleTables,
+  ...crmTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -213,6 +215,7 @@ async function ensureMatrixFixtures(client) {
   await seedLogisticsFixture(client, { checkout, payments, adminId });
   await seedOperationsFixture(client, { adminId });
   await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
+  await seedCrmFixture(client, { adminId });
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {

@@ -202,6 +202,12 @@ export function validateReleaseConfiguration(environment) {
     ),
   );
   check(
+    "release.crmJobActor",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      environment.CRM_JOB_ACTOR_ID ?? "",
+    ),
+  );
+  check(
     "release.turnstileSiteKey",
     Boolean(environment.NEXT_PUBLIC_TURNSTILE_SITE_KEY) &&
       !/^[123]x0{10}/.test(environment.NEXT_PUBLIC_TURNSTILE_SITE_KEY),

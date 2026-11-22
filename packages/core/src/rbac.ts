@@ -16,6 +16,10 @@ export type AdminPermission =
   | "orders:read"
   | "postsale:read"
   | "postsale:write"
+  | "crm:read"
+  | "crm:write"
+  | "crm:merge"
+  | "crm:suppress"
   | "reviews:read"
   | "reviews:write"
   | "finance:read"
@@ -121,6 +125,18 @@ const postsaleWriters = [
   "STORE_MANAGER",
   "CUSTOMER_SUPPORT",
 ] as const satisfies readonly AdminRoleValue[];
+const crmReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "CUSTOMER_SUPPORT",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
+const crmWriters = postsaleWriters;
+const crmSensitiveWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+] as const satisfies readonly AdminRoleValue[];
 const reviewReaders = [...orderReaders, "CMS_EDITOR"] as const satisfies readonly AdminRoleValue[];
 const reviewWriters = [
   ...postsaleWriters,
@@ -186,6 +202,10 @@ const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> 
   "orders:read": orderReaders,
   "postsale:read": orderReaders,
   "postsale:write": postsaleWriters,
+  "crm:read": crmReaders,
+  "crm:write": crmWriters,
+  "crm:merge": crmSensitiveWriters,
+  "crm:suppress": crmSensitiveWriters,
   "reviews:read": reviewReaders,
   "reviews:write": reviewWriters,
   "finance:read": integrationReaders,
@@ -254,6 +274,7 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/dashboard"
     | "/admin/pedidos"
     | "/admin/posventa"
+    | "/admin/crm"
     | "/admin/resenas"
     | "/admin/finanzas"
     | "/admin/catalogo"
@@ -280,6 +301,9 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       : []),
     ...(hasAdminPermission(role, "postsale:read")
       ? [{ href: "/admin/posventa" as const, label: "Posventa" }]
+      : []),
+    ...(hasAdminPermission(role, "crm:read")
+      ? [{ href: "/admin/crm" as const, label: "CRM 360" }]
       : []),
     ...(hasAdminPermission(role, "reviews:read")
       ? [{ href: "/admin/resenas" as const, label: "Reseñas" }]

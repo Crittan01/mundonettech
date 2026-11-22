@@ -770,4 +770,28 @@ describe("F3.2 — abandoned carts, reservation expiry and partial refunds", () 
     }
     assert.ok(drainedCount >= 10);
   });
+
+  it("synchronizes only the buyer identity and never a gift recipient into CRM", async () => {
+    const { cart, email } = await makeCart(1);
+    const input = await conversion(cart, email);
+    input.contact.recipientName = "Destinatario de regalo excluido";
+    const result = await orders.checkout(input);
+    const order = await db.order.findUniqueOrThrow({ where: { id: result.orderId } });
+    assert.equal(order.recipientNameSnapshot, "Destinatario de regalo excluido");
+    const contact = await db.contact.findFirstOrThrow({
+      where: { customerId: order.customerId, status: "ACTIVE", deletedAt: null },
+    });
+    assert.equal(contact.email, email);
+    assert.equal(contact.givenName, "Laura");
+    assert.equal(
+      await db.contact.count({ where: { givenName: "Destinatario de regalo excluido" } }),
+      0,
+    );
+    assert.equal(
+      await db.contactIdentity.count({
+        where: { contactId: contact.id, kind: "EMAIL", normalizedValue: email, retiredAt: null },
+      }),
+      1,
+    );
+  });
 });
