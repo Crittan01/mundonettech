@@ -34,6 +34,7 @@ function environment(
     RELEASE_TARGET_URL: "https://shop.example.test",
     INTEGRATION_ENVIRONMENT: "PRD",
     NODE_ENV: "production",
+    TRUSTED_PROXY: "cloudflare",
     NEXT_PUBLIC_SITE_URL: "https://shop.example.test",
     SITE_URL: "https://shop.example.test",
     TURNSTILE_EXPECTED_HOSTNAME: "shop.example.test",
@@ -87,12 +88,18 @@ describe("release configuration gate", () => {
     );
   });
 
-  it("rejects test integrations, loopback infrastructure and missing legal approval", () => {
+  it("rejects test integrations, loopback infrastructure, missing client IP adapter and mismatched server overrides", () => {
     const checks = validateReleaseConfiguration(
       environment({
+        NODE_ENV: "development",
+        TRUSTED_PROXY: undefined,
         DATABASE_URL: "postgresql://127.0.0.1:54422/postgres",
+        DIRECT_URL: "postgresql://postgres.stg.example.test/postgres",
+        SUPABASE_URL: "http://127.0.0.1:54429",
+        MEDIA_BASE_URL: "https://wrong-media.example.test",
+        R2_BUCKET: "shop-media-staging",
         NEXT_PUBLIC_TURNSTILE_SITE_KEY: "1x00000000000000000000AA",
-        EMAIL_SEND_DISABLED: "1",
+        EMAIL_SEND_DISABLED: "true",
         NEXT_PUBLIC_SITE_URL: "https://shop.example.test/hidden",
         INTEGRATION_CREDENTIAL_KEYS_LOCAL: JSON.stringify({ 1: key }),
         INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 1: key }),
@@ -101,8 +108,14 @@ describe("release configuration gate", () => {
     );
     expect(checks.filter((check) => !check.passed).map((check) => check.name)).toEqual(
       expect.arrayContaining([
+        "release.nodeEnvProduction",
         "release.emailEnabled",
+        "release.clientIpAdapter",
         "release.database",
+        "release.directDatabase",
+        "release.supabaseServerOverride",
+        "release.mediaServerOverride",
+        "release.r2Bucket",
         "release.publicSiteUrl",
         "release.turnstileSiteKey",
         "release.localCredentialIsolation",
@@ -110,6 +123,31 @@ describe("release configuration gate", () => {
         "attestation.RELEASE_LEGAL_REVIEW_APPROVED",
       ]),
     );
+  });
+
+  it("blocks STG configurations that point at production-named hosts or buckets", () => {
+    const checks = validateReleaseConfiguration(
+      environment({
+        RELEASE_ENVIRONMENT: "STG",
+        INTEGRATION_ENVIRONMENT: "STG",
+        RELEASE_TARGET_URL: "https://stg.example.test",
+        NEXT_PUBLIC_SITE_URL: "https://stg.example.test",
+        SITE_URL: "https://stg.example.test",
+        TURNSTILE_EXPECTED_HOSTNAME: "stg.example.test",
+        DATABASE_URL: "postgresql://postgres.prd-project@pooler.example.test/postgres",
+        NEXT_PUBLIC_SUPABASE_URL: "https://prd-auth.example.test",
+        R2_BUCKET: "shop-prd-media",
+        INTEGRATION_CREDENTIAL_KEYS_PRD: undefined,
+        INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_PRD: undefined,
+        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 1: key }),
+        INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_STG: "1",
+      }),
+    );
+    expect(checks.filter((check) => !check.passed).map((check) => check.name)).toEqual([
+      "release.database",
+      "release.supabaseUrl",
+      "release.r2Bucket",
+    ]);
   });
 
   it("keeps PRD blocked without explicit Go-Live and staging quality approvals", () => {
@@ -140,36 +178,73 @@ describe("release configuration gate", () => {
 
 describe("release HTTP gate", () => {
   const headers = {
-    "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy":
+      "default-src 'self'; img-src 'self' https://media.example.test; media-src 'self' https://media.example.test; frame-ancestors 'none'",
     "Strict-Transport-Security": "max-age=63072000; includeSubDomains; preload",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
   };
 
-  it("requires live, ready, public and feed responses with production headers", async () => {
-    const fetchImplementation = (async (input: string | URL | Request) => {
+  it("requires live, ready, public, feed, admin redirect and scheduler authn responses", async () => {
+    const fetchImplementation = (async (input: string | URL | Request, init?: RequestInit) => {
       const path = new URL(String(input)).pathname;
       if (path === "/api/health/live") return Response.json({ status: "alive" }, { headers });
       if (path === "/api/health/ready") return Response.json({ status: "ready" }, { headers });
+      if (path === "/admin") {
+        return new Response(null, {
+          status: 307,
+          headers: {
+            ...headers,
+            Location: "https://shop.example.test/admin/login?reason=security",
+          },
+        });
+      }
+      if (path.startsWith("/api/jobs/") && init?.method === "POST") {
+        return Response.json(
+          { error: "Unauthorized." },
+          { status: 401, headers: { ...headers, "Cache-Control": "no-store" } },
+        );
+      }
       return new Response("ok", { status: 200, headers });
     }) as typeof fetch;
     const checks = await verifyReleaseHttp("https://shop.example.test", fetchImplementation);
-    expect(checks).toHaveLength(7);
+    expect(checks).toHaveLength(14);
     expect(checks.every((check) => check.passed)).toBe(true);
   });
 
-  it("fails closed on unavailable readiness or leaked health details", async () => {
-    const fetchImplementation = (async (input: string | URL | Request) => {
+  it("fails closed on unavailable readiness, leaked health details, wildcard CSP or unconfigured schedulers", async () => {
+    const fetchImplementation = (async (input: string | URL | Request, init?: RequestInit) => {
       const path = new URL(String(input)).pathname;
       if (path === "/api/health/ready") {
         return Response.json({ status: "ready", database: "internal" }, { status: 503, headers });
       }
       if (path === "/api/health/live") return Response.json({ status: "alive" }, { headers });
+      if (path === "/legal") {
+        return new Response("ok", {
+          status: 200,
+          headers: {
+            ...headers,
+            "Content-Security-Policy":
+              "default-src 'self'; img-src 'self' https:; media-src 'self'; frame-ancestors 'none'",
+          },
+        });
+      }
+      if (path.startsWith("/api/jobs/") && init?.method === "POST") {
+        return Response.json(
+          { error: "Scheduler not configured." },
+          { status: 503, headers: { ...headers, "Cache-Control": "no-store" } },
+        );
+      }
       return new Response("ok", { status: 200, headers });
     }) as typeof fetch;
     const checks = await verifyReleaseHttp("https://shop.example.test", fetchImplementation);
     expect(checks.find((check) => check.name === "http./api/health/ready")?.passed).toBe(false);
     expect(checks.find((check) => check.name === "http./api/health/ready.payload")?.passed).toBe(
+      false,
+    );
+    expect(checks.find((check) => check.name === "http./legal")?.passed).toBe(false);
+    expect(checks.find((check) => check.name === "http./admin.redirect")?.passed).toBe(false);
+    expect(checks.find((check) => check.name === "http./api/jobs/orders.authn")?.passed).toBe(
       false,
     );
   });

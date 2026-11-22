@@ -1,4 +1,7 @@
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const productionMarkerPattern = /(?:^|[._-])(?:prd|prod|production|live)(?:$|[._-])/i;
+const nonProductionMarkerPattern =
+  /(?:^|[._-])(?:stg|staging|preview|dev|development|local|localhost)(?:$|[._-])/i;
 const commonApprovals = [
   "RELEASE_LEGAL_REVIEW_APPROVED",
   "RELEASE_BUSINESS_IDENTITY_VERIFIED",
@@ -46,28 +49,38 @@ function validHttpsUrl(value, { allowLoopback = false } = {}) {
   }
 }
 
-function validHttpsOrigin(value) {
+function validHttpsOrigin(value, targetEnvironment) {
   if (!validHttpsUrl(value)) return false;
   const url = new URL(value);
-  return value.replace(/\/$/, "") === url.origin;
+  if (value.replace(/\/$/, "") !== url.origin) return false;
+  if (targetEnvironment === "STG" && productionMarkerPattern.test(url.hostname)) return false;
+  if (targetEnvironment === "PRD" && nonProductionMarkerPattern.test(url.hostname)) return false;
+  return true;
 }
 
 function validPostgresqlUrl(value, targetEnvironment) {
   try {
     const url = new URL(value);
     const database = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+    const user = decodeURIComponent(url.username);
+    const combinedMarkers = `${url.hostname}/${user}/${database}`;
     return (
       ["postgres:", "postgresql:"].includes(url.protocol) &&
       Boolean(url.hostname) &&
       !loopbackHosts.has(url.hostname.toLowerCase()) &&
       Boolean(database) &&
       !database.includes("/") &&
-      (targetEnvironment !== "STG" ||
-        !/(?:^|[._-])(?:prd|prod|production|live)(?:$|[._-])/i.test(database))
+      (targetEnvironment !== "STG" || !productionMarkerPattern.test(combinedMarkers)) &&
+      (targetEnvironment !== "PRD" || !nonProductionMarkerPattern.test(combinedMarkers))
     );
   } catch {
     return false;
   }
+}
+
+function validOutboundEmailSetting(rawValue) {
+  const normalized = rawValue?.trim().toLowerCase();
+  return !normalized || normalized === "0" || normalized === "false";
 }
 
 function validKeyRing(serialized, activeVersion) {
@@ -86,6 +99,31 @@ function validKeyRing(serialized, activeVersion) {
   }
 }
 
+function cspDirective(csp, name) {
+  return csp
+    .split(";")
+    .map((directive) => directive.trim())
+    .find((directive) => directive.startsWith(`${name} `));
+}
+
+function hasProductionHeaders(response) {
+  const csp = response.headers.get("content-security-policy") ?? "";
+  const imgSrc = cspDirective(csp, "img-src") ?? "";
+  const mediaSrc = cspDirective(csp, "media-src") ?? "";
+  return (
+    response.headers.get("x-content-type-options") === "nosniff" &&
+    response.headers.get("x-frame-options") === "DENY" &&
+    (response.headers.get("strict-transport-security") ?? "").includes("max-age=63072000") &&
+    csp.includes("default-src 'self'") &&
+    csp.includes("frame-ancestors 'none'") &&
+    !csp.includes("'unsafe-eval'") &&
+    imgSrc.length > 0 &&
+    !/(?:^|\s)https:(?:\s|$)/.test(imgSrc) &&
+    mediaSrc.length > 0 &&
+    !/(?:^|\s)https:(?:\s|$)/.test(mediaSrc)
+  );
+}
+
 export function validateReleaseConfiguration(environment) {
   const targetEnvironment = environment.RELEASE_ENVIRONMENT;
   const checks = [];
@@ -96,13 +134,18 @@ export function validateReleaseConfiguration(environment) {
     "release.integrationEnvironment",
     environment.INTEGRATION_ENVIRONMENT === targetEnvironment,
   );
+  check("release.nodeEnvProduction", environment.NODE_ENV === "production");
+  check("release.emailEnabled", validOutboundEmailSetting(environment.EMAIL_SEND_DISABLED));
   check(
-    "release.emailEnabled",
-    environment.EMAIL_SEND_DISABLED !== "1" && environment.NODE_ENV !== "test",
+    "release.clientIpAdapter",
+    environment.VERCEL === "1" || environment.TRUSTED_PROXY === "cloudflare",
   );
-  check("release.targetHttps", validHttpsOrigin(environment.RELEASE_TARGET_URL));
-  check("release.publicSiteUrl", validHttpsOrigin(environment.NEXT_PUBLIC_SITE_URL));
-  check("release.serverSiteUrl", validHttpsOrigin(environment.SITE_URL));
+  check("release.targetHttps", validHttpsOrigin(environment.RELEASE_TARGET_URL, targetEnvironment));
+  check(
+    "release.publicSiteUrl",
+    validHttpsOrigin(environment.NEXT_PUBLIC_SITE_URL, targetEnvironment),
+  );
+  check("release.serverSiteUrl", validHttpsOrigin(environment.SITE_URL, targetEnvironment));
   let targetOrigin = "";
   try {
     targetOrigin = new URL(environment.RELEASE_TARGET_URL).origin;
@@ -121,7 +164,21 @@ export function validateReleaseConfiguration(environment) {
     check("release.turnstileHostname", false);
   }
   check("release.database", validPostgresqlUrl(environment.DATABASE_URL, targetEnvironment));
-  check("release.supabaseUrl", validHttpsOrigin(environment.NEXT_PUBLIC_SUPABASE_URL));
+  if (environment.DIRECT_URL !== undefined) {
+    check("release.directDatabase", validPostgresqlUrl(environment.DIRECT_URL, targetEnvironment));
+  }
+  check(
+    "release.supabaseUrl",
+    validHttpsOrigin(environment.NEXT_PUBLIC_SUPABASE_URL, targetEnvironment),
+  );
+  check(
+    "release.supabaseServerOverride",
+    (!environment.SUPABASE_URL ||
+      environment.SUPABASE_URL.replace(/\/$/, "") ===
+        environment.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, "")) &&
+      (!environment.SUPABASE_PUBLISHABLE_KEY ||
+        environment.SUPABASE_PUBLISHABLE_KEY === environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY),
+  );
   check(
     "release.supabasePublishableKey",
     (environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.length ?? 0) >= 20 &&
@@ -173,10 +230,25 @@ export function validateReleaseConfiguration(environment) {
       !environment[`INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_${otherEnvironment}`],
   );
   check("release.r2Endpoint", validHttpsOrigin(environment.R2_ENDPOINT));
-  check("release.r2Bucket", Boolean(environment.R2_BUCKET?.trim()));
+  const r2Bucket = environment.R2_BUCKET?.trim() ?? "";
+  check(
+    "release.r2Bucket",
+    Boolean(r2Bucket) &&
+      (targetEnvironment !== "STG" || !productionMarkerPattern.test(r2Bucket)) &&
+      (targetEnvironment !== "PRD" || !nonProductionMarkerPattern.test(r2Bucket)),
+  );
   check("release.r2AccessKey", Boolean(environment.R2_ACCESS_KEY_ID?.trim()));
   check("release.r2SecretKey", Boolean(environment.R2_SECRET_ACCESS_KEY?.trim()));
-  check("release.mediaOrigin", validHttpsOrigin(environment.NEXT_PUBLIC_MEDIA_BASE_URL));
+  check(
+    "release.mediaOrigin",
+    validHttpsOrigin(environment.NEXT_PUBLIC_MEDIA_BASE_URL, targetEnvironment),
+  );
+  check(
+    "release.mediaServerOverride",
+    !environment.MEDIA_BASE_URL ||
+      environment.MEDIA_BASE_URL.replace(/\/$/, "") ===
+        environment.NEXT_PUBLIC_MEDIA_BASE_URL?.replace(/\/$/, ""),
+  );
   for (const name of [
     ...commonApprovals,
     ...(targetEnvironment === "PRD" ? productionApprovals : []),
@@ -193,7 +265,10 @@ export async function verifyReleaseHttp(target, fetchImplementation = fetch) {
     ["/api/health/live", 200],
     ["/api/health/ready", 200],
     ["/", 200],
+    ["/productos", 200],
     ["/legal", 200],
+    ["/robots.txt", 200],
+    ["/sitemap.xml", 200],
     ["/api/feeds/google-merchant", 200],
   ]) {
     try {
@@ -201,15 +276,7 @@ export async function verifyReleaseHttp(target, fetchImplementation = fetch) {
         redirect: "manual",
         signal: AbortSignal.timeout(15_000),
       });
-      const csp = response.headers.get("content-security-policy") ?? "";
-      const passed =
-        response.status === expectedStatus &&
-        response.headers.get("x-content-type-options") === "nosniff" &&
-        response.headers.get("x-frame-options") === "DENY" &&
-        (response.headers.get("strict-transport-security") ?? "").includes("max-age=63072000") &&
-        csp.includes("default-src 'self'") &&
-        csp.includes("frame-ancestors 'none'") &&
-        !csp.includes("'unsafe-eval'");
+      const passed = response.status === expectedStatus && hasProductionHeaders(response);
       checks.push({ name: `http.${path}`, passed });
       if (path.startsWith("/api/health/")) {
         const payload = await response.json();
@@ -224,6 +291,48 @@ export async function verifyReleaseHttp(target, fetchImplementation = fetch) {
       }
     } catch {
       checks.push({ name: `http.${path}`, passed: false });
+      if (path.startsWith("/api/health/")) {
+        checks.push({ name: `http.${path}.payload`, passed: false });
+      }
+    }
+  }
+  try {
+    const adminRedirect = await fetchImplementation(`${origin}/admin`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(15_000),
+    });
+    const location = adminRedirect.headers.get("location") ?? "";
+    checks.push({
+      name: "http./admin.redirect",
+      passed:
+        [302, 307, 308].includes(adminRedirect.status) &&
+        location.includes("/admin/login") &&
+        hasProductionHeaders(adminRedirect),
+    });
+  } catch {
+    checks.push({ name: "http./admin.redirect", passed: false });
+  }
+  for (const schedulerPath of [
+    "/api/jobs/orders",
+    "/api/jobs/cms-publish",
+    "/api/jobs/domain-events",
+  ]) {
+    try {
+      const response = await fetchImplementation(`${origin}${schedulerPath}`, {
+        method: "POST",
+        redirect: "manual",
+        signal: AbortSignal.timeout(15_000),
+      });
+      await response.arrayBuffer();
+      checks.push({
+        name: `http.${schedulerPath}.authn`,
+        passed:
+          response.status === 401 &&
+          (response.headers.get("cache-control") ?? "").includes("no-store") &&
+          hasProductionHeaders(response),
+      });
+    } catch {
+      checks.push({ name: `http.${schedulerPath}.authn`, passed: false });
     }
   }
   return checks;

@@ -11,33 +11,36 @@ function cspDirective(csp, name) {
     .find((directive) => directive.startsWith(`${name} `));
 }
 
-function verifySecurityHeaders(response, label) {
+function verifySecurityHeaders(response, label, { allowIsolatedNonePolicy = false } = {}) {
   const csp = response.headers.get("content-security-policy") ?? "";
+  const isIsolatedNone = allowIsolatedNonePolicy && csp.includes("default-src 'none'");
   for (const required of [
-    "default-src 'self'",
+    isIsolatedNone ? "default-src 'none'" : "default-src 'self'",
     "object-src 'none'",
     "frame-ancestors 'none'",
-    "base-uri 'self'",
+    isIsolatedNone ? "base-uri 'none'" : "base-uri 'self'",
     "form-action 'self'",
-    "manifest-src 'self'",
+    isIsolatedNone ? "manifest-src 'none'" : "manifest-src 'self'",
   ]) {
     requireCondition(csp.includes(required), `${label}: CSP is missing ${required}.`);
   }
   for (const forbidden of ["'unsafe-eval'", "'strict-dynamic'", "data: text/html"]) {
     requireCondition(!csp.includes(forbidden), `${label}: CSP allows ${forbidden}.`);
   }
-  const script = cspDirective(csp, "script-src") ?? "";
-  requireCondition(
-    script.includes("'self'") && script.includes("https://challenges.cloudflare.com"),
-    `${label}: script-src does not match the application policy.`,
-  );
-  for (const directiveName of ["img-src", "media-src"]) {
-    const directive = cspDirective(csp, directiveName) ?? "";
-    requireCondition(directive.length > 0, `${label}: missing ${directiveName}.`);
+  if (!isIsolatedNone) {
+    const script = cspDirective(csp, "script-src") ?? "";
     requireCondition(
-      !/(?:^|\s)https:(?:\s|$)/.test(directive),
-      `${label}: ${directiveName} allows every HTTPS origin.`,
+      script.includes("'self'") && script.includes("https://challenges.cloudflare.com"),
+      `${label}: script-src does not match the application policy.`,
     );
+    for (const directiveName of ["img-src", "media-src"]) {
+      const directive = cspDirective(csp, directiveName) ?? "";
+      requireCondition(directive.length > 0, `${label}: missing ${directiveName}.`);
+      requireCondition(
+        !/(?:^|\s)https:(?:\s|$)/.test(directive),
+        `${label}: ${directiveName} allows every HTTPS origin.`,
+      );
+    }
   }
   requireCondition(
     response.headers.get("x-content-type-options") === "nosniff",
@@ -52,6 +55,10 @@ function verifySecurityHeaders(response, label) {
     `${label}: invalid referrer policy.`,
   );
   requireCondition(
+    (response.headers.get("permissions-policy") ?? "").includes("camera=()"),
+    `${label}: missing permissions policy.`,
+  );
+  requireCondition(
     response.headers.get("cross-origin-opener-policy") === "same-origin",
     `${label}: invalid opener isolation.`,
   );
@@ -62,6 +69,10 @@ function verifySecurityHeaders(response, label) {
   requireCondition(
     response.headers.get("origin-agent-cluster") === "?1",
     `${label}: missing origin agent cluster.`,
+  );
+  requireCondition(
+    response.headers.get("x-dns-prefetch-control") === "off",
+    `${label}: DNS prefetch is not disabled.`,
   );
   requireCondition(
     response.headers.get("x-permitted-cross-domain-policies") === "none",
@@ -78,13 +89,13 @@ function verifySecurityHeaders(response, label) {
   );
 }
 
-async function request(base, path, options = {}) {
+async function request(base, path, options = {}, headerOptions = {}) {
   const response = await fetch(`${base}${path}`, {
     redirect: "manual",
     signal: AbortSignal.timeout(15_000),
     ...options,
   });
-  verifySecurityHeaders(response, `${options.method ?? "GET"} ${path}`);
+  verifySecurityHeaders(response, `${options.method ?? "GET"} ${path}`, headerOptions);
   return response;
 }
 
@@ -159,7 +170,10 @@ export async function verifyWebSecurity(
   for (const [routePath, expected] of [
     ["/admin", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
+    ["/admin/usuarios?next=%2F%2Fevil.example", "/admin/login"],
+    ["/admin/usuarios.svg", "/admin/login"],
     ["/mi-cuenta", "/ingresar"],
+    ["/mi-cuenta.png", "/ingresar"],
   ]) {
     const response = await request(origin, routePath);
     const location = response.headers.get("location") ?? "";
@@ -170,10 +184,81 @@ export async function verifyWebSecurity(
     requireCondition(!location.includes("evil.example"), `${routePath}: open redirect detected.`);
   }
 
-  const notFound = await request(origin, "/ruta-inexistente-owasp");
-  requireCondition(notFound.status === 404, "Unknown public routes must return 404.");
+  for (const unknownPath of ["/ruta-inexistente-owasp", "/ruta-inexistente-owasp.svg"]) {
+    const notFound = await request(origin, unknownPath);
+    requireCondition(notFound.status === 404, `${unknownPath}: unknown routes must return 404.`);
+  }
+
+  for (const transactionalPath of [
+    "/carrito",
+    "/checkout",
+    "/pagar/token-invalido",
+    "/pedido/token-invalido",
+    "/recibo/token-invalido",
+  ]) {
+    const response = await request(origin, transactionalPath);
+    const html = await response.text();
+    requireCondition(
+      (response.headers.get("x-robots-tag") ?? "").includes("noindex") || html.includes("noindex"),
+      `${transactionalPath}: transactional surface must carry noindex.`,
+    );
+  }
+
+  for (const receiptAssetPath of [
+    "/api/recibos/token-invalido/descargar",
+    "/api/recibos/token-invalido/documentos/invoice/00000000-0000-4000-8000-000000000000",
+  ]) {
+    const response = await request(origin, receiptAssetPath);
+    requireCondition(response.status === 404, `${receiptAssetPath}: invalid token must 404.`);
+    requireCondition(
+      (response.headers.get("cache-control") ?? "").includes("no-store") &&
+        (response.headers.get("x-robots-tag") ?? "").includes("noindex"),
+      `${receiptAssetPath}: receipt error must be private no-store/noindex.`,
+    );
+  }
+
+  const unsubscribeGet = await request(
+    origin,
+    "/email/baja/token-invalido",
+    {},
+    { allowIsolatedNonePolicy: true },
+  );
+  requireCondition(unsubscribeGet.status === 404, "Invalid unsubscribe GET must return 404.");
+  const unsubscribeWrongType = await request(
+    origin,
+    "/email/baja/token-invalido",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+    { allowIsolatedNonePolicy: true },
+  );
+  requireCondition(
+    unsubscribeWrongType.status === 415,
+    "Unsubscribe POST with JSON must return 415.",
+  );
+  const unsubscribeOversized = await request(
+    origin,
+    "/email/baja/token-invalido",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `List-Unsubscribe=${"x".repeat(5000)}`,
+    },
+    { allowIsolatedNonePolicy: true },
+  );
+  requireCondition(
+    unsubscribeOversized.status === 413,
+    "Oversized unsubscribe POST must return 413.",
+  );
 
   for (const path of ["/api/jobs/orders", "/api/jobs/cms-publish", "/api/jobs/domain-events"]) {
+    const getMethod = await request(origin, path);
+    requireCondition(
+      getMethod.status === 405 && getMethod.headers.get("allow") === "POST",
+      `${path}: GET must return 405 with Allow: POST.`,
+    );
     const response = await request(origin, path, { method: "POST" });
     requireCondition(response.status === 401, `${path}: anonymous scheduler was not rejected.`);
     requireCondition(
@@ -188,6 +273,11 @@ export async function verifyWebSecurity(
   }
 
   for (const path of ["/api/webhooks/wompi", "/api/webhooks/resend"]) {
+    const getMethod = await request(origin, path);
+    requireCondition(
+      getMethod.status === 405 && getMethod.headers.get("allow") === "POST",
+      `${path}: webhook GET must return 405 with Allow: POST.`,
+    );
     const response = await request(origin, path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

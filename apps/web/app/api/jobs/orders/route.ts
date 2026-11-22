@@ -5,7 +5,18 @@ import { OperationsService, OrderLifecycleService } from "@mundonettech/db";
 import { getDatabase } from "@/lib/db";
 import { financeService } from "@/lib/finance";
 
-const noStoreHeaders = { "Cache-Control": "no-store" } as const;
+const noStoreHeaders = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "X-Robots-Tag": "noindex, nofollow, noarchive",
+} as const;
+
+export async function GET() {
+  return Response.json(
+    { error: "Method not allowed." },
+    { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } },
+  );
+}
 
 function matchesSecret(provided: string, expected: string): boolean {
   const left = createHash("sha256").update(provided).digest();

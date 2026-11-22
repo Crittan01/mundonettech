@@ -1,6 +1,8 @@
 import {
   assertRedirectAllowed,
   isRedirectStatus,
+  isReservedRedirectSource,
+  isReservedRedirectTarget,
   normalizeRedirectPath,
   redirectChain,
 } from "@mundonettech/core";
@@ -9,28 +11,6 @@ import type { CatalogMutationAudit } from "./catalog-types.js";
 import { Prisma, PrismaClient, type UrlRedirect } from "./generated/client.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const reservedSourcePrefixes = [
-  "/api",
-  "/_next",
-  "/admin",
-  "/email",
-  "/mi-cuenta",
-  "/ingresar",
-  "/registro",
-  "/recuperar",
-  "/verificar-correo",
-  "/legal",
-  "/robots.txt",
-  "/sitemap.xml",
-  "/sitemaps",
-  "/carrito",
-  "/checkout",
-  "/recibo",
-  "/pagar",
-  "/pedido",
-  "/propuesta",
-] as const;
-const reservedTargetPrefixes = ["/api", "/_next", "/admin", "/email"] as const;
 
 export interface UrlRedirectInput {
   readonly fromPath: string;
@@ -67,10 +47,6 @@ export class UrlRedirectNotFoundError extends Error {
   }
 }
 
-function hasPathPrefix(path: string, prefix: string): boolean {
-  return path === prefix || path.startsWith(`${prefix}/`);
-}
-
 function normalizeInput(input: UrlRedirectInput) {
   let fromPath: string;
   let toPath: string;
@@ -80,15 +56,12 @@ function normalizeInput(input: UrlRedirectInput) {
   } catch (error) {
     throw new UrlRedirectValidationError(error instanceof Error ? error.message : "Invalid path.");
   }
-  if (
-    fromPath === "/" ||
-    reservedSourcePrefixes.some((prefix) => hasPathPrefix(fromPath, prefix))
-  ) {
+  if (isReservedRedirectSource(fromPath)) {
     throw new UrlRedirectValidationError(
       "Root, authentication, legal, crawler, and transactional routes cannot be redirect sources.",
     );
   }
-  if (reservedTargetPrefixes.some((prefix) => hasPathPrefix(toPath, prefix))) {
+  if (isReservedRedirectTarget(toPath)) {
     throw new UrlRedirectValidationError(
       "Infrastructure and backoffice routes cannot be redirect targets.",
     );
@@ -339,10 +312,7 @@ export class UrlRedirectService {
     } catch {
       return null;
     }
-    if (
-      normalized === "/" ||
-      reservedSourcePrefixes.some((prefix) => hasPathPrefix(normalized, prefix))
-    ) {
+    if (isReservedRedirectSource(normalized)) {
       return null;
     }
     const edges = await this.listActive();

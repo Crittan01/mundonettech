@@ -44,6 +44,10 @@ export {
   redirectChain,
   assertRedirectAllowed,
   isRedirectStatus,
+  isReservedRedirectSource,
+  isReservedRedirectTarget,
+  reservedRedirectSourcePrefixes,
+  reservedRedirectTargetPrefixes,
 } from "./url-redirect.js";
 export type { RedirectEdge } from "./url-redirect.js";
 export { normalizeAttributeValue, assertCatalogMoney } from "./catalog-values.js";

@@ -2,6 +2,7 @@ import { connection } from "next/server";
 
 const headers = {
   "Cache-Control": "no-store, max-age=0",
+  "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 

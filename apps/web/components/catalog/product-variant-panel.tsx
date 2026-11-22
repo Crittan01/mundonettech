@@ -3,9 +3,30 @@
 import { formatCopCents } from "@mundonettech/core";
 import type { CatalogVariant } from "@mundonettech/db";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { AddToCartForm } from "@/components/cart/add-to-cart-form";
+
+function VariantQueryInitializer({
+  variants,
+  onSelect,
+}: {
+  variants: readonly CatalogVariant[];
+  onSelect: (variantId: string) => void;
+}) {
+  const searchParams = useSearchParams();
+  const requestedVariant = searchParams.get("variant");
+  const lastApplied = useRef<string | null>(null);
+  useEffect(() => {
+    if (!requestedVariant || requestedVariant === lastApplied.current) return;
+    lastApplied.current = requestedVariant;
+    if (variants.some((variant) => variant.id === requestedVariant)) {
+      onSelect(requestedVariant);
+    }
+  }, [onSelect, requestedVariant, variants]);
+  return null;
+}
 
 export function ProductVariantPanel({
   productSlug,
@@ -83,6 +104,9 @@ export function ProductVariantPanel({
 
   return (
     <div className="space-y-5 rounded-xl border border-border bg-card p-5">
+      <Suspense fallback={null}>
+        <VariantQueryInitializer variants={variants} onSelect={setSelectedId} />
+      </Suspense>
       {optionAxes.length > 0 ? (
         <div className="space-y-4">
           {optionAxes.map((axis) => {

@@ -1,6 +1,10 @@
 import "server-only";
 
-import { normalizeRedirectPath } from "@mundonettech/core";
+import {
+  isReservedRedirectSource,
+  isReservedRedirectTarget,
+  normalizeRedirectPath,
+} from "@mundonettech/core";
 
 import { getDatabase } from "@/lib/db";
 
@@ -20,29 +24,6 @@ const redirectState = globalThis as typeof globalThis & {
   __urlRedirectCache?: RedirectCacheState;
 };
 const cacheTtlMs = 30_000;
-const reservedSourcePrefixes = [
-  "/api",
-  "/_next",
-  "/admin",
-  "/mi-cuenta",
-  "/ingresar",
-  "/registro",
-  "/recuperar",
-  "/verificar-correo",
-  "/legal",
-  "/robots.txt",
-  "/sitemap.xml",
-  "/sitemaps",
-  "/checkout",
-  "/pagar",
-  "/pedido",
-  "/propuesta",
-] as const;
-const reservedTargetPrefixes = ["/api", "/_next", "/admin"] as const;
-
-function hasPathPrefix(path: string, prefix: string): boolean {
-  return path === prefix || path.startsWith(`${prefix}/`);
-}
 
 function state(): RedirectCacheState {
   redirectState.__urlRedirectCache ??= { loadedAt: 0, generation: 0 };
@@ -59,11 +40,7 @@ async function loadEdges(): Promise<ReadonlyMap<string, CachedRedirectEdge>> {
   for (const record of records) {
     const fromPath = normalizeRedirectPath(record.fromPath);
     const toPath = normalizeRedirectPath(record.toPath);
-    if (
-      fromPath === "/" ||
-      reservedSourcePrefixes.some((prefix) => hasPathPrefix(fromPath, prefix)) ||
-      reservedTargetPrefixes.some((prefix) => hasPathPrefix(toPath, prefix))
-    ) {
+    if (isReservedRedirectSource(fromPath) || isReservedRedirectTarget(toPath)) {
       continue;
     }
     if (edges.has(fromPath)) throw new Error("Duplicate active URL redirect source.");
@@ -110,10 +87,7 @@ export async function resolveCachedUrlRedirect(path: string): Promise<{
   } catch {
     return null;
   }
-  if (
-    normalized === "/" ||
-    reservedSourcePrefixes.some((prefix) => hasPathPrefix(normalized, prefix))
-  ) {
+  if (isReservedRedirectSource(normalized)) {
     return null;
   }
   let edges: ReadonlyMap<string, CachedRedirectEdge>;

@@ -70,6 +70,7 @@ try {
     chromePath: process.env.CHROME_PATH ?? chromium.executablePath(),
     chromeFlags: [
       "--headless=new",
+      "--remote-debugging-address=127.0.0.1",
       "--no-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",

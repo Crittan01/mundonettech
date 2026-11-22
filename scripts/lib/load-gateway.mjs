@@ -444,6 +444,71 @@ export async function startLoadGateway({ databaseUrl, port = 54427 }) {
       for (const row of creditEntries.rows) {
         check(`payments.creditEntries.${row.accountId}`, row.count, 3);
       }
+      const negativeStock = await sql.query(
+        `SELECT count(*)::int AS count FROM "StockLevel"
+         WHERE ("onHand" - "committed" - "safetyStock") < 0
+           AND "variantId" = ANY($1::uuid[])`,
+        [
+          [
+            stockFirst.variantId,
+            stockSecond.variantId,
+            couponFixture.variantId,
+            checkoutFixture.variantId,
+            paymentFixture.variantId,
+          ],
+        ],
+      );
+      check("stock.negativeAvailable", negativeStock.rows[0]?.count, 0);
+      const negativeCredits = await sql.query(
+        `SELECT count(*)::int AS count FROM "StoreCreditAccount"
+         WHERE ("availableCents" < 0 OR "heldCents" < 0)
+           AND "customerId" = ANY($1::uuid[])`,
+        [paymentCustomerIds],
+      );
+      check("credits.negativeBalances", negativeCredits.rows[0]?.count, 0);
+      const allLoadOrderIds = [
+        ...paymentOrderIds,
+        ...(
+          await sql.query(`SELECT "id" FROM "Order" WHERE "cartId" = ANY($1::uuid[])`, [cartIds])
+        ).rows.map((row) => row.id),
+      ];
+      const unbalancedOrders = await sql.query(
+        `SELECT count(*)::int AS count,
+          count(DISTINCT "orderNumber")::int AS distinct_numbers
+         FROM "Order"
+         WHERE "id" = ANY($1::uuid[])`,
+        [allLoadOrderIds],
+      );
+      check(
+        "orders.uniqueSequentialNumbers",
+        unbalancedOrders.rows[0]?.distinct_numbers,
+        allLoadOrderIds.length,
+      );
+      const receiptMismatches = await sql.query(
+        `SELECT count(*)::int AS count
+         FROM "OrderReceipt" receipt
+         JOIN "Order" orders ON orders."id" = receipt."orderId"
+         WHERE orders."id" = ANY($1::uuid[])
+           AND (
+             receipt."subtotalCents" - receipt."discountCents" + receipt."taxCents" + receipt."shippingCents" <> receipt."totalCents"
+             OR receipt."totalCents" <> orders."totalCents"
+           )`,
+        [allLoadOrderIds],
+      );
+      check("receipts.arithmeticMismatches", receiptMismatches.rows[0]?.count, 0);
+      const leakedOutboxPii = await sql.query(
+        `SELECT count(*)::int AS count
+         FROM "DomainOutbox"
+         WHERE "aggregateId" = ANY($1::text[])
+           AND (
+             "payload"::text ILIKE '%@example.test%'
+             OR "payload"::text ILIKE '%+57300%'
+             OR "payload"::text ILIKE '%Carrera 7%'
+             OR "payload"::text ILIKE '%1020304050%'
+           )`,
+        [allLoadOrderIds],
+      );
+      check("outbox.piiLeaks", leakedOutboxPii.rows[0]?.count, 0);
       check("gateway.deadlocks", stats.deadlocks, 0);
       check("gateway.unexpected", stats.unexpected, 0);
       return { passed: checks.every((entry) => entry.passed), checks };
