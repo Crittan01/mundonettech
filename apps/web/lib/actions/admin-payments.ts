@@ -179,7 +179,7 @@ export async function executeRefundAction(
     const db = getDatabase();
     const existing = await db.orderRefund.findUnique({
       where: { id: refundId },
-      select: { status: true },
+      select: { status: true, orderId: true },
     });
     if (!existing) throw new PaymentNotFoundError("Order refund not found.");
     if (existing.status === "REQUESTED") {
@@ -187,6 +187,10 @@ export async function executeRefundAction(
     }
     const result = await paymentRefundService().refund(refundId, audit);
     revalidatePath("/admin/pagos");
+    revalidatePath("/admin/pedidos");
+    revalidatePath(`/admin/pedidos/${existing.orderId}`);
+    revalidatePath("/admin/finanzas");
+    revalidatePath("/admin/hoy");
     return actionSuccess(
       result.pendingTransactionIds.length
         ? `Reembolso ${result.status.toLowerCase()}: ${result.pendingTransactionIds.length} transacciones requieren conciliación.`

@@ -6,6 +6,7 @@ import {
   PaymentProvider,
   PaymentStatus,
   Prisma,
+  recordDailyFunnelCounters,
   type Order,
   type PaymentAttempt,
   type PrismaClient,
@@ -409,6 +410,7 @@ export async function refreshOrderPaymentStatus(
     },
   });
   if (status === PaymentStatus.PAID) {
+    await recordDailyFunnelCounters(tx, { ordersPaid: 1n });
     await writePaymentOutbox(tx, {
       eventType: "order.payment.paid.v1",
       aggregateType: "Order",

@@ -38,6 +38,9 @@ const webServerEnv: Record<string, string> = {
   RECOVERY_CODE_PEPPER: process.env.RECOVERY_CODE_PEPPER ?? fallbackSecret(),
   CMS_CRON_SECRET: process.env.CMS_CRON_SECRET ?? "e2e-cms-scheduler-secret-32-chars-ok",
   ORDER_CRON_SECRET: process.env.ORDER_CRON_SECRET ?? "e2e-order-scheduler-secret-32-chars-ok",
+  BANK_TRANSFER_INSTRUCTIONS:
+    process.env.BANK_TRANSFER_INSTRUCTIONS ??
+    "Cuenta de ahorros 001-00234567-89, banco de pruebas E2E. Usa la referencia del pedido.",
   INTEGRATION_ENVIRONMENT: "LOCAL",
   INTEGRATION_CREDENTIAL_KEYS_LOCAL:
     process.env.INTEGRATION_CREDENTIAL_KEYS_LOCAL ?? JSON.stringify({ 1: fallbackSecret() }),

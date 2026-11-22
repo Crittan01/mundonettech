@@ -29,6 +29,8 @@ Configura `INTEGRATION_CREDENTIAL_KEYS_<AMBIENTE>` como JSON `{ "1": "base64-de-
 
 `ShippingService` crea fulfillments solo tras pago o con COD abierto, valida alistamiento y empaqueta cada unidad exactamente una vez con valor declarado `BigInt`. `AveonlineShippingProvider` autentica y genera una guía por bulto con `dsreferencia` determinista; el claim persistente impide dobles emisiones concurrentes y un timeout pasa a `RECONCILING`, donde `findLabel` debe confirmar existencia o ausencia antes de cualquier reintento. `FlexShippingProvider` emite referencias locales deterministas y el conductor queda sellado al despachar.
 
+Antes del despacho, `assignSerialUnits` o `markShipped` con `serialUnitIds` exige unidades `SOLD` de la misma orden, bodega y variante, con cantidades exactas agregadas por variante. La asignación `SerializedUnit.shipmentId` se bloquea contra carreras, se audita y solo puede modificarse antes del despacho; PostgreSQL vuelve a validar la cobertura al cambiar de estado.
+
 Las credenciales `aveonline` contienen usuario, clave, empresa, remitente y endpoints oficiales de autenticación/generación/consulta; se almacenan exclusivamente en la bóveda. `/admin/logistica` opera con `fulfillment:*` + MFA y permite multi-bulto, conciliación, despacho, entrega y zonas Flex. `LocalDeliveryZone` conserva polígonos enteros E6, DANE, tarifa y corte; checkout recotiza en servidor y sella zona/coordenadas/promesa.
 
 ## Resend, Svix y baja RFC 8058

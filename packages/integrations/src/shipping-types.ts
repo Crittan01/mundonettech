@@ -30,7 +30,8 @@ export class ShippingConflictError extends Error {
       | "PROVIDER_UNCERTAIN"
       | "SIBLING_CLAIM_ACTIVE"
       | "IDEMPOTENCY_CONFLICT"
-      | "ZONE_UNAVAILABLE" = "INVALID_STATE",
+      | "ZONE_UNAVAILABLE"
+      | "SERIAL_ASSIGNMENT_INCOMPLETE" = "INVALID_STATE",
   ) {
     super(message);
     this.name = "ShippingConflictError";

@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -9,8 +9,15 @@ import { Label } from "@/components/ui/label";
 import { initialActionState } from "@/lib/action-state";
 import { addCartBundleAction, addCartVariantAction } from "@/lib/actions/cart";
 
+function useCartMetric(status: "idle" | "success" | "error") {
+  useEffect(() => {
+    if (status === "success") window.dispatchEvent(new Event("store:cart-add"));
+  }, [status]);
+}
+
 export function AddToCartForm({ variantId, available }: { variantId: string; available: number }) {
   const [state, action, pending] = useActionState(addCartVariantAction, initialActionState);
+  useCartMetric(state.status);
   return (
     <form action={action} className="space-y-3 border-t border-border pt-4">
       <input type="hidden" name="variantId" value={variantId} />
@@ -40,6 +47,7 @@ export function AddToCartForm({ variantId, available }: { variantId: string; ava
 
 export function AddBundleToCartForm({ bundleId }: { bundleId: string }) {
   const [state, action, pending] = useActionState(addCartBundleAction, initialActionState);
+  useCartMetric(state.status);
   return (
     <form action={action} className="mt-4 space-y-2">
       <input type="hidden" name="bundleId" value={bundleId} />

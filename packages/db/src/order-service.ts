@@ -38,6 +38,7 @@ import {
 } from "./inventory-shared.js";
 import { acquireIdempotencyKey, completeIdempotencyKey } from "./primitives.js";
 import { reserveStock } from "./stock.js";
+import { recordDailyFunnelCounters } from "./funnel-service.js";
 import type {
   CheckoutConversionInput,
   CheckoutDefaults,
@@ -1456,6 +1457,7 @@ export class OrderService {
             },
           },
         });
+        await recordDailyFunnelCounters(tx, { ordersConfirmed: 1n });
         const completed = await completeIdempotencyKey(tx, {
           scope: checkoutScope,
           ...idempotency,

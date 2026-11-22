@@ -61,6 +61,8 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
       ZONE_UNAVAILABLE: "La zona Flex no está disponible o perdió cobertura.",
       IDEMPOTENCY_CONFLICT:
         "La operación ya existe o cambió en otra sesión. Recarga antes de continuar.",
+      SERIAL_ASSIGNMENT_INCOMPLETE:
+        "Selecciona seriales vendidos de este pedido, bodega y variante hasta cubrir exactamente cada cantidad.",
       INVALID_STATE: "El estado logístico cambió. Recarga y revisa la operación.",
     } as const;
     return actionError(
@@ -222,13 +224,22 @@ export async function dispatchShipmentAction(
     const shipmentId = z.string().uuid().parse(formString(formData, "shipmentId"));
     const driverName = formString(formData, "driverName").trim();
     const driverPhoneE164 = formString(formData, "driverPhoneE164").trim();
+    const rawSerialUnitIds = formString(formData, "serialUnitIds");
+    const serialUnitIds = rawSerialUnitIds
+      ? z.array(z.string().uuid()).max(10_000).parse(JSON.parse(rawSerialUnitIds))
+      : undefined;
     await shippingService().markShipped(
       shipmentId,
       audit,
       driverName || driverPhoneE164 ? { name: driverName, phoneE164: driverPhoneE164 } : undefined,
+      serialUnitIds,
     );
     revalidatePath("/admin/logistica");
-    return actionSuccess("Despacho confirmado, eventos y notificación encolados.");
+    revalidatePath("/admin/pedidos");
+    revalidatePath("/admin/hoy");
+    return actionSuccess(
+      "Seriales asignados y despacho confirmado con eventos y notificación encolados.",
+    );
   } catch (error) {
     return failure(error, values);
   }
