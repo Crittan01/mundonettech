@@ -17,6 +17,8 @@ const managedCategories = [
   "postsale.warranties",
   "postsale.support",
   "reviews.moderation",
+  "crm.tasks",
+  "crm.merges",
   "outbox.failed",
 ] as const;
 
@@ -29,6 +31,12 @@ export function canReadNotificationCategory(role: AdminRoleValue, category: stri
   }
   if (category.startsWith("reviews.")) {
     return hasAdminPermission(role, "reviews:read");
+  }
+  if (category === "crm.merges") {
+    return hasAdminPermission(role, "crm:merge");
+  }
+  if (category.startsWith("crm.")) {
+    return hasAdminPermission(role, "crm:read");
   }
   if (category.startsWith("payments.") || category.startsWith("refunds.")) {
     return hasAdminPermission(role, "payments:read");
@@ -44,6 +52,7 @@ export function canReadNotificationCategory(role: AdminRoleValue, category: stri
 
 export function notificationWhereForRole(role: AdminRoleValue): Prisma.NotificationWhereInput {
   const excludedPrefixes: string[] = [];
+  const excludedCategories: string[] = [];
   if (!hasAdminPermission(role, "orders:read")) {
     excludedPrefixes.push("orders.", "shipping.");
   }
@@ -52,6 +61,11 @@ export function notificationWhereForRole(role: AdminRoleValue): Prisma.Notificat
   }
   if (!hasAdminPermission(role, "reviews:read")) {
     excludedPrefixes.push("reviews.");
+  }
+  if (!hasAdminPermission(role, "crm:read")) {
+    excludedPrefixes.push("crm.");
+  } else if (!hasAdminPermission(role, "crm:merge")) {
+    excludedCategories.push("crm.merges");
   }
   if (!hasAdminPermission(role, "payments:read")) {
     excludedPrefixes.push("payments.", "refunds.");
@@ -62,9 +76,11 @@ export function notificationWhereForRole(role: AdminRoleValue): Prisma.Notificat
   if (!hasAdminPermission(role, "audit:read")) {
     excludedPrefixes.push("outbox.");
   }
-  return excludedPrefixes.length === 0
-    ? {}
-    : { NOT: excludedPrefixes.map((prefix) => ({ category: { startsWith: prefix } })) };
+  const exclusions: Prisma.NotificationWhereInput[] = [
+    ...excludedPrefixes.map((prefix) => ({ category: { startsWith: prefix } })),
+    ...excludedCategories.map((category) => ({ category })),
+  ];
+  return exclusions.length === 0 ? {} : { NOT: exclusions };
 }
 
 function notificationView(record: {
@@ -183,6 +199,24 @@ export class OperationsService {
           '/admin/resenas', 'Review', reviews."id"::text
         FROM "Review" reviews
         WHERE reviews."status" = 'PENDING'
+        UNION ALL
+        SELECT 'crm-task-overdue:' || tasks."id", 'crm.tasks',
+          CASE WHEN tasks."priority" = 'URGENT' THEN 'CRITICAL' ELSE 'WARNING' END,
+          btrim('Tarea CRM vencida: ' || left(tasks."title", 120)),
+          'Una tarea comercial o de seguimiento superó su fecha de vencimiento en CRM 360.',
+          '/admin/crm/' || tasks."contactId", 'Task', tasks."id"::text
+        FROM "Task" tasks
+        JOIN "Contact" contacts ON contacts."id" = tasks."contactId"
+        WHERE tasks."status" IN ('PENDING', 'IN_PROGRESS')
+          AND tasks."dueAt" < CURRENT_TIMESTAMP
+          AND contacts."status" = 'ACTIVE' AND contacts."deletedAt" IS NULL
+        UNION ALL
+        SELECT 'crm-merge-pending:' || candidates."id", 'crm.merges', 'INFO',
+          'Candidata de duplicado CRM pendiente',
+          'Dos contactos activos comparten identidad y requieren decisión humana en Anillo 1.',
+          '/admin/crm', 'IdentityMergeCandidate', candidates."id"::text
+        FROM "IdentityMergeCandidate" candidates
+        WHERE candidates."status" = 'PENDING'
         UNION ALL
         SELECT 'outbox-failed:' || outbox."id", 'outbox.failed', 'CRITICAL',
           'Evento de integración fallido',

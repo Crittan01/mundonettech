@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { normalizeEmail } from "@mundonettech/core";
 
 import type { Customer, PrismaClient } from "./generated/client.js";
+import { suppressCustomerCrmLineageInTransaction } from "./crm-shared.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 
 export type AccountErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION";
@@ -418,6 +419,7 @@ export class AccountService {
     tx: import("./generated/client.js").Prisma.TransactionClient,
     customerId: string,
     auditInput: AccountAudit,
+    options: { readonly skipCrmCascade?: boolean } = {},
   ) {
     assertUuid(customerId, "customerId");
     const audit = this.audit(auditInput);
@@ -499,6 +501,9 @@ export class AccountService {
     }
     const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]!.now;
+    if (!options.skipCrmCascade) {
+      await suppressCustomerCrmLineageInTransaction(tx, customerId, now);
+    }
     const previousEmail = customer.email;
     const anonymizedEmail = `anon-${customerId.replaceAll("-", "")}@anonymized.invalid`;
     const activeConsents = await tx.consent.findMany({

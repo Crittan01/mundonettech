@@ -1,4 +1,14 @@
-import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
+import {
+  crmActivityKindLabels,
+  crmContactStatusLabels,
+  crmIdentityKindLabels,
+  crmSuppressionReasonLabels,
+  crmTaskPriorityLabels,
+  crmTaskStatusLabels,
+  crmVerificationLevelLabels,
+  formatCopCents,
+  hasAdminPermission,
+} from "@mundonettech/core";
 import { CrmError } from "@mundonettech/db";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -53,7 +63,8 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
           {contact.givenName} {contact.familyName}
         </h1>
         <p className="mt-2 text-muted-foreground">
-          {contact.email} · {contact.phoneE164} · {contact.status} · {contact.verificationLevel}
+          {contact.email} · {contact.phoneE164} · {crmContactStatusLabels[contact.status]} ·{" "}
+          {crmVerificationLevelLabels[contact.verificationLevel]}
         </p>
         <p className="mt-1 text-sm">
           {contact.organization?.legalName ?? "Sin organización"} · fuente {contact.source} ·
@@ -61,8 +72,35 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           Revisión de retención: {dateFormatter.format(contact.retentionReviewAt)}
-          {contact.suppressionReason ? ` · ${contact.suppressionReason}` : ""}
+          {contact.suppressionReason
+            ? ` · ${crmSuppressionReasonLabels[contact.suppressionReason as keyof typeof crmSuppressionReasonLabels] ?? contact.suppressionReason}`
+            : ""}
         </p>
+        {contact.mergedIntoContactId ? (
+          <p className="mt-2 text-sm">
+            Este registro fue fusionado en{" "}
+            <Link
+              className="font-medium underline"
+              href={`/admin/crm/${contact.mergedIntoContactId}`}
+            >
+              el contacto principal
+            </Link>
+            .
+          </p>
+        ) : null}
+        {contact.mergedFrom.length > 0 ? (
+          <p className="mt-2 text-sm text-muted-foreground">
+            Linaje absorbido ({contact.mergedFrom.length}):{" "}
+            {contact.mergedFrom.map((entry, index) => (
+              <span key={entry.id}>
+                {index > 0 ? ", " : ""}
+                <Link className="underline" href={`/admin/crm/${entry.id}`}>
+                  {entry.givenName} {entry.familyName}
+                </Link>
+              </span>
+            ))}
+          </p>
+        ) : null}
       </div>
       {(canWrite || canSuppress) && active ? <CmsStepUp session={session} /> : null}
       <section aria-labelledby="contact-identities" className="space-y-3">
@@ -75,7 +113,7 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
           <ul className="grid gap-2 sm:grid-cols-2">
             {contact.identities.map((identity) => (
               <li key={identity.id} className="rounded-lg border border-border bg-card p-3 text-sm">
-                {identity.kind} · {identity.normalizedValue}
+                {crmIdentityKindLabels[identity.kind]} · {identity.normalizedValue}
                 <br />
                 <span className="text-muted-foreground">
                   {identity.verifiedAt
@@ -137,7 +175,7 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
             {contact.activities.map((activity) => (
               <li key={activity.id} className="rounded-xl border border-border bg-card p-4">
                 <h3 className="font-semibold">
-                  {activity.kind} · {activity.subject ?? "Sin asunto"}
+                  {crmActivityKindLabels[activity.kind]} · {activity.subject ?? "Sin asunto"}
                 </h3>
                 <p className="mt-1 text-sm whitespace-pre-wrap">{activity.body}</p>
                 <p className="mt-2 text-xs text-muted-foreground">
@@ -164,7 +202,8 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
             {contact.tasks.map((task) => (
               <article key={task.id} className="rounded-xl border border-border bg-card p-5">
                 <h3 className="font-semibold">
-                  {task.title} · {task.status} · {task.priority}
+                  {task.title} · {crmTaskStatusLabels[task.status]} ·{" "}
+                  {crmTaskPriorityLabels[task.priority]}
                 </h3>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Vence {dateFormatter.format(task.dueAt)} ·{" "}

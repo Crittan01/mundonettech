@@ -5,7 +5,10 @@ import {
   adminRoles,
   assertCrmRetentionMonths,
   contactPairKey,
+  crmContactStatusLabels,
+  crmVerificationLevelLabels,
   deriveContactVerificationLevel,
+  formatCrmMatchReasons,
   hasAdminPermission,
   normalizeContactIdentity,
   strongestContactVerificationLevel,
@@ -85,5 +88,10 @@ describe("F4B.1 — CRM identity and authorization contracts", () => {
         readers.includes(role),
       );
     }
+    expect(crmContactStatusLabels.ANONYMIZED).toBe("Anonimizado");
+    expect(crmVerificationLevelLabels.IDENTITY_VERIFIED).toBe("Identidad documental verificada");
+    expect(formatCrmMatchReasons(["EMAIL_EXACT", "PHONE_EXACT"])).toBe(
+      "Correo idéntico, Teléfono idéntico",
+    );
   });
 });

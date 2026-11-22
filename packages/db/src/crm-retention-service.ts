@@ -116,6 +116,21 @@ export class CrmRetentionService {
       const accounts = new AccountService(this.db, {
         privacyPolicyVersion: input.privacyPolicyVersion,
       });
+      if (input.reason === "RETENTION_EXPIRED" && customerIds.length > 0) {
+        const openSupport = await tx.supportTicket.findFirst({
+          where: {
+            requesterCustomerId: { in: customerIds },
+            status: { in: ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER"] },
+          },
+          select: { id: true },
+        });
+        if (openSupport) {
+          throw new CrmError(
+            "CONFLICT",
+            "Resolve open support tickets before automatic retention suppression.",
+          );
+        }
+      }
       const anonymizedCustomers: string[] = [];
       for (const customerId of customerIds) {
         const customer = await tx.customer.findUnique({
@@ -123,7 +138,7 @@ export class CrmRetentionService {
           select: { status: true, deletedAt: true },
         });
         if (!customer || customer.status === "ANONYMIZED" || customer.deletedAt) continue;
-        await accounts.anonymizeInTransaction(tx, customerId, audit);
+        await accounts.anonymizeInTransaction(tx, customerId, audit, { skipCrmCascade: true });
         anonymizedCustomers.push(customerId);
       }
       const now = await crmNow(tx);
@@ -221,6 +236,16 @@ export class CrmRetentionService {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new CrmError("VALIDATION", "Retention batch limit must be between 1 and 100.");
     }
+    if (
+      !input.privacyPolicyVersion ||
+      input.privacyPolicyVersion.trim() !== input.privacyPolicyVersion ||
+      input.privacyPolicyVersion.length > 50
+    ) {
+      throw new CrmError("VALIDATION", "A valid privacy policy version is required.");
+    }
+    await inInventoryTransaction(this.db, async (tx) => {
+      await crmActor(tx, audit, "crm:suppress");
+    });
     const due = await this.db.$queryRaw<Array<{ id: string; version: number }>>`
       SELECT "id", "version" FROM "Contact"
       WHERE "status" = 'ACTIVE' AND "deletedAt" IS NULL AND "retentionReviewAt" <= CURRENT_TIMESTAMP

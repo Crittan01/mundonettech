@@ -15,6 +15,7 @@ const databaseUrl =
 const schedulerActorId = process.env.CRM_JOB_ACTOR_ID ?? "00000000-0000-4000-8000-00000000c201";
 let db: ReturnType<typeof createDatabaseClient>;
 let admin: { id: string; authUserId: string; email: string };
+let supportAdmin: { id: string; authUserId: string; email: string };
 let cmsAdmin: { id: string; authUserId: string; email: string };
 const email = `crm-e2e-${randomUUID()}@example.test`;
 
@@ -109,6 +110,15 @@ test.beforeAll(async () => {
       status: "ACTIVE",
     },
   });
+  supportAdmin = await db.adminUser.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `crm-e2e-support-${randomUUID()}@example.test`,
+      displayName: "Soporte CRM E2E",
+      role: "CUSTOMER_SUPPORT",
+      status: "ACTIVE",
+    },
+  });
   cmsAdmin = await db.adminUser.create({
     data: {
       authUserId: randomUUID(),
@@ -140,6 +150,17 @@ test("CRM 360 works end to end with MFA, reversible merge, retention and accessi
   page,
 }) => {
   test.setTimeout(180_000);
+  await authenticateAdmin(page, admin, 900);
+  await page.goto("/admin/crm");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("CRM 360°");
+  const staleOrgs = page.locator("details").filter({ hasText: "Organizaciones" }).first();
+  await staleOrgs.locator("summary").click();
+  await staleOrgs.getByLabel("Razón social", { exact: true }).fill("Intento MFA Vencido");
+  await staleOrgs.getByRole("button", { name: "Crear organización" }).click();
+  await expect(
+    page.getByText("Confirma tu autenticador antes de ejecutar esta operación."),
+  ).toBeVisible();
+
   await authenticateAdmin(page);
   await page.goto("/admin/crm");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("CRM 360°");
@@ -148,6 +169,7 @@ test("CRM 360 works end to end with MFA, reversible merge, retention and accessi
   const organizations = page.locator("details").filter({ hasText: "Organizaciones" }).first();
   await organizations.locator("summary").click();
   await organizations.getByLabel("Razón social", { exact: true }).fill("Comercializadora CRM E2E");
+  await organizations.getByLabel("NIT o identificador").fill("901.888.777-6");
   await organizations.getByRole("button", { name: "Crear organización" }).click();
   await expect(page.getByText("Organización creada con auditoría.")).toBeVisible();
 
@@ -192,6 +214,7 @@ test("CRM 360 works end to end with MFA, reversible merge, retention and accessi
   await expect(
     page.getByRole("heading", { level: 2, name: "Identidades verificables" }),
   ).toBeVisible();
+  await expect(page.getByText(/Linaje absorbido/)).toBeVisible();
   await expectAccessible(page);
   await page
     .getByLabel("Detalle de la actividad")
@@ -204,22 +227,33 @@ test("CRM 360 works end to end with MFA, reversible merge, retention and accessi
   await newTask.getByLabel(/Vencimiento/).fill("2027-12-31T10:00");
   await newTask.getByRole("button", { name: "Crear tarea" }).click();
   await expect(page.getByText("Tarea creada con asignación y vencimiento.")).toBeVisible();
+
+  await page.goto("/admin/crm");
+  await expect(page.getByRole("link", { name: "Revisión CRM E2E" })).toBeVisible();
+  await page.goto(`/admin/crm/${candidate.targetContactId}`);
+
   const manageTask = page.locator("details").filter({ hasText: "Gestionar tarea" }).first();
   await manageTask.locator("summary").click();
   await manageTask.getByLabel("Estado", { exact: true }).selectOption("COMPLETED");
   await manageTask.getByRole("button", { name: "Actualizar tarea" }).click();
   await expect(
-    page.getByRole("heading", { name: "Revisión CRM E2E · COMPLETED · NORMAL" }),
+    page.getByRole("heading", { name: "Revisión CRM E2E · Completada · Normal" }),
   ).toBeVisible();
 
   await page.getByLabel("Escribe SUPRIMIR CONTACTO").fill("SUPRIMIR CONTACTO");
   await page.getByRole("button", { name: "Suprimir con MFA" }).click();
-  await expect(page.getByText(/ANONYMIZED/).first()).toBeVisible();
+  await expect(page.getByText(/Anonimizado/).first()).toBeVisible();
   expect(await page.content()).not.toContain(email);
   const suppressed = await db.contact.findMany({
     where: { id: { in: [candidate.sourceContactId, candidate.targetContactId] } },
   });
   expect(suppressed.every((contact) => contact.status === "ANONYMIZED")).toBe(true);
+
+  await authenticateAdmin(page, supportAdmin);
+  await page.goto("/admin/crm");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("CRM 360°");
+  await expect(page.getByRole("button", { name: "Fusionar con MFA" })).toHaveCount(0);
+  await expectAccessible(page);
 
   await authenticateAdmin(page, cmsAdmin);
   await page.goto("/admin/crm");

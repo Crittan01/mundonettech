@@ -2,7 +2,8 @@ import {
   contactPairKey,
   deriveContactVerificationLevel,
   normalizeContactIdentity,
-  strongestContactVerificationLevel,
+  normalizeContactPhone,
+  normalizeEmail,
   type ContactIdentityKindValue,
 } from "@mundonettech/core";
 
@@ -26,13 +27,16 @@ import {
   crmOptionalText,
   crmRetentionMonths,
   crmRetentionReviewAt,
+  crmSource,
   crmText,
   crmVersion,
   normalizeCrmContactInput,
   normalizeCrmOrganizationInput,
   type CrmAudit,
   type CrmContactInput,
+  type CrmContactUpdateInput,
   type CrmOrganizationInput,
+  type CrmOrganizationUpdateInput,
 } from "./crm-shared.js";
 
 const verificationRank: Readonly<Record<ContactVerificationLevel, number>> = {
@@ -135,10 +139,33 @@ export class CrmService {
     });
   }
 
+  private async assertUniqueOrganizationTaxId(
+    tx: Prisma.TransactionClient,
+    taxId: string | null,
+    excludeOrganizationId?: string,
+  ) {
+    if (!taxId) return;
+    const duplicate = await tx.organization.findFirst({
+      where: {
+        taxId,
+        deletedAt: null,
+        ...(excludeOrganizationId ? { id: { not: excludeOrganizationId } } : {}),
+      },
+      select: { id: true },
+    });
+    if (duplicate) {
+      throw new CrmError("CONFLICT", "An active organization already uses this tax identifier.");
+    }
+  }
+
   async createOrganization(input: CrmOrganizationInput, audit: CrmAudit) {
     const values = normalizeCrmOrganizationInput(input);
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:write");
+      if (values.taxId) {
+        await acquireOperationLocks(tx, [`crm-org-tax:${values.taxId}`]);
+        await this.assertUniqueOrganizationTaxId(tx, values.taxId);
+      }
       const organization = await tx.organization.create({ data: values });
       await crmLog(tx, audit, "CRM_ORGANIZATION_CREATED", "Organization", organization.id, {
         version: organization.version,
@@ -147,32 +174,42 @@ export class CrmService {
     });
   }
 
-  async updateOrganization(
-    input: CrmOrganizationInput & {
-      readonly organizationId: string;
-      readonly expectedVersion: number;
-    },
-    audit: CrmAudit,
-  ) {
+  async updateOrganization(input: CrmOrganizationUpdateInput, audit: CrmAudit) {
     assertUuid(input.organizationId, "organizationId");
     const expectedVersion = crmVersion(input.expectedVersion);
-    const values = normalizeCrmOrganizationInput(input);
+    const preserveTaxId = input.taxId === undefined;
+    const values = normalizeCrmOrganizationInput({
+      legalName: input.legalName,
+      commercialName: input.commercialName ?? null,
+      taxId: preserveTaxId ? null : input.taxId,
+    });
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:write");
-      await acquireOperationLocks(tx, [`crm-organization:${input.organizationId}`]);
+      const lockKeys = [`crm-organization:${input.organizationId}`];
+      if (!preserveTaxId && values.taxId) lockKeys.push(`crm-org-tax:${values.taxId}`);
+      await acquireOperationLocks(tx, lockKeys);
       const rows = await tx.$queryRaw<
-        Array<{ id: string; version: number; deletedAt: Date | null }>
+        Array<{ id: string; version: number; taxId: string | null; deletedAt: Date | null }>
       >`
-        SELECT "id", "version", "deletedAt" FROM "Organization" WHERE "id" = ${input.organizationId}::uuid FOR UPDATE
+        SELECT "id", "version", "taxId", "deletedAt" FROM "Organization" WHERE "id" = ${input.organizationId}::uuid FOR UPDATE
       `;
       const current = rows[0];
       if (!current || current.deletedAt) throw new CrmError("NOT_FOUND", "Organization not found.");
       if (current.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The organization changed in another session.");
       }
+      const resolvedTaxId = preserveTaxId ? current.taxId : values.taxId;
+      if (!preserveTaxId && resolvedTaxId) {
+        await this.assertUniqueOrganizationTaxId(tx, resolvedTaxId, current.id);
+      }
       const organization = await tx.organization.update({
         where: { id: current.id },
-        data: { ...values, version: { increment: 1 } },
+        data: {
+          legalName: values.legalName,
+          commercialName: values.commercialName,
+          taxId: resolvedTaxId,
+          version: { increment: 1 },
+        },
       });
       await crmLog(tx, audit, "CRM_ORGANIZATION_UPDATED", "Organization", organization.id, {
         previousVersion: expectedVersion,
@@ -286,54 +323,63 @@ export class CrmService {
       crmNow(tx),
       crmRetentionReviewAt(tx, this.retentionMonths),
     ]);
+    const normalizedEmail = normalizeEmail(customer.email);
     const emailVerifiedAt = customer.authUserId && customer.status === "ACTIVE" ? now : null;
     const existing = await tx.contact.findFirst({
       where: { customerId, deletedAt: null },
       include: { identities: true },
     });
-    const contact = existing
-      ? await tx.contact.update({
-          where: { id: existing.id },
-          data: {
-            givenName: customer.givenName,
-            familyName: customer.familyName,
-            email: customer.email,
-            phoneE164: customer.phoneE164,
-            lastActivityAt: now,
-            retentionReviewAt,
-            version: { increment: 1 },
-          },
-        })
-      : await tx.contact.create({
-          data: {
-            customerId,
-            givenName: customer.givenName,
-            familyName: customer.familyName,
-            email: customer.email,
-            phoneE164: customer.phoneE164,
-            source: "checkout",
-            retentionReviewAt,
-            lastActivityAt: now,
-          },
-        });
-    await this.upsertIdentity(tx, contact.id, "EMAIL", customer.email, emailVerifiedAt);
-    if (existing?.email && existing.email !== customer.email) {
-      await this.retireIdentity(tx, contact.id, "EMAIL", existing.email, customer.email, now);
+    const effectivePhone = customer.phoneE164
+      ? normalizeContactPhone(customer.phoneE164)
+      : (existing?.phoneE164 ?? null);
+    if (!existing) {
+      const initialLevel: ContactVerificationLevel = emailVerifiedAt
+        ? "SINGLE_CHANNEL_VERIFIED"
+        : "UNVERIFIED";
+      const created = await tx.contact.create({
+        data: {
+          customerId,
+          givenName: customer.givenName,
+          familyName: customer.familyName,
+          email: normalizedEmail,
+          phoneE164: effectivePhone,
+          verificationLevel: initialLevel,
+          source: "checkout",
+          retentionReviewAt,
+          lastActivityAt: now,
+        },
+      });
+      await this.upsertIdentity(tx, created.id, "EMAIL", normalizedEmail, emailVerifiedAt);
+      if (effectivePhone) {
+        await this.upsertIdentity(tx, created.id, "PHONE", effectivePhone, null);
+      }
+      return created;
     }
-    if (customer.phoneE164) {
-      await this.upsertIdentity(tx, contact.id, "PHONE", customer.phoneE164, null);
+    await acquireOperationLocks(tx, [`crm-contact:${existing.id}`]);
+    await this.upsertIdentity(tx, existing.id, "EMAIL", normalizedEmail, emailVerifiedAt);
+    if (existing.email && existing.email !== normalizedEmail) {
+      await this.retireIdentity(tx, existing.id, "EMAIL", existing.email, normalizedEmail, now);
     }
-    if (existing?.phoneE164 && existing.phoneE164 !== customer.phoneE164) {
-      await this.retireIdentity(tx, contact.id, "PHONE", existing.phoneE164, null, now);
+    if (effectivePhone) {
+      await this.upsertIdentity(tx, existing.id, "PHONE", effectivePhone, null);
     }
-    const derivedLevel = await this.verificationLevel(tx, contact.id);
-    const verificationLevel = existing
-      ? strongestContactVerificationLevel(existing.verificationLevel, derivedLevel)
-      : derivedLevel;
-    if (verificationLevel !== contact.verificationLevel) {
-      return tx.contact.update({ where: { id: contact.id }, data: { verificationLevel } });
+    if (existing.phoneE164 && existing.phoneE164 !== effectivePhone) {
+      await this.retireIdentity(tx, existing.id, "PHONE", existing.phoneE164, effectivePhone, now);
     }
-    return contact;
+    const verificationLevel = await this.verificationLevel(tx, existing.id);
+    return tx.contact.update({
+      where: { id: existing.id },
+      data: {
+        givenName: customer.givenName,
+        familyName: customer.familyName,
+        email: normalizedEmail,
+        phoneE164: effectivePhone,
+        verificationLevel,
+        lastActivityAt: now,
+        retentionReviewAt,
+        version: { increment: 1 },
+      },
+    });
   }
 
   async syncCustomerContact(customerId: string): Promise<Contact> {
@@ -342,13 +388,14 @@ export class CrmService {
     );
   }
 
-  async updateContact(
-    input: CrmContactInput & { readonly contactId: string; readonly expectedVersion: number },
-    audit: CrmAudit,
-  ) {
+  async updateContact(input: CrmContactUpdateInput, audit: CrmAudit) {
     assertUuid(input.contactId, "contactId");
     const expectedVersion = crmVersion(input.expectedVersion);
-    const values = normalizeCrmContactInput(input);
+    const values = normalizeCrmContactInput({
+      ...input,
+      source: input.source ?? "admin-crm",
+    });
+    const explicitSource = input.source !== undefined ? crmSource(input.source) : null;
     if (values.customerId) throw new CrmError("VALIDATION", "Customer links are system managed.");
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:write");
@@ -379,7 +426,8 @@ export class CrmService {
           values.phoneE164,
           now,
         );
-      const contact = await tx.contact.update({
+      const verificationLevel = await this.verificationLevel(tx, current.id);
+      const updated = await tx.contact.update({
         where: { id: current.id },
         data: {
           organizationId: values.organizationId,
@@ -387,18 +435,14 @@ export class CrmService {
           familyName: values.familyName,
           email: values.email,
           phoneE164: values.phoneE164,
-          source: values.source,
+          verificationLevel,
+          source: explicitSource ?? current.source,
           lastActivityAt: now,
           retentionReviewAt: await crmRetentionReviewAt(tx, this.retentionMonths),
           version: { increment: 1 },
         },
       });
-      const verificationLevel = await this.verificationLevel(tx, current.id);
-      const updated =
-        verificationLevel === contact.verificationLevel
-          ? contact
-          : await tx.contact.update({ where: { id: contact.id }, data: { verificationLevel } });
-      await crmLog(tx, audit, "CRM_CONTACT_UPDATED", "Contact", contact.id, {
+      await crmLog(tx, audit, "CRM_CONTACT_UPDATED", "Contact", updated.id, {
         previousVersion: expectedVersion,
         version: updated.version,
       });
@@ -479,29 +523,75 @@ export class CrmService {
     const limit = crmLimit(options.limit, 100);
     const query = options.query?.trim() || null;
     if (query && query.length > 320) throw new CrmError("VALIDATION", "Search query is too long.");
-    const contacts = await this.db.contact.findMany({
-      where: {
+    let cursor: { id: string; createdAt: Date } | null = null;
+    if (options.cursor) {
+      const found = await this.db.contact.findUnique({
+        where: { id: options.cursor },
+        select: { id: true, createdAt: true },
+      });
+      if (!found) throw new CrmError("NOT_FOUND", "Contact cursor not found.");
+      cursor = found;
+    }
+    const tokens = query ? query.split(/\s+/).filter(Boolean).slice(0, 6) : [];
+    const searchFilter: Prisma.ContactWhereInput | null = query
+      ? {
+          OR: [
+            { givenName: { contains: query, mode: "insensitive" } },
+            { familyName: { contains: query, mode: "insensitive" } },
+            ...(tokens.length > 1
+              ? [
+                  {
+                    AND: tokens.map((token) => ({
+                      OR: [
+                        { givenName: { contains: token, mode: "insensitive" as const } },
+                        { familyName: { contains: token, mode: "insensitive" as const } },
+                      ],
+                    })),
+                  },
+                ]
+              : []),
+            { email: { contains: query.toLowerCase(), mode: "insensitive" } },
+            { phoneE164: { contains: query } },
+            { organization: { legalName: { contains: query, mode: "insensitive" } } },
+            { organization: { commercialName: { contains: query, mode: "insensitive" } } },
+            {
+              identities: {
+                some: {
+                  retiredAt: null,
+                  OR: [
+                    { kind: "EMAIL", normalizedValue: { contains: query.toLowerCase() } },
+                    { kind: "PHONE", normalizedValue: { contains: query } },
+                    { kind: "DOCUMENT", normalizedValue: query.toUpperCase() },
+                  ],
+                },
+              },
+            },
+          ],
+        }
+      : null;
+    const filters: Prisma.ContactWhereInput[] = [
+      {
         status: options.status ?? "ACTIVE",
         ...(options.organizationId ? { organizationId: options.organizationId } : {}),
-        ...(query
-          ? {
-              OR: [
-                { givenName: { contains: query, mode: "insensitive" } },
-                { familyName: { contains: query, mode: "insensitive" } },
-                { email: { contains: query.toLowerCase(), mode: "insensitive" } },
-                { phoneE164: { contains: query } },
-                { organization: { legalName: { contains: query, mode: "insensitive" } } },
-              ],
-            }
-          : {}),
       },
+    ];
+    if (searchFilter) filters.push(searchFilter);
+    if (cursor) {
+      filters.push({
+        OR: [
+          { createdAt: { lt: cursor.createdAt } },
+          { createdAt: cursor.createdAt, id: { lt: cursor.id } },
+        ],
+      });
+    }
+    const contacts = await this.db.contact.findMany({
+      where: { AND: filters },
       include: {
         organization: true,
         identities: { where: { retiredAt: null }, orderBy: [{ kind: "asc" }, { id: "asc" }] },
         _count: { select: { tasks: true, activities: true } },
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
       take: limit + 1,
     });
     const hasMore = contacts.length > limit;
@@ -518,6 +608,10 @@ export class CrmService {
       where: { id: contactId },
       include: {
         organization: true,
+        mergedFrom: {
+          orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+          take: 50,
+        },
         identities: { orderBy: [{ kind: "asc" }, { createdAt: "asc" }] },
         activities: {
           include: { createdBy: { select: { id: true, displayName: true } } },
@@ -578,6 +672,7 @@ export class CrmService {
     if (!contact) throw new CrmError("NOT_FOUND", "Contact not found.");
     return {
       ...maskCrmContact(contact),
+      mergedFrom: contact.mergedFrom.map((entry) => maskCrmContact(entry)),
       identities: contact.identities.map(maskCrmIdentity),
       activities: contact.activities,
       tasks: contact.tasks,
@@ -800,6 +895,59 @@ export class CrmService {
     });
   }
 
+  async listTasks(
+    options: {
+      readonly assignedToAdminUserId?: string;
+      readonly status?: "OPEN" | "PENDING" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+      readonly limit?: number;
+    } = {},
+  ) {
+    if (options.assignedToAdminUserId) {
+      assertUuid(options.assignedToAdminUserId, "assignedToAdminUserId");
+    }
+    const limit = crmLimit(options.limit, 100);
+    const statusFilter: Prisma.TaskWhereInput =
+      !options.status || options.status === "OPEN"
+        ? { status: { in: ["PENDING", "IN_PROGRESS"] } }
+        : { status: options.status };
+    const [nowRows, tasks] = await Promise.all([
+      this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`,
+      this.db.task.findMany({
+        where: {
+          ...statusFilter,
+          contact: { status: "ACTIVE", deletedAt: null },
+          ...(options.assignedToAdminUserId
+            ? { assignedToAdminUserId: options.assignedToAdminUserId }
+            : {}),
+        },
+        include: {
+          contact: { include: { organization: true } },
+          assignedTo: { select: { id: true, displayName: true } },
+          createdBy: { select: { id: true, displayName: true } },
+        },
+        orderBy: [{ dueAt: "asc" }, { id: "asc" }],
+        take: limit,
+      }),
+    ]);
+    const now = nowRows[0]!.now.getTime();
+    return tasks.map((task) => ({
+      id: task.id,
+      contactId: task.contactId,
+      title: task.title,
+      description: task.description,
+      status: task.status,
+      priority: task.priority,
+      dueAt: task.dueAt,
+      completedAt: task.completedAt,
+      version: task.version,
+      isOverdue:
+        (task.status === "PENDING" || task.status === "IN_PROGRESS") && task.dueAt.getTime() < now,
+      assignedTo: task.assignedTo,
+      createdBy: task.createdBy,
+      contact: maskCrmContact(task.contact),
+    }));
+  }
+
   async detectDuplicates(
     options: { readonly contactId?: string; readonly limit?: number },
     audit: CrmAudit,
@@ -830,60 +978,71 @@ export class CrmService {
         ORDER BY identity."kind", identity."normalizedValue"
         LIMIT ${limit}
       `;
-      const pairs = new Map<string, { contactIds: Set<string>; reasons: Set<string> }>();
+      const pairs = new Map<string, { leftId: string; rightId: string; reasons: Set<string> }>();
       for (const group of groups) {
-        for (const contactId of group.contactIds) {
-          const pair = pairs.get(contactId) ?? {
-            contactIds: new Set<string>(),
-            reasons: new Set<string>(),
-          };
-          for (const otherId of group.contactIds)
-            if (otherId !== contactId) pair.contactIds.add(otherId);
-          pair.reasons.add(`${group.kind}_EXACT`);
-          pairs.set(contactId, pair);
+        const sortedIds = [...new Set(group.contactIds)].sort();
+        for (let i = 0; i < sortedIds.length; i += 1) {
+          for (let j = i + 1; j < sortedIds.length; j += 1) {
+            const leftId = sortedIds[i]!;
+            const rightId = sortedIds[j]!;
+            if (
+              options.contactId &&
+              leftId !== options.contactId &&
+              rightId !== options.contactId
+            ) {
+              continue;
+            }
+            const pairKey = contactPairKey(leftId, rightId);
+            const entry = pairs.get(pairKey) ?? {
+              leftId,
+              rightId,
+              reasons: new Set<string>(),
+            };
+            entry.reasons.add(`${group.kind}_EXACT`);
+            pairs.set(pairKey, entry);
+          }
         }
       }
       const resolved: Array<{ id: string; pairKey: string; created: boolean }> = [];
-      for (const [contactId, matches] of pairs) {
-        for (const otherId of matches.contactIds) {
-          if (resolved.length >= limit) break;
-          const pairKey = contactPairKey(contactId, otherId);
-          if (resolved.some((item) => item.pairKey === pairKey)) continue;
-          await acquireOperationLocks(tx, [`crm-merge:${pairKey}`]);
-          const existing = await tx.identityMergeCandidate.findFirst({
-            where: { pairKey, status: { in: ["PENDING", "MERGED", "REJECTED"] } },
-            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          });
-          if (existing) {
-            if (existing.status === "PENDING") {
-              resolved.push({ id: existing.id, pairKey, created: false });
-            }
-            continue;
+      for (const [pairKey, entry] of [...pairs.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+        if (resolved.length >= limit) break;
+        await acquireOperationLocks(tx, [`crm-merge:${pairKey}`]);
+        const existing = await tx.identityMergeCandidate.findFirst({
+          where: { pairKey, status: { in: ["PENDING", "MERGED", "REJECTED"] } },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        });
+        if (existing) {
+          if (existing.status === "PENDING") {
+            resolved.push({ id: existing.id, pairKey, created: false });
           }
-          const contacts = await tx.contact.findMany({
-            where: { id: { in: [contactId, otherId] }, status: "ACTIVE", deletedAt: null },
-          });
-          if (contacts.length !== 2) continue;
-          contacts.sort(
-            (left, right) =>
-              verificationRank[right.verificationLevel] -
-                verificationRank[left.verificationLevel] ||
-              left.createdAt.getTime() - right.createdAt.getTime() ||
-              left.id.localeCompare(right.id),
-          );
-          const target = contacts[0]!;
-          const source = contacts[1]!;
-          const candidate = await tx.identityMergeCandidate.create({
-            data: {
-              pairKey,
-              sourceContactId: source.id,
-              targetContactId: target.id,
-              matchScore: 10000,
-              matchReasons: [...matches.reasons].sort(),
-            },
-          });
-          resolved.push({ id: candidate.id, pairKey, created: true });
+          continue;
         }
+        const contacts = await tx.contact.findMany({
+          where: {
+            id: { in: [entry.leftId, entry.rightId] },
+            status: "ACTIVE",
+            deletedAt: null,
+          },
+        });
+        if (contacts.length !== 2) continue;
+        contacts.sort(
+          (left, right) =>
+            verificationRank[right.verificationLevel] - verificationRank[left.verificationLevel] ||
+            left.createdAt.getTime() - right.createdAt.getTime() ||
+            left.id.localeCompare(right.id),
+        );
+        const target = contacts[0]!;
+        const source = contacts[1]!;
+        const candidate = await tx.identityMergeCandidate.create({
+          data: {
+            pairKey,
+            sourceContactId: source.id,
+            targetContactId: target.id,
+            matchScore: 10000,
+            matchReasons: [...entry.reasons].sort(),
+          },
+        });
+        resolved.push({ id: candidate.id, pairKey, created: true });
       }
       if (resolved.length > 0) {
         await crmLog(

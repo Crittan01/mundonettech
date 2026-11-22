@@ -162,10 +162,20 @@ function OrganizationEditor({
         <Field
           id={`tax-${organization.id}`}
           name="taxId"
-          label="Reingresa el identificador"
+          label="Nuevo identificador (deja vacío para conservar el actual)"
           value={state.values?.taxId}
           maxLength={30}
         />
+        <label className="flex items-center gap-2 text-xs text-muted-foreground sm:col-span-3">
+          <input
+            type="checkbox"
+            name="clearTaxId"
+            value="1"
+            disabled={pending}
+            className="size-4 rounded border-input accent-primary"
+          />
+          Eliminar el identificador fiscal actual al guardar
+        </label>
         <div className="flex gap-2 sm:col-span-3">
           <Button type="submit" size="sm" disabled={pending}>
             {pending ? "Guardando…" : "Actualizar"}
@@ -359,6 +369,7 @@ export function CrmMergeForm({
     initialActionState,
   );
   const state = status === "PENDING" ? mergeState : reverseState;
+  const busy = merging || rejecting || reversing;
   return (
     <div className="space-y-3">
       <form action={status === "PENDING" ? mergeAction : reverseAction} className="space-y-3">
@@ -371,39 +382,38 @@ export function CrmMergeForm({
           <Textarea
             id={`merge-note-${candidateId}`}
             name="note"
-            defaultValue={state.values?.note ?? ""}
+            defaultValue={state.values?.note ?? rejectState.values?.note ?? ""}
             minLength={10}
             maxLength={500}
             required
-            disabled={merging || reversing}
+            disabled={busy}
           />
         </div>
-        <Button type="submit" size="sm" disabled={merging || reversing}>
-          {merging
-            ? "Fusionando…"
-            : reversing
-              ? "Revirtiendo…"
-              : status === "PENDING"
-                ? "Fusionar con MFA"
-                : "Revertir fusión con MFA"}
-        </Button>
-        <FormMessage state={state} />
-      </form>
-      {status === "PENDING" ? (
-        <form action={rejectAction} className="space-y-2">
-          <input type="hidden" name="candidateId" value={candidateId} />
-          <input type="hidden" name="expectedVersion" value={version} />
-          <input
-            type="hidden"
-            name="note"
-            value="Identidades diferentes verificadas por el operador."
-          />
-          <Button type="submit" size="sm" variant="outline" disabled={rejecting}>
-            {rejecting ? "Rechazando…" : "Rechazar candidata"}
+        <div className="flex flex-wrap gap-2">
+          <Button type="submit" size="sm" disabled={busy}>
+            {merging
+              ? "Fusionando…"
+              : reversing
+                ? "Revirtiendo…"
+                : status === "PENDING"
+                  ? "Fusionar con MFA"
+                  : "Revertir fusión con MFA"}
           </Button>
-          <FormMessage state={rejectState} />
-        </form>
-      ) : null}
+          {status === "PENDING" ? (
+            <Button
+              type="submit"
+              formAction={rejectAction}
+              size="sm"
+              variant="outline"
+              disabled={busy}
+            >
+              {rejecting ? "Rechazando…" : "Rechazar candidata"}
+            </Button>
+          ) : null}
+        </div>
+        <FormMessage state={state} />
+        {status === "PENDING" ? <FormMessage state={rejectState} /> : null}
+      </form>
     </div>
   );
 }

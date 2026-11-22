@@ -5,10 +5,12 @@ import { after, before, describe, it } from "node:test";
 import pg from "pg";
 
 import {
+  AccountService,
   CrmError,
   CrmMergeService,
   CrmRetentionService,
   CrmService,
+  OperationsService,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
@@ -501,5 +503,287 @@ describe("CRM 360 production behavior", () => {
       audit,
     );
     await assert.rejects(sql.query(`DELETE FROM "Task" WHERE "id" = $1`, [task.id]));
+  });
+
+  it("isolates pair matchReasons across triplets, guards duplicate NITs, preserves masked NIT/checkout source and searches 360 identities", async () => {
+    const sharedTaxId = `900.${randomUUID().slice(0, 8).toUpperCase()}`;
+    const org = await crm.createOrganization(
+      { legalName: "Grupo Empresarial Norte", commercialName: "Norte Tech", taxId: sharedTaxId },
+      audit,
+    );
+    await assert.rejects(
+      crm.createOrganization({ legalName: "Duplicada NIT", taxId: sharedTaxId }, audit),
+      (error) => error instanceof CrmError && error.code === "CONFLICT",
+    );
+    const updatedOrg = await crm.updateOrganization(
+      {
+        organizationId: org.id,
+        expectedVersion: org.version,
+        legalName: "Grupo Empresarial Norte SAS",
+        commercialName: "Norte Tech B2B",
+      },
+      audit,
+    );
+    assert.equal(updatedOrg.taxId, sharedTaxId);
+
+    await assert.rejects(
+      createContact({ source: "Fuente Invalida Con Mayusculas" }),
+      (error) => error instanceof CrmError && error.code === "VALIDATION",
+    );
+
+    const sharedEmail = `triplet-${randomUUID()}@example.test`;
+    const sharedPhone = `+57399${String(Math.floor(Math.random() * 9000000 + 1000000))}`;
+    const contactA = await createContact({
+      givenName: "Camila",
+      familyName: "Restrepo",
+      email: sharedEmail,
+      phoneE164: sharedPhone,
+      organizationId: org.id,
+    });
+    const contactB = await createContact({
+      givenName: "Camila",
+      familyName: "Dos",
+      email: sharedEmail,
+    });
+    const contactC = await createContact({
+      givenName: "Camila",
+      familyName: "Tres",
+      phoneE164: sharedPhone,
+    });
+
+    await crm.detectDuplicates({ contactId: contactA.id }, audit);
+    const abKey = [contactA.id, contactB.id].sort().join(":");
+    const acKey = [contactA.id, contactC.id].sort().join(":");
+    const abCandidate = await db.identityMergeCandidate.findFirstOrThrow({
+      where: { pairKey: abKey, status: "PENDING" },
+    });
+    const acCandidate = await db.identityMergeCandidate.findFirstOrThrow({
+      where: { pairKey: acKey, status: "PENDING" },
+    });
+    assert.deepEqual(abCandidate.matchReasons, ["EMAIL_EXACT"]);
+    assert.deepEqual(acCandidate.matchReasons, ["PHONE_EXACT"]);
+
+    const docCode = `NIT-${randomUUID().slice(0, 10).toUpperCase()}`;
+    await crm.verifyContact(
+      {
+        contactId: contactA.id,
+        expectedVersion: contactA.version,
+        level: "IDENTITY_VERIFIED",
+        document: docCode,
+      },
+      audit,
+    );
+    const byFullName = await crm.listContacts({ query: "Camila Restrepo" });
+    assert.equal(
+      byFullName.items.some((item) => item.id === contactA.id),
+      true,
+    );
+    const byCommercial = await crm.listContacts({ query: "Norte Tech B2B" });
+    assert.equal(
+      byCommercial.items.some((item) => item.id === contactA.id),
+      true,
+    );
+    const byDocument = await crm.listContacts({ query: docCode });
+    assert.equal(
+      byDocument.items.some((item) => item.id === contactA.id),
+      true,
+    );
+    await assert.rejects(
+      crm.listContacts({ cursor: randomUUID() }),
+      (error) => error instanceof CrmError && error.code === "NOT_FOUND",
+    );
+  });
+
+  it("handles customer phone changes without verification spoofing, cascades /mi-cuenta erasure to CRM lineage, blocks archived-org reversal and scopes /admin/hoy alerts", async () => {
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `sync-${randomUUID()}@example.test`,
+        givenName: "Mateo",
+        familyName: "Gómez",
+        phoneE164: "+573151112233",
+        status: "ACTIVE",
+      },
+    });
+    const synced = await crm.syncCustomerContact(customer.id);
+    assert.equal(synced.verificationLevel, "SINGLE_CHANNEL_VERIFIED");
+    const dualVerified = await crm.verifyContact(
+      {
+        contactId: synced.id,
+        expectedVersion: synced.version,
+        level: "DUAL_CHANNEL_VERIFIED",
+      },
+      audit,
+    );
+    assert.equal(dualVerified.verificationLevel, "DUAL_CHANNEL_VERIFIED");
+
+    await db.customer.update({ where: { id: customer.id }, data: { phoneE164: null } });
+    const preservedPhone = await crm.syncCustomerContact(customer.id);
+    assert.equal(preservedPhone.phoneE164, "+573151112233");
+    assert.equal(preservedPhone.verificationLevel, "DUAL_CHANNEL_VERIFIED");
+
+    await db.customer.update({
+      where: { id: customer.id },
+      data: { phoneE164: "+573159998877" },
+    });
+    const downgraded = await crm.syncCustomerContact(customer.id);
+    assert.equal(downgraded.phoneE164, "+573159998877");
+    assert.equal(downgraded.verificationLevel, "SINGLE_CHANNEL_VERIFIED");
+
+    const edited = await crm.updateContact(
+      {
+        contactId: downgraded.id,
+        expectedVersion: downgraded.version,
+        givenName: "Mateo",
+        familyName: "Gómez",
+        email: customer.email,
+      },
+      audit,
+    );
+    assert.equal(edited.source, "checkout");
+    assert.equal(edited.phoneE164, null);
+    assert.equal(edited.verificationLevel, "SINGLE_CHANNEL_VERIFIED");
+
+    const extra = await createContact({ email: customer.email, phoneE164: "+573154445566" });
+    const mergeCand = await candidateFor(edited, extra);
+    const mSource = await db.contact.findUniqueOrThrow({
+      where: { id: mergeCand.sourceContactId },
+    });
+    const mTarget = await db.contact.findUniqueOrThrow({
+      where: { id: mergeCand.targetContactId },
+    });
+    await merges.merge(
+      {
+        candidateId: mergeCand.id,
+        expectedVersion: mergeCand.version,
+        expectedSourceVersion: mSource.version,
+        expectedTargetVersion: mTarget.version,
+        note: "Fusión antes de supresión self-service del cliente.",
+      },
+      audit,
+    );
+    await crm.createTask(
+      { contactId: mTarget.id, title: "Seguimiento interno abierto", dueAt: future() },
+      supportAudit,
+    );
+    const accounts = new AccountService(db, { privacyPolicyVersion: "1.0.0" });
+    await accounts.anonymize(customer.id, "ELIMINAR MI CUENTA", {
+      ipHash: bytes(),
+      userAgentHash: bytes(),
+    });
+    const erasedLineage = await db.contact.findMany({
+      where: { id: { in: [mSource.id, mTarget.id] } },
+    });
+    assert.equal(
+      erasedLineage.every((c) => c.status === "ANONYMIZED" && c.email === null),
+      true,
+    );
+    assert.equal(
+      await db.contactIdentity.count({ where: { contactId: { in: [mSource.id, mTarget.id] } } }),
+      0,
+    );
+    const cancelledTask = await db.task.findFirstOrThrow({ where: { contactId: mTarget.id } });
+    assert.equal(cancelledTask.status, "CANCELLED");
+    assert.equal(cancelledTask.title, "[tarea suprimida por retención]");
+
+    await assert.rejects(
+      retention.runDue({ privacyPolicyVersion: "1.0.0" }, supportAudit),
+      (error) => error instanceof CrmError && error.code === "FORBIDDEN",
+    );
+
+    const orgToArchive = await crm.createOrganization({ legalName: "Org Temporal" }, audit);
+    const orgRetained = await crm.createOrganization({ legalName: "Org Principal" }, audit);
+    const emailOrg = `org-rev-${randomUUID()}@example.test`;
+    const orgSource = await createContact({ email: emailOrg, organizationId: orgToArchive.id });
+    const orgTarget = await createContact({ email: emailOrg, organizationId: orgRetained.id });
+    await crm.verifyContact(
+      {
+        contactId: orgTarget.id,
+        expectedVersion: orgTarget.version,
+        level: "SINGLE_CHANNEL_VERIFIED",
+        channel: "EMAIL",
+      },
+      audit,
+    );
+    const orgCand = await candidateFor(orgSource, orgTarget);
+    const oSource = await db.contact.findUniqueOrThrow({ where: { id: orgCand.sourceContactId } });
+    const oTarget = await db.contact.findUniqueOrThrow({ where: { id: orgCand.targetContactId } });
+    const orgMerged = await merges.merge(
+      {
+        candidateId: orgCand.id,
+        expectedVersion: orgCand.version,
+        expectedSourceVersion: oSource.version,
+        expectedTargetVersion: oTarget.version,
+        note: "Fusión con organización que luego será archivada.",
+      },
+      audit,
+    );
+    await crm.archiveOrganization(
+      { organizationId: orgToArchive.id, expectedVersion: orgToArchive.version },
+      audit,
+    );
+    await assert.rejects(
+      merges.reverse(
+        {
+          candidateId: orgCand.id,
+          expectedVersion: orgMerged.candidate.version,
+          note: "Intento de reversa con organización archivada.",
+        },
+        audit,
+      ),
+      (error) => error instanceof CrmError && error.code === "CONFLICT",
+    );
+
+    const overdueContact = await createContact();
+    const overdueTask = await crm.createTask(
+      {
+        contactId: overdueContact.id,
+        title: "Llamar cliente vencido",
+        dueAt: future(1),
+        assignedToAdminUserId: supportId,
+      },
+      supportAudit,
+    );
+    await sql.query(
+      `UPDATE "Task" SET "dueAt" = CURRENT_TIMESTAMP - INTERVAL '2 hours' WHERE "id" = $1`,
+      [overdueTask.id],
+    );
+    const openTasks = await crm.listTasks({ assignedToAdminUserId: supportId });
+    assert.equal(
+      openTasks.some((t) => t.id === overdueTask.id && t.isOverdue),
+      true,
+    );
+
+    const cmsId = randomUUID();
+    await db.adminUser.create({
+      data: {
+        id: cmsId,
+        authUserId: randomUUID(),
+        email: `crm-cms-${randomUUID()}@example.test`,
+        displayName: "CMS sin CRM",
+        role: "CMS_EDITOR",
+        status: "ACTIVE",
+      },
+    });
+    const ops = new OperationsService(db);
+    const adminSnap = await ops.snapshot(adminId);
+    const supportSnap = await ops.snapshot(supportId);
+    const cmsSnap = await ops.snapshot(cmsId);
+    assert.equal(
+      adminSnap.notifications.some((n) => n.category === "crm.tasks"),
+      true,
+    );
+    assert.equal(
+      supportSnap.notifications.some((n) => n.category === "crm.tasks"),
+      true,
+    );
+    assert.equal(
+      supportSnap.notifications.some((n) => n.category === "crm.merges"),
+      false,
+    );
+    assert.equal(
+      cmsSnap.notifications.some((n) => n.category.startsWith("crm.")),
+      false,
+    );
   });
 });

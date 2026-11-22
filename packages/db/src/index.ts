@@ -404,8 +404,10 @@ export { CrmError } from "./crm-shared.js";
 export type {
   CrmAudit,
   CrmContactInput,
+  CrmContactUpdateInput,
   CrmErrorCode,
   CrmOrganizationInput,
+  CrmOrganizationUpdateInput,
 } from "./crm-shared.js";
 export {
   ContactActivityKind,

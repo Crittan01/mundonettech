@@ -11,7 +11,7 @@ import {
 } from "@mundonettech/core";
 
 import type { AdminUser, Contact, Prisma } from "./generated/client.js";
-import { assertUuid } from "./inventory-shared.js";
+import { acquireOperationLocks, assertUuid } from "./inventory-shared.js";
 
 export type CrmErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN";
 export type CrmPermission = Extract<
@@ -42,6 +42,14 @@ export interface CrmOrganizationInput {
   readonly taxId?: string | null;
 }
 
+export interface CrmOrganizationUpdateInput {
+  readonly organizationId: string;
+  readonly expectedVersion: number;
+  readonly legalName: string;
+  readonly commercialName?: string | null;
+  readonly taxId?: string | null;
+}
+
 export interface CrmContactInput {
   readonly organizationId?: string | null;
   readonly customerId?: string | null;
@@ -50,6 +58,18 @@ export interface CrmContactInput {
   readonly email?: string | null;
   readonly phoneE164?: string | null;
   readonly source: string;
+}
+
+export interface CrmContactUpdateInput {
+  readonly contactId: string;
+  readonly expectedVersion: number;
+  readonly organizationId?: string | null;
+  readonly customerId?: string | null;
+  readonly givenName: string;
+  readonly familyName: string;
+  readonly email?: string | null;
+  readonly phoneE164?: string | null;
+  readonly source?: string;
 }
 
 export interface NormalizedCrmContactInput {
@@ -63,6 +83,7 @@ export interface NormalizedCrmContactInput {
 }
 
 const controlPattern = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const sourcePattern = /^[a-z][a-z0-9.-]{1,59}$/;
 
 export function crmText(value: unknown, field: string, minimum: number, maximum: number): string {
   if (
@@ -108,9 +129,26 @@ export function crmRetentionMonths(value: number): number {
   }
 }
 
+export function crmSource(value: unknown): string {
+  const normalized = crmText(value, "source", 2, 60);
+  if (!sourcePattern.test(normalized)) {
+    throw new CrmError(
+      "VALIDATION",
+      "source must start with a lowercase letter and use lowercase letters, digits, dots or hyphens.",
+    );
+  }
+  return normalized;
+}
+
 export function normalizeCrmContactInput(input: CrmContactInput): NormalizedCrmContactInput {
-  const email = input.email ? normalizeEmail(input.email) : null;
-  const phoneE164 = input.phoneE164 ? normalizeContactPhone(input.phoneE164) : null;
+  let email: string | null = null;
+  let phoneE164: string | null = null;
+  try {
+    email = input.email ? normalizeEmail(input.email) : null;
+    phoneE164 = input.phoneE164 ? normalizeContactPhone(input.phoneE164) : null;
+  } catch (error) {
+    throw new CrmError("VALIDATION", error instanceof Error ? error.message : "Invalid identity.");
+  }
   if (!email && !phoneE164) {
     throw new CrmError("VALIDATION", "A contact requires at least one email or phone identity.");
   }
@@ -123,12 +161,17 @@ export function normalizeCrmContactInput(input: CrmContactInput): NormalizedCrmC
     familyName: crmText(input.familyName, "familyName", 1, 100),
     email,
     phoneE164,
-    source: crmText(input.source, "source", 2, 60),
+    source: crmSource(input.source),
   };
 }
 
 export function normalizeCrmOrganizationInput(input: CrmOrganizationInput) {
-  const taxId = input.taxId ? normalizeContactIdentity("DOCUMENT", input.taxId) : null;
+  let taxId: string | null = null;
+  try {
+    taxId = input.taxId ? normalizeContactIdentity("DOCUMENT", input.taxId) : null;
+  } catch (error) {
+    throw new CrmError("VALIDATION", error instanceof Error ? error.message : "Invalid taxId.");
+  }
   return {
     legalName: crmText(input.legalName, "legalName", 2, 200),
     commercialName: input.commercialName
@@ -220,4 +263,124 @@ export function crmJsonStringArray(value: unknown, field: string): string[] {
   }
   for (const entry of value as string[]) assertUuid(entry, field);
   return value as string[];
+}
+
+export async function suppressCustomerCrmLineageInTransaction(
+  tx: Prisma.TransactionClient,
+  customerId: string,
+  now: Date,
+): Promise<string[]> {
+  assertUuid(customerId, "customerId");
+  const lineageRows = await tx.$queryRaw<Array<{ id: string }>>`
+    WITH RECURSIVE seed AS (
+      SELECT "id", "mergedIntoContactId" FROM "Contact" WHERE "customerId" = ${customerId}::uuid
+    ),
+    ancestors AS (
+      SELECT "id", "mergedIntoContactId" FROM seed
+      UNION
+      SELECT parent."id", parent."mergedIntoContactId"
+      FROM "Contact" parent
+      JOIN ancestors child ON child."mergedIntoContactId" = parent."id"
+    ),
+    full_lineage AS (
+      SELECT "id" FROM ancestors
+      UNION
+      SELECT child."id"
+      FROM "Contact" child
+      JOIN full_lineage parent ON child."mergedIntoContactId" = parent."id"
+    )
+    SELECT "id" FROM full_lineage ORDER BY "id"
+  `;
+  if (lineageRows.length === 0) return [];
+  const lineageIds = lineageRows.map((item) => item.id);
+  await acquireOperationLocks(
+    tx,
+    lineageIds.map((id) => `crm-contact:${id}`),
+  );
+  const contacts = await tx.$queryRaw<
+    Contact[]
+  >`SELECT * FROM "Contact" WHERE "id" IN (SELECT * FROM unnest(${lineageIds}::uuid[])) ORDER BY "id" FOR UPDATE`;
+  await tx.contactActivity.updateMany({
+    where: { contactId: { in: lineageIds }, redactedAt: null },
+    data: {
+      subject: null,
+      body: "[contenido suprimido por retención]",
+      redactedAt: now,
+    },
+  });
+  await tx.task.updateMany({
+    where: { contactId: { in: lineageIds }, status: { in: ["PENDING", "IN_PROGRESS"] } },
+    data: {
+      status: "CANCELLED",
+      title: "[tarea suprimida por retención]",
+      description: null,
+      redactedAt: now,
+      version: { increment: 1 },
+    },
+  });
+  await tx.task.updateMany({
+    where: { contactId: { in: lineageIds }, redactedAt: null },
+    data: {
+      title: "[tarea suprimida por retención]",
+      description: null,
+      redactedAt: now,
+      version: { increment: 1 },
+    },
+  });
+  const mergeHistory = await tx.identityMergeCandidate.findMany({
+    where: {
+      status: { in: ["MERGED", "REVERSED"] },
+      OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
+    },
+    select: { id: true },
+  });
+  for (const candidate of mergeHistory) {
+    await tx.identityMergeCandidate.update({
+      where: { id: candidate.id },
+      data: {
+        sourceSnapshot: { redacted: true },
+        targetSnapshot: { redacted: true },
+        movedIdentityIds: [],
+        retiredIdentityIds: [],
+        movedActivityIds: [],
+        movedTaskIds: [],
+        resolutionNote: "[contenido suprimido por retención]",
+        version: { increment: 1 },
+      },
+    });
+  }
+  await tx.identityMergeCandidate.updateMany({
+    where: {
+      status: "REJECTED",
+      OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
+    },
+    data: {
+      resolutionNote: "[contenido suprimido por retención]",
+      version: { increment: 1 },
+    },
+  });
+  for (const contact of contacts) {
+    if (contact.status === "ANONYMIZED") continue;
+    await tx.contact.update({
+      where: { id: contact.id },
+      data: {
+        organizationId: null,
+        customerId: null,
+        givenName: null,
+        familyName: null,
+        email: null,
+        phoneE164: null,
+        status: "ANONYMIZED",
+        verificationLevel: "UNVERIFIED",
+        mergedIntoContactId: null,
+        suppressionReason: "DATA_SUBJECT_REQUEST",
+        suppressedAt: now,
+        anonymizedAt: now,
+        deletedAt: now,
+        version: { increment: 1 },
+      },
+    });
+  }
+  await tx.contactIdentity.deleteMany({ where: { contactId: { in: lineageIds } } });
+  return lineageIds;
 }

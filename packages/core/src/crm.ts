@@ -71,3 +71,63 @@ export function assertCrmRetentionMonths(value: number): number {
   }
   return value;
 }
+
+export const crmContactStatusLabels = {
+  ACTIVE: "Activo",
+  MERGED: "Fusionado",
+  ANONYMIZED: "Anonimizado",
+} as const;
+
+export const crmVerificationLevelLabels: Readonly<Record<ContactVerificationLevelValue, string>> = {
+  UNVERIFIED: "Sin verificar",
+  SINGLE_CHANNEL_VERIFIED: "1 canal verificado",
+  DUAL_CHANNEL_VERIFIED: "Correo y teléfono verificados",
+  IDENTITY_VERIFIED: "Identidad documental verificada",
+};
+
+export const crmIdentityKindLabels: Readonly<Record<ContactIdentityKindValue, string>> = {
+  EMAIL: "Correo",
+  PHONE: "Teléfono",
+  DOCUMENT: "Documento",
+};
+
+export const crmActivityKindLabels = {
+  NOTE: "Nota",
+  CALL: "Llamada",
+  EMAIL: "Correo",
+  MEETING: "Reunión",
+} as const;
+
+export const crmTaskStatusLabels = {
+  PENDING: "Pendiente",
+  IN_PROGRESS: "En curso",
+  COMPLETED: "Completada",
+  CANCELLED: "Cancelada",
+} as const;
+
+export const crmTaskPriorityLabels = {
+  LOW: "Baja",
+  NORMAL: "Normal",
+  HIGH: "Alta",
+  URGENT: "Urgente",
+} as const;
+
+export const crmSuppressionReasonLabels = {
+  DATA_SUBJECT_REQUEST: "Solicitud del titular (Ley 1581)",
+  RETENTION_EXPIRED: "Retención de 24 meses vencida",
+  OPERATIONAL_REVIEW: "Revisión operativa",
+} as const;
+
+export const crmMatchReasonLabels: Readonly<Record<string, string>> = {
+  EMAIL_EXACT: "Correo idéntico",
+  PHONE_EXACT: "Teléfono idéntico",
+  DOCUMENT_EXACT: "Documento idéntico",
+};
+
+export function formatCrmMatchReasons(value: unknown): string {
+  if (!Array.isArray(value)) return "";
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((reason) => crmMatchReasonLabels[reason] ?? reason)
+    .join(", ");
+}

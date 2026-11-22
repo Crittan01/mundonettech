@@ -1,4 +1,11 @@
-import { hasAdminPermission } from "@mundonettech/core";
+import {
+  crmTaskPriorityLabels,
+  crmTaskStatusLabels,
+  crmVerificationLevelLabels,
+  formatCrmMatchReasons,
+  hasAdminPermission,
+} from "@mundonettech/core";
+import { CrmError } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -28,17 +35,12 @@ const selectClass =
 const querySchema = z.object({
   q: z.string().trim().max(320).optional(),
   status: z.enum(["ACTIVE", "MERGED", "ANONYMIZED"]).optional(),
+  tasks: z.enum(["all", "mine"]).optional(),
   cursor: z.string().uuid().optional(),
 });
 
 function single(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
-}
-
-function reasons(value: unknown): string {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string").join(", ")
-    : "";
 }
 
 export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">) {
@@ -47,29 +49,46 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
   const parsed = querySchema.safeParse({
     q: single(raw.q)?.trim() || undefined,
     status: single(raw.status) || undefined,
+    tasks: single(raw.tasks) || undefined,
     cursor: single(raw.cursor) || undefined,
   });
   const query = parsed.success ? parsed.data : {};
   const db = getDatabase();
   const service = crmService(db);
-  const [contacts, organizations, pending, merged] = await Promise.all([
+  let cursorNotFound = false;
+  const [contacts, openTasks, organizations, pending, merged] = await Promise.all([
     parsed.success
-      ? service.listContacts({
-          ...(query.q ? { query: query.q } : {}),
-          status: query.status ?? "ACTIVE",
-          ...(query.cursor ? { cursor: query.cursor } : {}),
-          limit: 25,
-        })
+      ? service
+          .listContacts({
+            ...(query.q ? { query: query.q } : {}),
+            status: query.status ?? "ACTIVE",
+            ...(query.cursor ? { cursor: query.cursor } : {}),
+            limit: 25,
+          })
+          .catch((error: unknown) => {
+            if (error instanceof CrmError && error.code === "NOT_FOUND") {
+              cursorNotFound = true;
+              return { items: [], nextCursor: null };
+            }
+            throw error;
+          })
       : Promise.resolve({ items: [], nextCursor: null }),
+    service.listTasks({
+      status: "OPEN",
+      ...(query.tasks === "mine" ? { assignedToAdminUserId: session.profile.id } : {}),
+      limit: 25,
+    }),
     service.listOrganizations(),
     crmMergeService(db).listCandidates("PENDING"),
     crmMergeService(db).listCandidates("MERGED"),
   ]);
+  const filterValid = parsed.success && !cursorNotFound;
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
   const canMerge = hasAdminPermission(session.profile.role, "crm:merge");
   const nextParams = new URLSearchParams();
   if (query.q) nextParams.set("q", query.q);
   if (query.status) nextParams.set("status", query.status);
+  if (query.tasks) nextParams.set("tasks", query.tasks);
   if (contacts.nextCursor) nextParams.set("cursor", contacts.nextCursor);
   return (
     <div className="space-y-10">
@@ -99,7 +118,7 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
               name="q"
               defaultValue={query.q ?? ""}
               maxLength={320}
-              placeholder="Nombre, organización, correo o teléfono"
+              placeholder="Nombre, organización, correo, teléfono o documento"
             />
           </div>
           <div className="space-y-2">
@@ -115,16 +134,28 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
               <option value="ANONYMIZED">Anonimizados</option>
             </select>
           </div>
+          <div className="space-y-2">
+            <Label htmlFor="crm-tasks">Cola de tareas</Label>
+            <select
+              id="crm-tasks"
+              name="tasks"
+              className={selectClass}
+              defaultValue={query.tasks ?? "all"}
+            >
+              <option value="all">Todas las abiertas</option>
+              <option value="mine">Asignadas a mí</option>
+            </select>
+          </div>
           <Button type="submit" variant="outline">
             Filtrar
           </Button>
         </form>
-        {!parsed.success ? (
+        {!filterValid ? (
           <p role="alert" className="text-sm text-destructive">
             Los filtros o el cursor no son válidos.
           </p>
         ) : null}
-        {parsed.success && contacts.items.length === 0 ? (
+        {filterValid && contacts.items.length === 0 ? (
           <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
             No hay contactos para estos filtros.
           </p>
@@ -142,7 +173,7 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
               </p>
               <p className="mt-2 text-sm">
                 {contact.organization?.legalName ?? "Sin organización"} ·{" "}
-                {contact.verificationLevel}
+                {crmVerificationLevelLabels[contact.verificationLevel]}
               </p>
               <p className="mt-1 text-xs text-muted-foreground">
                 {contact.counts.activities} actividades · {contact.counts.tasks} tareas · retención{" "}
@@ -156,6 +187,40 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
             Página siguiente
           </Link>
         ) : null}
+      </section>
+      <section aria-labelledby="crm-task-queue" className="space-y-4">
+        <h2 id="crm-task-queue" className="text-2xl font-semibold">
+          Cola operativa de tareas ({openTasks.length})
+        </h2>
+        {openTasks.length === 0 ? (
+          <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
+            No hay tareas pendientes o en curso para este filtro.
+          </p>
+        ) : (
+          <div className="grid gap-3 lg:grid-cols-2">
+            {openTasks.map((task) => (
+              <article key={task.id} className="rounded-xl border border-border bg-card p-4">
+                <h3 className="font-semibold">
+                  <Link className="underline" href={`/admin/crm/${task.contactId}`}>
+                    {task.title}
+                  </Link>
+                </h3>
+                <p className="mt-1 text-sm">
+                  {crmTaskStatusLabels[task.status]} · Prioridad{" "}
+                  {crmTaskPriorityLabels[task.priority]}
+                  {task.isOverdue ? (
+                    <span className="ml-2 font-semibold text-destructive">· Vencida</span>
+                  ) : null}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Contacto: {task.contact.givenName} {task.contact.familyName} · Vence{" "}
+                  {dateFormatter.format(task.dueAt)} ·{" "}
+                  {task.assignedTo?.displayName ?? "Sin asignar"}
+                </p>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
       {canWrite ? (
         <section aria-labelledby="crm-create" className="space-y-4">
@@ -199,7 +264,8 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
             className="space-y-4 rounded-xl border border-border bg-card p-5"
           >
             <h3 className="font-semibold">
-              Coincidencia {candidate.matchScore / 100}% · {reasons(candidate.matchReasons)}
+              Coincidencia {candidate.matchScore / 100}% ·{" "}
+              {formatCrmMatchReasons(candidate.matchReasons)}
             </h3>
             <div className="grid gap-3 text-sm sm:grid-cols-2">
               <p>

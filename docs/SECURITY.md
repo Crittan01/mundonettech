@@ -108,9 +108,9 @@ pnpm admin:bootstrap
 
 ## 12. CRM 360 y retención Hábeas Data
 
-- `/admin/crm` separa `crm:read`/`crm:write` de `crm:merge`/`crm:suppress`; fusión, reversa y supresión exigen Anillo 1 y MFA reciente. Los DTO enmascaran nombre, correo, teléfono y documento también en RSC, nunca exponen snapshots y toda mutación escribe `AdminActionLog` sin PII.
-- Las candidatas usan locks canónicos y versiones de candidata/contacto; una mutación posterior bloquea fusión o reversa. Las seis tablas CRM mantienen RLS forzada sin políticas, Data API revocada y triggers de transición/inmutabilidad. La postura total es 102 tablas y 1.779 denegaciones reales.
-- La supresión recorre el linaje completo, bloquea tareas/fusiones pendientes y obligaciones comerciales, anonimiza `Customer` en la misma transacción, elimina identidades directas y redacta actividades, tareas y snapshots. El scheduler exige `CRM_JOB_ACTOR_ID` activo con `crm:suppress`, difiere obligaciones durante 30 días y responde solo contadores.
+- `/admin/crm` separa `crm:read`/`crm:write` de `crm:merge`/`crm:suppress`; fusión, reversa y supresión exigen Anillo 1 y MFA reciente, mientras `/admin/hoy` aísla alertas `crm.tasks` (`crm:read`) y `crm.merges` (`crm:merge`). Los DTO enmascaran nombre, correo, teléfono y documento también en RSC, nunca exponen snapshots, conservan NIT enmascarado salvo reemplazo o limpieza explícita y toda mutación escribe `AdminActionLog` sin PII.
+- Las candidatas evalúan motivos exactos por par canónico y usan locks + versiones de candidata/contacto (más validación de organizaciones activas al revertir); una mutación posterior bloquea fusión o reversa. Las seis tablas CRM mantienen RLS forzada sin políticas, Data API revocada y triggers de transición/inmutabilidad. La postura total es 102 tablas y 1.779 denegaciones reales.
+- La supresión es bidireccional: tanto `/admin/crm` como la baja self-service de `/mi-cuenta` recorren el linaje completo en la misma transacción, anonimizan `Customer` y `Contact`, eliminan identidades directas y redactan actividades, tareas y snapshots. El scheduler valida siempre `CRM_JOB_ACTOR_ID` activo con `crm:suppress`, difiere obligaciones o PQR abiertas durante 30 días y responde solo contadores.
 
 ## 13. Verificación de lanzamiento
 

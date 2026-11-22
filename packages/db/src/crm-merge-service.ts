@@ -1,4 +1,7 @@
-import { strongestContactVerificationLevel } from "@mundonettech/core";
+import {
+  deriveContactVerificationLevel,
+  strongestContactVerificationLevel,
+} from "@mundonettech/core";
 
 import type {
   Contact,
@@ -311,11 +314,32 @@ export class CrmMergeService {
         where: { contactId: target.id, retiredAt: null },
         select: { kind: true, verifiedAt: true },
       });
-      const derivedLevel = remainingIdentities.some(
-        (item) => item.kind === "DOCUMENT" && item.verifiedAt !== null,
-      )
-        ? "IDENTITY_VERIFIED"
-        : strongestContactVerificationLevel(source.verificationLevel, target.verificationLevel);
+      const mergedEmail = target.email ?? source.email;
+      const mergedPhone = target.phoneE164 ?? source.phoneE164;
+      const combinedIdentities = [...remainingIdentities, ...sourceIdentities];
+      const combinedDerived = deriveContactVerificationLevel({
+        emailVerified: combinedIdentities.some(
+          (item) => item.kind === "EMAIL" && item.verifiedAt !== null,
+        ),
+        phoneVerified: combinedIdentities.some(
+          (item) => item.kind === "PHONE" && item.verifiedAt !== null,
+        ),
+        identityVerified: combinedIdentities.some(
+          (item) => item.kind === "DOCUMENT" && item.verifiedAt !== null,
+        ),
+      });
+      let derivedLevel = strongestContactVerificationLevel(
+        strongestContactVerificationLevel(source.verificationLevel, target.verificationLevel),
+        combinedDerived,
+      );
+      if (!mergedEmail && !mergedPhone) {
+        derivedLevel = "UNVERIFIED";
+      } else if (
+        (!mergedEmail || !mergedPhone) &&
+        (derivedLevel === "DUAL_CHANNEL_VERIFIED" || derivedLevel === "IDENTITY_VERIFIED")
+      ) {
+        derivedLevel = "SINGLE_CHANNEL_VERIFIED";
+      }
       const mergedTarget = await tx.contact.update({
         where: { id: target.id },
         data: {
@@ -323,8 +347,8 @@ export class CrmMergeService {
           customerId: target.customerId ?? source.customerId,
           givenName: target.givenName ?? source.givenName,
           familyName: target.familyName ?? source.familyName,
-          email: target.email ?? source.email,
-          phoneE164: target.phoneE164 ?? source.phoneE164,
+          email: mergedEmail,
+          phoneE164: mergedPhone,
           verificationLevel: derivedLevel,
           lastActivityAt:
             source.lastActivityAt && target.lastActivityAt
@@ -447,14 +471,34 @@ export class CrmMergeService {
           throw new CrmError("CONFLICT", "A merged task changed before reversal.");
         }
       }
+      const targetFields = restoredContactFields(targetSnapshot);
+      const sourceFields = restoredContactFields(sourceSnapshot);
+      const requiredOrgIds = [
+        ...new Set(
+          [targetFields.organizationId, sourceFields.organizationId].filter(
+            (id): id is string => id !== null,
+          ),
+        ),
+      ];
+      if (requiredOrgIds.length > 0) {
+        const activeOrgs = await tx.organization.count({
+          where: { id: { in: requiredOrgIds }, deletedAt: null },
+        });
+        if (activeOrgs !== requiredOrgIds.length) {
+          throw new CrmError(
+            "CONFLICT",
+            "Cannot reverse merge because an associated organization was archived.",
+          );
+        }
+      }
       const restoredTarget = await tx.contact.update({
         where: { id: target.id },
-        data: { ...restoredContactFields(targetSnapshot), version: { increment: 1 } },
+        data: { ...targetFields, version: { increment: 1 } },
       });
       const restoredSource = await tx.contact.update({
         where: { id: source.id },
         data: {
-          ...restoredContactFields(sourceSnapshot),
+          ...sourceFields,
           status: "ACTIVE",
           mergedIntoContactId: null,
           deletedAt: null,

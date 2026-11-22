@@ -122,13 +122,29 @@ function organizationInput(formData: FormData) {
   };
 }
 
-function contactInput(formData: FormData) {
+function organizationUpdateInput(formData: FormData) {
+  const enteredTaxId = optionalText(formData, "taxId", 30);
+  const clearTaxId = formString(formData, "clearTaxId") === "1";
+  return {
+    legalName: text(formData, "legalName", 2, 200),
+    commercialName: optionalText(formData, "commercialName", 200),
+    ...(enteredTaxId !== null ? { taxId: enteredTaxId } : clearTaxId ? { taxId: null } : {}),
+  };
+}
+
+function contactUpdateInput(formData: FormData) {
   return {
     organizationId: optionalUuid(formData, "organizationId"),
     givenName: text(formData, "givenName", 1, 100),
     familyName: text(formData, "familyName", 1, 100),
     email: optionalText(formData, "email", 320),
     phoneE164: optionalText(formData, "phoneE164", 16),
+  };
+}
+
+function contactInput(formData: FormData) {
+  return {
+    ...contactUpdateInput(formData),
     source: "admin-crm",
   };
 }
@@ -149,7 +165,7 @@ export async function updateCrmOrganizationAction(_previous: ActionState, formDa
       {
         organizationId: id(formData, "organizationId"),
         expectedVersion: version(formData),
-        ...organizationInput(formData),
+        ...organizationUpdateInput(formData),
       },
       await audit("crm:write"),
     );
@@ -184,7 +200,7 @@ export async function updateCrmContactAction(_previous: ActionState, formData: F
   return execute(formData, async () => {
     const contactId = id(formData, "contactId");
     await crmService(getDatabase()).updateContact(
-      { contactId, expectedVersion: version(formData), ...contactInput(formData) },
+      { contactId, expectedVersion: version(formData), ...contactUpdateInput(formData) },
       await audit("crm:write"),
     );
     return { message: "Contacto actualizado con control de versión.", contactId };
