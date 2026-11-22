@@ -39,7 +39,7 @@ Las cookies actuales se documentan como necesarias para Auth, actividad y seguri
 
 ## 4. Régimen tributario y comprobantes
 
-La configuración inicia en `NO_RESPONSABLE_IVA` con vigilancia de `3.500 UVT` y valor UVT configurable (año 2026: **$52.374 COP**, Resolución DIAN 000238 de 2025). `F3.2` ya implementa el cambio a `RESPONSABLE_IVA`, topes tech `50`/`22 UVT` por unidad neta, `OrderItemTaxLine[]` selladas y `OrderReceipt` no fiscal verificado. El recibo distingue pedido registrado de pago pendiente y no equivale a factura electrónica; mientras `paymentStatus = UNPAID`, la aceptación definitiva queda sujeta a validación de pago, inventario y condiciones de la operación. DIAN UBL 2.1 y Notas Crédito siguen en `F3.4`.
+La configuración inicia en `NO_RESPONSABLE_IVA` con vigilancia de `3.500 UVT` y valor UVT configurable (año 2026: **$52.374 COP**, Resolución DIAN 000238 de 2025). `F3.2` ya implementa el cambio a `RESPONSABLE_IVA`, topes tech `50`/`22 UVT` por unidad neta, `OrderItemTaxLine[]` selladas y `OrderReceipt` no fiscal verificado. El recibo distingue pedido registrado de pago pendiente y no equivale a factura electrónica; mientras `paymentStatus = UNPAID`, la aceptación definitiva queda sujeta a validación de pago, inventario y condiciones de la operación. `F3.4` incorpora `InvoiceProvider` DIAN UBL 2.1, Notas Crédito vinculadas a facturas aceptadas y reembolsos ejecutados, numeración serializada, CUFE/CUDE y aceptación exclusiva de XML firmado por el proveedor autorizado. La habilitación, los certificados y la validación externa con el proveedor y la DIAN siguen siendo requisitos operativos antes de Go-Live.
 
 El checkout valida en PostgreSQL la DIVIPOLA oficial DANE con corte al 30 de diciembre de 2024 (`33` departamentos y `1.122` municipios/áreas), sin depender de llamadas externas en tiempo de compra. Aceptación de términos/privacidad, promesa de entrega, snapshots DANE, régimen y UVT quedan persistidos por orden.
 
@@ -58,7 +58,7 @@ Todos los importes de catálogo, JSON-LD y Merchant XML parten de centavos `BigI
 1. Registrar y verificar razón social, NIT, dirección de notificación judicial, teléfono y demás datos exigidos por el artículo 50; no se rellenan con valores ficticios.
 2. Verificar operación y custodia de `servicioalcliente@mundonettech.co` y `privacidad@mundonettech.co`, además de los procedimientos humanos de respuesta y radicación.
 3. Someter los ocho textos a revisión jurídica colombiana y actualizar versión/vigencia ante cambios.
-4. Completar pasarelas de pago, logística externa, RMA/PQR web, retención self-service, integraciones DIAN y pruebas de lanzamiento de sus fases correspondientes; checkout y comprobante no fiscal ya están implementados en `F3.2`.
+4. Contratar y verificar en ambiente real las pasarelas de pago, Aveonline, Resend y el proveedor autorizado DIAN, incluidos certificados, resolución y credenciales; completar RMA/PQR web, retención self-service y pruebas de lanzamiento. La integración técnica de `F3.4` no equivale a habilitación tributaria ni a certificación de los servicios externos.
 5. Configurar en Merchant Center envío, impuestos y políticas de la cuenta; el feed no inventa tarifas logísticas.
 
 ## 7. Fuentes oficiales de referencia

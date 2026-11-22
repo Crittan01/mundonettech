@@ -1,6 +1,7 @@
 import { hasAdminPermission } from "@mundonettech/core";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { OperationalCredentialForm } from "@/components/admin/operational-credential-form";
 import {
   CredentialRotationForm,
   ReencryptCredentialForm,
@@ -61,19 +62,34 @@ export default async function IntegrationsPage() {
       </section>
       {canWrite ? <CmsStepUp session={session} /> : null}
       {canWrite ? (
-        <section
-          aria-labelledby="wompi-wizard"
-          className="rounded-xl border border-border bg-card p-5"
-        >
-          <h2 id="wompi-wizard" className="text-xl font-semibold">
-            Conectar una cuenta Wompi
-          </h2>
-          <p className="mt-2 mb-5 text-sm text-muted-foreground">
-            Usa Web Checkout firmado en servidor; los datos de tarjeta se ingresan únicamente en la
-            página segura de Wompi.
-          </p>
-          <WompiCredentialWizard environment={environment} />
-        </section>
+        <>
+          <section
+            aria-labelledby="wompi-wizard"
+            className="rounded-xl border border-border bg-card p-5"
+          >
+            <h2 id="wompi-wizard" className="text-xl font-semibold">
+              Conectar una cuenta Wompi
+            </h2>
+            <p className="mt-2 mb-5 text-sm text-muted-foreground">
+              Usa Web Checkout firmado en servidor; los datos de tarjeta se ingresan únicamente en
+              la página segura de Wompi.
+            </p>
+            <WompiCredentialWizard environment={environment} />
+          </section>
+          <section
+            aria-labelledby="operational-wizard"
+            className="rounded-xl border border-border bg-card p-5"
+          >
+            <h2 id="operational-wizard" className="text-xl font-semibold">
+              Conectar logística, correo o facturación
+            </h2>
+            <p className="mt-2 mb-5 text-sm text-muted-foreground">
+              Cada contrato se valida antes de cifrar. El proveedor DIAN debe firmar y transmitir el
+              XML; las credenciales nunca se muestran en descriptores o logs.
+            </p>
+            <OperationalCredentialForm environment={environment} />
+          </section>
+        </>
       ) : (
         <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
           Vista de solo lectura: tu rol puede consultar descriptores, pero no modificar
@@ -134,10 +150,28 @@ export default async function IntegrationsPage() {
                     </div>
                     <details>
                       <summary className="cursor-pointer text-sm font-medium">
-                        Rotar secretos de Wompi
+                        Rotar secretos de {credential.provider}
                       </summary>
                       <div className="mt-4">
-                        <CredentialRotationForm credential={credential} />
+                        {credential.provider === "wompi" ? (
+                          <CredentialRotationForm credential={credential} />
+                        ) : credential.provider === "aveonline" ||
+                          credential.provider === "resend" ||
+                          credential.provider === "dian" ? (
+                          <OperationalCredentialForm
+                            environment={environment}
+                            credential={{
+                              id: credential.id,
+                              provider: credential.provider,
+                              accountName: credential.accountName,
+                            }}
+                          />
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Este proveedor usa un contrato de rotación administrado por su
+                            integración.
+                          </p>
+                        )}
                       </div>
                     </details>
                     <details>

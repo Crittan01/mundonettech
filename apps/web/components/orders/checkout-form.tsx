@@ -8,7 +8,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { confirmCheckoutAction } from "@/lib/actions/checkout";
+import { confirmCheckoutAction, quoteLocalDeliveryAction } from "@/lib/actions/checkout";
 import { initialActionState } from "@/lib/action-state";
 import type { StorefrontCheckoutPreview } from "@/lib/checkout";
 
@@ -17,6 +17,8 @@ const steps = [
   { number: 2, label: "Entrega" },
   { number: 3, label: "Pago y confirmación" },
 ] as const;
+
+const initialFlexQuoteState = { status: "idle", message: "", quotes: [] } as const;
 
 const selectClass =
   "flex h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -31,8 +33,21 @@ export function CheckoutForm({
   const [state, action, pending] = useActionState(confirmCheckoutAction, initialActionState);
   const [step, setStep] = useState(1);
   const [localError, setLocalError] = useState("");
-  const [method, setMethod] = useState<"HOME_DELIVERY" | "CLICK_COLLECT">(
-    state.values?.fulfillmentMethod === "CLICK_COLLECT" ? "CLICK_COLLECT" : "HOME_DELIVERY",
+  const [method, setMethod] = useState<"HOME_DELIVERY" | "LOCAL_DELIVERY" | "CLICK_COLLECT">(
+    state.values?.fulfillmentMethod === "CLICK_COLLECT"
+      ? "CLICK_COLLECT"
+      : state.values?.fulfillmentMethod === "LOCAL_DELIVERY"
+        ? "LOCAL_DELIVERY"
+        : "HOME_DELIVERY",
+  );
+  const [flexZoneId, setFlexZoneId] = useState(state.values?.localDeliveryZoneId ?? "");
+  const [deliveryLatitude, setDeliveryLatitude] = useState(state.values?.deliveryLatitude ?? "");
+  const [deliveryLongitude, setDeliveryLongitude] = useState(state.values?.deliveryLongitude ?? "");
+  const [quotesStale, setQuotesStale] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [quoteState, quoteAction, quotePending] = useActionState(
+    quoteLocalDeliveryAction,
+    initialFlexQuoteState,
   );
   const [departmentCode, setDepartmentCode] = useState(state.values?.departmentCode ?? "");
   const [municipalityCode, setMunicipalityCode] = useState(state.values?.municipalityCode ?? "");
@@ -65,22 +80,70 @@ export function CheckoutForm({
     [departmentCode, preview.municipalities],
   );
   const selectedLocation = preview.pickupLocations.find((location) => location.id === locationId);
+  const flexQuotes = quoteState.quotes ?? [];
+  const selectedZoneId = flexQuotes.some((quote) => quote.zoneId === flexZoneId)
+    ? flexZoneId
+    : (flexQuotes[0]?.zoneId ?? "");
+  const selectedFlexQuote = quotesStale
+    ? undefined
+    : flexQuotes.find((quote) => quote.zoneId === selectedZoneId);
   const taxCents = preview.taxLines.reduce((sum, line) => sum + BigInt(line.taxCents), 0n);
-  const shippingCents = method === "HOME_DELIVERY" ? preview.homeDelivery.shippingCents : "0";
+  const shippingCents =
+    method === "HOME_DELIVERY"
+      ? preview.homeDelivery.shippingCents
+      : method === "LOCAL_DELIVERY"
+        ? (selectedFlexQuote?.shippingCents ?? "0")
+        : "0";
   const totalCents =
-    method === "HOME_DELIVERY" ? preview.homeDelivery.totalCents : preview.merchandiseTotalCents;
+    method === "HOME_DELIVERY"
+      ? preview.homeDelivery.totalCents
+      : method === "LOCAL_DELIVERY"
+        ? (selectedFlexQuote?.totalCents ?? preview.merchandiseTotalCents)
+        : preview.merchandiseTotalCents;
   const availableCredit = BigInt(preview.paymentMethods.storeCreditAvailableCents ?? "0");
   const creditAmount = availableCredit < BigInt(totalCents) ? availableCredit : BigInt(totalCents);
   const reviewFingerprint =
     method === "HOME_DELIVERY"
       ? preview.homeDelivery.reviewFingerprint
-      : (selectedLocation?.reviewFingerprint ?? "");
+      : method === "LOCAL_DELIVERY"
+        ? (selectedFlexQuote?.reviewFingerprint ?? "")
+        : (selectedLocation?.reviewFingerprint ?? "");
   const canPickup =
     preview.clickAndCollectEnabled &&
     preview.pickupLocations.some((location) => location.available);
 
   function field(name: string, fallback = ""): string {
     return values?.[name] ?? fallback;
+  }
+
+  function quoteFlex() {
+    const currentForm = checkoutForm.current;
+    if (!currentForm) return;
+    setLocalError("");
+    setQuotesStale(false);
+    startTransition(() => quoteAction(new FormData(currentForm)));
+  }
+
+  function locateForFlex() {
+    if (!navigator.geolocation) {
+      setLocalError("Tu navegador no ofrece geolocalización. Ingresa las coordenadas manualmente.");
+      return;
+    }
+    setLocating(true);
+    setLocalError("");
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setDeliveryLatitude(position.coords.latitude.toFixed(6));
+        setDeliveryLongitude(position.coords.longitude.toFixed(6));
+        setQuotesStale(true);
+        setLocating(false);
+      },
+      () => {
+        setLocalError("No pudimos obtener tu ubicación. Ingresa las coordenadas manualmente.");
+        setLocating(false);
+      },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+    );
   }
 
   function validateSection(number: number): boolean {
@@ -112,8 +175,12 @@ export function CheckoutForm({
       setLocalError("Selecciona una sede con stock completo para tu pedido.");
       return;
     }
-    if (step === 2 && method === "HOME_DELIVERY" && !validateSection(1)) {
+    if (step === 2 && method !== "CLICK_COLLECT" && !validateSection(1)) {
       setStep(1);
+      return;
+    }
+    if (step === 2 && method === "LOCAL_DELIVERY" && (!selectedFlexQuote || quotesStale)) {
+      setLocalError("Cotiza una zona Flex vigente para las coordenadas antes de continuar.");
       return;
     }
     if (step === 2 && method === "CLICK_COLLECT" && !reviewFingerprint) {
@@ -136,6 +203,17 @@ export function CheckoutForm({
       <form ref={checkoutForm} action={action} className="space-y-6" noValidate>
         <input type="hidden" name="submissionId" value={submissionId} />
         <input type="hidden" name="reviewFingerprint" value={reviewFingerprint} />
+        <input
+          type="hidden"
+          name="localDeliveryZoneId"
+          value={method === "LOCAL_DELIVERY" ? selectedZoneId : ""}
+        />
+        {method !== "LOCAL_DELIVERY" ? (
+          <>
+            <input type="hidden" name="deliveryLatitude" value="" />
+            <input type="hidden" name="deliveryLongitude" value="" />
+          </>
+        ) : null}
         <ol aria-label="Progreso del checkout" className="grid gap-2 sm:grid-cols-3">
           {steps.map((item) => (
             <li key={item.number}>
@@ -239,10 +317,63 @@ export function CheckoutForm({
                 required
               />
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="checkout-document-type">Tipo de documento</Label>
+              <select
+                id="checkout-document-type"
+                name="buyerDocumentType"
+                className={selectClass}
+                defaultValue={field("buyerDocumentType", "13")}
+                required={method !== "CLICK_COLLECT" || preview.taxRegime === "RESPONSABLE_IVA"}
+              >
+                <option value="13">Cédula de ciudadanía</option>
+                <option value="31">NIT</option>
+                <option value="22">Documento de extranjería</option>
+                <option value="41">Pasaporte</option>
+                <option value="42">Documento de identificación extranjero</option>
+                <option value="11">Registro civil</option>
+                <option value="12">Tarjeta de identidad</option>
+                <option value="21">Carné de extranjería</option>
+                <option value="50">NIT de otro país</option>
+                <option value="91">NUIP</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="checkout-document-number">Número de documento</Label>
+              <Input
+                id="checkout-document-number"
+                name="buyerDocumentNumber"
+                autoComplete="off"
+                defaultValue={field("buyerDocumentNumber")}
+                pattern="[A-Za-z0-9.-]{3,30}"
+                minLength={3}
+                maxLength={30}
+                required={method !== "CLICK_COLLECT" || preview.taxRegime === "RESPONSABLE_IVA"}
+              />
+              <p className="text-xs text-muted-foreground">
+                Se usa para la guía de transporte y, cuando aplique, la factura electrónica.
+              </p>
+            </div>
+            {preview.taxRegime === "RESPONSABLE_IVA" ? (
+              <div className="space-y-2 sm:col-span-2">
+                <Label htmlFor="checkout-buyer-tax-regime">Régimen de IVA del comprador</Label>
+                <select
+                  id="checkout-buyer-tax-regime"
+                  name="buyerTaxRegime"
+                  className={selectClass}
+                  defaultValue={field("buyerTaxRegime")}
+                  required
+                >
+                  <option value="">Selecciona el régimen</option>
+                  <option value="NO_RESPONSABLE_IVA">No responsable de IVA</option>
+                  <option value="RESPONSABLE_IVA">Responsable de IVA</option>
+                </select>
+              </div>
+            ) : null}
           </div>
           <div
             data-destination-fields
-            hidden={method !== "HOME_DELIVERY"}
+            hidden={method === "CLICK_COLLECT"}
             className="grid gap-4 border-t border-border pt-5 sm:grid-cols-2"
           >
             <div className="space-y-2">
@@ -255,8 +386,9 @@ export function CheckoutForm({
                 onChange={(event) => {
                   setDepartmentCode(event.target.value);
                   setMunicipalityCode("");
+                  setQuotesStale(true);
                 }}
-                required={method === "HOME_DELIVERY"}
+                required={method !== "CLICK_COLLECT"}
               >
                 <option value="">Selecciona un departamento</option>
                 {preview.departments.map((department) => (
@@ -274,8 +406,11 @@ export function CheckoutForm({
                 className={selectClass}
                 key={departmentCode}
                 value={municipalityCode}
-                onChange={(event) => setMunicipalityCode(event.target.value)}
-                required={method === "HOME_DELIVERY"}
+                onChange={(event) => {
+                  setMunicipalityCode(event.target.value);
+                  setQuotesStale(true);
+                }}
+                required={method !== "CLICK_COLLECT"}
               >
                 <option value="">Selecciona un municipio</option>
                 {municipalities.map((municipality) => (
@@ -292,9 +427,9 @@ export function CheckoutForm({
                 name="addressLine1"
                 autoComplete="address-line1"
                 defaultValue={field("addressLine1")}
-                minLength={method === "HOME_DELIVERY" ? 5 : undefined}
+                minLength={method !== "CLICK_COLLECT" ? 5 : undefined}
                 maxLength={200}
-                required={method === "HOME_DELIVERY"}
+                required={method !== "CLICK_COLLECT"}
               />
             </div>
             <div className="space-y-2">
@@ -325,7 +460,7 @@ export function CheckoutForm({
                 inputMode="numeric"
                 autoComplete="postal-code"
                 defaultValue={field("postalCode")}
-                pattern={method === "HOME_DELIVERY" ? "[0-9]{6}" : undefined}
+                pattern={method !== "CLICK_COLLECT" ? "[0-9]{6}" : undefined}
                 maxLength={6}
               />
             </div>
@@ -367,6 +502,25 @@ export function CheckoutForm({
                 </span>
               </span>
             </label>
+            {preview.localDeliveryEnabled ? (
+              <label className="flex cursor-pointer gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
+                <input
+                  type="radio"
+                  name="fulfillmentMethod"
+                  value="LOCAL_DELIVERY"
+                  checked={method === "LOCAL_DELIVERY"}
+                  onChange={() => setMethod("LOCAL_DELIVERY")}
+                  className="mt-1 size-4 accent-primary"
+                  required
+                />
+                <span>
+                  <span className="block font-semibold">Entrega Flex local</span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    Cotización por cobertura y horario de corte
+                  </span>
+                </span>
+              </label>
+            ) : null}
             <label
               className={`flex gap-3 rounded-xl border border-border p-4 has-checked:border-primary ${canPickup ? "cursor-pointer" : "opacity-60"}`}
             >
@@ -390,6 +544,116 @@ export function CheckoutForm({
               </span>
             </label>
           </div>
+          {method === "LOCAL_DELIVERY" ? (
+            <fieldset className="space-y-4 rounded-xl border border-border p-4">
+              <legend className="px-1 text-sm font-medium">Cotización Flex por coordenadas</legend>
+              <p className="text-sm text-muted-foreground">
+                Usa tu ubicación actual o escribe coordenadas con hasta seis decimales. La tarifa y
+                la promesa se validan nuevamente en el servidor.
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="delivery-latitude">Latitud</Label>
+                  <Input
+                    id="delivery-latitude"
+                    name="deliveryLatitude"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={deliveryLatitude}
+                    onChange={(event) => {
+                      setDeliveryLatitude(event.target.value);
+                      setQuotesStale(true);
+                    }}
+                    placeholder="4.711000"
+                    maxLength={24}
+                    required
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="delivery-longitude">Longitud</Label>
+                  <Input
+                    id="delivery-longitude"
+                    name="deliveryLongitude"
+                    inputMode="decimal"
+                    autoComplete="off"
+                    value={deliveryLongitude}
+                    onChange={(event) => {
+                      setDeliveryLongitude(event.target.value);
+                      setQuotesStale(true);
+                    }}
+                    placeholder="-74.072100"
+                    maxLength={24}
+                    required
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={locateForFlex}
+                  disabled={locating || quotePending}
+                >
+                  {locating ? "Obteniendo ubicación…" : "Usar mi ubicación"}
+                </Button>
+                <Button type="button" onClick={quoteFlex} disabled={quotePending || locating}>
+                  {quotePending ? "Cotizando…" : "Cotizar Flex"}
+                </Button>
+              </div>
+              {quotePending ? (
+                <p role="status" className="text-sm text-muted-foreground">
+                  Consultando cobertura y tarifa vigentes…
+                </p>
+              ) : null}
+              {quoteState.message ? (
+                <p
+                  role={quoteState.status === "error" ? "alert" : "status"}
+                  className={
+                    quoteState.status === "error"
+                      ? "text-sm text-destructive"
+                      : "text-sm text-muted-foreground"
+                  }
+                >
+                  {quoteState.message}
+                </p>
+              ) : null}
+              {quotesStale && flexQuotes.length ? (
+                <p role="alert" className="text-sm text-warning">
+                  Las coordenadas o el municipio cambiaron. Cotiza nuevamente antes de continuar.
+                </p>
+              ) : null}
+              {flexQuotes.length ? (
+                <div className="space-y-3" aria-label="Zonas Flex disponibles">
+                  {flexQuotes.map((quote) => (
+                    <label
+                      key={quote.zoneId}
+                      className="flex cursor-pointer items-start gap-3 rounded-lg border border-border p-3 has-checked:border-primary"
+                    >
+                      <input
+                        type="radio"
+                        checked={selectedZoneId === quote.zoneId}
+                        onChange={() => setFlexZoneId(quote.zoneId)}
+                        className="mt-1 size-4 accent-primary"
+                      />
+                      <span>
+                        <span className="block font-semibold">
+                          {quote.zoneCode} · {formatCopCents(quote.shippingCents)}
+                        </span>
+                        <span className="mt-1 block text-sm text-muted-foreground">
+                          Entrega estimada:{" "}
+                          {new Intl.DateTimeFormat("es-CO", {
+                            timeZone: "America/Bogota",
+                            dateStyle: "medium",
+                            timeStyle: "short",
+                          }).format(new Date(quote.deliveryPromiseAt))}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : null}
+            </fieldset>
+          ) : null}
           {method === "CLICK_COLLECT" ? (
             <fieldset className="space-y-3">
               <legend className="text-sm font-medium">Sede de recogida</legend>
@@ -563,7 +827,11 @@ export function CheckoutForm({
             <div>
               <dt className="text-muted-foreground">Modalidad</dt>
               <dd className="mt-1 font-medium">
-                {method === "HOME_DELIVERY" ? "Envío a domicilio" : "Click & Collect"}
+                {method === "HOME_DELIVERY"
+                  ? "Envío a domicilio"
+                  : method === "LOCAL_DELIVERY"
+                    ? `Entrega Flex ${selectedFlexQuote?.zoneCode ?? ""}`
+                    : "Click & Collect"}
               </dd>
             </div>
             <div>

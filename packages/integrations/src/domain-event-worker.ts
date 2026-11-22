@@ -1,0 +1,455 @@
+import { formatCopCents } from "@mundonettech/core";
+import {
+  claimDomainOutboxEvents,
+  completeDomainOutbox,
+  failDomainOutbox,
+  retryDomainOutbox,
+  type DomainOutbox,
+} from "@mundonettech/db";
+
+import { EmailService } from "./email-service.js";
+import {
+  InvoiceConflictError,
+  InvoiceProviderError,
+  InvoiceValidationError,
+} from "./invoice-types.js";
+import { InvoiceService } from "./invoice-service.js";
+import { assertIntegrationKey, publicHttpsUrl, recordValue } from "./integration-utils.js";
+import {
+  ShippingConflictError,
+  ShippingProviderError,
+  ShippingValidationError,
+} from "./shipping-types.js";
+import { ShippingService } from "./shipping-service.js";
+import { EmailProviderError, EmailValidationError } from "./email-types.js";
+
+const supportedEvents = [
+  "order.confirmed.v1",
+  "order.payment.paid.v1",
+  "order.refund.completed.v1",
+  "shipping.fulfillment.created.v1",
+  "shipping.label.requested.v1",
+  "shipping.label.generated.v1",
+  "shipping.provider.uncertain.v1",
+  "shipping.shipment.shipped.v1",
+  "shipping.shipment.delivered.v1",
+  "email.requested.v1",
+  "invoice.transmission.requested.v1",
+  "invoice.accepted.v1",
+  "invoice.rejected.v1",
+  "credit-note.transmission.requested.v1",
+  "credit-note.accepted.v1",
+  "credit-note.rejected.v1",
+] as const;
+
+class RetryableDomainEventError extends Error {
+  constructor(readonly availableAt: Date) {
+    super("Domain event requires a scheduled retry.");
+    this.name = "RetryableDomainEventError";
+  }
+}
+
+export interface DomainEventWorkerOptions {
+  readonly workerId: string;
+  readonly shipping: ShippingService;
+  readonly email: EmailService;
+  readonly invoice: InvoiceService;
+  readonly vault: {
+    list(options: { includeRevoked?: boolean; limit: number }): Promise<{
+      items: readonly { id: string; provider: string; revokedAt: Date | null }[];
+    }>;
+  };
+  readonly publicSiteUrl: string;
+  readonly storeName: string;
+  readonly receiptTokenForSubmission: (reference: string) => string;
+  readonly maximumAttempts?: number;
+}
+
+export interface DomainEventBatchResult {
+  readonly claimed: number;
+  readonly completed: number;
+  readonly retries: number;
+  readonly failed: number;
+}
+
+export class DomainEventWorker {
+  private readonly publicSiteUrl: string;
+  private readonly maximumAttempts: number;
+
+  constructor(
+    private readonly db: import("@mundonettech/db").PrismaClient,
+    private readonly options: DomainEventWorkerOptions,
+  ) {
+    this.publicSiteUrl = publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl").replace(/\/$/, "");
+    this.maximumAttempts = options.maximumAttempts ?? 10;
+    assertIntegrationKey(options.workerId, "workerId");
+    if (
+      !Number.isInteger(this.maximumAttempts) ||
+      this.maximumAttempts < 1 ||
+      this.maximumAttempts > 100
+    )
+      throw new TypeError("maximumAttempts must be between 1 and 100.");
+  }
+
+  private payload(event: DomainOutbox): Record<string, unknown> {
+    const payload = recordValue(event.payload);
+    if (!payload) throw new EmailValidationError("Domain event payload must be an object.");
+    return payload;
+  }
+
+  private id(event: DomainOutbox, field: string): string {
+    const value = this.payload(event)[field];
+    if (typeof value !== "string" || !/^[0-9a-f-]{36}$/i.test(value))
+      throw new EmailValidationError(`Domain event ${field} must be a UUID.`);
+    return value;
+  }
+
+  private async emailCredentialId(): Promise<string> {
+    const credentials = await this.options.vault.list({ includeRevoked: false, limit: 100 });
+    const active = credentials.items.filter(
+      (item) => item.provider === "resend" && !item.revokedAt,
+    );
+    if (active.length !== 1 || credentials.items.length === 100)
+      throw new EmailValidationError(
+        "Exactly one active Resend credential is required for domain emails.",
+      );
+    return active[0]!.id;
+  }
+
+  private async receiptUrl(
+    orderId: string,
+    document?: { kind: "invoice" | "credit-note"; id: string },
+  ): Promise<string> {
+    const event = await this.db.domainOutbox.findFirst({
+      where: { aggregateType: "Order", aggregateId: orderId, eventType: "order.confirmed.v1" },
+    });
+    const payload = recordValue(event?.payload);
+    const reference = payload?.receiptDeliveryReference;
+    if (typeof reference !== "string")
+      throw new EmailValidationError("Order receipt delivery reference is unavailable.");
+    const token = this.options.receiptTokenForSubmission(reference);
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(token))
+      throw new EmailValidationError("Receipt token derivation returned an invalid token.");
+    if (document)
+      return `${this.publicSiteUrl}/api/recibos/${encodeURIComponent(token)}/documentos/${document.kind}/${document.id}`;
+    return `${this.publicSiteUrl}/recibo/${encodeURIComponent(token)}`;
+  }
+
+  private async queueOrderEmail(options: {
+    orderId: string;
+    templateKey:
+      | "order.confirmed"
+      | "order.paid"
+      | "shipment.shipped"
+      | "shipment.delivered"
+      | "invoice.accepted"
+      | "credit-note.accepted"
+      | "refund.completed";
+    topic: "orders" | "fulfillment" | "fiscal";
+    operationId: string;
+    shipmentId?: string;
+    refundId?: string;
+    document?: { kind: "invoice" | "credit-note"; id: string; fullNumber: string };
+  }): Promise<void> {
+    const order = await this.db.order.findUnique({
+      where: { id: options.orderId },
+      include: { shipments: true },
+    });
+    if (!order?.emailSnapshot)
+      throw new EmailValidationError("Order has no recipient email snapshot.");
+    const receiptUrl = await this.receiptUrl(order.id);
+    const variables: Record<string, string> = {
+      orderNumber: order.orderNumber,
+      storeName: this.options.storeName,
+      totalCop: formatCopCents(order.totalCents),
+      receiptUrl,
+      trackingCode: "",
+      documentNumber: "",
+      documentUrl: "",
+    };
+    if (options.shipmentId) {
+      const shipment = order.shipments.find((candidate) => candidate.id === options.shipmentId);
+      if (!shipment?.trackingCode)
+        throw new EmailValidationError(
+          "Shipment tracking code is unavailable for its notification.",
+        );
+      variables.trackingCode = shipment.trackingCode;
+    }
+    if (options.document) {
+      variables.documentNumber = options.document.fullNumber;
+      variables.documentUrl = await this.receiptUrl(order.id, options.document);
+    }
+    if (options.refundId) {
+      const refund = await this.db.orderRefund.findUniqueOrThrow({
+        where: { id: options.refundId },
+      });
+      variables.totalCop = formatCopCents(refund.totalCents);
+    }
+    const template = (await import("./email-templates.js")).defaultEmailTemplate(
+      options.templateKey,
+    );
+    const values = Object.fromEntries(
+      template.variables
+        .filter((key) => key !== "unsubscribeUrl")
+        .map((key) => {
+          const value = variables[key];
+          if (typeof value !== "string" || !value)
+            throw new EmailValidationError(`Missing domain email variable ${key}.`);
+          return [key, value];
+        }),
+    );
+    await this.options.email.queue({
+      orderId: order.id,
+      credentialId: await this.emailCredentialId(),
+      templateKey: options.templateKey,
+      topic: options.topic,
+      recipientEmail: order.emailSnapshot,
+      idempotencyKey: `domain:${options.templateKey}:${options.operationId}`,
+      variables: values,
+    });
+  }
+
+  private async prepareInvoiceIfRequired(orderId: string): Promise<void> {
+    const order = await this.db.order.findUnique({
+      where: { id: orderId },
+      select: { taxRegime: true },
+    });
+    if (order?.taxRegime === "RESPONSABLE_IVA") await this.options.invoice.prepareInvoice(orderId);
+  }
+
+  private async prepareCreditNoteIfRequired(refundId: string): Promise<void> {
+    const refund = await this.db.orderRefund.findUnique({
+      where: { id: refundId },
+      select: {
+        order: {
+          select: {
+            taxRegime: true,
+            taxInvoice: { select: { id: true } },
+          },
+        },
+      },
+    });
+    if (refund?.order.taxRegime === "RESPONSABLE_IVA" || refund?.order.taxInvoice !== null) {
+      await this.options.invoice.prepareCreditNote(refundId);
+    }
+  }
+
+  private async independently(operations: readonly (() => Promise<void>)[]): Promise<void> {
+    let firstError: unknown = null;
+    for (const operation of operations) {
+      try {
+        await operation();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError) throw firstError;
+  }
+
+  private async handle(event: DomainOutbox): Promise<void> {
+    switch (event.eventType) {
+      case "order.confirmed.v1":
+        await this.queueOrderEmail({
+          orderId: this.id(event, "orderId"),
+          templateKey: "order.confirmed",
+          topic: "orders",
+          operationId: event.aggregateId,
+        });
+        return;
+      case "order.payment.paid.v1": {
+        const orderId = this.id(event, "orderId");
+        await this.independently([
+          () => this.options.shipping.ensureFulfillments(orderId).then(() => undefined),
+          () => this.prepareInvoiceIfRequired(orderId),
+          () =>
+            this.queueOrderEmail({
+              orderId,
+              templateKey: "order.paid",
+              topic: "orders",
+              operationId: event.aggregateId,
+            }),
+        ]);
+        return;
+      }
+      case "order.refund.completed.v1": {
+        const orderId = this.id(event, "orderId");
+        const refundId = this.id(event, "refundId");
+        await this.independently([
+          () => this.prepareCreditNoteIfRequired(refundId),
+          () =>
+            this.queueOrderEmail({
+              orderId,
+              refundId,
+              templateKey: "refund.completed",
+              topic: "orders",
+              operationId: refundId,
+            }),
+        ]);
+        return;
+      }
+      case "shipping.label.requested.v1": {
+        try {
+          const result = await this.options.shipping.processLabel(
+            this.id(event, "packageId"),
+            this.options.workerId,
+          );
+          if (result.status === "RECONCILING") return;
+          return;
+        } catch (error) {
+          if (error instanceof ShippingConflictError && error.code === "SIBLING_CLAIM_ACTIVE") {
+            throw new RetryableDomainEventError(new Date(Date.now() + 30_000));
+          }
+          throw error;
+        }
+      }
+      case "shipping.provider.uncertain.v1":
+        await this.options.shipping.reconcileLabel(
+          this.id(event, "packageId"),
+          this.options.workerId,
+        );
+        return;
+      case "shipping.shipment.shipped.v1":
+      case "shipping.shipment.delivered.v1": {
+        const orderId = this.id(event, "orderId");
+        const shipmentId = this.id(event, "shipmentId");
+        await this.queueOrderEmail({
+          orderId,
+          shipmentId,
+          templateKey:
+            event.eventType === "shipping.shipment.shipped.v1"
+              ? "shipment.shipped"
+              : "shipment.delivered",
+          topic: "fulfillment",
+          operationId: shipmentId,
+        });
+        return;
+      }
+      case "email.requested.v1": {
+        const outcome = await this.options.email.send(this.id(event, "emailEventId"));
+        if (outcome.status === "SENDING" && outcome.nextAttemptAt)
+          throw new RetryableDomainEventError(outcome.nextAttemptAt);
+        return;
+      }
+      case "invoice.transmission.requested.v1": {
+        const result = await this.options.invoice.transmitInvoice(
+          this.id(event, "invoiceId"),
+          this.options.workerId,
+        );
+        if (result.status === "UNCERTAIN")
+          throw new RetryableDomainEventError(new Date(Date.now() + 60_000));
+        return;
+      }
+      case "credit-note.transmission.requested.v1": {
+        const result = await this.options.invoice.transmitCreditNote(
+          this.id(event, "creditNoteId"),
+          this.options.workerId,
+        );
+        if (result.status === "UNCERTAIN")
+          throw new RetryableDomainEventError(new Date(Date.now() + 60_000));
+        return;
+      }
+      case "invoice.accepted.v1": {
+        const invoice = await this.db.taxInvoice.findUniqueOrThrow({
+          where: { id: this.id(event, "invoiceId") },
+        });
+        await this.queueOrderEmail({
+          orderId: invoice.orderId,
+          templateKey: "invoice.accepted",
+          topic: "fiscal",
+          operationId: invoice.id,
+          document: { kind: "invoice", id: invoice.id, fullNumber: invoice.fullNumber },
+        });
+        return;
+      }
+      case "credit-note.accepted.v1": {
+        const note = await this.db.creditNote.findUniqueOrThrow({
+          where: { id: this.id(event, "creditNoteId") },
+          include: { invoice: true },
+        });
+        await this.queueOrderEmail({
+          orderId: note.invoice.orderId,
+          templateKey: "credit-note.accepted",
+          topic: "fiscal",
+          operationId: note.id,
+          document: { kind: "credit-note", id: note.id, fullNumber: note.fullNumber },
+        });
+        return;
+      }
+      case "shipping.fulfillment.created.v1":
+      case "shipping.label.generated.v1":
+      case "invoice.rejected.v1":
+      case "credit-note.rejected.v1":
+        return;
+      default:
+        throw new EmailValidationError(`Unsupported domain event type ${event.eventType}.`);
+    }
+  }
+
+  private retryAt(attempts: number): Date {
+    return new Date(Date.now() + Math.min(900_000, 5_000 * 2 ** Math.min(attempts, 8)));
+  }
+
+  private errorText(error: unknown): string {
+    if (
+      error instanceof ShippingProviderError ||
+      error instanceof EmailProviderError ||
+      error instanceof InvoiceProviderError ||
+      error instanceof ShippingConflictError ||
+      error instanceof InvoiceConflictError
+    )
+      return `${error.name}:${error.code}`.slice(0, 500);
+    if (
+      error instanceof ShippingValidationError ||
+      error instanceof EmailValidationError ||
+      error instanceof InvoiceValidationError
+    )
+      return error.name;
+    if (error instanceof Error) return error.name.slice(0, 500);
+    return "Error";
+  }
+
+  async runBatch(limit = 25): Promise<DomainEventBatchResult> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new RangeError("limit must be between 1 and 100.");
+    const events = await claimDomainOutboxEvents(this.db, {
+      workerId: this.options.workerId,
+      eventTypes: supportedEvents,
+      limit,
+    });
+    let completed = 0;
+    let retries = 0;
+    let failed = 0;
+    for (const event of events) {
+      try {
+        await this.handle(event);
+        if (
+          !(await completeDomainOutbox(this.db, { id: event.id, workerId: this.options.workerId }))
+        )
+          throw new Error("Domain outbox claim expired before completion.");
+        completed += 1;
+      } catch (error) {
+        if (event.attempts >= this.maximumAttempts) {
+          await failDomainOutbox(this.db, {
+            id: event.id,
+            workerId: this.options.workerId,
+            error: this.errorText(error),
+          });
+          failed += 1;
+        } else {
+          const availableAt =
+            error instanceof RetryableDomainEventError
+              ? error.availableAt
+              : this.retryAt(event.attempts);
+          await retryDomainOutbox(this.db, {
+            id: event.id,
+            workerId: this.options.workerId,
+            availableAt,
+            error: this.errorText(error),
+          });
+          retries += 1;
+        }
+      }
+    }
+    return { claimed: events.length, completed, retries, failed };
+  }
+}

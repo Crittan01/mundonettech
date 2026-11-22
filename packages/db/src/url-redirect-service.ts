@@ -13,6 +13,7 @@ const reservedSourcePrefixes = [
   "/api",
   "/_next",
   "/admin",
+  "/email",
   "/mi-cuenta",
   "/ingresar",
   "/registro",
@@ -29,7 +30,7 @@ const reservedSourcePrefixes = [
   "/pedido",
   "/propuesta",
 ] as const;
-const reservedTargetPrefixes = ["/api", "/_next", "/admin"] as const;
+const reservedTargetPrefixes = ["/api", "/_next", "/admin", "/email"] as const;
 
 export interface UrlRedirectInput {
   readonly fromPath: string;

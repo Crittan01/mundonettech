@@ -125,6 +125,9 @@ test("protected account, MFA, and admin routes enforce unauthenticated redirects
     "/admin/configuracion",
     "/admin/integraciones",
     "/admin/pagos",
+    "/admin/logistica",
+    "/admin/comunicaciones",
+    "/admin/facturacion",
     "/admin/login/mfa",
   ]) {
     await page.goto(adminRoute);

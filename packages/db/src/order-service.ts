@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
   assertCartQuantity,
+  assertDeliveryPoint,
   assertMoney,
   assertReceiptBalanced,
   availableStock,
@@ -9,10 +10,12 @@ import {
   normalizeEmail,
   roundDivHalfUp,
   type CalculatedOrderTaxLine,
+  type DeliveryPoint,
   type StoreTaxRegimeValue,
 } from "@mundonettech/core";
 
 import { CartService, CartNotFoundError } from "./cart-service.js";
+import { LocalDeliveryConflictError, quoteLocalDeliveryZone } from "./local-delivery-service.js";
 import type { CartReference, CartSnapshot } from "./cart-types.js";
 import type {
   Cart,
@@ -40,6 +43,7 @@ import type {
   CheckoutDefaults,
   CheckoutPreview,
   CheckoutResult,
+  LocalDeliveryQuoteSnapshot,
   OrderReceiptSnapshot,
 } from "./order-types.js";
 
@@ -279,8 +283,12 @@ async function lockedSettings(
 function fingerprint(input: {
   readonly cart: CartSnapshot;
   readonly taxes: readonly CalculatedOrderTaxLine[];
-  readonly fulfillmentMethod: "HOME_DELIVERY" | "CLICK_COLLECT";
+  readonly fulfillmentMethod: "HOME_DELIVERY" | "CLICK_COLLECT" | "LOCAL_DELIVERY";
   readonly clickCollectLocationId: string | null;
+  readonly localDeliveryZoneId?: string;
+  readonly zoneUpdatedAt?: Date;
+  readonly deliveryPoint?: DeliveryPoint;
+  readonly deliveryPromiseAt?: Date;
   readonly shippingCents: bigint;
   readonly taxRegime: StoreTaxRegimeValue;
   readonly uvtValueCents: bigint;
@@ -310,6 +318,13 @@ function fingerprint(input: {
     })),
     fulfillmentMethod: input.fulfillmentMethod,
     clickCollectLocationId: input.clickCollectLocationId,
+    ...(input.fulfillmentMethod === "LOCAL_DELIVERY"
+      ? {
+          localDeliveryZoneId: input.localDeliveryZoneId,
+          zoneUpdatedAt: input.zoneUpdatedAt?.toISOString(),
+          deliveryPoint: input.deliveryPoint,
+        }
+      : {}),
     shippingCents: input.shippingCents.toString(),
     taxRegime: input.taxRegime,
     uvtValueCents: input.uvtValueCents.toString(),
@@ -683,6 +698,7 @@ export class OrderService {
           reviewFingerprint: homeFingerprint,
         },
         clickAndCollectEnabled: settings.clickAndCollectEnabled,
+        localDeliveryEnabled: settings.localDeliveryEnabled === true,
         pickupLocations,
         departments: departments.map((department) => ({
           code: department.code,
@@ -698,6 +714,83 @@ export class OrderService {
     });
   }
 
+  async localDeliveryQuotes(
+    reference: CartReference,
+    input: { municipalityCode: string; point: DeliveryPoint },
+  ): Promise<readonly LocalDeliveryQuoteSnapshot[]> {
+    referenceHash(reference);
+    if ("cartId" in reference) assertUuid(reference.cartId, "cartId");
+    const municipalityCode = daneCode(input.municipalityCode, 5, "municipalityCode");
+    const point = assertDeliveryPoint(input.point);
+    return inInventoryTransaction(this.db, async (tx) => {
+      const carts = new CartService(tx);
+      const cart =
+        "accessTokenHash" in reference
+          ? await carts.getByAccessToken(reference.accessTokenHash)
+          : await carts.getById(reference.cartId);
+      if (!cart || cart.status !== "ACTIVE") return [];
+      const settings = await lockedSettings(tx, this.defaults);
+      if (!settings.localDeliveryEnabled) return [];
+      const municipality = await tx.daneMunicipality.findUnique({
+        where: { code: municipalityCode },
+      });
+      if (!municipality)
+        throw new OrderValidationError("A valid DANE municipality is required for Flex quotes.");
+      const taxes = await taxesForCart(tx, cart, settings);
+      const merchandiseTotalCents = BigInt(cart.totalCents) + totalTax(taxes);
+      const zones = await tx.localDeliveryZone.findMany({
+        where: { active: true, deletedAt: null },
+        orderBy: [{ code: "asc" }, { id: "asc" }],
+        take: 1000,
+      });
+      const now = await databaseNow(tx);
+      const quotes: LocalDeliveryQuoteSnapshot[] = [];
+      for (const zone of zones) {
+        try {
+          const quote = quoteLocalDeliveryZone(zone, {
+            municipalityCode,
+            point,
+            merchandiseTotalCents,
+            now,
+            timeZone: settings.timeZone,
+          });
+          quotes.push({
+            zoneId: zone.id,
+            zoneCode: zone.code,
+            shippingCents: quote.shippingCents.toString(),
+            totalCents: (merchandiseTotalCents + quote.shippingCents).toString(),
+            deliveryPromiseAt: quote.deliveryPromiseAt.toISOString(),
+            reviewFingerprint: fingerprint({
+              cart,
+              taxes,
+              fulfillmentMethod: "LOCAL_DELIVERY",
+              clickCollectLocationId: null,
+              localDeliveryZoneId: zone.id,
+              zoneUpdatedAt: zone.updatedAt,
+              deliveryPoint: point,
+              deliveryPromiseAt: quote.deliveryPromiseAt,
+              shippingCents: quote.shippingCents,
+              taxRegime: settings.taxRegime,
+              uvtValueCents: settings.uvtValueCents,
+              uvtYear: settings.uvtYear,
+            }),
+          });
+        } catch (error) {
+          if (!(error instanceof LocalDeliveryConflictError)) throw error;
+        }
+      }
+      return quotes.sort((left, right) => {
+        const cost =
+          left.shippingCents < right.shippingCents
+            ? -1
+            : left.shippingCents > right.shippingCents
+              ? 1
+              : 0;
+        return cost || compareStrings(left.zoneCode, right.zoneCode);
+      });
+    });
+  }
+
   async checkout(input: CheckoutConversionInput): Promise<CheckoutResult> {
     const contact = {
       email: email(input.contact.email),
@@ -705,6 +798,11 @@ export class OrderService {
       familyName: text(input.contact.familyName, "familyName", 2, 100),
       recipientName: text(input.contact.recipientName, "recipientName", 2, 200),
       phoneE164: phone(input.contact.phoneE164),
+      buyerDocumentType: optionalText(input.contact.buyerDocumentType, "buyerDocumentType", 2),
+      buyerDocumentNumber:
+        optionalText(input.contact.buyerDocumentNumber, "buyerDocumentNumber", 30)?.toUpperCase() ??
+        null,
+      buyerTaxRegime: input.contact.buyerTaxRegime ?? null,
       termsVersion: text(input.contact.termsVersion, "termsVersion", 1, 50),
       privacyPolicyVersion: text(input.contact.privacyPolicyVersion, "privacyPolicyVersion", 1, 50),
       acceptanceProofHash: hash32(input.contact.acceptanceProofHash, "acceptanceProofHash"),
@@ -721,6 +819,9 @@ export class OrderService {
       expiresAt: validDate(input.idempotency.expiresAt, "idempotency.expiresAt"),
     };
     const receiptAccessTokenHash = hash32(input.receiptAccessTokenHash, "receiptAccessTokenHash");
+    const receiptDeliveryReference = input.receiptDeliveryReference;
+    if (receiptDeliveryReference !== undefined)
+      assertUuid(receiptDeliveryReference, "receiptDeliveryReference");
     if (!/^[0-9a-f]{64}$/.test(input.expectedReviewFingerprint)) {
       throw new OrderValidationError("expectedReviewFingerprint must be a SHA-256 hex value.");
     }
@@ -811,6 +912,7 @@ export class OrderService {
         const settings = await lockedSettings(tx, this.defaults);
         const taxes = await taxesForCart(tx, cart, settings);
         const isPickup = input.fulfillment.method === "CLICK_COLLECT";
+        const isLocal = input.fulfillment.method === "LOCAL_DELIVERY";
         let locationId: string | null = null;
         let municipality: {
           code: string;
@@ -871,12 +973,80 @@ export class OrderService {
           }
         }
         if (!municipality) throw new OrderValidationError("A DANE municipality is required.");
-        const shippingCents = isPickup ? 0n : settings.standardShippingCents;
+        if ((contact.buyerDocumentType === null) !== (contact.buyerDocumentNumber === null)) {
+          throw new OrderValidationError(
+            "Buyer document type and number must be provided together.",
+          );
+        }
+        if (
+          contact.buyerDocumentType &&
+          !["11", "12", "13", "21", "22", "31", "41", "42", "50", "91"].includes(
+            contact.buyerDocumentType,
+          )
+        ) {
+          throw new OrderValidationError("buyerDocumentType is not supported by DIAN.");
+        }
+        if (
+          contact.buyerDocumentNumber &&
+          !/^[A-Z0-9.-]{3,30}$/.test(contact.buyerDocumentNumber)
+        ) {
+          throw new OrderValidationError("buyerDocumentNumber has an invalid format.");
+        }
+        if (
+          (settings.taxRegime === "RESPONSABLE_IVA" ||
+            input.fulfillment.method === "HOME_DELIVERY") &&
+          !contact.buyerDocumentNumber
+        ) {
+          throw new OrderValidationError(
+            "Buyer identification is required for carrier delivery and responsible VAT.",
+          );
+        }
+        if (
+          settings.taxRegime === "RESPONSABLE_IVA" &&
+          !["NO_RESPONSABLE_IVA", "RESPONSABLE_IVA"].includes(contact.buyerTaxRegime ?? "")
+        ) {
+          throw new OrderValidationError("Buyer tax regime is required for electronic invoicing.");
+        }
+        let localDeliveryZoneId: string | null = null;
+        let deliveryPoint: DeliveryPoint | null = null;
+        let localQuote: ReturnType<typeof quoteLocalDeliveryZone> | null = null;
+        if (isLocal) {
+          if (!settings.localDeliveryEnabled)
+            throw new OrderValidationError("Local Flex delivery is disabled.");
+          deliveryPoint = assertDeliveryPoint(input.fulfillment.point);
+          const zone = await tx.localDeliveryZone.findUnique({
+            where: { id: assertUuid(input.fulfillment.zoneId, "zoneId") },
+          });
+          if (!zone)
+            throw new OrderValidationError("The selected local delivery zone no longer exists.");
+          localQuote = quoteLocalDeliveryZone(zone, {
+            municipalityCode: municipality.code,
+            point: deliveryPoint,
+            merchandiseTotalCents: BigInt(cart.totalCents) + totalTax(taxes),
+            now,
+            timeZone: settings.timeZone,
+          });
+          localDeliveryZoneId = localQuote.zoneId;
+        }
+        const shippingCents = isPickup
+          ? 0n
+          : (localQuote?.shippingCents ?? settings.standardShippingCents);
+        const deliveryPromiseAt =
+          localQuote?.deliveryPromiseAt ??
+          new Date(now.getTime() + settings.deliveryPromiseDays * 86_400_000);
         const reviewFingerprint = fingerprint({
           cart,
           taxes,
           fulfillmentMethod: input.fulfillment.method,
           clickCollectLocationId: locationId,
+          ...(localQuote && deliveryPoint
+            ? {
+                localDeliveryZoneId: localQuote.zoneId,
+                zoneUpdatedAt: localQuote.zoneUpdatedAt,
+                deliveryPoint,
+                deliveryPromiseAt: localQuote.deliveryPromiseAt,
+              }
+            : {}),
           shippingCents,
           taxRegime: settings.taxRegime,
           uvtValueCents: settings.uvtValueCents,
@@ -975,9 +1145,6 @@ export class OrderService {
         const totalCents = merchandiseTotal + shippingCents;
         assertMoney(totalCents, "totalCents");
         const reservationExpiresAt = new Date(now.getTime() + settings.reservationMinutes * 60_000);
-        const deliveryPromiseAt = new Date(
-          now.getTime() + settings.deliveryPromiseDays * 86_400_000,
-        );
         const created = await tx.order.create({
           data: {
             id: orderId,
@@ -996,6 +1163,9 @@ export class OrderService {
             emailSnapshot: contact.email,
             recipientNameSnapshot: contact.recipientName,
             phoneE164Snapshot: contact.phoneE164,
+            buyerDocumentTypeSnapshot: contact.buyerDocumentType,
+            buyerDocumentNumberSnapshot: contact.buyerDocumentNumber,
+            buyerTaxRegimeSnapshot: contact.buyerTaxRegime,
             countryCode: "CO",
             departmentCode: municipality.departmentCode,
             departmentNameSnapshot: municipality.department.name,
@@ -1005,6 +1175,8 @@ export class OrderService {
             addressLine2Snapshot: addressLine2,
             neighborhoodSnapshot: neighborhood,
             postalCodeSnapshot: postalCode,
+            deliveryLatitudeE6: deliveryPoint?.latitudeE6 ?? null,
+            deliveryLongitudeE6: deliveryPoint?.longitudeE6 ?? null,
             deliveryNotesSnapshot: deliveryNotes,
             clickCollectLocationId: locationId,
             couponCodeSnapshot: cart.coupon?.code ?? null,
@@ -1108,6 +1280,10 @@ export class OrderService {
             shipmentGroups.set(entry.locationId, group);
           }
         }
+        const createdItemByCartItem = new Map(
+          createdItems.map((item) => [item.sourceCartItemId!, item] as const),
+        );
+        const declarationProgress = new Map<string, { quantity: number; value: bigint }>();
         let shippingAssigned = false;
         for (const [originLocationId, entries] of [...shipmentGroups].sort(([left], [right]) =>
           left < right ? -1 : left > right ? 1 : 0,
@@ -1116,6 +1292,7 @@ export class OrderService {
             data: {
               orderId,
               originLocationId,
+              localDeliveryZoneId,
               kind: isPickup ? "CLICK_COLLECT" : "DELIVERY",
               shippingCents: !shippingAssigned ? shippingCents : 0n,
               promisedAt: deliveryPromiseAt,
@@ -1123,11 +1300,27 @@ export class OrderService {
           });
           shippingAssigned = true;
           for (const entry of entries) {
+            const orderItem = createdItemByCartItem.get(entry.cartItemId)!;
+            const previous = declarationProgress.get(entry.cartItemId) ?? {
+              quantity: 0,
+              value: 0n,
+            };
+            const quantity = previous.quantity + entry.quantity;
+            const declaredValueCents =
+              roundDivHalfUp(
+                (orderItem.lineTotalCents + orderItem.taxCents) * BigInt(quantity),
+                BigInt(orderItem.quantity),
+              ) - previous.value;
+            declarationProgress.set(entry.cartItemId, {
+              quantity,
+              value: previous.value + declaredValueCents,
+            });
             await tx.shipmentItem.create({
               data: {
                 shipmentId: shipment.id,
                 orderItemId: itemIdByCartItem.get(entry.cartItemId)!,
                 quantity: entry.quantity,
+                declaredValueCents,
               },
             });
           }
@@ -1257,6 +1450,7 @@ export class OrderService {
               orderNumber: order.orderNumber,
               receiptNumber: receipt.receiptNumber,
               fulfillmentMethod: input.fulfillment.method,
+              ...(receiptDeliveryReference ? { receiptDeliveryReference } : {}),
               totalCents: order.totalCents.toString(),
               paymentStatus: order.paymentStatus,
             },

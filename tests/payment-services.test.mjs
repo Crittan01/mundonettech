@@ -100,6 +100,8 @@ async function makeOrder(customer = { id: catalog.customerId, email: customerEma
       familyName: "Rodríguez",
       recipientName: "Laura Rodríguez",
       phoneE164: "3001234567",
+      buyerDocumentType: "13",
+      buyerDocumentNumber: "1020304050",
       termsVersion: "2026-01",
       privacyPolicyVersion: "2026-01",
       acceptanceProofHash: hash(),

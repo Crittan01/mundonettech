@@ -29,6 +29,7 @@ async function fillContact(page: import("@playwright/test").Page, homeDelivery: 
   await page.getByLabel("Apellidos", { exact: true }).fill("Rodríguez");
   await page.getByLabel("Persona que recibe").fill("Laura Rodríguez");
   await page.getByLabel("Teléfono", { exact: true }).fill("3001234567");
+  await page.getByLabel("Número de documento").fill("1020304050");
   if (homeDelivery) {
     await page.getByLabel("Departamento", { exact: true }).selectOption("11");
     await page.getByLabel("Municipio o territorio").selectOption("11001");

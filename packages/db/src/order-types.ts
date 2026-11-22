@@ -1,4 +1,9 @@
-import type { CalculatedOrderTaxLine, OrderTaxRule, StoreTaxRegimeValue } from "@mundonettech/core";
+import type {
+  CalculatedOrderTaxLine,
+  DeliveryPoint,
+  OrderTaxRule,
+  StoreTaxRegimeValue,
+} from "@mundonettech/core";
 
 import type { CartReference, CartSnapshot } from "./cart-types.js";
 import type { OrderStatus, PaymentStatus } from "./generated/client.js";
@@ -23,6 +28,9 @@ export interface CheckoutContactInput {
   readonly familyName: string;
   readonly recipientName: string;
   readonly phoneE164: string;
+  readonly buyerDocumentType?: string;
+  readonly buyerDocumentNumber?: string;
+  readonly buyerTaxRegime?: StoreTaxRegimeValue | null;
   readonly termsVersion: string;
   readonly privacyPolicyVersion: string;
   readonly acceptanceProofHash: Uint8Array;
@@ -41,13 +49,19 @@ export interface HomeDeliveryInput {
   readonly deliveryNotes?: string | null;
 }
 
+export interface LocalDeliveryInput extends Omit<HomeDeliveryInput, "method"> {
+  readonly method: "LOCAL_DELIVERY";
+  readonly zoneId: string;
+  readonly point: DeliveryPoint;
+}
+
 export interface ClickCollectInput {
   readonly method: "CLICK_COLLECT";
   readonly locationId: string;
   readonly deliveryNotes?: string | null;
 }
 
-export type CheckoutFulfillmentInput = HomeDeliveryInput | ClickCollectInput;
+export type CheckoutFulfillmentInput = HomeDeliveryInput | LocalDeliveryInput | ClickCollectInput;
 
 export interface CheckoutIdempotencyInput {
   readonly keyHash: Uint8Array;
@@ -62,6 +76,7 @@ export interface CheckoutConversionInput {
   readonly fulfillment: CheckoutFulfillmentInput;
   readonly idempotency: CheckoutIdempotencyInput;
   readonly receiptAccessTokenHash: Uint8Array;
+  readonly receiptDeliveryReference?: string;
   readonly expectedReviewFingerprint: string;
 }
 
@@ -120,6 +135,15 @@ export type CheckoutTaxLineSnapshot = Omit<
   readonly taxCents: string;
 };
 
+export interface LocalDeliveryQuoteSnapshot {
+  readonly zoneId: string;
+  readonly zoneCode: string;
+  readonly shippingCents: string;
+  readonly totalCents: string;
+  readonly deliveryPromiseAt: string;
+  readonly reviewFingerprint: string;
+}
+
 export interface CheckoutPreview {
   readonly cart: CartSnapshot;
   readonly customer: CheckoutCustomerSnapshot | null;
@@ -136,6 +160,7 @@ export interface CheckoutPreview {
     readonly reviewFingerprint: string;
   };
   readonly clickAndCollectEnabled: boolean;
+  readonly localDeliveryEnabled: boolean;
   readonly pickupLocations: readonly PickupLocationSnapshot[];
   readonly departments: readonly DaneDepartmentSnapshot[];
   readonly municipalities: readonly DaneMunicipalitySnapshot[];
@@ -180,7 +205,7 @@ export interface OrderReceiptSnapshot {
   readonly issuedAt: string;
   readonly orderStatus: OrderStatus;
   readonly paymentStatus: PaymentStatus;
-  readonly fulfillmentMethod: "HOME_DELIVERY" | "CLICK_COLLECT";
+  readonly fulfillmentMethod: "HOME_DELIVERY" | "CLICK_COLLECT" | "LOCAL_DELIVERY";
   readonly taxRegime: StoreTaxRegimeValue;
   readonly currency: "COP";
   readonly emailSnapshot: string;

@@ -17,6 +17,7 @@ model DomainOutbox {
   claimedBy        String?   @db.VarChar(120)
   claimExpiresAt   DateTime? @db.Timestamptz(6)
   processedAt      DateTime? @db.Timestamptz(6)
+  failedAt         DateTime? @db.Timestamptz(6)
   attempts         Int       @default(0)
   lastError        String?   @db.VarChar(2000)
 

@@ -3,7 +3,11 @@
 import { createHash } from "node:crypto";
 
 import { legalConfig } from "@mundonettech/config/legal";
-import { PaymentProvider, type CheckoutFulfillmentInput } from "@mundonettech/db";
+import {
+  PaymentProvider,
+  type CheckoutFulfillmentInput,
+  type LocalDeliveryQuoteSnapshot,
+} from "@mundonettech/db";
 import {
   PaymentConflictError,
   PaymentNotFoundError,
@@ -44,7 +48,7 @@ const submissionSchema = z
   .object({
     submissionId: z.string().uuid(),
     reviewFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
-    fulfillmentMethod: z.enum(["HOME_DELIVERY", "CLICK_COLLECT"]),
+    fulfillmentMethod: z.enum(["HOME_DELIVERY", "LOCAL_DELIVERY", "CLICK_COLLECT"]),
     paymentMethod: z.enum(["WOMPI", "COD", "BANK_TRANSFER", "STORE_CREDIT"]),
     wompiCredentialId: z.union([z.string().uuid(), z.literal("")]),
     email: z.string().trim().email().max(320),
@@ -52,6 +56,12 @@ const submissionSchema = z
     familyName: z.string().trim().min(2).max(100),
     recipientName: z.string().trim().min(2).max(200),
     phoneE164: z.string().trim().min(8).max(24).regex(phoneInputPattern),
+    buyerDocumentType: z.union([
+      z.enum(["11", "12", "13", "21", "22", "31", "41", "42", "50", "91"]),
+      z.literal(""),
+    ]),
+    buyerDocumentNumber: z.string().trim().max(30),
+    buyerTaxRegime: z.union([z.enum(["NO_RESPONSABLE_IVA", "RESPONSABLE_IVA"]), z.literal("")]),
     departmentCode: z.union([z.string().regex(/^[0-9]{2}$/), z.literal("")]),
     municipalityCode: z.union([z.string().regex(/^[0-9]{5}$/), z.literal("")]),
     addressLine1: z.string().trim().max(200),
@@ -59,25 +69,57 @@ const submissionSchema = z
     neighborhood: optionalText(120),
     postalCode: z.union([z.string().regex(/^[0-9]{6}$/), z.literal("")]),
     clickCollectLocationId: z.union([z.string().uuid(), z.literal("")]),
+    localDeliveryZoneId: z.union([z.string().uuid(), z.literal("")]),
+    deliveryLatitude: z.string().trim().max(24),
+    deliveryLongitude: z.string().trim().max(24),
     deliveryNotes: optionalText(500),
     termsAccepted: z.literal("true"),
     dataProcessingAccepted: z.literal("true"),
   })
   .superRefine((value, context) => {
-    if (value.fulfillmentMethod === "HOME_DELIVERY") {
+    if (value.fulfillmentMethod !== "CLICK_COLLECT") {
       if (!value.departmentCode || !value.municipalityCode || value.addressLine1.length < 5) {
         context.addIssue({
           code: "custom",
-          message: "Departamento, municipio y dirección son obligatorios para envío a domicilio.",
+          message: "Departamento, municipio y dirección son obligatorios para la entrega.",
         });
       }
     } else if (!value.clickCollectLocationId) {
       context.addIssue({ code: "custom", message: "Selecciona una sede de recogida disponible." });
     }
+    if (
+      (value.fulfillmentMethod !== "CLICK_COLLECT" || value.buyerTaxRegime !== "") &&
+      (!value.buyerDocumentType || !/^[A-Za-z0-9.-]{3,30}$/.test(value.buyerDocumentNumber))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "El tipo y número de documento son obligatorios.",
+      });
+    }
+    if (
+      value.fulfillmentMethod === "LOCAL_DELIVERY" &&
+      (!value.localDeliveryZoneId || !value.deliveryLatitude || !value.deliveryLongitude)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Selecciona una zona Flex y coordenadas válidas antes de confirmar.",
+      });
+    }
   });
 
 function digest(value: string | Uint8Array): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(createHash("sha256").update(value).digest());
+}
+
+function coordinateE6(value: string, field: string, minimum: number, maximum: number): number {
+  const match = /^(-?)([0-9]{1,3})(?:\.([0-9]{1,6}))?$/.exec(value.trim());
+  if (!match) throw new TypeError(`${field} must use at most six decimal places.`);
+  const whole = Number(match[2]);
+  const fraction = Number((match[3] ?? "").padEnd(6, "0") || 0);
+  const scaled = (match[1] === "-" ? -1 : 1) * (whole * 1_000_000 + fraction);
+  if (!Number.isSafeInteger(scaled) || scaled < minimum || scaled > maximum)
+    throw new RangeError(`${field} is outside its valid range.`);
+  return scaled;
 }
 
 function legalDocument(slug: string) {
@@ -102,6 +144,9 @@ export async function confirmCheckoutAction(
     familyName: formString(formData, "familyName"),
     recipientName: formString(formData, "recipientName"),
     phoneE164: formString(formData, "phoneE164"),
+    buyerDocumentType: formString(formData, "buyerDocumentType"),
+    buyerDocumentNumber: formString(formData, "buyerDocumentNumber"),
+    buyerTaxRegime: formString(formData, "buyerTaxRegime"),
     departmentCode: formString(formData, "departmentCode"),
     municipalityCode: formString(formData, "municipalityCode"),
     addressLine1: formString(formData, "addressLine1"),
@@ -109,6 +154,9 @@ export async function confirmCheckoutAction(
     neighborhood: formString(formData, "neighborhood"),
     postalCode: formString(formData, "postalCode"),
     clickCollectLocationId: formString(formData, "clickCollectLocationId"),
+    localDeliveryZoneId: formString(formData, "localDeliveryZoneId"),
+    deliveryLatitude: formString(formData, "deliveryLatitude"),
+    deliveryLongitude: formString(formData, "deliveryLongitude"),
     deliveryNotes: formString(formData, "deliveryNotes"),
     termsAccepted: formString(formData, "termsAccepted"),
     dataProcessingAccepted: formString(formData, "dataProcessingAccepted"),
@@ -127,6 +175,15 @@ export async function confirmCheckoutAction(
     const terms = legalDocument("terminos-y-condiciones");
     const privacy = legalDocument("privacidad");
     const dataProcessing = legalDocument("tratamiento-datos-personales");
+    const destination = {
+      departmentCode: input.departmentCode,
+      municipalityCode: input.municipalityCode,
+      addressLine1: input.addressLine1,
+      addressLine2: input.addressLine2,
+      neighborhood: input.neighborhood,
+      postalCode: input.postalCode || null,
+      deliveryNotes: input.deliveryNotes,
+    };
     const fulfillment: CheckoutFulfillmentInput =
       input.fulfillmentMethod === "CLICK_COLLECT"
         ? {
@@ -134,16 +191,27 @@ export async function confirmCheckoutAction(
             locationId: input.clickCollectLocationId,
             deliveryNotes: input.deliveryNotes,
           }
-        : {
-            method: "HOME_DELIVERY",
-            departmentCode: input.departmentCode,
-            municipalityCode: input.municipalityCode,
-            addressLine1: input.addressLine1,
-            addressLine2: input.addressLine2,
-            neighborhood: input.neighborhood,
-            postalCode: input.postalCode || null,
-            deliveryNotes: input.deliveryNotes,
-          };
+        : input.fulfillmentMethod === "LOCAL_DELIVERY"
+          ? {
+              ...destination,
+              method: "LOCAL_DELIVERY",
+              zoneId: input.localDeliveryZoneId,
+              point: {
+                latitudeE6: coordinateE6(
+                  input.deliveryLatitude,
+                  "deliveryLatitude",
+                  -90_000_000,
+                  90_000_000,
+                ),
+                longitudeE6: coordinateE6(
+                  input.deliveryLongitude,
+                  "deliveryLongitude",
+                  -180_000_000,
+                  180_000_000,
+                ),
+              },
+            }
+          : { ...destination, method: "HOME_DELIVERY" };
     const subjectHash = digest(reference.accessTokenHash);
     const requestHash = digest(
       JSON.stringify({
@@ -219,6 +287,9 @@ export async function confirmCheckoutAction(
         familyName: input.familyName,
         recipientName: input.recipientName,
         phoneE164: input.phoneE164,
+        buyerDocumentType: input.buyerDocumentType,
+        buyerDocumentNumber: input.buyerDocumentNumber,
+        buyerTaxRegime: input.buyerTaxRegime || null,
         termsVersion: terms.version,
         privacyPolicyVersion: dataProcessing.version,
         acceptanceProofHash,
@@ -233,6 +304,7 @@ export async function confirmCheckoutAction(
         expiresAt: new Date(Date.now() + 24 * 3_600_000),
       },
       receiptAccessTokenHash: digest(receiptToken),
+      receiptDeliveryReference: input.submissionId,
       expectedReviewFingerprint: input.reviewFingerprint,
     });
     try {
@@ -284,4 +356,57 @@ export async function confirmCheckoutAction(
     return actionError(checkoutMutationMessage(error), values);
   }
   redirect(receiptUrl);
+}
+
+export interface FlexQuoteActionState {
+  readonly status: "idle" | "success" | "error";
+  readonly message: string;
+  readonly quotes: readonly LocalDeliveryQuoteSnapshot[];
+}
+
+export async function quoteLocalDeliveryAction(
+  _previous: FlexQuoteActionState,
+  formData: FormData,
+): Promise<FlexQuoteActionState> {
+  try {
+    const reference = await readCheckoutCartReference();
+    if (!reference)
+      return { status: "error", message: "Tu carrito ya no está disponible.", quotes: [] };
+    const municipalityCode = formString(formData, "municipalityCode");
+    if (!/^[0-9]{5}$/.test(municipalityCode)) {
+      return {
+        status: "error",
+        message: "Selecciona departamento y municipio antes de cotizar Flex.",
+        quotes: [],
+      };
+    }
+    const point = {
+      latitudeE6: coordinateE6(
+        formString(formData, "deliveryLatitude"),
+        "deliveryLatitude",
+        -90_000_000,
+        90_000_000,
+      ),
+      longitudeE6: coordinateE6(
+        formString(formData, "deliveryLongitude"),
+        "deliveryLongitude",
+        -180_000_000,
+        180_000_000,
+      ),
+    };
+    const quotes = await orderService().localDeliveryQuotes(reference, { municipalityCode, point });
+    return {
+      status: "success",
+      message: quotes.length
+        ? "Cotizaciones Flex actualizadas."
+        : "No hay cobertura Flex activa para estas coordenadas.",
+      quotes,
+    };
+  } catch {
+    return {
+      status: "error",
+      message: "No pudimos cotizar Flex. Revisa las coordenadas e inténtalo de nuevo.",
+      quotes: [],
+    };
+  }
 }

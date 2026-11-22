@@ -82,6 +82,47 @@ enum ShipmentStatus {
   CANCELLED
 }
 
+enum ShippingProviderCode {
+  AVEONLINE
+  FLEX
+  PICKUP
+}
+
+enum OrderFulfillmentStatus {
+  PENDING
+  PICKING
+  PACKED
+  LABELLED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RECONCILING
+}
+
+enum ShipmentPackageStatus {
+  SEALED
+  CLAIMED
+  LABELLED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RECONCILING
+}
+
+enum ShipmentEventType {
+  FULFILLMENT_CREATED
+  PICKING_STARTED
+  PACKAGE_SEALED
+  LABEL_CLAIMED
+  LABEL_GENERATED
+  PROVIDER_REJECTED
+  PROVIDER_UNCERTAIN
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  NOTE
+}
+
 enum OrderRefundStatus {
   REQUESTED
   APPROVED
@@ -99,44 +140,173 @@ enum OrderRefundReason {
   CUSTOMER_SUPPORT
 }
 
+model LocalDeliveryZone {
+  id                         String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code                       String            @db.VarChar(40)
+  name                       String            @db.VarChar(120)
+  active                     Boolean           @default(true)
+  municipalityCodes          Json              @db.JsonB
+  polygon                    Json              @db.JsonB
+  baseFeeCents               BigInt
+  freeShippingThresholdCents BigInt?
+  cutoffMinutes              Int
+  deliveryPromiseMinutes     Int
+  createdByAdminUserId       String            @db.Uuid
+  updatedByAdminUserId       String            @db.Uuid
+  createdAt                  DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt                  DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt                  DateTime?         @db.Timestamptz(6)
+  createdBy                  AdminUser         @relation("DeliveryZoneCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  updatedBy                  AdminUser         @relation("DeliveryZoneUpdater", fields: [updatedByAdminUserId], references: [id], onDelete: Restrict)
+  shipments                  Shipment[]
+
+  @@index([active, deletedAt])
+  @@map("LocalDeliveryZone")
+}
+
 model Shipment {
-  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId           String            @db.Uuid
-  originLocationId  String            @db.Uuid
-  kind              ShipmentKind
-  status            ShipmentStatus    @default(PENDING)
-  trackingCode      String?           @db.VarChar(120)
-  carrier           String?           @db.VarChar(120)
-  shippingCents     BigInt            @default(0)
-  promisedAt        DateTime          @db.Timestamptz(6)
-  readyAt           DateTime?         @db.Timestamptz(6)
-  shippedAt         DateTime?         @db.Timestamptz(6)
-  deliveredAt       DateTime?         @db.Timestamptz(6)
-  cancelledAt       DateTime?         @db.Timestamptz(6)
-  createdAt         DateTime          @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
-  order             Order             @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  originLocation    StockLocation     @relation(fields: [originLocationId], references: [id], onDelete: Restrict)
-  items             ShipmentItem[]
+  id                   String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId              String            @db.Uuid
+  originLocationId     String            @db.Uuid
+  localDeliveryZoneId  String?           @db.Uuid
+  kind                 ShipmentKind
+  status               ShipmentStatus    @default(PENDING)
+  trackingCode         String?           @db.VarChar(120)
+  carrier              String?           @db.VarChar(120)
+  localDriverName      String?           @db.VarChar(200)
+  localDriverPhoneE164 String?           @db.VarChar(16)
+  shippingCents        BigInt            @default(0)
+  promisedAt           DateTime          @db.Timestamptz(6)
+  readyAt              DateTime?         @db.Timestamptz(6)
+  shippedAt            DateTime?         @db.Timestamptz(6)
+  deliveredAt          DateTime?         @db.Timestamptz(6)
+  cancelledAt          DateTime?         @db.Timestamptz(6)
+  createdAt            DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  order                Order             @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  originLocation       StockLocation     @relation(fields: [originLocationId], references: [id], onDelete: Restrict)
+  localDeliveryZone    LocalDeliveryZone? @relation(fields: [localDeliveryZoneId], references: [id], onDelete: Restrict)
+  items                ShipmentItem[]
+  fulfillment          OrderFulfillment?
+  packages             ShipmentPackage[]
+  events               ShipmentEvent[]
 
   @@index([orderId, status, createdAt])
   @@index([originLocationId, status])
   @@index([status, promisedAt])
+  @@index([localDeliveryZoneId, status])
   @@map("Shipment")
 }
 
 model ShipmentItem {
-  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  shipmentId String    @db.Uuid
-  orderItemId String   @db.Uuid
-  quantity   Int
-  createdAt  DateTime  @default(now()) @db.Timestamptz(6)
-  shipment   Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
-  orderItem  OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipmentId          String    @db.Uuid
+  orderItemId         String    @db.Uuid
+  quantity            Int
+  declaredValueCents  BigInt?
+  createdAt           DateTime  @default(now()) @db.Timestamptz(6)
+  shipment            Shipment  @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  orderItem           OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  packageItems        ShipmentPackageItem[]
 
   @@unique([shipmentId, orderItemId])
   @@index([orderItemId, shipmentId])
   @@map("ShipmentItem")
+}
+
+model OrderFulfillment {
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId        String                 @db.Uuid
+  shipmentId     String                 @unique @db.Uuid
+  provider       ShippingProviderCode
+  status         OrderFulfillmentStatus @default(PENDING)
+  credentialId   String?                @db.Uuid
+  environment    IntegrationEnvironment?
+  version        Int                    @default(0)
+  createdAt      DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  order          Order                  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  shipment       Shipment               @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  credential     IntegrationCredential? @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+
+  @@index([orderId, status, createdAt])
+  @@index([status, provider, createdAt])
+  @@index([credentialId, status])
+  @@map("OrderFulfillment")
+}
+
+model ShipmentPackage {
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipmentId        String                @db.Uuid
+  packageNumber     Int
+  status            ShipmentPackageStatus @default(SEALED)
+  weightGrams       Int
+  lengthMillimeters Int
+  widthMillimeters  Int
+  heightMillimeters Int
+  declaredValueCents BigInt
+  requestKey        String                @unique @db.VarChar(128)
+  requestHash       Bytes                 @db.ByteA
+  credentialId      String?               @db.Uuid
+  providerReference String?               @db.VarChar(128)
+  trackingCode      String?               @unique @db.VarChar(120)
+  labelUrl          String?               @db.VarChar(2048)
+  claimedBy         String?               @db.VarChar(120)
+  claimedAt         DateTime?             @db.Timestamptz(6)
+  claimExpiresAt    DateTime?             @db.Timestamptz(6)
+  requestStartedAt  DateTime?             @db.Timestamptz(6)
+  lastError         String?               @db.VarChar(1000)
+  labelledAt        DateTime?             @db.Timestamptz(6)
+  shippedAt         DateTime?             @db.Timestamptz(6)
+  deliveredAt       DateTime?             @db.Timestamptz(6)
+  cancelledAt       DateTime?             @db.Timestamptz(6)
+  createdAt         DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  shipment          Shipment              @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  credential        IntegrationCredential? @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  items             ShipmentPackageItem[]
+  events            ShipmentEvent[]
+
+  @@unique([shipmentId, packageNumber])
+  @@index([status, claimExpiresAt, createdAt])
+  @@index([credentialId, status])
+  @@map("ShipmentPackage")
+}
+
+model ShipmentPackageItem {
+  id                  String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  packageId           String          @db.Uuid
+  shipmentItemId      String          @db.Uuid
+  quantity            Int
+  declaredValueCents  BigInt
+  createdAt           DateTime        @default(now()) @db.Timestamptz(6)
+  package             ShipmentPackage @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  shipmentItem        ShipmentItem    @relation(fields: [shipmentItemId], references: [id], onDelete: Restrict)
+
+  @@unique([packageId, shipmentItemId])
+  @@index([shipmentItemId, packageId])
+  @@map("ShipmentPackageItem")
+}
+
+model ShipmentEvent {
+  id                String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  shipmentId        String           @db.Uuid
+  packageId         String?          @db.Uuid
+  actorAdminUserId  String?          @db.Uuid
+  type              ShipmentEventType
+  eventKey          String           @unique @db.VarChar(128)
+  providerEventId   String?          @db.VarChar(128)
+  payloadHash       Bytes?           @db.ByteA
+  metadata          Json             @default("{}") @db.JsonB
+  occurredAt        DateTime         @default(now()) @db.Timestamptz(6)
+  shipment          Shipment         @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  package           ShipmentPackage? @relation(fields: [packageId], references: [id], onDelete: Restrict)
+  actor             AdminUser?       @relation(fields: [actorAdminUserId], references: [id], onDelete: Restrict)
+
+  @@unique([shipmentId, providerEventId])
+  @@index([shipmentId, occurredAt, id])
+  @@index([packageId, occurredAt])
+  @@map("ShipmentEvent")
 }
 
 model OrderRefund {
@@ -160,6 +330,7 @@ model OrderRefund {
   items                   OrderRefundItem[]
   paymentTransactions     PaymentTransaction[]
   storeCreditEntries      StoreCreditEntry[]
+  creditNote              CreditNote?
 
   @@index([orderId, status, createdAt])
   @@index([requestedByAdminUserId, createdAt])

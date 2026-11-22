@@ -1,0 +1,557 @@
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+
+import { normalizeEmail } from "@mundonettech/core";
+import type { EmailEventStatus } from "@mundonettech/db";
+
+import {
+  defaultEmailTemplate,
+  renderEmailTemplate,
+  validateEmailTemplate,
+} from "./email-templates.js";
+import {
+  EmailConflictError,
+  EmailNotFoundError,
+  EmailProviderError,
+  EmailValidationError,
+  type EmailAuditContext,
+  type EmailCredentials,
+  type EmailProvider,
+  type EmailQueueInput,
+  type EmailServiceOptions,
+  type EmailTemplateInput,
+} from "./email-types.js";
+import {
+  assertIntegrationKey,
+  assertIntegrationUuid,
+  hash32,
+  publicHttpsUrl,
+} from "./integration-utils.js";
+import { parseEmailCredentials, ResendEmailProvider } from "./resend.js";
+import { verifySvixWebhook } from "./svix.js";
+
+export interface EmailSendOutcome {
+  readonly id: string;
+  readonly status: string;
+  readonly providerMessageId: string | null;
+  readonly nextAttemptAt: Date | null;
+}
+
+const templateWriters = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"]);
+const finalStatuses = new Set(["BOUNCED", "COMPLAINED", "SUPPRESSED", "CANCELLED", "FAILED"]);
+
+function templateKey(value: string): string {
+  if (typeof value !== "string" || !/^[a-z][a-z0-9.-]{1,79}$/.test(value))
+    throw new EmailValidationError("templateKey is invalid.");
+  return value;
+}
+
+function topicKey(value: string): string {
+  return templateKey(value);
+}
+
+function statusRank(status: string): number {
+  const ranks: Record<string, number> = {
+    QUEUED: 0,
+    SENDING: 10,
+    SENT: 20,
+    DELIVERY_DELAYED: 25,
+    DELIVERED: 30,
+    BOUNCED: 50,
+    COMPLAINED: 60,
+    SUPPRESSED: 70,
+    CANCELLED: 70,
+    FAILED: 70,
+  };
+  const rank = ranks[status];
+  if (rank === undefined) throw new EmailValidationError("Unsupported email status.");
+  return rank;
+}
+
+function errorCode(error: unknown): string {
+  return error instanceof EmailProviderError ? error.code : "PROVIDER_FAILURE";
+}
+
+export class EmailService {
+  constructor(
+    private readonly db: import("@mundonettech/db").PrismaClient,
+    private readonly options: EmailServiceOptions,
+  ) {
+    this.options = {
+      ...options,
+      publicSiteUrl: publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl").replace(/\/$/, ""),
+    };
+  }
+
+  private async credentials(credentialId: string): Promise<EmailCredentials> {
+    const plaintext = await this.options.vault.reveal(credentialId);
+    try {
+      return parseEmailCredentials(plaintext);
+    } finally {
+      plaintext.fill(0);
+    }
+  }
+
+  private provider(credentials: EmailCredentials): EmailProvider {
+    return this.options.providerFactory?.(credentials) ?? new ResendEmailProvider(credentials);
+  }
+
+  private async assertWriter(actorAdminUserId: string): Promise<void> {
+    const actor = await this.db.adminUser.findFirst({
+      where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+      select: { role: true },
+    });
+    if (!actor || !templateWriters.has(actor.role))
+      throw new EmailValidationError("Administrator is not authorized to manage email templates.");
+  }
+
+  async saveTemplate(input: EmailTemplateInput, audit: EmailAuditContext): Promise<string> {
+    const key = templateKey(input.templateKey);
+    const template = validateEmailTemplate({
+      templateKey: key,
+      subject: input.subject,
+      htmlBody: input.htmlBody,
+      textBody: input.textBody,
+      variables: input.variables,
+    });
+    await this.assertWriter(audit.actorAdminUserId);
+    return this.db.$transaction(async (tx) => {
+      const latest = await tx.emailTemplateOverride.aggregate({
+        where: { templateKey: key, locale: "es-CO" },
+        _max: { version: true },
+      });
+      const version = (latest._max.version ?? 0) + 1;
+      if (version > 2_147_483_647)
+        throw new EmailConflictError("Email template version sequence is exhausted.");
+      if (input.publish) {
+        await tx.emailTemplateOverride.updateMany({
+          where: { templateKey: key, locale: "es-CO", status: "PUBLISHED" },
+          data: { status: "ARCHIVED" },
+        });
+      }
+      const created = await tx.emailTemplateOverride.create({
+        data: {
+          templateKey: key,
+          locale: "es-CO",
+          version,
+          status: input.publish ? "PUBLISHED" : "DRAFT",
+          subject: template.subject,
+          htmlBody: template.htmlBody,
+          textBody: template.textBody,
+          variables: [...template.variables],
+          createdByAdminUserId: audit.actorAdminUserId,
+        },
+      });
+      await tx.adminActionLog.create({
+        data: {
+          actorAdminUserId: audit.actorAdminUserId,
+          action: input.publish ? "EMAIL_TEMPLATE_PUBLISHED" : "EMAIL_TEMPLATE_DRAFT_CREATED",
+          targetType: "EmailTemplateOverride",
+          targetId: created.id,
+          requestId: audit.requestId ?? null,
+          ipHash: hash32(audit.ipHash, "ipHash"),
+          userAgentHash: audit.userAgentHash ? hash32(audit.userAgentHash, "userAgentHash") : null,
+          metadata: { templateKey: key, version },
+        },
+      });
+      return created.id;
+    });
+  }
+
+  private unsubscribeToken(
+    secret: string,
+    eventId: string,
+    recipientHash: Uint8Array,
+    topic: string,
+  ): string {
+    const key = Buffer.from(secret, "base64");
+    if (key.length < 32)
+      throw new EmailValidationError("unsubscribeSecret must decode to at least 32 bytes.");
+    const signature = createHmac("sha256", key)
+      .update(`${eventId}.${Buffer.from(recipientHash).toString("hex")}.${topic}`)
+      .digest("base64url");
+    return `${eventId}.${signature}`;
+  }
+
+  async queue(input: EmailQueueInput): Promise<{ id: string; status: string }> {
+    const key = templateKey(input.templateKey);
+    const topic = topicKey(input.topic);
+    assertIntegrationKey(input.idempotencyKey);
+    assertIntegrationUuid(input.credentialId, "credentialId");
+    if (input.orderId !== undefined) assertIntegrationUuid(input.orderId, "orderId");
+    let recipientEmail: string;
+    try {
+      recipientEmail = normalizeEmail(input.recipientEmail);
+    } catch {
+      throw new EmailValidationError("recipientEmail must be a valid normalized address.");
+    }
+    const recipientHash = createHash("sha256").update(recipientEmail, "utf8").digest();
+    const existing = await this.db.emailEvent.findUnique({
+      where: { idempotencyKey: input.idempotencyKey },
+    });
+    if (existing) {
+      const same =
+        existing.templateKey === key &&
+        existing.topic === topic &&
+        existing.recipientEmail === recipientEmail &&
+        existing.credentialId === input.credentialId &&
+        (existing.orderId ?? null) === (input.orderId ?? null) &&
+        Object.entries(input.variables).every(
+          ([name, value]) =>
+            (existing.variablesSnapshot as Record<string, unknown>)[name] === value,
+        );
+      if (!same)
+        throw new EmailConflictError(
+          "Email idempotency key was already used for another message.",
+          "IDEMPOTENCY_CONFLICT",
+        );
+      return { id: existing.id, status: existing.status };
+    }
+    const credentials = await this.credentials(input.credentialId);
+    const override = await this.db.emailTemplateOverride.findFirst({
+      where: { templateKey: key, locale: "es-CO", status: "PUBLISHED" },
+    });
+    let variables: readonly string[];
+    if (override) {
+      if (
+        !Array.isArray(override.variables) ||
+        override.variables.some((value) => typeof value !== "string")
+      )
+        throw new EmailValidationError("Stored email template variables are invalid.");
+      variables = override.variables as string[];
+    } else {
+      variables = defaultEmailTemplate(key).variables;
+    }
+    const baseTemplate = override
+      ? {
+          templateKey: key,
+          subject: override.subject,
+          htmlBody: override.htmlBody,
+          textBody: override.textBody,
+          variables,
+        }
+      : defaultEmailTemplate(key);
+    const eventId = randomUUID();
+    const token = this.unsubscribeToken(
+      credentials.unsubscribeSecret,
+      eventId,
+      recipientHash,
+      topic,
+    );
+    const unsubscribeUrl = `${this.options.publicSiteUrl}/email/baja/${encodeURIComponent(token)}`;
+    const values = { ...input.variables, unsubscribeUrl };
+    for (const [name, value] of Object.entries(values)) {
+      if (name.endsWith("Url")) publicHttpsUrl(value, `variables.${name}`);
+    }
+    const rendered = renderEmailTemplate(baseTemplate, values);
+    const suppression = await this.db.emailSuppression.findUnique({
+      where: { recipientHash_topic: { recipientHash, topic } },
+    });
+    return this.db.$transaction(async (tx) => {
+      const created = await tx.emailEvent.create({
+        data: {
+          id: eventId,
+          orderId: input.orderId ?? null,
+          credentialId: input.credentialId,
+          templateKey: key,
+          topic,
+          subjectSnapshot: rendered.subject,
+          htmlBodySnapshot: rendered.htmlBody,
+          textBodySnapshot: rendered.textBody,
+          variablesSnapshot: values,
+          recipientEmail,
+          recipientHash,
+          idempotencyKey: input.idempotencyKey,
+          unsubscribeTokenHash: createHash("sha256").update(token).digest(),
+          status: suppression ? "SUPPRESSED" : "QUEUED",
+          statusRank: suppression ? statusRank("SUPPRESSED") : statusRank("QUEUED"),
+          finalAt: suppression ? new Date() : null,
+        },
+      });
+      if (!suppression) {
+        await tx.domainOutbox.create({
+          data: {
+            eventType: "email.requested.v1",
+            aggregateType: "EmailEvent",
+            aggregateId: created.id,
+            deduplicationKey: `email:${created.id}:requested:v1`,
+            payload: {
+              emailEventId: created.id,
+              ...(input.orderId ? { orderId: input.orderId } : {}),
+            },
+          },
+        });
+      }
+      return { id: created.id, status: created.status };
+    });
+  }
+
+  async send(emailEventId: string): Promise<EmailSendOutcome> {
+    assertIntegrationUuid(emailEventId, "emailEventId");
+    const claimed = await this.db.$transaction(async (tx) => {
+      const current = await tx.emailEvent.findUnique({ where: { id: emailEventId } });
+      if (!current) throw new EmailNotFoundError();
+      if (current.status !== "QUEUED" && current.status !== "SENDING") return current;
+      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = nowRows[0]!.now;
+      if (current.nextAttemptAt && current.nextAttemptAt > now) return current;
+      const updated = await tx.emailEvent.updateMany({
+        where: {
+          id: emailEventId,
+          status: { in: ["QUEUED", "SENDING"] },
+          OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
+        },
+        data: {
+          status: "SENDING",
+          statusRank: statusRank("SENDING"),
+          attemptCount: { increment: 1 },
+          nextAttemptAt: null,
+          lastError: null,
+        },
+      });
+      if (updated.count === 0)
+        return tx.emailEvent.findUniqueOrThrow({ where: { id: emailEventId } });
+      return tx.emailEvent.findUniqueOrThrow({ where: { id: emailEventId } });
+    });
+    if (
+      claimed.status !== "SENDING" ||
+      (claimed.nextAttemptAt && claimed.nextAttemptAt > new Date())
+    ) {
+      return {
+        id: claimed.id,
+        status: claimed.status,
+        providerMessageId: claimed.providerMessageId,
+        nextAttemptAt: claimed.nextAttemptAt,
+      };
+    }
+    try {
+      const credentials = await this.credentials(claimed.credentialId);
+      const tokenEventUrl = (claimed.variablesSnapshot as Record<string, unknown>).unsubscribeUrl;
+      if (typeof tokenEventUrl !== "string")
+        throw new EmailValidationError("Stored unsubscribe URL is missing.");
+      const result = await this.provider(credentials).send({
+        idempotencyKey: claimed.idempotencyKey,
+        to: claimed.recipientEmail,
+        subject: claimed.subjectSnapshot,
+        html: claimed.htmlBodySnapshot,
+        text: claimed.textBodySnapshot,
+        unsubscribeUrl: tokenEventUrl,
+      });
+      const sent = await this.db.emailEvent.update({
+        where: { id: emailEventId },
+        data: {
+          status: "SENT",
+          statusRank: statusRank("SENT"),
+          providerMessageId: result.providerMessageId,
+          sentAt: new Date(),
+          nextAttemptAt: null,
+          lastError: null,
+        },
+      });
+      return {
+        id: sent.id,
+        status: sent.status,
+        providerMessageId: sent.providerMessageId,
+        nextAttemptAt: null,
+      };
+    } catch (error) {
+      if (!(error instanceof EmailProviderError)) throw error;
+      const transient = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
+      const code = errorCode(error);
+      if (transient) {
+        const delay = Math.min(15 * 60_000, 5_000 * 2 ** Math.min(claimed.attemptCount, 8));
+        const nextAttemptAt = new Date(Date.now() + delay);
+        const retry = await this.db.emailEvent.update({
+          where: { id: emailEventId },
+          data: {
+            status: "SENDING",
+            statusRank: statusRank("SENDING"),
+            nextAttemptAt,
+            lastError: code,
+          },
+        });
+        return {
+          id: retry.id,
+          status: retry.status,
+          providerMessageId: retry.providerMessageId,
+          nextAttemptAt,
+        };
+      }
+      const failed = await this.db.emailEvent.update({
+        where: { id: emailEventId },
+        data: {
+          status: "FAILED",
+          statusRank: statusRank("FAILED"),
+          finalAt: new Date(),
+          lastError: code,
+          nextAttemptAt: null,
+        },
+      });
+      return {
+        id: failed.id,
+        status: failed.status,
+        providerMessageId: failed.providerMessageId,
+        nextAttemptAt: null,
+      };
+    }
+  }
+
+  private validUnsubscribeEvent(token: string) {
+    const [eventId, signature, extra] = token.split(".");
+    if (!eventId || !signature || extra !== undefined)
+      throw new EmailValidationError("Unsubscribe token is malformed.");
+    assertIntegrationUuid(eventId, "eventId");
+    if (!/^[A-Za-z0-9_-]{40,64}$/.test(signature))
+      throw new EmailValidationError("Unsubscribe token signature is malformed.");
+    return eventId;
+  }
+
+  async unsubscribe(token: string): Promise<{ eventId: string; topic: string; replayed: boolean }> {
+    const eventId = this.validUnsubscribeEvent(token);
+    const event = await this.db.emailEvent.findUnique({ where: { id: eventId } });
+    if (!event) throw new EmailNotFoundError("Unsubscribe link is no longer available.");
+    const actual = createHash("sha256").update(token).digest();
+    const expected = Buffer.from(event.unsubscribeTokenHash);
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
+      throw new EmailValidationError("Unsubscribe token is invalid.");
+    return this.db.$transaction(async (tx) => {
+      const inserted = await tx.$queryRaw<Array<{ id: string }>>`
+        INSERT INTO "EmailSuppression" ("recipientHash", "topic", "reason", "sourceEventId")
+        VALUES (${event.recipientHash}, ${event.topic}, 'UNSUBSCRIBE', ${event.id}::uuid)
+        ON CONFLICT ("recipientHash", "topic") DO NOTHING RETURNING "id"
+      `;
+      if (["QUEUED", "SENDING"].includes(event.status)) {
+        await tx.emailEvent.update({
+          where: { id: event.id },
+          data: {
+            status: "SUPPRESSED",
+            statusRank: statusRank("SUPPRESSED"),
+            finalAt: new Date(),
+            nextAttemptAt: null,
+          },
+        });
+      }
+      return { eventId: event.id, topic: event.topic, replayed: inserted.length === 0 };
+    });
+  }
+
+  async unsubscribeTopic(token: string): Promise<string> {
+    const eventId = this.validUnsubscribeEvent(token);
+    const event = await this.db.emailEvent.findUnique({
+      where: { id: eventId },
+      select: { topic: true, unsubscribeTokenHash: true },
+    });
+    if (!event) throw new EmailNotFoundError("Unsubscribe link is no longer available.");
+    const actual = createHash("sha256").update(token).digest();
+    if (!timingSafeEqual(actual, Buffer.from(event.unsubscribeTokenHash)))
+      throw new EmailValidationError("Unsubscribe token is invalid.");
+    return event.topic;
+  }
+
+  async processWebhook(options: {
+    body: string;
+    id: string | null;
+    timestamp: string | null;
+    signature: string | null;
+  }): Promise<{ eventId: string | null; status: string; replayed: boolean }> {
+    const credentials = await this.options.vault.list({ includeRevoked: false, limit: 100 });
+    const active = credentials.items.filter(
+      (item) => item.provider === "resend" && !item.revokedAt,
+    );
+    if (active.length === 0 || credentials.items.length === 100)
+      throw new EmailValidationError("An unambiguous active Resend credential is required.");
+    let lastError: unknown;
+    let verified: { credentialId: string; event: import("./svix.js").VerifiedSvixEvent } | null =
+      null;
+    for (const descriptor of active) {
+      try {
+        const secret = await this.credentials(descriptor.id);
+        const event = verifySvixWebhook({
+          body: options.body,
+          secret: secret.svixSecret,
+          id: options.id,
+          timestamp: options.timestamp,
+          signature: options.signature,
+        });
+        verified = { credentialId: descriptor.id, event };
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (verified) return this.persistWebhook(verified.credentialId, verified.event);
+    throw lastError instanceof Error
+      ? lastError
+      : new EmailValidationError("No Resend credential accepted the webhook.");
+  }
+
+  private async persistWebhook(
+    credentialId: string,
+    event: import("./svix.js").VerifiedSvixEvent,
+  ): Promise<{ eventId: string | null; status: string; replayed: boolean }> {
+    const payloadHash = createHash("sha256").update(event.payloadHashInput).digest();
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const email = await tx.emailEvent.findUnique({
+          where: {
+            credentialId_providerMessageId: {
+              credentialId,
+              providerMessageId: event.providerMessageId,
+            },
+          },
+        });
+        await tx.emailWebhookEvent.create({
+          data: {
+            credentialId,
+            emailEventId: email?.id ?? null,
+            svixEventId: event.svixEventId,
+            eventType: event.eventType,
+            payloadHash,
+            occurredAt: event.occurredAt,
+            processedAt: new Date(),
+          },
+        });
+        if (!email) return { eventId: null, status: "IGNORED", replayed: false };
+        const targetStatus = {
+          "email.sent": "SENT",
+          "email.delivered": "DELIVERED",
+          "email.delivery_delayed": "DELIVERY_DELAYED",
+          "email.bounced": "BOUNCED",
+          "email.complained": "COMPLAINED",
+        }[event.eventType] as EmailEventStatus | undefined;
+        if (!targetStatus) return { eventId: email.id, status: email.status, replayed: false };
+        const rank = statusRank(targetStatus);
+        if (email.statusRank > rank || finalStatuses.has(email.status))
+          return { eventId: email.id, status: email.status, replayed: false };
+        await tx.emailEvent.update({
+          where: { id: email.id },
+          data: {
+            status: targetStatus,
+            statusRank: rank,
+            sentAt: ["SENT", "DELIVERY_DELAYED", "DELIVERED", "BOUNCED", "COMPLAINED"].includes(
+              targetStatus,
+            )
+              ? (email.sentAt ?? event.occurredAt)
+              : email.sentAt,
+            deliveredAt: targetStatus === "DELIVERED" ? event.occurredAt : email.deliveredAt,
+            finalAt: ["BOUNCED", "COMPLAINED"].includes(targetStatus)
+              ? event.occurredAt
+              : email.finalAt,
+            nextAttemptAt: null,
+          },
+        });
+        if (["BOUNCED", "COMPLAINED"].includes(targetStatus)) {
+          await tx.$executeRaw`
+            INSERT INTO "EmailSuppression" ("recipientHash", "topic", "reason", "sourceEventId")
+            VALUES (${email.recipientHash}, ${email.topic}, ${targetStatus === "BOUNCED" ? "BOUNCE" : "COMPLAINT"}::"EmailSuppressionReason", ${email.id}::uuid)
+            ON CONFLICT ("recipientHash", "topic") DO NOTHING
+          `;
+        }
+        return { eventId: email.id, status: targetStatus, replayed: false };
+      });
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002")
+        return { eventId: null, status: "IGNORED", replayed: true };
+      throw error;
+    }
+  }
+}

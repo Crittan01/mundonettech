@@ -128,3 +128,11 @@ export {
 } from "./sitemap-xml.js";
 export type { SitemapXmlEntry } from "./sitemap-xml.js";
 export { absolutePublicUrl, escapeXml, normalizeXmlText } from "./xml.js";
+export {
+  assertDeliveryPoint,
+  assertDeliveryPolygon,
+  DeliveryValidationError,
+  localDeliveryPromise,
+  pointInDeliveryPolygon,
+} from "./delivery.js";
+export type { DeliveryPoint } from "./delivery.js";

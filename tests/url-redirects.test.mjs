@@ -89,6 +89,8 @@ describe("F2.3 — persistent redirect graph, concurrency and audit", () => {
       { fromPath: "/sitemap.xml", toPath: "/productos" },
       { fromPath: "/carrito", toPath: "/productos" },
       { fromPath: "/pagar/token-ejemplo", toPath: "/productos" },
+      { fromPath: "/email/baja/token-ejemplo", toPath: "/productos" },
+      { fromPath: "/origen", toPath: "/email/baja/token-ejemplo" },
       { fromPath: "/checkout", toPath: "/productos" },
       { fromPath: "https://evil.example", toPath: "/destino" },
       { fromPath: "/origen", toPath: "https://evil.example" },

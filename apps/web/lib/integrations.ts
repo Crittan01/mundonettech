@@ -5,9 +5,12 @@ import { IntegrationEnvironment, type PrismaClient } from "@mundonettech/db";
 import {
   BlockedIdentityService,
   CodReconciliationService,
+  EmailService,
   IntegrationCredentialVault,
+  InvoiceService,
   PaymentRefundService,
   PaymentService,
+  ShippingService,
   StoreCreditService,
   WompiWebhookService,
   loadCredentialKeyRing,
@@ -97,4 +100,25 @@ export function codReconciliationService(
 
 export function blockedIdentityService(db: PrismaClient = getDatabase()): BlockedIdentityService {
   return new BlockedIdentityService(db);
+}
+
+export function shippingService(db: PrismaClient = getDatabase()): ShippingService {
+  return new ShippingService(db, {
+    vault: getIntegrationCredentialVault(),
+    environment: getIntegrationEnvironment(),
+  });
+}
+
+export function emailService(db: PrismaClient = getDatabase()): EmailService {
+  return new EmailService(db, {
+    vault: getIntegrationCredentialVault(),
+    publicSiteUrl: getPublicSiteUrl(),
+  });
+}
+
+export function invoiceService(db: PrismaClient = getDatabase()): InvoiceService {
+  return new InvoiceService(db, {
+    vault: getIntegrationCredentialVault(),
+    environment: getIntegrationEnvironment(),
+  });
 }

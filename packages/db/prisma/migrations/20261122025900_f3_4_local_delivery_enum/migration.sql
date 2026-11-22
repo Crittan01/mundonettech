@@ -1,0 +1,1 @@
+ALTER TYPE "OrderFulfillmentMethod" ADD VALUE 'LOCAL_DELIVERY';
