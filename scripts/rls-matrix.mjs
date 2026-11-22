@@ -9,6 +9,7 @@ import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mj
 import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixture.mjs";
 import { cmsTables, seedCmsFixture } from "./lib/cms-test-fixture.mjs";
 import { operationsTables, seedOperationsFixture } from "./lib/operations-test-fixture.mjs";
+import { postsaleTables, seedPostSaleFixture } from "./lib/postsale-test-fixture.mjs";
 import { pricingTables, seedPricingFixture } from "./lib/pricing-test-fixture.mjs";
 import {
   checkoutTables,
@@ -37,6 +38,7 @@ const expectedTables = [
   ...paymentTables,
   ...logisticsTables,
   ...operationsTables,
+  ...postsaleTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -210,21 +212,24 @@ async function ensureMatrixFixtures(client) {
   const payments = await seedPaymentFixture(client, { checkout, catalog, adminId });
   await seedLogisticsFixture(client, { checkout, payments, adminId });
   await seedOperationsFixture(client, { adminId });
+  await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {
     const requestedRefundFilter =
       table === "OrderRefundItem"
         ? `AND EXISTS (SELECT 1 FROM public."OrderRefund" refund WHERE refund."id" = t."refundId" AND refund."status" = 'REQUESTED')`
-        : table === "InventoryLedger"
-          ? `AND EXISTS (
+        : table === "SerializedUnit"
+          ? `AND EXISTS (SELECT 1 FROM public."Shipment" shipment WHERE shipment."id" = t."shipmentId" AND shipment."status" IN ('PENDING', 'READY'))`
+          : table === "InventoryLedger"
+            ? `AND EXISTS (
               SELECT 1 FROM public."StockLevel" level
               WHERE level."locationId" = t."locationId" AND level."variantId" = t."variantId"
                 AND level."onHand" = t."onHandAfter" AND level."committed" = t."committedAfter"
                 AND level."safetyStock" = t."safetyStockAfter"
                 AND level."weightedAvgCostCents" = t."weightedAvgCostAfterCents"
             )`
-          : "";
+            : "";
     const freshRow = await client.query(
       `SELECT t."id"
        FROM public."${table}" t

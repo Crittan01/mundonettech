@@ -1,9 +1,12 @@
 export {
   addCalendarDays,
   addColombianBusinessDays,
+  addColombianCalendarMonths,
   bogotaDateOnly,
   calculateBusinessDayDeadline,
+  calculateBusinessDayDeadlineAt,
   calculateRetractRefundDeadline,
+  endOfColombianDate,
   calculateRetractWindow,
   colombiaTimeZone,
   colombianHolidays,

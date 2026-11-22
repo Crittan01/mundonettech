@@ -8,6 +8,7 @@ import {
 } from "@mundonettech/core";
 
 import type { Order, OrderRefund, PrismaClient } from "./generated/client.js";
+import type { DatabaseExecutor } from "./primitives.js";
 import {
   acquireOperationLocks,
   assertUuid,
@@ -123,6 +124,20 @@ export class OrderRefundService {
   constructor(private readonly db: PrismaClient) {}
 
   async request(input: RefundRequestInput): Promise<RefundRequestResult> {
+    return this.requestWithExecutor(this.db, input);
+  }
+
+  async requestInTransaction(
+    db: DatabaseExecutor,
+    input: RefundRequestInput,
+  ): Promise<RefundRequestResult> {
+    return this.requestWithExecutor(db, input);
+  }
+
+  private async requestWithExecutor(
+    db: DatabaseExecutor,
+    input: RefundRequestInput,
+  ): Promise<RefundRequestResult> {
     assertUuid(input.orderId, "orderId");
     const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
@@ -150,7 +165,7 @@ export class OrderRefundService {
     const expectedHash = requestDigest({ ...input, idempotencyKey, note }, requestedItems);
 
     try {
-      return await inInventoryTransaction(this.db, async (tx) => {
+      return await inInventoryTransaction(db, async (tx) => {
         await acquireOperationLocks(tx, [`order-refund:${input.orderId}`]);
         const orderRows = await tx.$queryRaw<
           Order[]

@@ -41,7 +41,10 @@ export const logisticsTables = [
   "CreditNote",
 ];
 
-export async function seedCheckoutFixture(client, { catalog, inventory, pricing, adminId }) {
+export async function seedCheckoutFixture(
+  client,
+  { catalog, inventory, pricing, adminId, receiptAccessTokenHash },
+) {
   const orderId = randomUUID();
   const orderItemId = randomUUID();
   const shipmentId = randomUUID();
@@ -117,7 +120,7 @@ export async function seedCheckoutFixture(client, { catalog, inventory, pricing,
       "orderId", "receiptNumber", "accessTokenHash", "taxRegime", "currency", "subtotalCents",
       "discountCents", "taxCents", "shippingCents", "totalCents", "contentHash"
     ) VALUES ($1, $2, $3, 'RESPONSABLE_IVA', 'COP', 200000, 5000, 0, 0, 195000, $4)`,
-    [orderId, `R-${orderNumber}`, randomBytes(32), randomBytes(32)],
+    [orderId, `R-${orderNumber}`, receiptAccessTokenHash ?? randomBytes(32), randomBytes(32)],
   );
   await client.query(
     `INSERT INTO "OrderStatusEvent" ("orderId", "orderStatus", "paymentStatus", "fulfillmentStatus", "reason")

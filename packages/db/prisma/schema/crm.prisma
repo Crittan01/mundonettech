@@ -37,6 +37,12 @@ model Customer {
   couponUsages             CouponUsage[]
   abandonedCarts           AbandonedCart[]
   storeCreditAccounts      StoreCreditAccount[]
+  addresses                Address[]
+  returnRequests           ReturnRequest[]
+  warrantyClaims           WarrantyClaim[]
+  supportTickets           SupportTicket[]
+  supportMessages          SupportTicketMessage[]
+  reviews                  Review[]
 
   @@index([status, createdAt])
   @@index([deletedAt])
@@ -62,4 +68,30 @@ model Consent {
   @@unique([revokesId])
   @@index([customerId, purpose, occurredAt])
   @@map("Consent")
+}
+
+model Address {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId       String           @db.Uuid
+  label            String           @db.VarChar(80)
+  recipientName    String           @db.VarChar(200)
+  phoneE164        String           @db.VarChar(16)
+  countryCode      String           @default("CO") @db.Char(2)
+  departmentCode   String           @db.Char(2)
+  municipalityCode String           @db.Char(5)
+  addressLine1     String           @db.VarChar(200)
+  addressLine2     String?          @db.VarChar(200)
+  neighborhood     String?          @db.VarChar(120)
+  postalCode       String?          @db.VarChar(6)
+  deliveryNotes    String?          @db.VarChar(500)
+  isDefault        Boolean          @default(false)
+  createdAt        DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime         @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt        DateTime?        @db.Timestamptz(6)
+  customer         Customer         @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  municipality     DaneMunicipality @relation(fields: [municipalityCode], references: [code], onDelete: Restrict)
+
+  @@index([customerId, deletedAt, isDefault])
+  @@index([municipalityCode])
+  @@map("Address")
 }

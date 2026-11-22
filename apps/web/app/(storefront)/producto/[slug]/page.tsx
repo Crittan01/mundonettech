@@ -5,10 +5,12 @@ import { notFound } from "next/navigation";
 import { AddBundleToCartForm } from "@/components/cart/add-to-cart-form";
 import { ProductCard } from "@/components/catalog/product-card";
 import { ProductMediaGallery } from "@/components/catalog/product-media-gallery";
+import { ProductReviews } from "@/components/catalog/product-reviews";
 import { ProductVariantPanel } from "@/components/catalog/product-variant-panel";
 import { JsonLd } from "@/components/seo/json-ld";
 import { getCatalogProduct, searchCatalog } from "@/lib/catalog";
 import { getPublicMediaOrigin } from "@/lib/env";
+import { getPublicReviews } from "@/lib/reviews";
 import { getProductImageUrls, getProductStructuredData, productUrl } from "@/lib/product-seo";
 
 const authenticityLabels = {
@@ -60,16 +62,27 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
   const defaultVariantId = product.variants.some((variant) => variant.id === requestedVariant)
     ? requestedVariant!
     : product.defaultVariantId;
-  const related = await searchCatalog({
-    categorySlug: product.category.slug,
-    excludeProductId: product.id,
-    pageSize: 3,
-    sort: "newest",
-  });
+  const rawReviewCursor = Array.isArray(query.reviewCursor)
+    ? query.reviewCursor[0]
+    : query.reviewCursor;
+  const reviewCursor = typeof rawReviewCursor === "string" ? rawReviewCursor : undefined;
+  const [related, reviews] = await Promise.all([
+    searchCatalog({
+      categorySlug: product.category.slug,
+      excludeProductId: product.id,
+      pageSize: 3,
+      sort: "newest",
+    }),
+    getPublicReviews(slug, reviewCursor),
+  ]);
   const mediaOrigin = getPublicMediaOrigin();
+  const reviewSummary =
+    reviews.count > 0 && reviews.averageRating !== null
+      ? { count: reviews.count, averageRating: reviews.averageRating }
+      : undefined;
   return (
     <div className="space-y-12">
-      <JsonLd data={getProductStructuredData(product, mediaOrigin)} />
+      <JsonLd data={getProductStructuredData(product, mediaOrigin, reviewSummary)} />
       <nav aria-label="Migas de pan" className="text-sm text-muted-foreground">
         <ol className="flex flex-wrap gap-2">
           <li>
@@ -279,6 +292,8 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
           </div>
         </section>
       ) : null}
+
+      <ProductReviews slug={slug} {...(reviewCursor ? { cursor: reviewCursor } : {})} />
 
       {related.items.length ? (
         <section aria-labelledby="related-title">

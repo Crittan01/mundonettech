@@ -41,7 +41,11 @@ export function getProductImageUrls(
   return [...new Set(urls)].slice(0, 10);
 }
 
-export function getProductStructuredData(product: CatalogProductDetail, origin: string | null) {
+export function getProductStructuredData(
+  product: CatalogProductDetail,
+  origin: string | null,
+  reviewSummary?: { count: number; averageRating: number },
+) {
   const canonical = productUrl(product);
   return buildProductJsonLd({
     name: product.name,
@@ -68,5 +72,6 @@ export function getProductStructuredData(product: CatalogProductDetail, origin: 
       ean: variant.ean,
       mpn: variant.mpn,
     })),
+    ...(reviewSummary ? { reviewSummary } : {}),
   });
 }

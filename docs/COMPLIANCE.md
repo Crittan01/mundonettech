@@ -27,13 +27,13 @@ El footer enlaza el centro legal, retracto, garantías, PQR y la Superintendenci
 - **Reembolso por retracto:** máximo quince días calendario desde el ejercicio y el cumplimiento de datos/devolución. `calculateRetractRefundDeadline` suma exactamente quince días en una zona sin DST. La Sentencia C-192 de 2026 mantiene la aplicación uniforme del término en las modalidades del artículo 47.
 - **Entrega:** el plazo aceptado debe informarse antes del pago; si no existe, la política documenta treinta días calendario. La implementación transaccional de checkout y envíos pertenece a `F3.2`–`F3.4`.
 - **Reversión:** el texto diferencia fraude, operación no solicitada, producto no recibido, distinto o defectuoso y conserva el deber de reclamar al proveedor/emisor dentro de cinco días hábiles.
-- **PQR:** el documento define canales y trazabilidad escrita. El radicado automático con seguimiento web y SLA operativo se completa en `F4A.2`; no se simula en esta fase.
+- **PQR:** el documento define canales y trazabilidad escrita. `F4A.2` implementa radicado persistente con número único, conversaciones append-only, seguimiento web autenticado e invitado, y SLA operativo de 10 días hábiles para consultas/sugerencias y 15 para quejas, reclamos y recursos.
 
 ## 3. Ley 1581 de 2012 y Hábeas Data
 
 Las políticas describen finalidades, autorización, excepciones, derechos, datos sensibles, menores, encargados, transferencias, retención y seguridad. Las consultas se documentan con diez días hábiles y los reclamos con quince, incluidas las reglas de información incompleta y prórroga legal.
 
-Controles técnicos activos: RBAC de ocho roles, MFA `aal2` y step-up, RLS *deny-by-default*, PostgREST revocado, bóveda AES-256-GCM, máscaras PII, sesiones HMAC con expiración, `AdminActionLog`, `SecurityEvent` y `Consent` append-only con revocación. La supresión/anonimización self-service de `/mi-cuenta` y la retención CRM completa se certifican en fases posteriores; no se afirman como ya entregadas.
+Controles técnicos activos: RBAC de ocho roles, MFA `aal2` y step-up, RLS *deny-by-default*, PostgREST revocado, bóveda AES-256-GCM, máscaras PII, sesiones HMAC con expiración, `AdminActionLog`, `SecurityEvent` y `Consent` append-only con revocación. La supresión/anonimización self-service de `/mi-cuenta` está implementada con revocación de sesiones, borrado de direcciones y disociación de identificadores directos; la retención CRM completa se aborda en F4B/F5.
 
 Las cookies actuales se documentan como necesarias para Auth, actividad y seguridad. Cualquier analítica/publicidad no esencial exige actualizar inventario, finalidad, duración, terceros y consentimiento antes de activarse.
 
@@ -58,7 +58,7 @@ Todos los importes de catálogo, JSON-LD y Merchant XML parten de centavos `BigI
 1. Registrar y verificar razón social, NIT, dirección de notificación judicial, teléfono y demás datos exigidos por el artículo 50; no se rellenan con valores ficticios.
 2. Verificar operación y custodia de `servicioalcliente@mundonettech.co` y `privacidad@mundonettech.co`, además de los procedimientos humanos de respuesta y radicación.
 3. Someter los ocho textos a revisión jurídica colombiana y actualizar versión/vigencia ante cambios.
-4. Contratar y verificar en ambiente real las pasarelas de pago, Aveonline, Resend y el proveedor autorizado DIAN, incluidos certificados, resolución y credenciales; completar RMA/PQR web, retención self-service y pruebas de lanzamiento. La integración técnica de `F3.4` no equivale a habilitación tributaria ni a certificación de los servicios externos.
+4. Contratar y verificar en ambiente real las pasarelas de pago, Aveonline, Resend y el proveedor autorizado DIAN, incluidos certificados, resolución y credenciales; ejecutar las pruebas de lanzamiento `F4A.3`. RMA/PQR web y anonimización self-service ya están implementados en `F4A.2`; la integración técnica de `F3.4` no equivale a habilitación tributaria ni a certificación de los servicios externos.
 5. Configurar en Merchant Center envío, impuestos y políticas de la cuenta; el feed no inventa tarifas logísticas.
 
 ## 7. Fuentes oficiales de referencia

@@ -3,6 +3,7 @@ import "server-only";
 import { verifyTimeoutToken } from "@mundonettech/core";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 
 import { getDatabase } from "@/lib/db";
 import { getSessionHmacSecret } from "@/lib/env";
@@ -14,6 +15,7 @@ import {
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export async function requireCustomerPage() {
+  await connection();
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase.auth.getUser();
   if (error || !data.user) redirect("/ingresar?reason=security");

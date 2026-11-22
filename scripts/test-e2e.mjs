@@ -31,6 +31,9 @@ try {
       MEDIA_BASE_URL: "http://127.0.0.1:4110",
       SESSION_TIMEOUT_SECRET:
         process.env.SESSION_TIMEOUT_SECRET ?? randomBytes(32).toString("base64"),
+      SECURITY_EVENT_PEPPER:
+        process.env.SECURITY_EVENT_PEPPER ?? randomBytes(32).toString("base64"),
+      RECOVERY_CODE_PEPPER: process.env.RECOVERY_CODE_PEPPER ?? randomBytes(32).toString("base64"),
     },
   });
   process.exitCode = await new Promise((resolve, reject) => {

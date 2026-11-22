@@ -1,40 +1,51 @@
-import { maskEmail } from "@mundonettech/core";
+import Link from "next/link";
 
-import { Button } from "@/components/ui/button";
-import { signOutCustomerAction } from "@/lib/actions/customer-auth";
+import { ProfileForm } from "@/components/account/account-forms";
+import { accountService } from "@/lib/account";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 
-export const metadata = { title: "Mi cuenta" };
+export const metadata = { title: "Mi cuenta", robots: { index: false, follow: false } };
 
 export default async function AccountPage() {
   const { profile } = await requireCustomerPage();
+  const account = await accountService().getProfile(profile.id);
+  const marketingEmail =
+    account.consents.find((consent) => consent.purpose === "MARKETING_EMAIL")?.status === "GRANTED";
   return (
-    <main className="mx-auto min-h-screen w-full max-w-3xl px-6 py-12">
-      <div className="space-y-2">
+    <main className="space-y-8">
+      <div>
         <h1 className="text-3xl font-bold">Mi cuenta</h1>
-        <p className="text-muted-foreground">
-          Tu sesión y datos se consultaron de forma segura en el servidor.
+        <p className="mt-2 text-muted-foreground">
+          Administra tus datos personales y tu autorización de comunicaciones comerciales.
         </p>
       </div>
-      <dl className="mt-8 grid gap-4 rounded-xl border border-border bg-card p-6 sm:grid-cols-2">
-        <div>
-          <dt className="text-sm text-muted-foreground">Correo</dt>
-          <dd className="mt-1 font-medium">{maskEmail(profile.email)}</dd>
+      <dl className="grid gap-4 sm:grid-cols-3">
+        <div className="rounded-xl border border-border bg-card p-5">
+          <dt className="text-sm text-muted-foreground">Correo verificado</dt>
+          <dd className="mt-2 font-medium break-all">{account.email}</dd>
         </div>
-        <div>
-          <dt className="text-sm text-muted-foreground">Estado</dt>
-          <dd className="mt-1 font-medium">Activa</dd>
-        </div>
-        <div>
+        <Link href="/mi-cuenta/pedidos" className="rounded-xl border border-border bg-card p-5">
+          <dt className="text-sm text-muted-foreground">Pedidos</dt>
+          <dd className="mt-2 font-medium">Consultar historial y posventa →</dd>
+        </Link>
+        <Link href="/mi-cuenta/privacidad" className="rounded-xl border border-border bg-card p-5">
           <dt className="text-sm text-muted-foreground">Puntos disponibles</dt>
-          <dd className="mt-1 font-medium">{profile.loyaltyPoints}</dd>
-        </div>
+          <dd className="mt-2 font-medium">{account.loyaltyPoints}</dd>
+        </Link>
       </dl>
-      <form action={signOutCustomerAction} className="mt-8">
-        <Button type="submit" variant="outline">
-          Cerrar sesión
-        </Button>
-      </form>
+      <section aria-labelledby="profile-title" className="space-y-4">
+        <h2 id="profile-title" className="text-2xl font-semibold">
+          Perfil y tratamiento de datos
+        </h2>
+        <ProfileForm
+          initial={{
+            givenName: account.givenName ?? "",
+            familyName: account.familyName ?? "",
+            phoneE164: account.phoneE164 ?? "",
+            marketingEmail,
+          }}
+        />
+      </section>
     </main>
   );
 }

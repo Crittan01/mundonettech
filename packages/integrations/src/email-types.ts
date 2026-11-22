@@ -60,7 +60,7 @@ export interface EmailSendInput {
   readonly subject: string;
   readonly html: string;
   readonly text: string;
-  readonly unsubscribeUrl: string;
+  readonly unsubscribeUrl?: string;
 }
 
 export interface EmailSendResult {

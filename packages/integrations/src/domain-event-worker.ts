@@ -40,6 +40,13 @@ const supportedEvents = [
   "credit-note.transmission.requested.v1",
   "credit-note.accepted.v1",
   "credit-note.rejected.v1",
+  "customer.auth-erasure.requested.v1",
+  "postsale.return.requested.v1",
+  "postsale.return.status.v1",
+  "postsale.warranty.requested.v1",
+  "postsale.warranty.status.v1",
+  "support.ticket.created.v1",
+  "support.ticket.updated.v1",
 ] as const;
 
 class RetryableDomainEventError extends Error {
@@ -62,6 +69,7 @@ export interface DomainEventWorkerOptions {
   readonly publicSiteUrl: string;
   readonly storeName: string;
   readonly receiptTokenForSubmission: (reference: string) => string;
+  readonly eraseAuthUser?: (authUserId: string) => Promise<void>;
   readonly maximumAttempts?: number;
 }
 
@@ -206,6 +214,87 @@ export class DomainEventWorker {
       recipientEmail: order.emailSnapshot,
       idempotencyKey: `domain:${options.templateKey}:${options.operationId}`,
       variables: values,
+    });
+  }
+
+  private statusLabel(status: string): string {
+    const labels: Record<string, string> = {
+      REQUESTED: "Solicitud recibida",
+      AWAITING_RETURN: "Aprobada, pendiente de recibir el producto",
+      RECEIVED: "Producto recibido",
+      COMPLETED: "Completada",
+      REJECTED: "Rechazada",
+      CANCELLED: "Cancelada",
+      UNDER_REVIEW: "En revisión técnica",
+      APPROVED: "Aprobada",
+      RESOLVED: "Resuelta",
+      OPEN: "Abierta",
+      IN_PROGRESS: "En gestión",
+      WAITING_CUSTOMER: "En espera de tu respuesta",
+      CLOSED: "Cerrada",
+    };
+    const label = labels[status];
+    if (!label) throw new EmailValidationError(`Unsupported post-sale status ${status}.`);
+    return label;
+  }
+
+  private async queuePostsaleEmail(event: DomainOutbox): Promise<void> {
+    const isReturn = event.eventType.startsWith("postsale.return.");
+    const entity = isReturn
+      ? await this.db.returnRequest.findUnique({
+          where: { id: this.id(event, "returnRequestId") },
+          include: { order: true },
+        })
+      : await this.db.warrantyClaim.findUnique({
+          where: { id: this.id(event, "warrantyClaimId") },
+          include: { order: true },
+        });
+    if (!entity?.order.emailSnapshot || entity.order.anonymizedAt) return;
+    const caseKind = isReturn
+      ? "kind" in entity && entity.kind === "EXCHANGE"
+        ? "cambio"
+        : "devolución"
+      : "garantía";
+    const accessUrl = (await this.receiptUrl(entity.orderId)).replace("/recibo/", "/pedido/");
+    await this.options.email.queue({
+      orderId: entity.orderId,
+      credentialId: await this.emailCredentialId(),
+      templateKey: "postsale.updated",
+      topic: "support",
+      recipientEmail: entity.order.emailSnapshot,
+      idempotencyKey: `domain:postsale.updated:${event.id}`,
+      variables: {
+        caseId: entity.id,
+        caseKind,
+        orderNumber: entity.order.orderNumber,
+        statusLabel: this.statusLabel(entity.status),
+        storeName: this.options.storeName,
+        accessUrl,
+      },
+    });
+  }
+
+  private async queueSupportEmail(event: DomainOutbox): Promise<void> {
+    const ticket = await this.db.supportTicket.findUnique({
+      where: { id: this.id(event, "supportTicketId") },
+    });
+    if (!ticket || ticket.contactEmailSnapshot.endsWith("@anonymized.invalid")) return;
+    const supportUrl = ticket.orderId
+      ? (await this.receiptUrl(ticket.orderId)).replace("/recibo/", "/pedido/")
+      : `${this.publicSiteUrl}/mi-cuenta/soporte`;
+    await this.options.email.queue({
+      ...(ticket.orderId ? { orderId: ticket.orderId } : {}),
+      credentialId: await this.emailCredentialId(),
+      templateKey: "support.ticket",
+      topic: "support",
+      recipientEmail: ticket.contactEmailSnapshot,
+      idempotencyKey: `domain:support.ticket:${event.id}`,
+      variables: {
+        ticketNumber: ticket.ticketNumber,
+        statusLabel: this.statusLabel(ticket.status),
+        storeName: this.options.storeName,
+        supportUrl,
+      },
     });
   }
 
@@ -373,6 +462,23 @@ export class DomainEventWorker {
           operationId: note.id,
           document: { kind: "credit-note", id: note.id, fullNumber: note.fullNumber },
         });
+        return;
+      }
+      case "postsale.return.requested.v1":
+      case "postsale.return.status.v1":
+      case "postsale.warranty.requested.v1":
+      case "postsale.warranty.status.v1":
+        await this.queuePostsaleEmail(event);
+        return;
+      case "support.ticket.created.v1":
+      case "support.ticket.updated.v1":
+        await this.queueSupportEmail(event);
+        return;
+      case "customer.auth-erasure.requested.v1": {
+        if (!this.options.eraseAuthUser) {
+          throw new EmailValidationError("Auth erasure is not configured in the domain worker.");
+        }
+        await this.options.eraseAuthUser(this.id(event, "authUserId"));
         return;
       }
       case "shipping.fulfillment.created.v1":
