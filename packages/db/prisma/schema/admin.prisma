@@ -54,6 +54,7 @@ model AdminUser {
   createdDeliveryZones LocalDeliveryZone[] @relation("DeliveryZoneCreator")
   updatedDeliveryZones LocalDeliveryZone[] @relation("DeliveryZoneUpdater")
   emailTemplateOverrides EmailTemplateOverride[]
+  notificationReads NotificationRead[]
 
   @@index([role, status])
   @@index([createdAt])
@@ -145,4 +146,42 @@ model IntegrationCredential {
   @@index([environment, createdAt, id])
   @@index([createdByAdminUserId, createdAt])
   @@map("IntegrationCredential")
+}
+
+enum NotificationSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model Notification {
+  id               String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  deduplicationKey String               @unique @db.VarChar(160)
+  category         String               @db.VarChar(60)
+  severity         NotificationSeverity
+  title            String               @db.VarChar(160)
+  message          String               @db.VarChar(500)
+  href             String               @db.VarChar(255)
+  entityType       String?              @db.VarChar(80)
+  entityId         String?              @db.VarChar(128)
+  createdAt        DateTime             @default(now()) @db.Timestamptz(6)
+  resolvedAt       DateTime?            @db.Timestamptz(6)
+  reads            NotificationRead[]
+
+  @@index([resolvedAt, severity, createdAt])
+  @@index([category, resolvedAt, createdAt])
+  @@map("Notification")
+}
+
+model NotificationRead {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  notificationId String       @db.Uuid
+  adminUserId    String       @db.Uuid
+  readAt         DateTime     @default(now()) @db.Timestamptz(6)
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Restrict)
+  adminUser      AdminUser    @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
+
+  @@unique([notificationId, adminUserId])
+  @@index([adminUserId, readAt])
+  @@map("NotificationRead")
 }

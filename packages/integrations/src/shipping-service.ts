@@ -900,11 +900,182 @@ export class ShippingService {
     }
   }
 
+  private async serialRequirements(
+    tx: ShippingTransaction,
+    shipmentId: string,
+  ): Promise<readonly { variantId: string; quantity: bigint }[]> {
+    return tx.$queryRaw<Array<{ variantId: string; quantity: bigint }>>`
+      SELECT order_item."variantId", sum(item."quantity")::bigint AS "quantity"
+      FROM "ShipmentItem" item
+      JOIN "OrderItem" order_item ON order_item."id" = item."orderItemId"
+      JOIN "ProductVariant" variant ON variant."id" = order_item."variantId"
+      JOIN "Product" product ON product."id" = variant."productId"
+      WHERE item."shipmentId" = ${shipmentId}::uuid AND product."trackSerial" = true
+      GROUP BY order_item."variantId"
+      ORDER BY order_item."variantId"
+    `;
+  }
+
+  private async assertSerialAssignments(
+    tx: ShippingTransaction,
+    shipmentId: string,
+  ): Promise<void> {
+    const requirements = await this.serialRequirements(tx, shipmentId);
+    const assigned = await tx.serializedUnit.groupBy({
+      by: ["variantId"],
+      where: { shipmentId },
+      _count: { _all: true },
+    });
+    const counts = new Map(assigned.map((entry) => [entry.variantId, BigInt(entry._count._all)]));
+    if (
+      requirements.some(
+        (requirement) => counts.get(requirement.variantId) !== requirement.quantity,
+      ) ||
+      [...counts.entries()].some(
+        ([variantId, count]) =>
+          count > 0n && !requirements.some((requirement) => requirement.variantId === variantId),
+      )
+    ) {
+      throw new ShippingConflictError(
+        "Every tracked shipment item requires its exact serialized unit assignment before dispatch.",
+        "SERIAL_ASSIGNMENT_INCOMPLETE",
+      );
+    }
+  }
+
+  private async assignSerialUnitsInTransaction(
+    tx: ShippingTransaction,
+    shipmentId: string,
+    fulfillmentId: string,
+    serialUnitIds: readonly string[],
+    audit: ShippingAuditContext,
+  ): Promise<number> {
+    if (!Array.isArray(serialUnitIds) || serialUnitIds.length > 10_000) {
+      throw new ShippingValidationError("serialUnitIds must contain at most 10000 identifiers.");
+    }
+    const ids = serialUnitIds.map((id) => assertIntegrationUuid(id, "serialUnitId")).sort();
+    if (new Set(ids).size !== ids.length) {
+      throw new ShippingValidationError("Duplicate serialized units are not allowed.");
+    }
+    const shipment = await tx.shipment.findUniqueOrThrow({
+      where: { id: shipmentId },
+      select: { orderId: true, originLocationId: true, status: true },
+    });
+    if (["SHIPPED", "DELIVERED", "CANCELLED"].includes(shipment.status)) {
+      throw new ShippingConflictError("Serialized assignments are immutable after dispatch.");
+    }
+    const requirements = await this.serialRequirements(tx, shipmentId);
+    if (requirements.length === 0 && ids.length > 0) {
+      throw new ShippingValidationError("This shipment has no serial-tracked items.");
+    }
+    const lockedUnits = await tx.$queryRaw<
+      Array<{
+        id: string;
+        variantId: string;
+        locationId: string;
+        orderId: string | null;
+        shipmentId: string | null;
+        status: string;
+      }>
+    >`SELECT "id", "variantId", "locationId", "orderId", "shipmentId", "status"
+      FROM "SerializedUnit"
+      WHERE "shipmentId" = ${shipmentId}::uuid
+         OR "id" = ANY(${ids}::uuid[])
+      ORDER BY "id"
+      FOR UPDATE`;
+    const requestedSet = new Set(ids);
+    const units = lockedUnits.filter((unit) => requestedSet.has(unit.id));
+    if (units.length !== ids.length) {
+      throw new ShippingValidationError("One or more serialized units do not exist.");
+    }
+    const selectedCounts = new Map<string, bigint>();
+    for (const unit of units) {
+      if (
+        unit.status !== "SOLD" ||
+        unit.orderId !== shipment.orderId ||
+        unit.locationId !== shipment.originLocationId ||
+        (unit.shipmentId !== null && unit.shipmentId !== shipmentId) ||
+        !requirements.some((requirement) => requirement.variantId === unit.variantId)
+      ) {
+        throw new ShippingConflictError(
+          "A serialized unit does not belong to the order, origin, variant, or available assignment pool.",
+          "SERIAL_ASSIGNMENT_INCOMPLETE",
+        );
+      }
+      selectedCounts.set(unit.variantId, (selectedCounts.get(unit.variantId) ?? 0n) + 1n);
+    }
+    if (
+      requirements.some(
+        (requirement) => selectedCounts.get(requirement.variantId) !== requirement.quantity,
+      )
+    ) {
+      throw new ShippingConflictError(
+        "Selected serialized units must exactly cover every tracked variant and quantity.",
+        "SERIAL_ASSIGNMENT_INCOMPLETE",
+      );
+    }
+    await tx.serializedUnit.updateMany({
+      where: { shipmentId, ...(ids.length ? { id: { notIn: ids } } : {}) },
+      data: { shipmentId: null },
+    });
+    if (ids.length) {
+      await tx.serializedUnit.updateMany({
+        where: { id: { in: ids } },
+        data: { shipmentId },
+      });
+    }
+    await this.assertSerialAssignments(tx, shipmentId);
+    const digest = Buffer.from(integrationDigest(ids)).toString("hex").slice(0, 32);
+    await tx.shipmentEvent.upsert({
+      where: { eventKey: `serial-assignment:${fulfillmentId}:${digest}` },
+      create: {
+        shipmentId,
+        actorAdminUserId: audit.actorAdminUserId,
+        type: "NOTE",
+        eventKey: `serial-assignment:${fulfillmentId}:${digest}`,
+        metadata: { serializedUnitCount: ids.length },
+      },
+      update: {},
+    });
+    await writeShippingAudit(tx, {
+      action: "SHIPMENT_SERIALS_ASSIGNED",
+      targetType: "Shipment",
+      targetId: shipmentId,
+      audit,
+      metadata: { orderId: shipment.orderId, serializedUnitCount: ids.length },
+    });
+    return ids.length;
+  }
+
+  async assignSerialUnits(
+    shipmentId: string,
+    serialUnitIds: readonly string[],
+    audit: ShippingAuditContext,
+  ): Promise<number> {
+    assertIntegrationUuid(shipmentId, "shipmentId");
+    return this.db.$transaction(async (tx) => {
+      await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      const fulfillment = await lockFulfillment(tx, shipmentId);
+      if (fulfillment.status !== "LABELLED") {
+        throw new ShippingConflictError("Serial assignment requires a labelled fulfillment.");
+      }
+      await lockShipment(tx, shipmentId);
+      return this.assignSerialUnitsInTransaction(
+        tx,
+        shipmentId,
+        fulfillment.id,
+        serialUnitIds,
+        audit,
+      );
+    });
+  }
+
   private async transitionShipment(
     shipmentId: string,
     target: "SHIPPED" | "DELIVERED",
     audit: ShippingAuditContext,
     driver?: { name: string; phoneE164: string },
+    serialUnitIds?: readonly string[],
   ): Promise<void> {
     assertIntegrationUuid(shipmentId, "shipmentId");
     await this.db.$transaction(async (tx) => {
@@ -913,6 +1084,16 @@ export class ShippingService {
       if (fulfillment.status !== (target === "SHIPPED" ? "LABELLED" : "SHIPPED"))
         throw new ShippingConflictError(`Fulfillment cannot transition to ${target}.`);
       const shipment = await lockShipment(tx, shipmentId);
+      if (target === "SHIPPED" && serialUnitIds) {
+        await this.assignSerialUnitsInTransaction(
+          tx,
+          shipmentId,
+          fulfillment.id,
+          serialUnitIds,
+          audit,
+        );
+      }
+      if (target === "SHIPPED") await this.assertSerialAssignments(tx, shipmentId);
       const packages = await tx.shipmentPackage.findMany({
         where: { shipmentId },
         orderBy: [{ packageNumber: "asc" }, { id: "asc" }],
@@ -1000,8 +1181,9 @@ export class ShippingService {
     shipmentId: string,
     audit: ShippingAuditContext,
     driver?: { name: string; phoneE164: string },
+    serialUnitIds?: readonly string[],
   ): Promise<void> {
-    return this.transitionShipment(shipmentId, "SHIPPED", audit, driver);
+    return this.transitionShipment(shipmentId, "SHIPPED", audit, driver, serialUnitIds);
   }
 
   async markDelivered(shipmentId: string, audit: ShippingAuditContext): Promise<void> {

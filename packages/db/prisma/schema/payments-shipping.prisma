@@ -190,6 +190,7 @@ model Shipment {
   fulfillment          OrderFulfillment?
   packages             ShipmentPackage[]
   events               ShipmentEvent[]
+  serializedUnits      SerializedUnit[]
 
   @@index([orderId, status, createdAt])
   @@index([originLocationId, status])

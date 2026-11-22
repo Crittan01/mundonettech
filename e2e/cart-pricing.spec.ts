@@ -47,6 +47,18 @@ async function authenticateAdmin(
     idleSeconds: 1800,
     absoluteSeconds: 43_200,
   });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Network.setCookie", {
+    name: "__Host-admin_activity",
+    value: activity,
+    domain: "127.0.0.1",
+    path: "/",
+    httpOnly: true,
+    secure: true,
+    sameSite: "Strict",
+    sourceScheme: "Secure",
+  });
+  await cdp.detach();
   await page.context().addCookies([
     {
       name: "sb-127-auth-token",
@@ -63,17 +75,6 @@ async function authenticateAdmin(
       sameSite: "Strict",
     },
   ]);
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Network.setCookie", {
-    name: "__Host-admin_activity",
-    value: activity,
-    domain: "127.0.0.1",
-    path: "/",
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-    sourceScheme: "Secure",
-  });
 }
 
 async function currentBrowserCart(page: Page) {

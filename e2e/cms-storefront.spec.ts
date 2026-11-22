@@ -94,6 +94,17 @@ async function authenticateAdmin(
     absoluteSeconds: 43_200,
   });
   const supabaseCookie = encodeSupabaseFixtureCookie(session);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Network.setCookie", {
+    name: "__Host-admin_activity",
+    value: activity,
+    url: "http://127.0.0.1:4110/",
+    httpOnly: true,
+    secure: true,
+    sameSite: "Strict",
+    sourceScheme: "Secure",
+  });
+  await cdp.detach();
   await page.context().addCookies([
     {
       name: "sb-127-auth-token",
@@ -110,16 +121,6 @@ async function authenticateAdmin(
       sameSite: "Strict",
     },
   ]);
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Network.setCookie", {
-    name: "__Host-admin_activity",
-    value: activity,
-    url: "http://127.0.0.1:4110/",
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-    sourceScheme: "Secure",
-  });
 }
 
 test.beforeAll(async () => {

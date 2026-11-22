@@ -46,3 +46,50 @@ model IdempotencyKey {
   @@index([subjectHash, createdAt])
   @@map("IdempotencyKey")
 }
+
+model DailyFunnelMetric {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  metricDate      DateTime @db.Date
+  source          String   @default("STOREFRONT") @db.VarChar(30)
+  pageViews       BigInt   @default(0)
+  productViews    BigInt   @default(0)
+  cartAdditions   BigInt   @default(0)
+  checkoutStarts  BigInt   @default(0)
+  ordersConfirmed BigInt   @default(0)
+  ordersPaid      BigInt   @default(0)
+  createdAt       DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([metricDate, source])
+  @@index([metricDate])
+  @@map("DailyFunnelMetric")
+}
+
+enum FiscalWatchStatus {
+  WITHIN_LIMIT
+  APPROACHING_LIMIT
+  THRESHOLD_REACHED
+}
+
+model FiscalWatchSnapshot {
+  id                  String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  fiscalYear          Int
+  snapshotDate        DateTime          @db.Date
+  uvtYear             Int
+  uvtValueCents       BigInt
+  thresholdUvt        Int               @default(3500)
+  thresholdCents      BigInt
+  grossCapturedCents  BigInt            @default(0)
+  refundedCents       BigInt            @default(0)
+  netRevenueCents     BigInt            @default(0)
+  refundExcessCents   BigInt            @default(0)
+  remainingCents      BigInt
+  status              FiscalWatchStatus
+  thresholdReachedAt  DateTime?         @db.Timestamptz(6)
+  createdAt           DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([fiscalYear, snapshotDate])
+  @@index([status, snapshotDate])
+  @@map("FiscalWatchSnapshot")
+}

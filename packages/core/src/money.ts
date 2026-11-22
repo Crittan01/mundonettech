@@ -16,6 +16,14 @@ export function formatCopCents(value: string | bigint): string {
   return copFormatter.format(roundDivHalfUp(cents, 100n));
 }
 
+export function formatSignedCopCents(value: string | bigint): string {
+  const cents = typeof value === "bigint" ? value : BigInt(value);
+  if (cents < -maxSignedBigInt || cents > maxSignedBigInt) {
+    throw new RangeError("COP cents must fit a signed BIGINT.");
+  }
+  return cents < 0n ? `-${formatCopCents(-cents)}` : formatCopCents(cents);
+}
+
 export function parseWholeCopToCents(value: string): string {
   if (typeof value !== "string" || !/^[0-9]+$/.test(value.trim())) {
     throw new TypeError("COP amount must contain only whole pesos.");

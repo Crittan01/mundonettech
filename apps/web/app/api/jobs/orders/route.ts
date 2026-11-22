@@ -1,8 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
-import { OrderLifecycleService } from "@mundonettech/db";
+import { OperationsService, OrderLifecycleService } from "@mundonettech/db";
 
 import { getDatabase } from "@/lib/db";
+import { financeService } from "@/lib/finance";
 
 const noStoreHeaders = { "Cache-Control": "no-store" } as const;
 
@@ -24,15 +25,23 @@ export async function POST(request: Request) {
   if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers: noStoreHeaders });
   }
-  const service = new OrderLifecycleService(getDatabase());
+  const db = getDatabase();
+  const service = new OrderLifecycleService(db);
   const abandoned = await service.captureAbandonedCarts();
   const reservations = await service.releaseExpiredOrderReservations();
   const partialPaymentReviews = await service.flagExpiredPartialPaymentReviews();
+  const fiscalWatch = await financeService().refreshFiscalWatch();
+  await new OperationsService(db).synchronizeNotifications();
   return Response.json(
     {
       abandonedCarts: abandoned,
       expiredReservations: reservations,
       partialPaymentReviews,
+      fiscalWatch: {
+        fiscalYear: fiscalWatch.fiscalYear,
+        snapshotDate: fiscalWatch.snapshotDate,
+        status: fiscalWatch.status,
+      },
     },
     { headers: noStoreHeaders },
   );

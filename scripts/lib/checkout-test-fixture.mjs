@@ -139,6 +139,57 @@ export async function seedCheckoutFixture(client, { catalog, inventory, pricing,
     [shipmentId, orderItemId],
   );
   await client.query(
+    `UPDATE "SerializedUnit" SET "status" = 'RESERVED', "reservationKey" = $1
+     WHERE "id" = ANY($2::uuid[])`,
+    [`order-reservation:${orderId}`, inventory.serializedUnitIds.slice(0, 2)],
+  );
+  await client.query(
+    `UPDATE "StockLevel" SET "committed" = "committed" + 2
+     WHERE "locationId" = $1 AND "variantId" = $2`,
+    [inventory.locationId, catalog.variantId],
+  );
+  await client.query(
+    `INSERT INTO "InventoryLedger" (
+      "locationId", "variantId", "entryType", "quantityDelta", "committedDelta",
+      "onHandAfter", "committedAfter", "safetyStockAfter", "weightedAvgCostAfterCents",
+      "operationKey", "operationHash", "operationSequence", "metadata"
+    )
+    SELECT $1, $2, 'RESERVATION', 0, 2, "onHand", "committed", "safetyStock",
+      "weightedAvgCostCents", $3, $4, 0, '{"source":"paid-fixture"}'::jsonb
+    FROM "StockLevel" WHERE "locationId" = $1 AND "variantId" = $2`,
+    [inventory.locationId, catalog.variantId, `order-reservation:${orderId}`, randomBytes(32)],
+  );
+  await client.query(
+    `UPDATE "SerializedUnit"
+     SET "status" = 'SOLD', "orderId" = $1, "shipmentId" = $2, "soldAt" = CURRENT_TIMESTAMP,
+       "reservationKey" = NULL
+     WHERE "id" = ANY($3::uuid[])`,
+    [orderId, shipmentId, inventory.serializedUnitIds.slice(0, 2)],
+  );
+  await client.query(
+    `UPDATE "StockLevel" SET "onHand" = "onHand" - 2, "committed" = "committed" - 2
+     WHERE "locationId" = $1 AND "variantId" = $2`,
+    [inventory.locationId, catalog.variantId],
+  );
+  await client.query(
+    `INSERT INTO "InventoryLedger" (
+      "locationId", "variantId", "orderId", "entryType", "quantityDelta", "committedDelta",
+      "onHandAfter", "committedAfter", "safetyStockAfter", "weightedAvgCostAfterCents",
+      "operationKey", "operationHash", "operationSequence", "referenceKey", "metadata"
+    )
+    SELECT $1, $2, $3, 'FULFILLMENT', -2, -2, "onHand", "committed", "safetyStock",
+      "weightedAvgCostCents", $4, $5, 0, $6, '{"source":"paid-fixture"}'::jsonb
+    FROM "StockLevel" WHERE "locationId" = $1 AND "variantId" = $2`,
+    [
+      inventory.locationId,
+      catalog.variantId,
+      orderId,
+      `order-fulfillment:${orderId}`,
+      randomBytes(32),
+      `order-reservation:${orderId}`,
+    ],
+  );
+  await client.query(
     `INSERT INTO "OrderRefund" (
       "id", "orderId", "idempotencyKey", "requestHash", "reason", "subtotalCents",
       "taxCents", "totalCents", "requestedByAdminUserId"

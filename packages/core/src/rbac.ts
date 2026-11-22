@@ -13,6 +13,8 @@ export type AdminRoleValue = (typeof adminRoles)[number];
 export type AdminRing = 1 | 2 | 3;
 export type AdminPermission =
   | "dashboard:read"
+  | "orders:read"
+  | "finance:read"
   | "users:read"
   | "users:write"
   | "security:read_own"
@@ -100,6 +102,15 @@ const salesReaders = [
   "CUSTOMER_SUPPORT",
 ] as const satisfies readonly AdminRoleValue[];
 const salesWriters = salesReaders;
+const orderReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "INVENTORY_BUYER",
+  "FULFILLMENT",
+  "CUSTOMER_SUPPORT",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
 const integrationReaders = [
   "SUPERADMIN",
   "OPERATIONS_MANAGER",
@@ -157,6 +168,8 @@ const invoiceWriters = [
 
 const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> = {
   "dashboard:read": adminRoles,
+  "orders:read": orderReaders,
+  "finance:read": integrationReaders,
   "users:read": ["SUPERADMIN", "OPERATIONS_MANAGER"],
   "users:write": ["SUPERADMIN", "OPERATIONS_MANAGER"],
   "security:read_own": adminRoles,
@@ -218,6 +231,10 @@ export function canManageAdministrator(
 export function adminNavigation(role: AdminRoleValue): readonly {
   href:
     | "/admin"
+    | "/admin/hoy"
+    | "/admin/dashboard"
+    | "/admin/pedidos"
+    | "/admin/finanzas"
     | "/admin/catalogo"
     | "/admin/precios"
     | "/admin/venta-asistida"
@@ -235,6 +252,14 @@ export function adminNavigation(role: AdminRoleValue): readonly {
 }[] {
   return [
     { href: "/admin", label: "Resumen" },
+    { href: "/admin/hoy", label: "Hoy" },
+    { href: "/admin/dashboard", label: "Embudo" },
+    ...(hasAdminPermission(role, "orders:read")
+      ? [{ href: "/admin/pedidos" as const, label: "Pedidos" }]
+      : []),
+    ...(hasAdminPermission(role, "finance:read")
+      ? [{ href: "/admin/finanzas" as const, label: "Finanzas" }]
+      : []),
     ...(hasAdminPermission(role, "catalog:read")
       ? [{ href: "/admin/catalogo" as const, label: "Catálogo" }]
       : []),

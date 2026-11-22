@@ -116,6 +116,15 @@ function cents(value: string): bigint {
   return parsed;
 }
 
+function revalidatePaymentViews(orderId?: string): void {
+  revalidatePath("/admin/pagos");
+  revalidatePath("/admin/finanzas");
+  revalidatePath("/admin/pedidos");
+  revalidatePath("/admin/hoy");
+  revalidatePath("/admin/dashboard");
+  if (orderId) revalidatePath(`/admin/pedidos/${orderId}`);
+}
+
 export async function confirmBankTransferAction(
   _previous: ActionState,
   formData: FormData,
@@ -128,7 +137,7 @@ export async function confirmBankTransferAction(
       externalReference: formString(formData, "externalReference").trim(),
       audit,
     });
-    revalidatePath("/admin/pagos");
+    revalidatePaymentViews(result.orderId);
     return actionSuccess(
       `Transferencia ${result.reference} confirmada; inventario y outbox actualizados.`,
     );
@@ -157,7 +166,7 @@ export async function reconcileCodAction(
       ],
       audit,
     });
-    revalidatePath("/admin/pagos");
+    revalidatePaymentViews();
     return actionSuccess(
       result.status === "RECONCILED"
         ? "Remesa conciliada y pago acreditado."
@@ -179,14 +188,14 @@ export async function executeRefundAction(
     const db = getDatabase();
     const existing = await db.orderRefund.findUnique({
       where: { id: refundId },
-      select: { status: true },
+      select: { status: true, orderId: true },
     });
     if (!existing) throw new PaymentNotFoundError("Order refund not found.");
     if (existing.status === "REQUESTED") {
       await new OrderRefundService(db).approve({ refundId, audit });
     }
     const result = await paymentRefundService().refund(refundId, audit);
-    revalidatePath("/admin/pagos");
+    revalidatePaymentViews(existing.orderId);
     return actionSuccess(
       result.pendingTransactionIds.length
         ? `Reembolso ${result.status.toLowerCase()}: ${result.pendingTransactionIds.length} transacciones requieren conciliación.`
@@ -204,12 +213,17 @@ export async function completeCompensationAction(
   const values = formSnapshot(formData);
   try {
     const audit = await authorize();
+    const transactionId = z.string().uuid().parse(formString(formData, "transactionId"));
+    const existing = await getDatabase().paymentTransaction.findUnique({
+      where: { id: transactionId },
+      select: { attempt: { select: { orderId: true } } },
+    });
     await paymentRefundService().completeManualTransaction({
-      transactionId: z.string().uuid().parse(formString(formData, "transactionId")),
+      transactionId,
       externalId: formString(formData, "externalId").trim(),
       audit,
     });
-    revalidatePath("/admin/pagos");
+    revalidatePaymentViews(existing?.attempt.orderId);
     return actionSuccess("Compensación verificada y conciliada.");
   } catch (error) {
     return failure(error, values);
@@ -223,11 +237,13 @@ export async function voidPaymentAction(
   const values = formSnapshot(formData);
   try {
     const audit = await authorize();
-    const result = await paymentRefundService().void(
-      z.string().uuid().parse(formString(formData, "paymentAttemptId")),
-      audit,
-    );
-    revalidatePath("/admin/pagos");
+    const paymentAttemptId = z.string().uuid().parse(formString(formData, "paymentAttemptId"));
+    const existing = await getDatabase().paymentAttempt.findUnique({
+      where: { id: paymentAttemptId },
+      select: { orderId: true },
+    });
+    const result = await paymentRefundService().void(paymentAttemptId, audit);
+    revalidatePaymentViews(existing?.orderId);
     return actionSuccess(
       result.pendingTransactionIds.length
         ? "Anulación registrada; requiere conciliación con el ID externo."

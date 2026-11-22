@@ -122,6 +122,10 @@ export async function proxy(request: NextRequest) {
   const isCustomer = pathname.startsWith("/mi-cuenta");
   let redirectResponse: NextResponse | null = null;
 
+  const isPrefetch =
+    request.headers.get("purpose") === "prefetch" ||
+    request.headers.get("sec-purpose")?.includes("prefetch") === true;
+
   if ((isAdmin || isCustomer) && !user) {
     redirectResponse = loginRedirect(request, isAdmin ? "/admin/login" : "/ingresar", "security");
   } else if (user && (isAdmin || isCustomer)) {
@@ -138,7 +142,7 @@ export async function proxy(request: NextRequest) {
         idleSeconds: isAdmin ? adminIdleSeconds : customerIdleSeconds,
         maximumAbsoluteSeconds: isAdmin ? adminAbsoluteSeconds : customerAbsoluteSeconds,
       });
-      if (refreshed.refreshed) {
+      if (refreshed.refreshed && !isPrefetch) {
         response.cookies.set(cookieName, refreshed.token, {
           ...sessionCookieOptions,
           maxAge: isAdmin ? adminAbsoluteSeconds : customerAbsoluteSeconds,
@@ -146,9 +150,11 @@ export async function proxy(request: NextRequest) {
       }
     } catch {
       redirectResponse = loginRedirect(request, isAdmin ? "/admin/login" : "/ingresar", "timeout");
-      response.cookies.set(cookieName, "", { ...sessionCookieOptions, maxAge: 0 });
+      if (token && !isPrefetch) {
+        response.cookies.set(cookieName, "", { ...sessionCookieOptions, maxAge: 0 });
+      }
     }
-  } else if (user && pathname.startsWith("/pagina/")) {
+  } else if (user && pathname.startsWith("/pagina/") && !isPrefetch) {
     const adminToken = request.cookies.get(adminActivityCookie)?.value;
     if (adminToken) {
       try {
@@ -172,6 +178,7 @@ export async function proxy(request: NextRequest) {
     }
   } else if (
     user &&
+    !isPrefetch &&
     (pathname === "/carrito" ||
       pathname.startsWith("/checkout") ||
       pathname.startsWith("/pagar/") ||

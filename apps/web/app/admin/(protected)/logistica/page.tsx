@@ -57,9 +57,21 @@ export default async function LogisticsPage() {
     db.shipment.findMany({
       where: { status: { notIn: ["DELIVERED", "CANCELLED"] } },
       include: {
-        order: { select: { orderNumber: true, emailSnapshot: true, paymentStatus: true } },
+        order: {
+          select: { id: true, orderNumber: true, emailSnapshot: true, paymentStatus: true },
+        },
         fulfillment: true,
-        items: { include: { orderItem: { select: { titleSnapshot: true } } } },
+        items: {
+          include: {
+            orderItem: {
+              select: {
+                titleSnapshot: true,
+                variantId: true,
+                variant: { select: { product: { select: { trackSerial: true } } } },
+              },
+            },
+          },
+        },
         packages: { orderBy: { packageNumber: "asc" } },
         localDeliveryZone: { select: { code: true } },
       },
@@ -68,6 +80,24 @@ export default async function LogisticsPage() {
     }),
     new LocalDeliveryService(db).list(true),
   ]);
+  const serialUnits = await db.serializedUnit.findMany({
+    where: {
+      status: "SOLD",
+      orderId: { in: shipments.map((shipment) => shipment.order.id) },
+      OR: [{ shipmentId: null }, { shipmentId: { in: shipments.map((shipment) => shipment.id) } }],
+    },
+    select: {
+      id: true,
+      serial: true,
+      imei: true,
+      variantId: true,
+      locationId: true,
+      orderId: true,
+      shipmentId: true,
+    },
+    orderBy: [{ variantId: "asc" }, { serial: "asc" }],
+    take: 10_000,
+  });
   const zones: DeliveryZoneView[] = zoneRecords.map((zone) => ({
     id: zone.id,
     code: zone.code,
@@ -185,6 +215,17 @@ export default async function LogisticsPage() {
                   <DispatchShipmentForm
                     shipmentId={shipment.id}
                     flex={shipment.fulfillment.provider === "FLEX"}
+                    items={shipment.items.map((item) => ({
+                      variantId: item.orderItem.variantId,
+                      title: item.orderItem.titleSnapshot,
+                      quantity: item.quantity,
+                      trackSerial: item.orderItem.variant.product.trackSerial,
+                    }))}
+                    serialUnits={serialUnits.filter(
+                      (unit) =>
+                        unit.orderId === shipment.order.id &&
+                        unit.locationId === shipment.originLocationId,
+                    )}
                   />
                 ) : null}
                 {canWrite && shipment.fulfillment?.status === "SHIPPED" ? (

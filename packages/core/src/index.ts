@@ -70,7 +70,7 @@ export {
   serializeCsv,
 } from "./csv.js";
 export type { CsvCell, CsvParseOptions, CsvRow, InventoryStockCsvRow } from "./csv.js";
-export { formatCopCents, parseWholeCopToCents } from "./money.js";
+export { formatCopCents, formatSignedCopCents, parseWholeCopToCents } from "./money.js";
 export { assertReceiptBalanced, calculateOrderTaxes } from "./order-tax.js";
 export type {
   CalculatedOrderTaxLine,

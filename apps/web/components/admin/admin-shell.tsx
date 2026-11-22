@@ -35,7 +35,7 @@ export function AdminShell({
       <header className="border-b border-border bg-background">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <Link href="/admin" className="text-lg font-bold">
+            <Link href="/admin" prefetch={false} className="text-lg font-bold">
               Administración
             </Link>
             <p className="text-sm text-muted-foreground">
@@ -57,6 +57,7 @@ export function AdminShell({
             <Link
               key={item.href}
               href={item.href}
+              prefetch={false}
               className="rounded-md px-3 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               {item.label}

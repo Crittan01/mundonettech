@@ -83,6 +83,7 @@ model SerializedUnit {
   locationId          String              @db.Uuid
   purchaseOrderItemId String?             @db.Uuid
   orderId             String?             @db.Uuid
+  shipmentId          String?             @db.Uuid
   serial              String              @db.VarChar(120)
   imei                String?             @db.VarChar(15)
   status              SerializedUnitStatus @default(IN_STOCK)
@@ -94,11 +95,13 @@ model SerializedUnit {
   location            StockLocation       @relation(fields: [locationId], references: [id], onDelete: Restrict)
   purchaseOrderItem   PurchaseOrderItem?  @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
   order               Order?              @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  shipment            Shipment?           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
 
   @@unique([variantId, serial])
   @@index([locationId, variantId, status, id])
   @@index([reservationKey, variantId, locationId])
   @@index([orderId])
+  @@index([shipmentId, variantId, id])
   @@index([purchaseOrderItemId])
   @@map("SerializedUnit")
 }
