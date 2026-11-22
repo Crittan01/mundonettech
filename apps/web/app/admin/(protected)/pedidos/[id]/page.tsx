@@ -4,11 +4,19 @@ import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
 import { AdminOrderService } from "@mundonettech/db";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { z } from "zod";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
-import { DispatchShipmentForm } from "@/components/admin/logistics-operations-forms";
+import {
+  DeliverShipmentForm,
+  DispatchShipmentForm,
+} from "@/components/admin/logistics-operations-forms";
 import { RefundTransitionForm, RequestRefundForm } from "@/components/admin/order-operations-forms";
-import { RefundExecutionForm } from "@/components/admin/payment-operations-forms";
+import {
+  BankTransferConfirmationForm,
+  CompensationForm,
+  RefundExecutionForm,
+} from "@/components/admin/payment-operations-forms";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -30,6 +38,7 @@ function Empty({ children }: { children: string }) {
 
 export default async function OrderDetailPage({ params }: PageProps<"/admin/pedidos/[id]">) {
   const [{ id }, session] = await Promise.all([params, requireAdminPage("orders:read")]);
+  if (!z.string().uuid().safeParse(id).success) notFound();
   const order = await new AdminOrderService(getDatabase()).detail(id);
   if (!order) notFound();
   const canDispatch = hasAdminPermission(session.profile.role, "fulfillment:write");
@@ -212,6 +221,11 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                       serialUnits={serialUnits}
                     />
                   ) : null}
+                  {canDispatch && shipment.fulfillmentStatus === "SHIPPED" ? (
+                    <div className="mt-3 border-t border-border pt-3">
+                      <DeliverShipmentForm shipmentId={shipment.id} />
+                    </div>
+                  ) : null}
                 </li>
               );
             })}
@@ -287,6 +301,11 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                     ))}
                   </ul>
                 ) : null}
+                {canRefund &&
+                attempt.provider === "BANK_TRANSFER" &&
+                ["PENDING", "PROCESSING"].includes(attempt.status) ? (
+                  <BankTransferConfirmationForm paymentAttemptId={attempt.id} />
+                ) : null}
               </li>
             ))}
           </ul>
@@ -325,6 +344,17 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                     requiresApproval={refund.status === "REQUESTED"}
                   />
                 ) : null}
+                {canRefund
+                  ? refund.transactions
+                      .filter(
+                        (transaction) =>
+                          ["PENDING", "PROCESSING"].includes(transaction.status) &&
+                          transaction.provider !== "STORE_CREDIT",
+                      )
+                      .map((transaction) => (
+                        <CompensationForm key={transaction.id} transactionId={transaction.id} />
+                      ))
+                  : null}
                 {canRefund && refund.status === "REQUESTED" ? (
                   <div className="mt-3 grid gap-3 sm:grid-cols-2">
                     <RefundTransitionForm
@@ -354,6 +384,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
         )}
         {canRefund && refundable && hasRemainingItems ? (
           <RequestRefundForm
+            key={order.refunds.length}
             orderId={order.id}
             idempotencyKey={`admin-refund:${randomUUID()}`}
             items={order.items}

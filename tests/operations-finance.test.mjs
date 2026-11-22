@@ -9,6 +9,8 @@ import {
   FinanceService,
   FunnelService,
   OperationsService,
+  OrderRefundService,
+  RefundConflictError,
   createDatabaseClient,
   currentYearRange,
   recordDailyFunnelCounters,
@@ -49,6 +51,8 @@ let checkout;
 let logistics;
 let adminId;
 let secondAdminId;
+let cmsAdminId;
+let fulfillmentAdminId;
 let audit;
 let finance;
 let funnel;
@@ -73,6 +77,8 @@ before(
     const pricing = await seedPricingFixture(sql, catalog);
     adminId = randomUUID();
     secondAdminId = randomUUID();
+    cmsAdminId = randomUUID();
+    fulfillmentAdminId = randomUUID();
     await db.adminUser.createMany({
       data: [
         {
@@ -89,6 +95,22 @@ before(
           email: `finance-${randomUUID()}@example.test`,
           displayName: "Finanzas E2E",
           role: "FINANCE_ANALYST",
+          status: "ACTIVE",
+        },
+        {
+          id: cmsAdminId,
+          authUserId: randomUUID(),
+          email: `cms-${randomUUID()}@example.test`,
+          displayName: "Contenido E2E",
+          role: "CMS_EDITOR",
+          status: "ACTIVE",
+        },
+        {
+          id: fulfillmentAdminId,
+          authUserId: randomUUID(),
+          email: `fulfillment-${randomUUID()}@example.test`,
+          displayName: "Bodega E2E",
+          role: "FULFILLMENT",
           status: "ACTIVE",
         },
       ],
@@ -166,9 +188,17 @@ after(
   { timeout: 30_000 },
 );
 
+function bogotaYear() {
+  return Number(
+    new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota", year: "numeric" }).format(
+      new Date(),
+    ),
+  );
+}
+
 describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => {
-  it("deducts 100% of completed refunds, computes net WAC/margin and persists an idempotent threshold alert", async () => {
-    const year = new Date().getUTCFullYear();
+  it("deducts 100% of completed refunds, computes net WAC/margin and persists approaching + threshold alerts", async () => {
+    const year = bogotaYear();
     const report = await finance.report(currentYearRange(year));
     assert.equal(report.summary.orderCount, 1);
     assert.equal(report.summary.capturedCents, "195000");
@@ -189,6 +219,20 @@ describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => 
 
     await db.storeSettings.update({
       where: { key: "default" },
+      data: { uvtValueCents: 100n, annualRevenueAlertUvt: 2200 },
+    });
+    const approaching = await finance.refreshFiscalWatch(year);
+    assert.equal(approaching.status, "APPROACHING_LIMIT");
+    assert.equal(approaching.thresholdCents, "220000");
+    assert.equal(approaching.remainingCents, "25000");
+    const approachingAlert = await db.notification.findUniqueOrThrow({
+      where: { deduplicationKey: `fiscal-watch:${year}:approaching` },
+    });
+    assert.equal(approachingAlert.severity, "WARNING");
+    assert.equal(approachingAlert.resolvedAt, null);
+
+    await db.storeSettings.update({
+      where: { key: "default" },
       data: { uvtValueCents: 100n, annualRevenueAlertUvt: 1000 },
     });
     const reached = await finance.refreshFiscalWatch(year);
@@ -198,6 +242,10 @@ describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => 
     assert.equal(reached.refundedCents, "50000");
     assert.equal(reached.netRevenueCents, "145000");
     assert.equal(reached.remainingCents, "0");
+    assert.notEqual(
+      (await db.notification.findUniqueOrThrow({ where: { id: approachingAlert.id } })).resolvedAt,
+      null,
+    );
     const replay = await finance.refreshFiscalWatch(year);
     assert.equal(replay.id, reached.id);
     assert.equal(replay.thresholdReachedAt, reached.thresholdReachedAt);
@@ -223,7 +271,133 @@ describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => 
     );
   });
 
-  it("rejects excessive ranges and invalid local dates", async () => {
+  it("clamps net WAC on partial-payment refunds and enforces FAILED refund cancellation hygiene", async () => {
+    const year = bogotaYear();
+    const partialOrderId = randomUUID();
+    const partialItemId = randomUUID();
+    const partialAttemptId = randomUUID();
+    const failedRefundId = randomUUID();
+    const failedTxId = randomUUID();
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase();
+    await sql.query("BEGIN");
+    await sql.query(
+      `INSERT INTO "Order" (
+        "id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus",
+        "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt"
+      ) VALUES ($1, $2, $3, 'CONFIRMED', 'PARTIALLY_PAID', 'UNFULFILLED', 50000, 0, 0, 50000, 100000, CURRENT_TIMESTAMP)`,
+      [partialOrderId, `FIN-${suffix}`, catalog.customerId],
+    );
+    await sql.query(
+      `INSERT INTO "OrderItem" (
+        "id", "orderId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot",
+        "skuSnapshot", "unitPriceCents", "unitCostWacCents", "discountCents", "lineTotalCents", "taxCents"
+      ) VALUES ($1, $2, $3, 1, 'Cable USB-C Pro', 'cable-usbc-pro', $4, 50000, 45000, 0, 50000, 0)`,
+      [partialItemId, partialOrderId, catalog.variantId, `SKU-${suffix}`],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentAttempt" (
+        "id", "orderId", "provider", "environment", "status", "idempotencyKey", "requestHash",
+        "reference", "amountCents", "confirmedByAdminUserId", "confirmedAt", "completedAt"
+      ) VALUES ($1, $2, 'BANK_TRANSFER', 'LOCAL', 'SUCCEEDED', $3, $4, $5, 50000, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [
+        partialAttemptId,
+        partialOrderId,
+        `partial-cap-${randomUUID()}`,
+        randomBytes(32),
+        `REF-${suffix}`,
+        adminId,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, 'BANK_TRANSFER', 'CAPTURE', 'SUCCEEDED', 50000, $2, $3, CURRENT_TIMESTAMP)`,
+      [partialAttemptId, `cap-${randomUUID()}`, randomBytes(32)],
+    );
+    await sql.query("COMMIT");
+
+    const refundService = new OrderRefundService(db);
+    const firstRefund = await refundService.request({
+      orderId: partialOrderId,
+      idempotencyKey: `failed-refund-${randomUUID()}`,
+      reason: "CUSTOMER_SUPPORT",
+      includeShipping: false,
+      items: [{ orderItemId: partialItemId, quantity: 1 }],
+      audit,
+    });
+    assert.equal(firstRefund.id !== failedRefundId, true);
+    await refundService.approve({ refundId: firstRefund.id, audit });
+    await sql.query(`UPDATE "OrderRefund" SET "status" = 'PROCESSING' WHERE "id" = $1`, [
+      firstRefund.id,
+    ]);
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "id", "attemptId", "refundId", "provider", "kind", "status", "amountCents", "requestHash", "completedAt"
+      ) VALUES ($1, $2, $3, 'BANK_TRANSFER', 'REFUND', 'FAILED', 50000, $4, CURRENT_TIMESTAMP)`,
+      [failedTxId, partialAttemptId, firstRefund.id, randomBytes(32)],
+    );
+    await sql.query(`UPDATE "OrderRefund" SET "status" = 'FAILED' WHERE "id" = $1`, [
+      firstRefund.id,
+    ]);
+
+    await assert.rejects(
+      refundService.request({
+        orderId: partialOrderId,
+        idempotencyKey: `duplicate-while-failed-${randomUUID()}`,
+        reason: "CUSTOMER_SUPPORT",
+        includeShipping: false,
+        items: [{ orderItemId: partialItemId, quantity: 1 }],
+        audit,
+      }),
+      RefundConflictError,
+    );
+
+    const cancelled = await refundService.cancel({ refundId: firstRefund.id, audit });
+    assert.equal(cancelled.status, "CANCELLED");
+    assert.equal(
+      (await db.paymentTransaction.findUniqueOrThrow({ where: { id: failedTxId } })).status,
+      "CANCELLED",
+    );
+
+    const replacement = await refundService.request({
+      orderId: partialOrderId,
+      idempotencyKey: `replacement-refund-${randomUUID()}`,
+      reason: "CUSTOMER_SUPPORT",
+      includeShipping: false,
+      items: [{ orderItemId: partialItemId, quantity: 1 }],
+      audit,
+    });
+    await refundService.approve({ refundId: replacement.id, audit });
+    await sql.query(`UPDATE "OrderRefund" SET "status" = 'PROCESSING' WHERE "id" = $1`, [
+      replacement.id,
+    ]);
+    await sql.query("BEGIN");
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "refundId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, $2, 'BANK_TRANSFER', 'REFUND', 'SUCCEEDED', 50000, $3, $4, CURRENT_TIMESTAMP)`,
+      [partialAttemptId, replacement.id, `ref-${randomUUID()}`, randomBytes(32)],
+    );
+    await sql.query(
+      `UPDATE "OrderRefund" SET "status" = 'COMPLETED', "processedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+      [replacement.id],
+    );
+    await sql.query(`UPDATE "Order" SET "paymentStatus" = 'REFUNDED' WHERE "id" = $1`, [
+      partialOrderId,
+    ]);
+    await sql.query("COMMIT");
+
+    const report = await finance.report(currentYearRange(year));
+    const partialRow = report.rows.find((entry) => entry.orderId === partialOrderId);
+    assert.ok(partialRow);
+    assert.equal(partialRow.grossCapturedCents, "50000");
+    assert.equal(partialRow.refundedCents, "50000");
+    assert.equal(partialRow.netRevenueCents, "0");
+    assert.equal(partialRow.wacCostCents, "0");
+    assert.equal(partialRow.marginCents, "0");
+  });
+
+  it("rejects excessive ranges, invalid local dates and inconsistent fiscal watch states", async () => {
     await assert.rejects(
       finance.report({
         from: new Date("2020-01-01T00:00:00Z"),
@@ -232,6 +406,16 @@ describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => 
       RangeError,
     );
     assert.throws(() => currentYearRange(1999), RangeError);
+    await assert.rejects(
+      sql.query(
+        `INSERT INTO "FiscalWatchSnapshot" (
+          "fiscalYear", "snapshotDate", "uvtYear", "uvtValueCents", "thresholdUvt",
+          "thresholdCents", "grossCapturedCents", "refundedCents", "netRevenueCents",
+          "refundExcessCents", "remainingCents", "status"
+        ) VALUES (2099, '2099-01-01', 2099, 1000, 100, 100000, 90000, 0, 90000, 0, 10000, 'WITHIN_LIMIT')`,
+      ),
+      (error) => error.code === "23514",
+    );
   });
 });
 
@@ -261,6 +445,29 @@ describe("F4A.1 — aggregate funnel, operational notifications and masked order
     );
     const other = await operations.snapshot(secondAdminId);
     assert.equal(other.notifications.find((entry) => entry.id === notification.id).readAt, null);
+    const cmsSnapshot = await operations.snapshot(cmsAdminId);
+    assert.equal(cmsSnapshot.permissions.orders, false);
+    assert.equal(cmsSnapshot.permissions.payments, false);
+    assert.equal(cmsSnapshot.permissions.finance, false);
+    assert.equal(cmsSnapshot.pendingOrders.length, 0);
+    assert.equal(cmsSnapshot.pendingRefunds.length, 0);
+    assert.equal(cmsSnapshot.pendingPayments.length, 0);
+    assert.equal(cmsSnapshot.notifications.length, 0);
+    await assert.rejects(operations.markNotificationRead(notification.id, cmsAdminId));
+    const cmsDashboard = await funnel.dashboard(cmsAdminId, 30);
+    assert.equal(cmsDashboard.unreadNotifications, 0);
+    const fulfillmentSnapshot = await operations.snapshot(fulfillmentAdminId);
+    assert.equal(fulfillmentSnapshot.permissions.orders, true);
+    assert.equal(fulfillmentSnapshot.permissions.payments, false);
+    assert.equal(fulfillmentSnapshot.pendingRefunds.length, 0);
+    assert.ok(
+      fulfillmentSnapshot.notifications.every(
+        (entry) =>
+          !entry.category.startsWith("refunds.") &&
+          !entry.category.startsWith("payments.") &&
+          !entry.category.startsWith("fiscal."),
+      ),
+    );
     const dashboard = await funnel.dashboard(secondAdminId, 30);
     assert.equal(dashboard.totals.pageViews, "4");
     assert.equal(dashboard.totals.productViews, "2");
@@ -335,6 +542,13 @@ describe("F4A.1 — serialized dispatch assignment and concurrency", () => {
       (error) => error.code === "SERIAL_ASSIGNMENT_INCOMPLETE",
     );
 
+    const preAssignedCount = await shipping.assignSerialUnits(
+      checkout.shipmentId,
+      [...selected].reverse(),
+      audit,
+    );
+    assert.equal(preAssignedCount, 2);
+
     const attempts = await Promise.allSettled([
       shipping.markShipped(checkout.shipmentId, audit, undefined, selected),
       shipping.markShipped(
@@ -360,15 +574,22 @@ describe("F4A.1 — serialized dispatch assignment and concurrency", () => {
       (await db.shipment.findUniqueOrThrow({ where: { id: checkout.shipmentId } })).status,
       "SHIPPED",
     );
-    assert.equal(
-      await db.adminActionLog.count({
+    assert.ok(
+      (await db.adminActionLog.count({
         where: { targetId: checkout.shipmentId, action: "SHIPMENT_SERIALS_ASSIGNED" },
-      }),
-      1,
+      })) >= 1,
     );
     await assert.rejects(
       sql.query(`UPDATE "SerializedUnit" SET "shipmentId" = NULL WHERE "id" = $1`, [selected[0]]),
       /immutable after dispatch/,
     );
+    await sql.query(`UPDATE "SerializedUnit" SET "status" = 'RETURNED' WHERE "id" = $1`, [
+      selected[0],
+    ]);
+    assert.equal(
+      (await db.serializedUnit.findUniqueOrThrow({ where: { id: selected[0] } })).status,
+      "RETURNED",
+    );
+    await sql.query(`UPDATE "SerializedUnit" SET "status" = 'SOLD' WHERE "id" = $1`, [selected[0]]);
   });
 });

@@ -22,7 +22,7 @@ import type {
   RefundStatusTransitionInput,
 } from "./order-types.js";
 
-const activeRefundStatuses = ["REQUESTED", "APPROVED", "PROCESSING"] as const;
+const activeRefundStatuses = ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] as const;
 const refundActorRoles = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"]);
 
 export class RefundValidationError extends Error {
@@ -381,7 +381,15 @@ export class OrderRefundService {
         select: { orderId: true },
       });
       if (!peek) throw new RefundNotFoundError("Refund request not found.");
-      await acquireOperationLocks(tx, [`order-refund:${peek.orderId}`]);
+      await acquireOperationLocks(
+        tx,
+        targetStatus === "CANCELLED"
+          ? [`order-payment:${peek.orderId}`, `order-refund:${peek.orderId}`]
+          : [`order-refund:${peek.orderId}`],
+      );
+      if (targetStatus === "CANCELLED") {
+        await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${peek.orderId}::uuid FOR UPDATE`;
+      }
       const rows = await tx.$queryRaw<
         OrderRefund[]
       >`SELECT * FROM "OrderRefund" WHERE "id" = ${input.refundId}::uuid FOR UPDATE`;
@@ -404,6 +412,25 @@ export class OrderRefundService {
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
+      if (targetStatus === "CANCELLED") {
+        const blockingTransaction = await tx.paymentTransaction.findFirst({
+          where: {
+            refundId: existing.id,
+            kind: "REFUND",
+            status: { in: ["PROCESSING", "SUCCEEDED"] },
+          },
+          select: { id: true },
+        });
+        if (blockingTransaction) {
+          throw new RefundConflictError(
+            "Cannot cancel a refund that already has an active or completed provider reversal.",
+          );
+        }
+        await tx.paymentTransaction.updateMany({
+          where: { refundId: existing.id, kind: "REFUND", status: { in: ["PENDING", "FAILED"] } },
+          data: { status: "CANCELLED", completedAt: now },
+        });
+      }
       const updated = await tx.orderRefund.update({
         where: { id: existing.id },
         data: {

@@ -1,5 +1,5 @@
 import { formatCopCents } from "@mundonettech/core";
-import { AdminOrderService, bogotaDayStart } from "@mundonettech/db";
+import { AdminOrderService, bogotaDayStart, type AdminOrderPage } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -47,24 +47,41 @@ function single(value: string | string[] | undefined): string | undefined {
 export default async function OrdersPage({ searchParams }: PageProps<"/admin/pedidos">) {
   await requireAdminPage("orders:read");
   const raw = await searchParams;
-  const query = querySchema.parse({
-    q: single(raw.q) || undefined,
+  const rawInput = {
+    q: single(raw.q)?.trim() || undefined,
     orderStatus: single(raw.orderStatus) || undefined,
     paymentStatus: single(raw.paymentStatus) || undefined,
     fulfillmentStatus: single(raw.fulfillmentStatus) || undefined,
     from: single(raw.from) || undefined,
     to: single(raw.to) || undefined,
     cursor: single(raw.cursor) || undefined,
-  });
-  const page = await new AdminOrderService(getDatabase()).list({
-    query: query.q,
-    orderStatus: query.orderStatus,
-    paymentStatus: query.paymentStatus,
-    fulfillmentStatus: query.fulfillmentStatus,
-    from: query.from ? bogotaDayStart(query.from) : undefined,
-    to: query.to ? new Date(bogotaDayStart(query.to).getTime() + 86_400_000) : undefined,
-    cursor: query.cursor,
-  });
+  };
+  const parsed = querySchema.safeParse(rawInput);
+  const query = parsed.success ? parsed.data : {};
+  let filterError = parsed.success
+    ? null
+    : "Revisa los parámetros de búsqueda, estados, fechas o cursor.";
+  let page: AdminOrderPage = { items: [], nextCursor: null };
+  if (parsed.success) {
+    try {
+      page = await new AdminOrderService(getDatabase()).list({
+        query: query.q,
+        orderStatus: query.orderStatus,
+        paymentStatus: query.paymentStatus,
+        fulfillmentStatus: query.fulfillmentStatus,
+        from: query.from ? bogotaDayStart(query.from) : undefined,
+        to: query.to ? new Date(bogotaDayStart(query.to).getTime() + 86_400_000) : undefined,
+        cursor: query.cursor,
+      });
+    } catch (error) {
+      if (error instanceof TypeError || error instanceof RangeError) {
+        filterError =
+          "Revisa los filtros: el número requiere de 3 a 64 letras, dígitos o guiones y un rango de fechas válido.";
+      } else {
+        throw error;
+      }
+    }
+  }
   const nextParams = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
     if (key !== "cursor" && value !== undefined) nextParams.set(key, String(value));
@@ -155,6 +172,11 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
           </Link>
         </div>
       </form>
+      {filterError ? (
+        <p role="alert" className="rounded-xl border border-destructive bg-card p-4 text-sm">
+          {filterError}
+        </p>
+      ) : null}
       {page.items.length === 0 ? (
         <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
           No hay pedidos que coincidan con estos filtros.

@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   archiveDeliveryZoneAction,
+  assignShipmentSerialsAction,
   deliverShipmentAction,
   dispatchShipmentAction,
   packShipmentAction,
@@ -244,6 +245,10 @@ export function DispatchShipmentForm({
   readonly items?: readonly DispatchShipmentItem[];
 }) {
   const [state, action, pending] = useActionState(dispatchShipmentAction, initialActionState);
+  const [assignState, assignAction, assigning] = useActionState(
+    assignShipmentSerialsAction,
+    initialActionState,
+  );
   const trackedItems = [
     ...items
       .filter((item) => item.trackSerial)
@@ -275,92 +280,113 @@ export function DispatchShipmentForm({
     );
   }
   return (
-    <form action={action} className="mt-3 space-y-3 border-t border-border pt-3">
-      <input type="hidden" name="shipmentId" value={shipmentId} />
+    <div className="mt-3 space-y-3 border-t border-border pt-3">
+      <form action={action} className="space-y-3">
+        <input type="hidden" name="shipmentId" value={shipmentId} />
+        {trackedItems.length ? (
+          <input type="hidden" name="serialUnitIds" value={JSON.stringify(selected)} />
+        ) : null}
+        {trackedItems.map((item) => {
+          const units = availableUnits.filter((unit) => unit.variantId === item.variantId);
+          return (
+            <fieldset
+              key={item.variantId}
+              className="space-y-2 rounded-lg border border-border p-3"
+            >
+              <legend className="px-1 text-sm font-semibold">
+                {item.title}: selecciona {item.quantity}{" "}
+                {item.quantity === 1 ? "unidad" : "unidades"}
+              </legend>
+              {units.length === 0 ? (
+                <p className="text-sm text-destructive">
+                  No hay unidades vendidas disponibles para asignar a este envío.
+                </p>
+              ) : (
+                <ul className="grid gap-2 sm:grid-cols-2">
+                  {units.map((unit) => (
+                    <li key={unit.id}>
+                      <label className="flex items-start gap-2 rounded-md bg-secondary/40 p-2 text-sm">
+                        <input
+                          type="checkbox"
+                          className="mt-1"
+                          checked={selected.includes(unit.id)}
+                          onChange={(event) => toggle(unit.id, event.target.checked)}
+                          disabled={pending || assigning}
+                        />
+                        <span>
+                          <span className="block font-mono">{unit.serial}</span>
+                          {unit.imei ? (
+                            <span className="block text-xs text-muted-foreground">
+                              IMEI {unit.imei}
+                            </span>
+                          ) : null}
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </fieldset>
+          );
+        })}
+        {trackedItems.length && !assignmentComplete ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            La cantidad seleccionada debe cubrir exactamente cada variante serializada.
+          </p>
+        ) : null}
+        {flex ? (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label htmlFor={`driver-name-${shipmentId}`}>Nombre verificado del conductor</Label>
+              <Input
+                id={`driver-name-${shipmentId}`}
+                name="driverName"
+                minLength={2}
+                maxLength={200}
+                required
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor={`driver-phone-${shipmentId}`}>Teléfono E.164 del conductor</Label>
+              <Input
+                id={`driver-phone-${shipmentId}`}
+                name="driverPhoneE164"
+                placeholder="+573001234567"
+                maxLength={16}
+                required
+              />
+            </div>
+          </div>
+        ) : null}
+        <Button type="submit" disabled={pending || assigning || !assignmentComplete}>
+          {pending
+            ? "Despachando…"
+            : flex
+              ? trackedItems.length
+                ? "Asignar seriales y despachar Flex"
+                : "Despachar Flex"
+              : trackedItems.length
+                ? "Asignar seriales y confirmar despacho"
+                : "Confirmar despacho"}
+        </Button>
+        <FormMessage state={state} />
+      </form>
       {trackedItems.length ? (
-        <input type="hidden" name="serialUnitIds" value={JSON.stringify(selected)} />
+        <form action={assignAction} className="space-y-2">
+          <input type="hidden" name="shipmentId" value={shipmentId} />
+          <input type="hidden" name="serialUnitIds" value={JSON.stringify(selected)} />
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            disabled={pending || assigning || !assignmentComplete}
+          >
+            {assigning ? "Guardando seriales…" : "Guardar asignación de seriales"}
+          </Button>
+          <FormMessage state={assignState} />
+        </form>
       ) : null}
-      {trackedItems.map((item) => {
-        const units = availableUnits.filter((unit) => unit.variantId === item.variantId);
-        return (
-          <fieldset key={item.variantId} className="space-y-2 rounded-lg border border-border p-3">
-            <legend className="px-1 text-sm font-semibold">
-              {item.title}: selecciona {item.quantity} {item.quantity === 1 ? "unidad" : "unidades"}
-            </legend>
-            {units.length === 0 ? (
-              <p className="text-sm text-destructive">
-                No hay unidades vendidas disponibles para asignar a este envío.
-              </p>
-            ) : (
-              <ul className="grid gap-2 sm:grid-cols-2">
-                {units.map((unit) => (
-                  <li key={unit.id}>
-                    <label className="flex items-start gap-2 rounded-md bg-secondary/40 p-2 text-sm">
-                      <input
-                        type="checkbox"
-                        className="mt-1"
-                        checked={selected.includes(unit.id)}
-                        onChange={(event) => toggle(unit.id, event.target.checked)}
-                        disabled={pending}
-                      />
-                      <span>
-                        <span className="block font-mono">{unit.serial}</span>
-                        {unit.imei ? (
-                          <span className="block text-xs text-muted-foreground">
-                            IMEI {unit.imei}
-                          </span>
-                        ) : null}
-                      </span>
-                    </label>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </fieldset>
-        );
-      })}
-      {trackedItems.length && !assignmentComplete ? (
-        <p className="text-sm text-muted-foreground" role="status">
-          La cantidad seleccionada debe cubrir exactamente cada variante serializada.
-        </p>
-      ) : null}
-      {flex ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1">
-            <Label htmlFor={`driver-name-${shipmentId}`}>Nombre verificado del conductor</Label>
-            <Input
-              id={`driver-name-${shipmentId}`}
-              name="driverName"
-              minLength={2}
-              maxLength={200}
-              required
-            />
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor={`driver-phone-${shipmentId}`}>Teléfono E.164 del conductor</Label>
-            <Input
-              id={`driver-phone-${shipmentId}`}
-              name="driverPhoneE164"
-              placeholder="+573001234567"
-              maxLength={16}
-              required
-            />
-          </div>
-        </div>
-      ) : null}
-      <Button type="submit" disabled={pending || !assignmentComplete}>
-        {pending
-          ? "Despachando…"
-          : flex
-            ? trackedItems.length
-              ? "Asignar seriales y despachar Flex"
-              : "Despachar Flex"
-            : trackedItems.length
-              ? "Asignar seriales y confirmar despacho"
-              : "Confirmar despacho"}
-      </Button>
-      <FormMessage state={state} />
-    </form>
+    </div>
   );
 }
 

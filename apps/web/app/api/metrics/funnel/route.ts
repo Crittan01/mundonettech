@@ -2,6 +2,7 @@ import { FunnelService } from "@mundonettech/db";
 import { z } from "zod";
 
 import { getDatabase } from "@/lib/db";
+import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const headers = {
   "Cache-Control": "no-store",
@@ -18,28 +19,41 @@ const batchSchema = z
     checkoutStarts: counter,
   })
   .strict()
-  .refine(
-    (value) =>
-      [
-        value.pageViews,
-        value.productViews,
-        value.cartAdditions,
-        value.checkoutStarts,
-      ].reduce<number>((sum, entry) => sum + (entry ?? 0), 0) <= 2000,
-  );
+  .refine((value) => {
+    const sum = [
+      value.pageViews,
+      value.productViews,
+      value.cartAdditions,
+      value.checkoutStarts,
+    ].reduce<number>((total, entry) => total + (entry ?? 0), 0);
+    return sum >= 1 && sum <= 2000;
+  });
 
 const rateState = globalThis as typeof globalThis & {
-  __funnelMetricWindow?: { readonly startedAt: number; count: number };
+  __funnelMetricWindow?: {
+    readonly startedAt: number;
+    globalCount: number;
+    readonly perClient: Map<string, number>;
+  };
 };
 
-function acceptRate(): boolean {
+function acceptRate(clientKey: string): boolean {
   const now = Date.now();
   if (!rateState.__funnelMetricWindow || now - rateState.__funnelMetricWindow.startedAt >= 60_000) {
-    rateState.__funnelMetricWindow = { startedAt: now, count: 1 };
+    rateState.__funnelMetricWindow = {
+      startedAt: now,
+      globalCount: 1,
+      perClient: new Map([[clientKey, 1]]),
+    };
     return true;
   }
-  if (rateState.__funnelMetricWindow.count >= 120) return false;
-  rateState.__funnelMetricWindow.count += 1;
+  const window = rateState.__funnelMetricWindow;
+  if (window.globalCount >= 6_000) return false;
+  const current = window.perClient.get(clientKey) ?? 0;
+  if (current >= 60) return false;
+  if (!window.perClient.has(clientKey) && window.perClient.size >= 5_000) return false;
+  window.globalCount += 1;
+  window.perClient.set(clientKey, current + 1);
   return true;
 }
 
@@ -51,8 +65,6 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  if (!acceptRate())
-    return Response.json({ error: "Rate limit exceeded." }, { status: 429, headers });
   const origin = request.headers.get("origin");
   try {
     if (!origin || new URL(origin).host !== request.headers.get("host")) {
@@ -61,12 +73,22 @@ export async function POST(request: Request) {
   } catch {
     return Response.json({ error: "Invalid origin." }, { status: 403, headers });
   }
-  if (request.headers.get("content-type")?.split(";")[0] !== "application/json") {
+  if (request.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
     return Response.json({ error: "JSON is required." }, { status: 415, headers });
   }
   const length = Number(request.headers.get("content-length") ?? 0);
   if (!Number.isSafeInteger(length) || length < 2 || length > 16_384) {
     return Response.json({ error: "Invalid batch size." }, { status: 413, headers });
+  }
+  let clientKey = "loopback";
+  try {
+    const context = await getRequestSecurityContext();
+    clientKey = Buffer.from(context.ipHash).toString("hex");
+  } catch {
+    clientKey = "unverified";
+  }
+  if (!acceptRate(clientKey)) {
+    return Response.json({ error: "Rate limit exceeded." }, { status: 429, headers });
   }
   const text = await request.text();
   if (new TextEncoder().encode(text).byteLength > 16_384) {

@@ -23,11 +23,13 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
   const session = await requireAdminPage();
   const query = await searchParams;
   const rawDays = Array.isArray(query.days) ? query.days[0] : query.days;
-  const days = z.coerce
+  const parsedDays = z.coerce
     .number()
     .int()
-    .refine((value) => periods.includes(value as 7 | 30 | 90))
-    .parse(rawDays ?? 30);
+    .refine((value): value is (typeof periods)[number] => periods.includes(value as 7 | 30 | 90))
+    .safeParse(rawDays ?? 30);
+  const days = parsedDays.success ? parsedDays.data : 30;
+  const invalidPeriod = rawDays !== undefined && !parsedDays.success;
   const snapshot = await new FunnelService(getDatabase()).dashboard(session.profile.id, days);
   const cards = [
     ["Páginas vistas", snapshot.totals.pageViews],
@@ -61,6 +63,11 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
           ))}
         </nav>
       </div>
+      {invalidPeriod ? (
+        <p role="alert" className="rounded-xl border border-destructive bg-card p-4 text-sm">
+          El periodo solicitado no es válido. Mostramos la ventana predeterminada de 30 días.
+        </p>
+      ) : null}
       {snapshot.unreadNotifications > 0 ? (
         <p className="rounded-xl border border-border bg-card p-4 text-sm">
           Tienes {snapshot.unreadNotifications} notificaciones operativas sin leer en{" "}

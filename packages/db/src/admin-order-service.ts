@@ -135,7 +135,13 @@ export class AdminOrderService {
         },
         serializedUnits: { orderBy: [{ variantId: "asc" }, { serial: "asc" }], take: 10_000 },
         refunds: {
-          include: { items: { orderBy: { id: "asc" } } },
+          include: {
+            items: { orderBy: { id: "asc" } },
+            paymentTransactions: {
+              where: { kind: "REFUND" },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            },
+          },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
           take: 200,
         },
@@ -254,6 +260,13 @@ export class AdminOrderService {
         items: refund.items.map((item) => ({
           orderItemId: item.orderItemId,
           quantity: item.quantity,
+        })),
+        transactions: refund.paymentTransactions.map((transaction) => ({
+          id: transaction.id,
+          provider: transaction.provider,
+          status: transaction.status,
+          amountCents: transaction.amountCents.toString(),
+          externalId: transaction.externalId ? maskIdentifier(transaction.externalId) : null,
         })),
       })),
       timeline: order.statusEvents.map((event) => ({

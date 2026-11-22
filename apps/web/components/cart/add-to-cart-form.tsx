@@ -6,18 +6,18 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 import { addCartBundleAction, addCartVariantAction } from "@/lib/actions/cart";
 
-function useCartMetric(status: "idle" | "success" | "error") {
+function useCartMetric(state: ActionState) {
   useEffect(() => {
-    if (status === "success") window.dispatchEvent(new Event("store:cart-add"));
-  }, [status]);
+    if (state.status === "success") window.dispatchEvent(new Event("store:cart-add"));
+  }, [state]);
 }
 
 export function AddToCartForm({ variantId, available }: { variantId: string; available: number }) {
   const [state, action, pending] = useActionState(addCartVariantAction, initialActionState);
-  useCartMetric(state.status);
+  useCartMetric(state);
   return (
     <form action={action} className="space-y-3 border-t border-border pt-4">
       <input type="hidden" name="variantId" value={variantId} />
@@ -47,7 +47,7 @@ export function AddToCartForm({ variantId, available }: { variantId: string; ava
 
 export function AddBundleToCartForm({ bundleId }: { bundleId: string }) {
   const [state, action, pending] = useActionState(addCartBundleAction, initialActionState);
-  useCartMetric(state.status);
+  useCartMetric(state);
   return (
     <form action={action} className="mt-4 space-y-2">
       <input type="hidden" name="bundleId" value={bundleId} />

@@ -112,9 +112,28 @@ export interface OperationalQueueRefund {
   readonly status: string;
 }
 
+export interface OperationalQueuePayment {
+  readonly id: string;
+  readonly orderId: string;
+  readonly orderNumber: string;
+  readonly provider: string;
+  readonly status: string;
+  readonly amountCents: string;
+  readonly createdAt: string;
+}
+
+export interface OperationsPermissions {
+  readonly orders: boolean;
+  readonly payments: boolean;
+  readonly finance: boolean;
+  readonly audit: boolean;
+}
+
 export interface OperationsSnapshot {
+  readonly permissions: OperationsPermissions;
   readonly pendingOrders: OperationalQueueOrder[];
   readonly lateShipments: OperationalQueueShipment[];
+  readonly pendingPayments: OperationalQueuePayment[];
   readonly pendingRefunds: OperationalQueueRefund[];
   readonly failedOutbox: number;
   readonly notifications: OperationalNotification[];
@@ -244,6 +263,13 @@ export interface AdminOrderDetail {
     readonly createdAt: string;
     readonly processedAt: string | null;
     readonly items: readonly { readonly orderItemId: string; readonly quantity: number }[];
+    readonly transactions: readonly {
+      readonly id: string;
+      readonly provider: string;
+      readonly status: string;
+      readonly amountCents: string;
+      readonly externalId: string | null;
+    }[];
   }[];
   readonly timeline: readonly {
     readonly id: string;

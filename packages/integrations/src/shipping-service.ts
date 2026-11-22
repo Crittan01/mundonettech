@@ -968,19 +968,23 @@ export class ShippingService {
     if (requirements.length === 0 && ids.length > 0) {
       throw new ShippingValidationError("This shipment has no serial-tracked items.");
     }
-    const units = ids.length
-      ? await tx.$queryRaw<
-          Array<{
-            id: string;
-            variantId: string;
-            locationId: string;
-            orderId: string | null;
-            shipmentId: string | null;
-            status: string;
-          }>
-        >`SELECT "id", "variantId", "locationId", "orderId", "shipmentId", "status"
-          FROM "SerializedUnit" WHERE "id" = ANY(${ids}::uuid[]) ORDER BY "id" FOR UPDATE`
-      : [];
+    const lockedUnits = await tx.$queryRaw<
+      Array<{
+        id: string;
+        variantId: string;
+        locationId: string;
+        orderId: string | null;
+        shipmentId: string | null;
+        status: string;
+      }>
+    >`SELECT "id", "variantId", "locationId", "orderId", "shipmentId", "status"
+      FROM "SerializedUnit"
+      WHERE "shipmentId" = ${shipmentId}::uuid
+         OR "id" = ANY(${ids}::uuid[])
+      ORDER BY "id"
+      FOR UPDATE`;
+    const requestedSet = new Set(ids);
+    const units = lockedUnits.filter((unit) => requestedSet.has(unit.id));
     if (units.length !== ids.length) {
       throw new ShippingValidationError("One or more serialized units do not exist.");
     }

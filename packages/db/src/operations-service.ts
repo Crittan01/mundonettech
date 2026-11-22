@@ -1,8 +1,12 @@
-import { maskName } from "@mundonettech/core";
+import { hasAdminPermission, isAdminRole, maskName, type AdminRoleValue } from "@mundonettech/core";
 
-import type { PrismaClient } from "./generated/client.js";
+import type { Prisma, PrismaClient } from "./generated/client.js";
 import { assertUuid } from "./inventory-shared.js";
-import type { OperationalNotification, OperationsSnapshot } from "./operations-types.js";
+import type {
+  OperationalNotification,
+  OperationsPermissions,
+  OperationsSnapshot,
+} from "./operations-types.js";
 
 const managedCategories = [
   "orders.fulfillment",
@@ -11,6 +15,41 @@ const managedCategories = [
   "refunds.review",
   "outbox.failed",
 ] as const;
+
+export function canReadNotificationCategory(role: AdminRoleValue, category: string): boolean {
+  if (category.startsWith("orders.") || category.startsWith("shipping.")) {
+    return hasAdminPermission(role, "orders:read");
+  }
+  if (category.startsWith("payments.") || category.startsWith("refunds.")) {
+    return hasAdminPermission(role, "payments:read");
+  }
+  if (category.startsWith("fiscal.")) {
+    return hasAdminPermission(role, "finance:read");
+  }
+  if (category.startsWith("outbox.")) {
+    return hasAdminPermission(role, "audit:read");
+  }
+  return hasAdminPermission(role, "dashboard:read");
+}
+
+export function notificationWhereForRole(role: AdminRoleValue): Prisma.NotificationWhereInput {
+  const excludedPrefixes: string[] = [];
+  if (!hasAdminPermission(role, "orders:read")) {
+    excludedPrefixes.push("orders.", "shipping.");
+  }
+  if (!hasAdminPermission(role, "payments:read")) {
+    excludedPrefixes.push("payments.", "refunds.");
+  }
+  if (!hasAdminPermission(role, "finance:read")) {
+    excludedPrefixes.push("fiscal.");
+  }
+  if (!hasAdminPermission(role, "audit:read")) {
+    excludedPrefixes.push("outbox.");
+  }
+  return excludedPrefixes.length === 0
+    ? {}
+    : { NOT: excludedPrefixes.map((prefix) => ({ category: { startsWith: prefix } })) };
+}
 
 function notificationView(record: {
   id: string;
@@ -130,44 +169,89 @@ export class OperationsService {
 
   async snapshot(adminUserId: string): Promise<OperationsSnapshot> {
     assertUuid(adminUserId, "adminUserId");
+    const actor = await this.db.adminUser.findFirst({
+      where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
+      select: { id: true, role: true },
+    });
+    if (!actor || !isAdminRole(actor.role)) {
+      throw new Error("Active administrator not found.");
+    }
     await this.synchronizeNotifications();
+    const permissions: OperationsPermissions = {
+      orders: hasAdminPermission(actor.role, "orders:read"),
+      payments: hasAdminPermission(actor.role, "payments:read"),
+      finance: hasAdminPermission(actor.role, "finance:read"),
+      audit: hasAdminPermission(actor.role, "audit:read"),
+    };
     const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]!.now;
-    const [pendingOrders, lateShipments, pendingRefunds, failedOutbox, notifications] =
-      await Promise.all([
-        this.db.order.findMany({
-          where: {
-            orderStatus: "CONFIRMED",
-            paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED"] },
-            fulfillmentStatus: { in: ["UNFULFILLED", "PARTIALLY_FULFILLED"] },
-          },
-          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-          take: 50,
-        }),
-        this.db.shipment.findMany({
-          where: { promisedAt: { lt: now }, status: { notIn: ["DELIVERED", "CANCELLED"] } },
-          include: {
-            order: { select: { id: true, orderNumber: true } },
-            fulfillment: { select: { status: true } },
-          },
-          orderBy: [{ promisedAt: "asc" }, { id: "asc" }],
-          take: 50,
-        }),
-        this.db.orderRefund.findMany({
-          where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] } },
-          include: { order: { select: { id: true, orderNumber: true } } },
-          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-          take: 50,
-        }),
-        this.db.domainOutbox.count({ where: { failedAt: { not: null } } }),
-        this.db.notification.findMany({
-          where: { resolvedAt: null },
-          include: { reads: { where: { adminUserId }, select: { readAt: true } } },
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: 100,
-        }),
-      ]);
+    const [
+      pendingOrders,
+      lateShipments,
+      pendingPayments,
+      pendingRefunds,
+      failedOutbox,
+      notifications,
+    ] = await Promise.all([
+      permissions.orders
+        ? this.db.order.findMany({
+            where: {
+              orderStatus: "CONFIRMED",
+              paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED"] },
+              fulfillmentStatus: { in: ["UNFULFILLED", "PARTIALLY_FULFILLED"] },
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: 50,
+          })
+        : Promise.resolve([]),
+      permissions.orders
+        ? this.db.shipment.findMany({
+            where: { promisedAt: { lt: now }, status: { notIn: ["DELIVERED", "CANCELLED"] } },
+            include: {
+              order: { select: { id: true, orderNumber: true } },
+              fulfillment: { select: { status: true } },
+            },
+            orderBy: [{ promisedAt: "asc" }, { id: "asc" }],
+            take: 50,
+          })
+        : Promise.resolve([]),
+      permissions.payments
+        ? this.db.paymentAttempt.findMany({
+            where: {
+              OR: [
+                { provider: "BANK_TRANSFER", status: { in: ["PENDING", "PROCESSING"] } },
+                {
+                  provider: "COD",
+                  status: { in: ["PENDING", "PROCESSING"] },
+                  codReconciliation: { is: { status: "DISCREPANCY" } },
+                },
+              ],
+            },
+            include: { order: { select: { id: true, orderNumber: true } } },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: 50,
+          })
+        : Promise.resolve([]),
+      permissions.payments
+        ? this.db.orderRefund.findMany({
+            where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] } },
+            include: { order: { select: { id: true, orderNumber: true } } },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            take: 50,
+          })
+        : Promise.resolve([]),
+      permissions.audit
+        ? this.db.domainOutbox.count({ where: { failedAt: { not: null } } })
+        : Promise.resolve(0),
+      this.db.notification.findMany({
+        where: { AND: [{ resolvedAt: null }, notificationWhereForRole(actor.role)] },
+        include: { reads: { where: { adminUserId }, select: { readAt: true } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 100,
+      }),
+    ]);
     return {
+      permissions,
       pendingOrders: pendingOrders.map((order) => ({
         id: order.id,
         orderNumber: order.orderNumber,
@@ -184,6 +268,15 @@ export class OperationsService {
         promisedAt: shipment.promisedAt.toISOString(),
         status: shipment.status,
         fulfillmentStatus: shipment.fulfillment?.status ?? null,
+      })),
+      pendingPayments: pendingPayments.map((attempt) => ({
+        id: attempt.id,
+        orderId: attempt.order.id,
+        orderNumber: attempt.order.orderNumber,
+        provider: attempt.provider,
+        status: attempt.status,
+        amountCents: attempt.amountCents.toString(),
+        createdAt: attempt.createdAt.toISOString(),
       })),
       pendingRefunds: pendingRefunds.map((refund) => ({
         id: refund.id,
@@ -202,13 +295,23 @@ export class OperationsService {
     assertUuid(notificationId, "notificationId");
     assertUuid(adminUserId, "adminUserId");
     const [notification, actor] = await Promise.all([
-      this.db.notification.findUnique({ where: { id: notificationId }, select: { id: true } }),
+      this.db.notification.findUnique({
+        where: { id: notificationId },
+        select: { id: true, category: true },
+      }),
       this.db.adminUser.findFirst({
         where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
-        select: { id: true },
+        select: { id: true, role: true },
       }),
     ]);
-    if (!notification || !actor) throw new Error("Notification or active administrator not found.");
+    if (
+      !notification ||
+      !actor ||
+      !isAdminRole(actor.role) ||
+      !canReadNotificationCategory(actor.role, notification.category)
+    ) {
+      throw new Error("Notification or authorized active administrator not found.");
+    }
     const read = await this.db.notificationRead.upsert({
       where: { notificationId_adminUserId: { notificationId, adminUserId } },
       create: { notificationId, adminUserId },

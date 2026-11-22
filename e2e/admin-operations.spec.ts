@@ -41,6 +41,17 @@ async function authenticateAdmin(page: Page, profile = admin, mfaAgeSeconds = 30
     idleSeconds: 1800,
     absoluteSeconds: 43_200,
   });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Network.setCookie", {
+    name: "__Host-admin_activity",
+    value: activity,
+    domain: "127.0.0.1",
+    path: "/",
+    httpOnly: true,
+    secure: true,
+    sameSite: "Strict",
+    sourceScheme: "Secure",
+  });
   await page.context().addCookies([
     {
       name: "sb-127-auth-token",
@@ -57,17 +68,6 @@ async function authenticateAdmin(page: Page, profile = admin, mfaAgeSeconds = 30
       sameSite: "Strict",
     },
   ]);
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Network.setCookie", {
-    name: "__Host-admin_activity",
-    value: activity,
-    domain: "127.0.0.1",
-    path: "/",
-    httpOnly: true,
-    secure: true,
-    sameSite: "Strict",
-    sourceScheme: "Secure",
-  });
 }
 
 async function expectAccessible(page: Page) {
@@ -294,6 +294,10 @@ test("operations, serialized dispatch, completed refund and finance work end to 
     .getByRole("group", { name: /MacBook Air M3.*selecciona 1 unidad/ })
     .getByRole("checkbox")
     .check();
+  await page.getByRole("button", { name: "Guardar asignación de seriales" }).click();
+  await expect
+    .poll(async () => (await db.serializedUnit.findFirstOrThrow({ where: { serial } })).shipmentId)
+    .toBe(order.shipments[0]!.id);
   await page.getByRole("button", { name: "Asignar seriales y confirmar despacho" }).click();
   await expect
     .poll(
@@ -318,7 +322,6 @@ test("operations, serialized dispatch, completed refund and finance work end to 
       }),
     )
     .toBe(1);
-  await page.goto("/admin/pagos");
   const pendingTransaction = await db.paymentTransaction.findFirstOrThrow({
     where: { refund: { orderId: order.id }, kind: "REFUND", status: "PENDING" },
   });
@@ -337,6 +340,17 @@ test("operations, serialized dispatch, completed refund and finance work end to 
     .poll(async () => (await db.order.findUniqueOrThrow({ where: { id: order.id } })).paymentStatus)
     .toBe("REFUNDED");
 
+  await page.goto("/admin/pedidos?q=ab");
+  await expect(page.locator("main").getByRole("alert")).toContainText("Revisa los filtros");
+  await page.goto("/admin/pedidos/not-a-valid-uuid");
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
+  await page.goto("/admin/dashboard?days=999");
+  await expect(page.locator("main").getByRole("alert")).toContainText(
+    "El periodo solicitado no es válido",
+  );
+  await page.goto("/admin/finanzas?from=2026-12-31&to=2026-01-01");
+  await expect(page.locator("main").getByRole("alert")).toContainText("El rango debe ser válido");
+
   const schedulerResponse = await page.request.post("/api/jobs/orders", {
     headers: {
       authorization: `Bearer ${process.env.ORDER_CRON_SECRET ?? "e2e-order-scheduler-secret-32-chars-ok"}`,
@@ -349,7 +363,11 @@ test("operations, serialized dispatch, completed refund and finance work end to 
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Finanzas");
   await expect(page.getByText("Vigilancia anual 3500 UVT")).toBeVisible();
   await expectAccessible(page);
-  const year = new Date().getUTCFullYear();
+  const year = Number(
+    new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota", year: "numeric" }).format(
+      new Date(),
+    ),
+  );
   const report = await new FinanceService(db, {
     uvtValueCents: 5_237_400n,
     uvtYear: 2026,
@@ -367,6 +385,12 @@ test("operations, serialized dispatch, completed refund and finance work end to 
   expect(csv).not.toContain(email);
 
   await authenticateAdmin(page, cmsAdmin);
+  await page.goto("/admin/hoy");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Operación de hoy");
+  await expect(page.getByText(order.orderNumber)).toHaveCount(0);
+  await expectAccessible(page);
+  const forbiddenCsv = await page.request.get(`/admin/finanzas/exportar?year=${year}`);
+  expect(forbiddenCsv.status()).toBe(403);
   await page.goto("/admin/finanzas");
   await expect(page).toHaveURL(/\/admin\/login\?.*reason=security/);
   await authenticateAdmin(page, cmsAdmin);

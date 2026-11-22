@@ -7,10 +7,14 @@ import {
   formatSignedCopCents,
   hasAdminPermission,
 } from "../../packages/core/dist/index.js";
-import { bogotaDayStart, currentYearRange } from "../../packages/db/dist/index.js";
+import {
+  bogotaDayStart,
+  canReadNotificationCategory,
+  currentYearRange,
+} from "../../packages/db/dist/index.js";
 
 describe("F4A.1 — RBAC for operational and finance surfaces", () => {
-  it("keeps finance restricted and orders available to operational roles without CMS access", () => {
+  it("keeps finance restricted, scopes notification categories by role, and blocks CMS order access", () => {
     for (const role of adminRoles) {
       const navigation = adminNavigation(role);
       expect(navigation.some((item) => item.href === "/admin/hoy")).toBe(true);
@@ -21,6 +25,25 @@ describe("F4A.1 — RBAC for operational and finance surfaces", () => {
       expect(navigation.some((item) => item.href === "/admin/finanzas")).toBe(
         hasAdminPermission(role, "finance:read"),
       );
+      expect(canReadNotificationCategory(role, "orders.fulfillment")).toBe(
+        hasAdminPermission(role, "orders:read"),
+      );
+      expect(canReadNotificationCategory(role, "shipping.promise")).toBe(
+        hasAdminPermission(role, "orders:read"),
+      );
+      expect(canReadNotificationCategory(role, "payments.review")).toBe(
+        hasAdminPermission(role, "payments:read"),
+      );
+      expect(canReadNotificationCategory(role, "refunds.review")).toBe(
+        hasAdminPermission(role, "payments:read"),
+      );
+      expect(canReadNotificationCategory(role, "fiscal.threshold")).toBe(
+        hasAdminPermission(role, "finance:read"),
+      );
+      expect(canReadNotificationCategory(role, "outbox.failed")).toBe(
+        hasAdminPermission(role, "audit:read"),
+      );
+      expect(canReadNotificationCategory(role, "operations.general")).toBe(true);
     }
     expect(hasAdminPermission("FULFILLMENT", "orders:read")).toBe(true);
     expect(hasAdminPermission("CUSTOMER_SUPPORT", "orders:read")).toBe(true);

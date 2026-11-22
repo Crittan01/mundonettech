@@ -27,13 +27,13 @@ interface FinanceRowRecord {
 
 interface FinanceSummaryRecord {
   orderCount: bigint;
-  capturedCents: bigint;
-  voidedCents: bigint;
-  grossCapturedCents: bigint;
-  refundedCents: bigint;
-  netRevenueCents: bigint;
-  wacCostCents: bigint;
-  marginCents: bigint;
+  capturedCents: string;
+  voidedCents: string;
+  grossCapturedCents: string;
+  refundedCents: string;
+  netRevenueCents: string;
+  wacCostCents: string;
+  marginCents: string;
 }
 
 export interface FiscalWatchDefaults {
@@ -97,8 +97,8 @@ function financeCte(range: FinanceRange): Prisma.Sql {
     WITH capture_ledger AS (
       SELECT attempt."orderId",
         min(transaction."completedAt") FILTER (WHERE transaction."kind" = 'CAPTURE') AS "recognizedAt",
-        COALESCE(sum(transaction."amountCents") FILTER (WHERE transaction."kind" = 'CAPTURE'), 0) AS "capturedCents",
-        COALESCE(sum(transaction."amountCents") FILTER (WHERE transaction."kind" = 'VOID'), 0) AS "voidedCents"
+        COALESCE(sum(transaction."amountCents") FILTER (WHERE transaction."kind" = 'CAPTURE'), 0)::bigint AS "capturedCents",
+        COALESCE(sum(transaction."amountCents") FILTER (WHERE transaction."kind" = 'VOID'), 0)::bigint AS "voidedCents"
       FROM "PaymentTransaction" transaction
       JOIN "PaymentAttempt" attempt ON attempt."id" = transaction."attemptId"
       WHERE transaction."status" = 'SUCCEEDED' AND transaction."kind" IN ('CAPTURE', 'VOID')
@@ -108,29 +108,32 @@ function financeCte(range: FinanceRange): Prisma.Sql {
     recognized_orders AS (
       SELECT orders."id", orders."orderNumber", orders."currency", orders."paymentStatus",
         orders."totalCents", ledger."recognizedAt", ledger."capturedCents", ledger."voidedCents",
-        ledger."capturedCents" - ledger."voidedCents" AS "grossCapturedCents"
+        (ledger."capturedCents" - ledger."voidedCents")::bigint AS "grossCapturedCents"
       FROM capture_ledger ledger
       JOIN "Order" orders ON orders."id" = ledger."orderId"
       WHERE ledger."recognizedAt" >= ${range.from}::timestamptz
         AND ledger."recognizedAt" < ${range.to}::timestamptz
     ),
     refund_ledger AS (
-      SELECT refund."orderId", COALESCE(sum(refund."totalCents"), 0) AS "refundedCents"
+      SELECT refund."orderId", COALESCE(sum(refund."totalCents"), 0)::bigint AS "refundedCents"
       FROM "OrderRefund" refund
       JOIN recognized_orders orders ON orders."id" = refund."orderId"
       WHERE refund."status" = 'COMPLETED'
       GROUP BY refund."orderId"
     ),
     order_cost AS (
-      SELECT item."orderId", sum(item."unitCostWacCents" * item."quantity") AS "fullCostCents"
+      SELECT item."orderId", COALESCE(sum(item."unitCostWacCents" * item."quantity"), 0)::bigint AS "fullCostCents"
       FROM "OrderItem" item
       JOIN recognized_orders orders ON orders."id" = item."orderId"
       GROUP BY item."orderId"
     ),
     captured_cost AS (
       SELECT orders."id",
-        CASE WHEN orders."totalCents" > 0
-          THEN round(COALESCE(cost."fullCostCents", 0)::numeric * orders."grossCapturedCents"::numeric / orders."totalCents"::numeric)::bigint
+        CASE WHEN orders."totalCents" > 0 AND orders."grossCapturedCents" > 0
+          THEN div(
+            COALESCE(cost."fullCostCents", 0)::numeric * orders."grossCapturedCents"::numeric * 2 + orders."totalCents"::numeric,
+            orders."totalCents"::numeric * 2
+          )::bigint
           ELSE 0::bigint
         END AS "capturedCostCents"
       FROM recognized_orders orders
@@ -138,7 +141,7 @@ function financeCte(range: FinanceRange): Prisma.Sql {
     ),
     refund_cost AS (
       SELECT refund."orderId",
-        COALESCE(sum(order_item."unitCostWacCents" * refund_item."quantity"), 0) AS "refundCostCents"
+        COALESCE(sum(order_item."unitCostWacCents" * refund_item."quantity"), 0)::bigint AS "refundCostCents"
       FROM "OrderRefund" refund
       JOIN recognized_orders orders ON orders."id" = refund."orderId"
       JOIN "OrderRefundItem" refund_item ON refund_item."refundId" = refund."id"
@@ -146,28 +149,39 @@ function financeCte(range: FinanceRange): Prisma.Sql {
       WHERE refund."status" = 'COMPLETED'
       GROUP BY refund."orderId"
     ),
-    finance_rows AS (
+    finance_base AS (
       SELECT orders."id" AS "orderId", orders."orderNumber", orders."recognizedAt",
         orders."currency", orders."paymentStatus"::text AS "paymentStatus",
         orders."capturedCents", orders."voidedCents", orders."grossCapturedCents",
-        COALESCE(refund."refundedCents", 0) AS "refundedCents",
-        orders."grossCapturedCents" - COALESCE(refund."refundedCents", 0) AS "netRevenueCents",
-        cost."capturedCostCents" - COALESCE(returned."refundCostCents", 0) AS "wacCostCents",
-        orders."grossCapturedCents" - COALESCE(refund."refundedCents", 0) -
-          cost."capturedCostCents" + COALESCE(returned."refundCostCents", 0) AS "marginCents"
+        COALESCE(refund."refundedCents", 0)::bigint AS "refundedCents",
+        (orders."grossCapturedCents" - COALESCE(refund."refundedCents", 0))::bigint AS "netRevenueCents",
+        CASE
+          WHEN orders."grossCapturedCents" <= COALESCE(refund."refundedCents", 0) THEN 0::bigint
+          ELSE GREATEST(0::bigint, cost."capturedCostCents" - COALESCE(returned."refundCostCents", 0))
+        END AS "wacCostCents"
       FROM recognized_orders orders
       LEFT JOIN refund_ledger refund ON refund."orderId" = orders."id"
       JOIN captured_cost cost ON cost."id" = orders."id"
       LEFT JOIN refund_cost returned ON returned."orderId" = orders."id"
+    ),
+    finance_rows AS (
+      SELECT base."orderId", base."orderNumber", base."recognizedAt",
+        base."currency", base."paymentStatus",
+        base."capturedCents", base."voidedCents", base."grossCapturedCents",
+        base."refundedCents", base."netRevenueCents", base."wacCostCents",
+        (base."netRevenueCents" - base."wacCostCents")::bigint AS "marginCents"
+      FROM finance_base base
     )
   `;
 }
 
 const PrismaSql = Prisma.sql;
 
+const maxSignedBigInt = 9_223_372_036_854_775_807n;
+
 function summary(record: FinanceSummaryRecord | undefined): FinanceSummary {
   if (!record || BigInt(record.orderCount) === 0n) return zeroSummary;
-  record = {
+  const parsed = {
     orderCount: BigInt(record.orderCount),
     capturedCents: BigInt(record.capturedCents),
     voidedCents: BigInt(record.voidedCents),
@@ -178,26 +192,35 @@ function summary(record: FinanceSummaryRecord | undefined): FinanceSummary {
     marginCents: BigInt(record.marginCents),
   };
   if (
-    record.capturedCents < 0n ||
-    record.voidedCents < 0n ||
-    record.grossCapturedCents < 0n ||
-    record.refundedCents < 0n ||
-    record.netRevenueCents < 0n
+    parsed.capturedCents < 0n ||
+    parsed.voidedCents < 0n ||
+    parsed.grossCapturedCents < 0n ||
+    parsed.refundedCents < 0n ||
+    parsed.netRevenueCents < 0n ||
+    parsed.wacCostCents < 0n ||
+    parsed.capturedCents > maxSignedBigInt ||
+    parsed.voidedCents > maxSignedBigInt ||
+    parsed.grossCapturedCents > maxSignedBigInt ||
+    parsed.refundedCents > maxSignedBigInt ||
+    parsed.netRevenueCents > maxSignedBigInt ||
+    parsed.wacCostCents > maxSignedBigInt ||
+    parsed.marginCents < -maxSignedBigInt ||
+    parsed.marginCents > maxSignedBigInt
   ) {
     throw new Error("The payment and refund ledger produced an inconsistent finance summary.");
   }
   return {
-    orderCount: Number(record.orderCount),
-    capturedCents: record.capturedCents.toString(),
-    voidedCents: record.voidedCents.toString(),
-    grossCapturedCents: record.grossCapturedCents.toString(),
-    refundedCents: record.refundedCents.toString(),
-    netRevenueCents: record.netRevenueCents.toString(),
-    wacCostCents: record.wacCostCents.toString(),
-    marginCents: record.marginCents.toString(),
+    orderCount: Number(parsed.orderCount),
+    capturedCents: parsed.capturedCents.toString(),
+    voidedCents: parsed.voidedCents.toString(),
+    grossCapturedCents: parsed.grossCapturedCents.toString(),
+    refundedCents: parsed.refundedCents.toString(),
+    netRevenueCents: parsed.netRevenueCents.toString(),
+    wacCostCents: parsed.wacCostCents.toString(),
+    marginCents: parsed.marginCents.toString(),
     marginBps:
-      record.netRevenueCents > 0n
-        ? Number((record.marginCents * 10_000n) / record.netRevenueCents)
+      parsed.netRevenueCents > 0n
+        ? Number((parsed.marginCents * 10_000n) / parsed.netRevenueCents)
         : null,
   };
 }
@@ -266,13 +289,13 @@ export class FinanceService {
       this.db.$queryRaw<FinanceSummaryRecord[]>(PrismaSql`
         ${cte}
         SELECT count(*) AS "orderCount",
-          COALESCE(sum("capturedCents"), 0) AS "capturedCents",
-          COALESCE(sum("voidedCents"), 0) AS "voidedCents",
-          COALESCE(sum("grossCapturedCents"), 0) AS "grossCapturedCents",
-          COALESCE(sum("refundedCents"), 0) AS "refundedCents",
-          COALESCE(sum("netRevenueCents"), 0) AS "netRevenueCents",
-          COALESCE(sum("wacCostCents"), 0) AS "wacCostCents",
-          COALESCE(sum("marginCents"), 0) AS "marginCents"
+          COALESCE(sum("capturedCents"), 0)::text AS "capturedCents",
+          COALESCE(sum("voidedCents"), 0)::text AS "voidedCents",
+          COALESCE(sum("grossCapturedCents"), 0)::text AS "grossCapturedCents",
+          COALESCE(sum("refundedCents"), 0)::text AS "refundedCents",
+          COALESCE(sum("netRevenueCents"), 0)::text AS "netRevenueCents",
+          COALESCE(sum("wacCostCents"), 0)::text AS "wacCostCents",
+          COALESCE(sum("marginCents"), 0)::text AS "marginCents"
         FROM finance_rows
       `),
       this.db.$queryRaw<FinanceRowRecord[]>(PrismaSql`
@@ -390,11 +413,20 @@ export class FinanceService {
         create: { fiscalYear, snapshotDate: clock.localDate, ...values },
         update: values,
       });
-      const notificationValues = {
+      const thresholdNotificationValues = {
         category: "fiscal.threshold",
         severity: "CRITICAL" as const,
         title: `Vigilancia fiscal ${fiscalYear}: umbral alcanzado`,
         message: `Los ingresos brutos reconocidos alcanzaron el umbral configurado de ${thresholdUvt} UVT. Revisa el régimen tributario y la obligación de facturación.`,
+        href: "/admin/finanzas",
+        entityType: "FiscalWatchSnapshot",
+        entityId: snapshot.id,
+      };
+      const approachingNotificationValues = {
+        category: "fiscal.threshold",
+        severity: "WARNING" as const,
+        title: `Vigilancia fiscal ${fiscalYear}: próximo al umbral`,
+        message: `Los ingresos brutos reconocidos superaron el 80 % del umbral anual de ${thresholdUvt} UVT. Prepara la revisión tributaria y de facturación.`,
         href: "/admin/finanzas",
         entityType: "FiscalWatchSnapshot",
         entityId: snapshot.id,
@@ -404,13 +436,28 @@ export class FinanceService {
           where: { deduplicationKey: `fiscal-watch:${fiscalYear}:threshold` },
           create: {
             deduplicationKey: `fiscal-watch:${fiscalYear}:threshold`,
-            ...notificationValues,
+            ...thresholdNotificationValues,
           },
           update: { resolvedAt: null },
         });
       } else {
         await tx.notification.updateMany({
           where: { deduplicationKey: `fiscal-watch:${fiscalYear}:threshold`, resolvedAt: null },
+          data: { resolvedAt: currentRows[0]!.now },
+        });
+      }
+      if (status === "APPROACHING_LIMIT") {
+        await tx.notification.upsert({
+          where: { deduplicationKey: `fiscal-watch:${fiscalYear}:approaching` },
+          create: {
+            deduplicationKey: `fiscal-watch:${fiscalYear}:approaching`,
+            ...approachingNotificationValues,
+          },
+          update: { resolvedAt: null },
+        });
+      } else {
+        await tx.notification.updateMany({
+          where: { deduplicationKey: `fiscal-watch:${fiscalYear}:approaching`, resolvedAt: null },
           data: { resolvedAt: currentRows[0]!.now },
         });
       }

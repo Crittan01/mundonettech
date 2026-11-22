@@ -1,5 +1,7 @@
 import { formatCopCents, formatSignedCopCents } from "@mundonettech/core";
+import { currentYearRange, type FinanceReport } from "@mundonettech/db";
 import Link from "next/link";
+import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,16 +38,49 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
   );
   const raw = await searchParams;
   const requestedYear = single(raw.year);
-  const initialYear = requestedYear ? Number(requestedYear) : currentYear;
-  const range = parseFinanceRange(
-    { from: single(raw.from), to: single(raw.to), year: requestedYear },
-    Number.isInteger(initialYear) ? initialYear : currentYear,
-  );
-  const [watch, report, history] = await Promise.all([
-    service.refreshFiscalWatch(range.year),
-    service.report(range),
+  let rangeError: string | null = null;
+  let range: ReturnType<typeof parseFinanceRange>;
+  try {
+    range = parseFinanceRange(
+      { from: single(raw.from), to: single(raw.to), year: requestedYear },
+      currentYear,
+    );
+  } catch (error) {
+    if (error instanceof z.ZodError || error instanceof TypeError || error instanceof RangeError) {
+      rangeError =
+        "El rango solicitado no es válido; mostramos las operaciones del año fiscal actual.";
+      range = {
+        ...currentYearRange(currentYear),
+        fromDate: `${currentYear}-01-01`,
+        toDate: `${currentYear}-12-31`,
+        year: currentYear,
+      };
+    } else {
+      throw error;
+    }
+  }
+  const [watch, history] = await Promise.all([
+    service.refreshFiscalWatch(),
     service.fiscalHistory(),
   ]);
+  let report: FinanceReport;
+  try {
+    report = await service.report(range);
+  } catch (error) {
+    if (error instanceof RangeError) {
+      rangeError =
+        "El rango debe ser válido y cubrir máximo 367 días; mostramos el año fiscal actual.";
+      range = {
+        ...currentYearRange(currentYear),
+        fromDate: `${currentYear}-01-01`,
+        toDate: `${currentYear}-12-31`,
+        year: currentYear,
+      };
+      report = await service.report(range);
+    } else {
+      throw error;
+    }
+  }
   const threshold = BigInt(watch.thresholdCents);
   const gross = BigInt(watch.grossCapturedCents);
   const progressBps = threshold > 0n ? Number((gross * 10_000n) / threshold) : 10_000;
@@ -88,9 +123,16 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
           <Label htmlFor="finance-to">Hasta (inclusive)</Label>
           <Input id="finance-to" name="to" type="date" defaultValue={range.toDate} required />
         </div>
-        <input type="hidden" name="year" value={range.year} />
         <Button type="submit">Actualizar reporte</Button>
+        <Link href="/admin/finanzas" className="rounded-md px-3 py-2 text-sm font-medium underline">
+          Año actual
+        </Link>
       </form>
+      {rangeError ? (
+        <p role="alert" className="rounded-xl border border-destructive bg-card p-4 text-sm">
+          {rangeError}
+        </p>
+      ) : null}
       <section
         aria-label="Indicadores financieros"
         className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"

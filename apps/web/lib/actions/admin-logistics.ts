@@ -130,6 +130,12 @@ const packageSchema = z
   .min(1)
   .max(1000);
 
+function revalidateLogistics(): void {
+  revalidatePath("/admin/logistica");
+  revalidatePath("/admin/pedidos");
+  revalidatePath("/admin/hoy");
+}
+
 export async function startPickingAction(
   _previous: ActionState,
   formData: FormData,
@@ -141,7 +147,7 @@ export async function startPickingAction(
       z.string().uuid().parse(formString(formData, "shipmentId")),
       audit,
     );
-    revalidatePath("/admin/logistica");
+    revalidateLogistics();
     return actionSuccess("Alistamiento iniciado y auditado.");
   } catch (error) {
     return failure(error, values);
@@ -161,7 +167,7 @@ export async function packShipmentAction(
       packages,
       audit,
     );
-    revalidatePath("/admin/logistica");
+    revalidateLogistics();
     return actionSuccess(`${result.packageIds.length} bultos sellados con cobertura exacta.`);
   } catch (error) {
     return failure(error, values);
@@ -180,7 +186,7 @@ export async function processLabelAction(
       `admin:${audit.actorAdminUserId}`,
       audit,
     );
-    revalidatePath("/admin/logistica");
+    revalidateLogistics();
     return actionSuccess(
       result.status === "LABELLED"
         ? `Guía ${result.trackingCode} persistida.`
@@ -203,12 +209,32 @@ export async function reconcileLabelAction(
       `admin:${audit.actorAdminUserId}`,
       audit,
     );
-    revalidatePath("/admin/logistica");
+    revalidateLogistics();
     return actionSuccess(
       result.status === "LABELLED"
         ? "Guía conciliada sin duplicar cobro."
         : "El proveedor confirmó que no existe la guía; el bulto puede solicitarse de nuevo.",
     );
+  } catch (error) {
+    return failure(error, values);
+  }
+}
+
+export async function assignShipmentSerialsAction(
+  _previous: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const values = formSnapshot(formData);
+  try {
+    const audit = await authorize();
+    const shipmentId = z.string().uuid().parse(formString(formData, "shipmentId"));
+    const serialUnitIds = z
+      .array(z.string().uuid())
+      .max(10_000)
+      .parse(JSON.parse(formString(formData, "serialUnitIds") || "[]"));
+    const count = await shippingService().assignSerialUnits(shipmentId, serialUnitIds, audit);
+    revalidateLogistics();
+    return actionSuccess(`${count} seriales asignados al envío y auditados.`);
   } catch (error) {
     return failure(error, values);
   }
@@ -234,9 +260,7 @@ export async function dispatchShipmentAction(
       driverName || driverPhoneE164 ? { name: driverName, phoneE164: driverPhoneE164 } : undefined,
       serialUnitIds,
     );
-    revalidatePath("/admin/logistica");
-    revalidatePath("/admin/pedidos");
-    revalidatePath("/admin/hoy");
+    revalidateLogistics();
     return actionSuccess(
       "Seriales asignados y despacho confirmado con eventos y notificación encolados.",
     );
@@ -256,7 +280,7 @@ export async function deliverShipmentAction(
       z.string().uuid().parse(formString(formData, "shipmentId")),
       audit,
     );
-    revalidatePath("/admin/logistica");
+    revalidateLogistics();
     return actionSuccess("Entrega confirmada y evento monotónico registrado.");
   } catch (error) {
     return failure(error, values);

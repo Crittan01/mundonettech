@@ -1,5 +1,7 @@
-import { assertMoney } from "@mundonettech/core";
+import { assertMoney, isAdminRole } from "@mundonettech/core";
 
+import { assertUuid } from "./inventory-shared.js";
+import { notificationWhereForRole } from "./operations-service.js";
 import type { DashboardSnapshot, DailyFunnelPoint } from "./operations-types.js";
 import type { DatabaseExecutor } from "./primitives.js";
 import type { PrismaClient } from "./generated/client.js";
@@ -89,9 +91,16 @@ export class FunnelService {
   }
 
   async dashboard(adminUserId: string, dayCount = 30): Promise<DashboardSnapshot> {
-    if (!/^[0-9a-f-]{36}$/i.test(adminUserId)) throw new TypeError("Invalid administrator UUID.");
+    assertUuid(adminUserId, "adminUserId");
     if (!Number.isInteger(dayCount) || dayCount < 1 || dayCount > 366) {
       throw new RangeError("dayCount must be between 1 and 366.");
+    }
+    const actor = await this.db.adminUser.findFirst({
+      where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
+      select: { role: true },
+    });
+    if (!actor || !isAdminRole(actor.role)) {
+      throw new Error("Active administrator not found.");
     }
     const [days, unreadNotifications] = await Promise.all([
       this.db.$queryRaw<Array<DailyFunnelPoint & { total: bigint }>>`
@@ -112,7 +121,12 @@ export class FunnelService {
         ORDER BY day."metricDate"
       `,
       this.db.notification.count({
-        where: { resolvedAt: null, reads: { none: { adminUserId } } },
+        where: {
+          AND: [
+            { resolvedAt: null, reads: { none: { adminUserId } } },
+            notificationWhereForRole(actor.role),
+          ],
+        },
       }),
     ]);
     const totals = days.reduce(

@@ -38,7 +38,11 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     if (error instanceof AdminAuthorizationError) {
-      return Response.json({ error: "Unauthorized." }, { status: 401, headers });
+      const forbidden = error.code === "FORBIDDEN";
+      return Response.json(
+        { error: forbidden ? "Forbidden." : "Unauthorized." },
+        { status: forbidden ? 403 : 401, headers },
+      );
     }
     if (error instanceof z.ZodError || error instanceof TypeError || error instanceof RangeError) {
       return Response.json(

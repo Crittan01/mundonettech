@@ -109,21 +109,33 @@ ALTER TABLE "FiscalWatchSnapshot"
   ),
   ADD CONSTRAINT "FiscalWatchSnapshot_threshold_consistent" CHECK (
     ("status" = 'THRESHOLD_REACHED' AND "grossCapturedCents" >= "thresholdCents" AND "remainingCents" = 0 AND "thresholdReachedAt" IS NOT NULL) OR
-    ("status" <> 'THRESHOLD_REACHED' AND "grossCapturedCents" < "thresholdCents" AND "remainingCents" = "thresholdCents" - "grossCapturedCents" AND "thresholdReachedAt" IS NULL)
+    ("status" = 'APPROACHING_LIMIT' AND "grossCapturedCents" < "thresholdCents" AND "grossCapturedCents" * 5 >= "thresholdCents" * 4 AND "remainingCents" = "thresholdCents" - "grossCapturedCents" AND "thresholdReachedAt" IS NULL) OR
+    ("status" = 'WITHIN_LIMIT' AND "grossCapturedCents" * 5 < "thresholdCents" * 4 AND "remainingCents" = "thresholdCents" - "grossCapturedCents" AND "thresholdReachedAt" IS NULL)
   );
 
 CREATE OR REPLACE FUNCTION "validate_serialized_unit_shipment"() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   parent_status "ShipmentStatus";
+  assigning_new BOOLEAN;
 BEGIN
+  assigning_new := TG_OP = 'INSERT' OR NEW."shipmentId" IS DISTINCT FROM OLD."shipmentId";
+  IF TG_OP = 'UPDATE' AND NEW."shipmentId" IS DISTINCT FROM OLD."shipmentId" AND OLD."shipmentId" IS NOT NULL THEN
+    SELECT "status" INTO parent_status FROM "Shipment" WHERE "id" = OLD."shipmentId";
+    IF parent_status IN ('SHIPPED', 'DELIVERED') THEN
+      RAISE EXCEPTION 'Serialized assignments are immutable after dispatch' USING ERRCODE = '55000';
+    END IF;
+  END IF;
   IF NEW."shipmentId" IS NOT NULL THEN
-    IF NEW."status" <> 'SOLD' OR NEW."orderId" IS NULL OR NEW."soldAt" IS NULL THEN
+    IF NEW."orderId" IS NULL OR NEW."soldAt" IS NULL OR
+       (assigning_new AND NEW."status" <> 'SOLD') OR
+       (NOT assigning_new AND NEW."status" NOT IN ('SOLD', 'RETURNED')) THEN
       RAISE EXCEPTION 'A shipment assignment requires a sold serialized unit and order' USING ERRCODE = '23514';
     END IF;
     SELECT "status" INTO parent_status FROM "Shipment" WHERE "id" = NEW."shipmentId";
-    IF parent_status IS NULL OR parent_status = 'CANCELLED' THEN
-      RAISE EXCEPTION 'Serialized units require an active shipment' USING ERRCODE = '23514';
+    IF parent_status IS NULL OR parent_status = 'CANCELLED' OR
+       (assigning_new AND parent_status NOT IN ('PENDING', 'READY')) THEN
+      RAISE EXCEPTION 'Serialized units require an active pre-dispatch shipment' USING ERRCODE = '23514';
     END IF;
     IF NOT EXISTS (
       SELECT 1
@@ -138,12 +150,6 @@ BEGIN
       RAISE EXCEPTION 'Serialized unit does not match the shipment order, origin, and variant' USING ERRCODE = '23514';
     END IF;
   END IF;
-  IF TG_OP = 'UPDATE' AND NEW."shipmentId" IS DISTINCT FROM OLD."shipmentId" THEN
-    SELECT "status" INTO parent_status FROM "Shipment" WHERE "id" = OLD."shipmentId";
-    IF parent_status IN ('SHIPPED', 'DELIVERED') THEN
-      RAISE EXCEPTION 'Serialized assignments are immutable after dispatch' USING ERRCODE = '55000';
-    END IF;
-  END IF;
   RETURN NEW;
 END;
 $$;
@@ -156,7 +162,11 @@ LANGUAGE plpgsql AS $$
 DECLARE
   invalid_item UUID;
 BEGIN
-  IF NEW."status" IN ('SHIPPED', 'DELIVERED') AND OLD."status" IS DISTINCT FROM NEW."status" THEN
+  IF NEW."status" = 'CANCELLED' AND OLD."status" IS DISTINCT FROM NEW."status" THEN
+    IF EXISTS (SELECT 1 FROM "SerializedUnit" unit WHERE unit."shipmentId" = NEW."id") THEN
+      RAISE EXCEPTION 'Cannot cancel a shipment with assigned serialized units' USING ERRCODE = '23514';
+    END IF;
+  ELSIF NEW."status" IN ('SHIPPED', 'DELIVERED') AND OLD."status" IS DISTINCT FROM NEW."status" THEN
     SELECT required."variantId" INTO invalid_item
     FROM (
       SELECT order_item."variantId", sum(item."quantity")::bigint AS "quantity"
