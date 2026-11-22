@@ -26,6 +26,7 @@ export interface JsonLdProduct {
   readonly imageUrls: readonly string[];
   readonly breadcrumbs: readonly JsonLdBreadcrumbItem[];
   readonly offers: readonly JsonLdOffer[];
+  readonly reviewSummary?: { readonly count: number; readonly averageRating: number };
 }
 
 function plainText(value: string, field: string, max = 20_000): string {
@@ -106,6 +107,18 @@ export function buildProductJsonLd(product: JsonLdProduct) {
   if (product.offers.length < 1 || product.offers.length > 1000) {
     throw new TypeError("A JSON-LD product requires a bounded non-empty offer list.");
   }
+  if (
+    product.reviewSummary &&
+    (!Number.isInteger(product.reviewSummary.count) ||
+      product.reviewSummary.count < 1 ||
+      product.reviewSummary.count > 100_000_000 ||
+      typeof product.reviewSummary.averageRating !== "number" ||
+      !Number.isFinite(product.reviewSummary.averageRating) ||
+      product.reviewSummary.averageRating < 1 ||
+      product.reviewSummary.averageRating > 5)
+  ) {
+    throw new TypeError("A review summary requires real ratings and a positive bounded count.");
+  }
   const url = absolutePublicUrl(product.url, "product.url");
   const defaultOffer = product.offers[0]!;
   return [
@@ -124,6 +137,17 @@ export function buildProductJsonLd(product: JsonLdProduct) {
       sku: plainText(defaultOffer.sku, "product.sku", 100),
       ...(defaultOffer.mpn ? { mpn: plainText(defaultOffer.mpn, "product.mpn", 100) } : {}),
       ...gtinProperty(defaultOffer.gtin, defaultOffer.ean),
+      ...(product.reviewSummary
+        ? {
+            aggregateRating: {
+              "@type": "AggregateRating",
+              ratingValue: product.reviewSummary.averageRating.toFixed(2),
+              reviewCount: product.reviewSummary.count,
+              bestRating: 5,
+              worstRating: 1,
+            },
+          }
+        : {}),
       offers: product.offers.map((offer, index) => ({
         "@type": "Offer",
         "@id": `${absolutePublicUrl(offer.url, `offers[${index}].url`)}#offer-${offer.id}`,

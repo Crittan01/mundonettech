@@ -108,10 +108,14 @@ export class ResendEmailProvider implements EmailProvider {
             html: input.html,
             text: input.text,
             ...(this.credentials.replyTo ? { reply_to: this.credentials.replyTo } : {}),
-            headers: {
-              "List-Unsubscribe": `<${input.unsubscribeUrl}>`,
-              "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-            },
+            ...(input.unsubscribeUrl
+              ? {
+                  headers: {
+                    "List-Unsubscribe": `<${input.unsubscribeUrl}>`,
+                    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+                  },
+                }
+              : {}),
           }),
         },
         fetchImpl: this.options.fetchImpl ?? fetch,

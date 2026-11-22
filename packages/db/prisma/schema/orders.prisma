@@ -64,78 +64,84 @@ enum AbandonedCartStatus {
 }
 
 model Order {
-  id                       String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderNumber              String                 @unique @db.VarChar(32)
-  cartId                   String?                @unique @db.Uuid
-  customerId               String?                @db.Uuid
-  couponId                 String?                @db.Uuid
-  orderStatus              OrderStatus            @default(PENDING)
-  paymentStatus            PaymentStatus          @default(UNPAID)
-  fulfillmentStatus        FulfillmentStatus      @default(UNFULFILLED)
-  fulfillmentMethod        OrderFulfillmentMethod?
-  taxRegime                StoreTaxRegime?
-  uvtValueCents            BigInt?
-  uvtYear                  Int?
-  currency                 String                 @default("COP") @db.Char(3)
-  emailSnapshot            String?                @db.VarChar(320)
-  recipientNameSnapshot    String?                @db.VarChar(200)
-  phoneE164Snapshot        String?                @db.VarChar(16)
-  buyerDocumentTypeSnapshot String?               @db.Char(2)
-  buyerDocumentNumberSnapshot String?             @db.VarChar(30)
-  buyerTaxRegimeSnapshot   StoreTaxRegime?
-  countryCode              String                 @default("CO") @db.Char(2)
-  departmentCode           String?                @db.Char(2)
-  departmentNameSnapshot   String?                @db.VarChar(120)
-  municipalityCode         String?                @db.Char(5)
-  municipalityNameSnapshot String?                @db.VarChar(120)
-  addressLine1Snapshot     String?                @db.VarChar(200)
-  addressLine2Snapshot     String?                @db.VarChar(200)
-  neighborhoodSnapshot     String?                @db.VarChar(120)
-  postalCodeSnapshot       String?                @db.VarChar(6)
-  deliveryLatitudeE6       Int?
-  deliveryLongitudeE6      Int?
-  deliveryNotesSnapshot    String?                @db.VarChar(500)
-  clickCollectLocationId   String?                @db.Uuid
-  couponCodeSnapshot       String?                @db.VarChar(64)
-  subtotalCents            BigInt                 @default(0)
-  wholesaleDiscountCents   BigInt                 @default(0)
-  bundleDiscountCents      BigInt                 @default(0)
-  couponDiscountCents      BigInt                 @default(0)
-  discountCents            BigInt                 @default(0)
-  taxCents                 BigInt                 @default(0)
-  shippingCents            BigInt                 @default(0)
-  totalCents               BigInt                 @default(0)
-  reservationKey           String?                @unique @db.VarChar(128)
-  reservationExpiresAt     DateTime?              @db.Timestamptz(6)
-  deliveryPromiseAt        DateTime?              @db.Timestamptz(6)
-  termsVersion             String?                @db.VarChar(50)
-  privacyPolicyVersion     String?                @db.VarChar(50)
-  acceptanceProofHash      Bytes?                 @db.ByteA
-  acceptanceIpHash         Bytes?                 @db.ByteA
-  acceptanceUserAgentHash  Bytes?                 @db.ByteA
-  acceptedAt               DateTime?              @db.Timestamptz(6)
-  confirmedAt              DateTime?              @db.Timestamptz(6)
-  cancelledAt              DateTime?              @db.Timestamptz(6)
-  completedAt              DateTime?              @db.Timestamptz(6)
-  createdAt                DateTime               @default(now()) @db.Timestamptz(6)
-  updatedAt                DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
-  customer                 Customer?              @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  cart                     Cart?                  @relation(fields: [cartId], references: [id], onDelete: Restrict)
-  coupon                   Coupon?                @relation(fields: [couponId], references: [id], onDelete: Restrict)
-  municipality             DaneMunicipality?      @relation(fields: [municipalityCode], references: [code], onDelete: Restrict)
-  clickCollectLocation     StockLocation?         @relation(fields: [clickCollectLocationId], references: [id], onDelete: Restrict)
-  inventoryLedgerEntries   InventoryLedger[]
-  serializedUnits          SerializedUnit[]
-  items                    OrderItem[]
-  couponUsages             CouponUsage[]
-  receipt                  OrderReceipt?
-  statusEvents             OrderStatusEvent[]
-  shipments                Shipment[]
-  refunds                  OrderRefund[]
-  paymentAttempts          PaymentAttempt[]
-  fulfillments             OrderFulfillment[]
-  emailEvents              EmailEvent[]
-  taxInvoice               TaxInvoice?
+  id                          String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderNumber                 String                  @unique @db.VarChar(32)
+  cartId                      String?                 @unique @db.Uuid
+  customerId                  String?                 @db.Uuid
+  couponId                    String?                 @db.Uuid
+  orderStatus                 OrderStatus             @default(PENDING)
+  paymentStatus               PaymentStatus           @default(UNPAID)
+  fulfillmentStatus           FulfillmentStatus       @default(UNFULFILLED)
+  fulfillmentMethod           OrderFulfillmentMethod?
+  taxRegime                   StoreTaxRegime?
+  uvtValueCents               BigInt?
+  uvtYear                     Int?
+  currency                    String                  @default("COP") @db.Char(3)
+  emailSnapshot               String?                 @db.VarChar(320)
+  recipientNameSnapshot       String?                 @db.VarChar(200)
+  phoneE164Snapshot           String?                 @db.VarChar(16)
+  buyerDocumentTypeSnapshot   String?                 @db.Char(2)
+  buyerDocumentNumberSnapshot String?                 @db.VarChar(30)
+  buyerTaxRegimeSnapshot      StoreTaxRegime?
+  countryCode                 String                  @default("CO") @db.Char(2)
+  departmentCode              String?                 @db.Char(2)
+  departmentNameSnapshot      String?                 @db.VarChar(120)
+  municipalityCode            String?                 @db.Char(5)
+  municipalityNameSnapshot    String?                 @db.VarChar(120)
+  addressLine1Snapshot        String?                 @db.VarChar(200)
+  addressLine2Snapshot        String?                 @db.VarChar(200)
+  neighborhoodSnapshot        String?                 @db.VarChar(120)
+  postalCodeSnapshot          String?                 @db.VarChar(6)
+  deliveryLatitudeE6          Int?
+  deliveryLongitudeE6         Int?
+  deliveryNotesSnapshot       String?                 @db.VarChar(500)
+  clickCollectLocationId      String?                 @db.Uuid
+  couponCodeSnapshot          String?                 @db.VarChar(64)
+  subtotalCents               BigInt                  @default(0)
+  wholesaleDiscountCents      BigInt                  @default(0)
+  bundleDiscountCents         BigInt                  @default(0)
+  couponDiscountCents         BigInt                  @default(0)
+  discountCents               BigInt                  @default(0)
+  taxCents                    BigInt                  @default(0)
+  shippingCents               BigInt                  @default(0)
+  totalCents                  BigInt                  @default(0)
+  reservationKey              String?                 @unique @db.VarChar(128)
+  reservationExpiresAt        DateTime?               @db.Timestamptz(6)
+  deliveryPromiseAt           DateTime?               @db.Timestamptz(6)
+  termsVersion                String?                 @db.VarChar(50)
+  privacyPolicyVersion        String?                 @db.VarChar(50)
+  acceptanceProofHash         Bytes?                  @db.ByteA
+  acceptanceIpHash            Bytes?                  @db.ByteA
+  acceptanceUserAgentHash     Bytes?                  @db.ByteA
+  acceptedAt                  DateTime?               @db.Timestamptz(6)
+  confirmedAt                 DateTime?               @db.Timestamptz(6)
+  cancelledAt                 DateTime?               @db.Timestamptz(6)
+  completedAt                 DateTime?               @db.Timestamptz(6)
+  anonymizedAt                DateTime?               @db.Timestamptz(6)
+  createdAt                   DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt                   DateTime                @default(now()) @updatedAt @db.Timestamptz(6)
+  customer                    Customer?               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  cart                        Cart?                   @relation(fields: [cartId], references: [id], onDelete: Restrict)
+  coupon                      Coupon?                 @relation(fields: [couponId], references: [id], onDelete: Restrict)
+  municipality                DaneMunicipality?       @relation(fields: [municipalityCode], references: [code], onDelete: Restrict)
+  clickCollectLocation        StockLocation?          @relation(fields: [clickCollectLocationId], references: [id], onDelete: Restrict)
+  inventoryLedgerEntries      InventoryLedger[]
+  serializedUnits             SerializedUnit[]
+  items                       OrderItem[]
+  couponUsages                CouponUsage[]
+  receipt                     OrderReceipt?
+  statusEvents                OrderStatusEvent[]
+  shipments                   Shipment[]
+  refunds                     OrderRefund[]
+  paymentAttempts             PaymentAttempt[]
+  fulfillments                OrderFulfillment[]
+  emailEvents                 EmailEvent[]
+  taxInvoice                  TaxInvoice?
+  guestOrderChallenges        GuestOrderChallenge[]
+  guestOrderSessions          GuestOrderSession[]
+  returnRequests              ReturnRequest[]
+  warrantyClaims              WarrantyClaim[]
+  supportTickets              SupportTicket[]
 
   @@index([customerId, createdAt])
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
@@ -171,6 +177,9 @@ model OrderItem {
   reservations           OrderItemReservation[]
   shipmentItems          ShipmentItem[]
   refundItems            OrderRefundItem[]
+  returnRequestItems     ReturnRequestItem[]
+  warrantyClaims         WarrantyClaim[]
+  reviews                Review[]
 
   @@index([orderId, id])
   @@index([variantId, orderId])
@@ -178,22 +187,22 @@ model OrderItem {
 }
 
 model OrderItemTaxLine {
-  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderItemId        String             @db.Uuid
-  taxGroupCode       String             @db.VarChar(40)
-  taxGroupName       String             @db.VarChar(120)
-  treatment          TaxTreatment
-  rule               OrderTaxRule
-  catalogRateBps     Int
-  appliedRateBps     Int
-  uvtLimit           Int?
-  uvtValueCents      BigInt
-  uvtYear            Int
-  unitValueCents     BigInt
-  taxableBaseCents   BigInt
-  taxCents           BigInt
-  createdAt          DateTime           @default(now()) @db.Timestamptz(6)
-  orderItem          OrderItem          @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  id               String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderItemId      String       @db.Uuid
+  taxGroupCode     String       @db.VarChar(40)
+  taxGroupName     String       @db.VarChar(120)
+  treatment        TaxTreatment
+  rule             OrderTaxRule
+  catalogRateBps   Int
+  appliedRateBps   Int
+  uvtLimit         Int?
+  uvtValueCents    BigInt
+  uvtYear          Int
+  unitValueCents   BigInt
+  taxableBaseCents BigInt
+  taxCents         BigInt
+  createdAt        DateTime     @default(now()) @db.Timestamptz(6)
+  orderItem        OrderItem    @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
 
   @@unique([orderItemId, taxGroupCode, rule])
   @@index([rule, appliedRateBps])
@@ -216,36 +225,36 @@ model OrderItemReservation {
 }
 
 model TaxInvoice {
-  id                       String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId                  String              @unique @db.Uuid
-  credentialId             String              @db.Uuid
-  environment              IntegrationEnvironment
-  prefix                   String              @db.VarChar(20)
-  number                   Int
-  fullNumber               String              @db.VarChar(40)
-  cufe                     String              @db.Char(96)
-  currency                 String              @default("COP") @db.Char(3)
-  subtotalCents            BigInt
-  discountCents            BigInt
-  taxCents                 BigInt
-  shippingCents            BigInt
-  totalCents               BigInt
-  requestHash              Bytes               @db.ByteA
-  claimedBy                String?             @db.VarChar(120)
-  claimExpiresAt           DateTime?           @db.Timestamptz(6)
-  unsignedXml              String              @db.Text
-  signedXml                String?             @db.Text
-  documentHash             Bytes?              @db.ByteA
-  providerDocumentId       String?             @db.VarChar(128)
-  status                   FiscalDocumentStatus @default(DRAFT)
-  failureCode              String?             @db.VarChar(200)
-  transmittedAt            DateTime?           @db.Timestamptz(6)
-  acceptedAt               DateTime?           @db.Timestamptz(6)
-  createdAt                DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt                DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
-  order                    Order               @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  credential               IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
-  creditNotes              CreditNote[]
+  id                 String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId            String                 @unique @db.Uuid
+  credentialId       String                 @db.Uuid
+  environment        IntegrationEnvironment
+  prefix             String                 @db.VarChar(20)
+  number             Int
+  fullNumber         String                 @db.VarChar(40)
+  cufe               String                 @db.Char(96)
+  currency           String                 @default("COP") @db.Char(3)
+  subtotalCents      BigInt
+  discountCents      BigInt
+  taxCents           BigInt
+  shippingCents      BigInt
+  totalCents         BigInt
+  requestHash        Bytes                  @db.ByteA
+  claimedBy          String?                @db.VarChar(120)
+  claimExpiresAt     DateTime?              @db.Timestamptz(6)
+  unsignedXml        String                 @db.Text
+  signedXml          String?                @db.Text
+  documentHash       Bytes?                 @db.ByteA
+  providerDocumentId String?                @db.VarChar(128)
+  status             FiscalDocumentStatus   @default(DRAFT)
+  failureCode        String?                @db.VarChar(200)
+  transmittedAt      DateTime?              @db.Timestamptz(6)
+  acceptedAt         DateTime?              @db.Timestamptz(6)
+  createdAt          DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  order              Order                  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  credential         IntegrationCredential  @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  creditNotes        CreditNote[]
 
   @@unique([credentialId, prefix, number])
   @@unique([credentialId, fullNumber])
@@ -254,37 +263,37 @@ model TaxInvoice {
 }
 
 model CreditNote {
-  id                       String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  invoiceId                String              @db.Uuid
-  refundId                 String              @unique @db.Uuid
-  credentialId             String              @db.Uuid
-  prefix                   String              @db.VarChar(20)
-  number                   Int
-  fullNumber               String              @db.VarChar(40)
-  cude                     String              @db.Char(96)
-  currency                 String              @default("COP") @db.Char(3)
-  subtotalCents            BigInt
-  discountCents            BigInt
-  taxCents                 BigInt
-  shippingCents            BigInt
-  totalCents               BigInt
-  reasonCode               Int
-  requestHash              Bytes               @db.ByteA
-  claimedBy                String?             @db.VarChar(120)
-  claimExpiresAt           DateTime?           @db.Timestamptz(6)
-  unsignedXml              String              @db.Text
-  signedXml                String?             @db.Text
-  documentHash             Bytes?              @db.ByteA
-  providerDocumentId       String?             @db.VarChar(128)
-  status                   FiscalDocumentStatus @default(DRAFT)
-  failureCode              String?             @db.VarChar(200)
-  transmittedAt            DateTime?           @db.Timestamptz(6)
-  acceptedAt               DateTime?           @db.Timestamptz(6)
-  createdAt                DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt                DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
-  invoice                  TaxInvoice          @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
-  refund                   OrderRefund         @relation(fields: [refundId], references: [id], onDelete: Restrict)
-  credential               IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  id                 String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceId          String                @db.Uuid
+  refundId           String                @unique @db.Uuid
+  credentialId       String                @db.Uuid
+  prefix             String                @db.VarChar(20)
+  number             Int
+  fullNumber         String                @db.VarChar(40)
+  cude               String                @db.Char(96)
+  currency           String                @default("COP") @db.Char(3)
+  subtotalCents      BigInt
+  discountCents      BigInt
+  taxCents           BigInt
+  shippingCents      BigInt
+  totalCents         BigInt
+  reasonCode         Int
+  requestHash        Bytes                 @db.ByteA
+  claimedBy          String?               @db.VarChar(120)
+  claimExpiresAt     DateTime?             @db.Timestamptz(6)
+  unsignedXml        String                @db.Text
+  signedXml          String?               @db.Text
+  documentHash       Bytes?                @db.ByteA
+  providerDocumentId String?               @db.VarChar(128)
+  status             FiscalDocumentStatus  @default(DRAFT)
+  failureCode        String?               @db.VarChar(200)
+  transmittedAt      DateTime?             @db.Timestamptz(6)
+  acceptedAt         DateTime?             @db.Timestamptz(6)
+  createdAt          DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  invoice            TaxInvoice            @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  refund             OrderRefund           @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  credential         IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
 
   @@unique([credentialId, prefix, number])
   @@unique([credentialId, fullNumber])
@@ -293,56 +302,56 @@ model CreditNote {
 }
 
 model OrderReceipt {
-  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId              String    @unique @db.Uuid
-  receiptNumber        String    @unique @db.VarChar(40)
-  accessTokenHash      Bytes     @unique @db.ByteA
-  taxRegime            StoreTaxRegime
-  currency             String    @db.Char(3)
-  subtotalCents        BigInt
-  discountCents        BigInt
-  taxCents             BigInt
-  shippingCents        BigInt
-  totalCents           BigInt
-  contentHash          Bytes     @db.ByteA
-  issuedAt             DateTime  @default(now()) @db.Timestamptz(6)
-  order                Order     @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId         String         @unique @db.Uuid
+  receiptNumber   String         @unique @db.VarChar(40)
+  accessTokenHash Bytes          @unique @db.ByteA
+  taxRegime       StoreTaxRegime
+  currency        String         @db.Char(3)
+  subtotalCents   BigInt
+  discountCents   BigInt
+  taxCents        BigInt
+  shippingCents   BigInt
+  totalCents      BigInt
+  contentHash     Bytes          @db.ByteA
+  issuedAt        DateTime       @default(now()) @db.Timestamptz(6)
+  order           Order          @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   @@index([issuedAt, orderId])
   @@map("OrderReceipt")
 }
 
 model OrderStatusEvent {
-  id                String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  orderId           String           @db.Uuid
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId           String            @db.Uuid
   orderStatus       OrderStatus
   paymentStatus     PaymentStatus
   fulfillmentStatus FulfillmentStatus
-  reason            String?          @db.VarChar(200)
-  metadata          Json             @default("{}") @db.JsonB
-  occurredAt        DateTime         @default(now()) @db.Timestamptz(6)
-  order             Order            @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  reason            String?           @db.VarChar(200)
+  metadata          Json              @default("{}") @db.JsonB
+  occurredAt        DateTime          @default(now()) @db.Timestamptz(6)
+  order             Order             @relation(fields: [orderId], references: [id], onDelete: Restrict)
 
   @@index([orderId, occurredAt, id])
   @@map("OrderStatusEvent")
 }
 
 model AbandonedCart {
-  id                String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  cartId            String              @unique @db.Uuid
-  customerId        String?             @db.Uuid
-  contactEmail      String?             @db.VarChar(320)
-  status            AbandonedCartStatus @default(DETECTED)
-  lastActivityAt    DateTime            @db.Timestamptz(6)
-  detectedAt        DateTime            @default(now()) @db.Timestamptz(6)
-  recoveredAt       DateTime?           @db.Timestamptz(6)
-  expiredAt         DateTime?           @db.Timestamptz(6)
-  reminderCount     Int                 @default(0)
-  lastReminderAt    DateTime?           @db.Timestamptz(6)
-  createdAt         DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt         DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
-  cart              Cart                @relation(fields: [cartId], references: [id], onDelete: Restrict)
-  customer          Customer?           @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cartId         String              @unique @db.Uuid
+  customerId     String?             @db.Uuid
+  contactEmail   String?             @db.VarChar(320)
+  status         AbandonedCartStatus @default(DETECTED)
+  lastActivityAt DateTime            @db.Timestamptz(6)
+  detectedAt     DateTime            @default(now()) @db.Timestamptz(6)
+  recoveredAt    DateTime?           @db.Timestamptz(6)
+  expiredAt      DateTime?           @db.Timestamptz(6)
+  reminderCount  Int                 @default(0)
+  lastReminderAt DateTime?           @db.Timestamptz(6)
+  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  cart           Cart                @relation(fields: [cartId], references: [id], onDelete: Restrict)
+  customer       Customer?           @relation(fields: [customerId], references: [id], onDelete: Restrict)
 
   @@index([status, detectedAt])
   @@index([customerId, status])
@@ -359,53 +368,54 @@ model OrderNumberSequence {
 }
 
 model DaneDepartment {
-  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code         String            @unique @db.Char(2)
-  name         String            @db.VarChar(120)
+  id             String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code           String             @unique @db.Char(2)
+  name           String             @db.VarChar(120)
   municipalities DaneMunicipality[]
 
   @@map("DaneDepartment")
 }
 
 model DaneMunicipality {
-  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code           String         @unique @db.Char(5)
-  departmentCode String         @db.Char(2)
-  name           String         @db.VarChar(120)
-  locationType   String         @db.VarChar(60)
-  department     DaneDepartment @relation(fields: [departmentCode], references: [code], onDelete: Restrict)
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code           String          @unique @db.Char(5)
+  departmentCode String          @db.Char(2)
+  name           String          @db.VarChar(120)
+  locationType   String          @db.VarChar(60)
+  department     DaneDepartment  @relation(fields: [departmentCode], references: [code], onDelete: Restrict)
   orders         Order[]
   stockLocations StockLocation[]
+  addresses      Address[]
 
   @@index([departmentCode, name, code])
   @@map("DaneMunicipality")
 }
 
 model Cart {
-  id                     String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  accessTokenHash        Bytes         @unique @db.ByteA
-  kind                   CartKind      @default(STOREFRONT)
-  status                 CartStatus    @default(ACTIVE)
-  customerId             String?       @db.Uuid
-  couponId               String?       @db.Uuid
-  assistedByAdminUserId  String?       @db.Uuid
-  assistedTokenHash      Bytes?        @unique @db.ByteA
-  assistedExpiresAt      DateTime?     @db.Timestamptz(6)
-  assistedClaimedAt      DateTime?     @db.Timestamptz(6)
-  subtotalCents          BigInt        @default(0)
-  wholesaleDiscountCents BigInt        @default(0)
-  bundleDiscountCents    BigInt        @default(0)
-  couponDiscountCents    BigInt        @default(0)
-  totalCents             BigInt        @default(0)
-  itemCount              Int           @default(0)
-  pricingIssues          Json          @default("[]") @db.JsonB
-  priceRevalidatedAt     DateTime?     @db.Timestamptz(6)
-  expiresAt              DateTime      @db.Timestamptz(6)
-  createdAt              DateTime      @default(now()) @db.Timestamptz(6)
-  updatedAt              DateTime      @default(now()) @updatedAt @db.Timestamptz(6)
-  customer               Customer?     @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  coupon                 Coupon?       @relation(fields: [couponId], references: [id], onDelete: Restrict)
-  assistedBy             AdminUser?    @relation(fields: [assistedByAdminUserId], references: [id], onDelete: Restrict)
+  id                     String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accessTokenHash        Bytes          @unique @db.ByteA
+  kind                   CartKind       @default(STOREFRONT)
+  status                 CartStatus     @default(ACTIVE)
+  customerId             String?        @db.Uuid
+  couponId               String?        @db.Uuid
+  assistedByAdminUserId  String?        @db.Uuid
+  assistedTokenHash      Bytes?         @unique @db.ByteA
+  assistedExpiresAt      DateTime?      @db.Timestamptz(6)
+  assistedClaimedAt      DateTime?      @db.Timestamptz(6)
+  subtotalCents          BigInt         @default(0)
+  wholesaleDiscountCents BigInt         @default(0)
+  bundleDiscountCents    BigInt         @default(0)
+  couponDiscountCents    BigInt         @default(0)
+  totalCents             BigInt         @default(0)
+  itemCount              Int            @default(0)
+  pricingIssues          Json           @default("[]") @db.JsonB
+  priceRevalidatedAt     DateTime?      @db.Timestamptz(6)
+  expiresAt              DateTime       @db.Timestamptz(6)
+  createdAt              DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  customer               Customer?      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  coupon                 Coupon?        @relation(fields: [couponId], references: [id], onDelete: Restrict)
+  assistedBy             AdminUser?     @relation(fields: [assistedByAdminUserId], references: [id], onDelete: Restrict)
   items                  CartItem[]
   couponUsages           CouponUsage[]
   order                  Order?

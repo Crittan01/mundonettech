@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@mundonettech/core": "workspace:*",
+    "@mundonettech/legal-co": "workspace:*",
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
     "pg": "8.23.1"

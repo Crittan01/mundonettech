@@ -1,0 +1,302 @@
+enum GuestOrderChallengeStatus {
+  PENDING
+  SENT
+  FAILED
+  CONSUMED
+  EXPIRED
+}
+
+enum ReturnRequestKind {
+  REFUND
+  EXCHANGE
+}
+
+enum ReturnRequestStatus {
+  REQUESTED
+  AWAITING_RETURN
+  RECEIVED
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+enum WarrantyClaimStatus {
+  REQUESTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+  RESOLVED
+  CANCELLED
+}
+
+enum WarrantyRemedy {
+  REFUND
+  REPAIR
+  REPLACEMENT
+}
+
+enum SupportTicketKind {
+  QUERY
+  COMPLAINT
+  CLAIM
+  APPEAL
+  SUGGESTION
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+enum SupportMessageAuthor {
+  CUSTOMER
+  GUEST
+  ADMIN
+}
+
+enum ReviewStatus {
+  PENDING
+  PUBLISHED
+  REJECTED
+}
+
+model GuestOrderChallenge {
+  id                String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId           String                    @db.Uuid
+  idempotencyKey    String                    @unique @db.VarChar(128)
+  codeHash          Bytes                     @db.ByteA
+  requestIpHash     Bytes                     @db.ByteA
+  status            GuestOrderChallengeStatus @default(PENDING)
+  attempts          Int                       @default(0)
+  providerMessageId String?                   @db.VarChar(128)
+  failureCode       String?                   @db.VarChar(100)
+  lastSentAt        DateTime?                 @db.Timestamptz(6)
+  expiresAt         DateTime                  @db.Timestamptz(6)
+  consumedAt        DateTime?                 @db.Timestamptz(6)
+  createdAt         DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime                  @default(now()) @updatedAt @db.Timestamptz(6)
+  order             Order                     @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  session           GuestOrderSession?
+
+  @@index([orderId, status, createdAt])
+  @@index([status, expiresAt])
+  @@map("GuestOrderChallenge")
+}
+
+model GuestOrderSession {
+  id              String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId         String                 @db.Uuid
+  challengeId     String                 @unique @db.Uuid
+  tokenHash       Bytes                  @unique @db.ByteA
+  expiresAt       DateTime               @db.Timestamptz(6)
+  lastUsedAt      DateTime               @default(now()) @db.Timestamptz(6)
+  revokedAt       DateTime?              @db.Timestamptz(6)
+  createdAt       DateTime               @default(now()) @db.Timestamptz(6)
+  order           Order                  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  challenge       GuestOrderChallenge    @relation(fields: [challengeId], references: [id], onDelete: Restrict)
+  returnRequests  ReturnRequest[]
+  warrantyClaims  WarrantyClaim[]
+  supportTickets  SupportTicket[]
+  supportMessages SupportTicketMessage[]
+  reviews         Review[]
+
+  @@index([orderId, revokedAt, expiresAt])
+  @@map("GuestOrderSession")
+}
+
+model ReturnRequest {
+  id                      String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId                 String              @db.Uuid
+  requesterCustomerId     String?             @db.Uuid
+  requesterGuestSessionId String?             @db.Uuid
+  idempotencyKey          String              @unique @db.VarChar(128)
+  requestHash             Bytes               @db.ByteA
+  kind                    ReturnRequestKind
+  status                  ReturnRequestStatus @default(REQUESTED)
+  reason                  String              @db.VarChar(2000)
+  resolutionNote          String?             @db.VarChar(500)
+  retractRefundDueAt      DateTime?           @db.Timestamptz(6)
+  refundId                String?             @unique @db.Uuid
+  version                 Int                 @default(0)
+  reviewedByAdminUserId   String?             @db.Uuid
+  reviewedAt              DateTime?           @db.Timestamptz(6)
+  receivedAt              DateTime?           @db.Timestamptz(6)
+  completedAt             DateTime?           @db.Timestamptz(6)
+  createdAt               DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  order                   Order               @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  requesterCustomer       Customer?           @relation(fields: [requesterCustomerId], references: [id], onDelete: Restrict)
+  requesterGuestSession   GuestOrderSession?  @relation(fields: [requesterGuestSessionId], references: [id], onDelete: Restrict)
+  refund                  OrderRefund?        @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  reviewedBy              AdminUser?          @relation("ReturnRequestReviewer", fields: [reviewedByAdminUserId], references: [id], onDelete: Restrict)
+  items                   ReturnRequestItem[]
+
+  @@index([orderId, status, createdAt])
+  @@index([requesterCustomerId, createdAt])
+  @@index([requesterGuestSessionId, createdAt])
+  @@index([status, createdAt])
+  @@map("ReturnRequest")
+}
+
+model ReturnRequestItem {
+  id                   String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  returnRequestId      String              @db.Uuid
+  orderItemId          String              @db.Uuid
+  shipmentItemId       String              @db.Uuid
+  quantity             Int
+  replacementVariantId String?             @db.Uuid
+  deliveredAt          DateTime            @db.Timestamptz(6)
+  retractDueAt         DateTime            @db.Timestamptz(6)
+  createdAt            DateTime            @default(now()) @db.Timestamptz(6)
+  returnRequest        ReturnRequest       @relation(fields: [returnRequestId], references: [id], onDelete: Restrict)
+  orderItem            OrderItem           @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  shipmentItem         ShipmentItem        @relation(fields: [shipmentItemId], references: [id], onDelete: Restrict)
+  replacementVariant   ProductVariant?     @relation("ReturnReplacementVariant", fields: [replacementVariantId], references: [id], onDelete: Restrict)
+  units                ReturnRequestUnit[]
+
+  @@unique([returnRequestId, shipmentItemId])
+  @@index([orderItemId, returnRequestId])
+  @@index([replacementVariantId])
+  @@map("ReturnRequestItem")
+}
+
+model ReturnRequestUnit {
+  id                  String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  returnRequestItemId String            @db.Uuid
+  serializedUnitId    String            @db.Uuid
+  createdAt           DateTime          @default(now()) @db.Timestamptz(6)
+  returnRequestItem   ReturnRequestItem @relation(fields: [returnRequestItemId], references: [id], onDelete: Restrict)
+  serializedUnit      SerializedUnit    @relation(fields: [serializedUnitId], references: [id], onDelete: Restrict)
+
+  @@unique([returnRequestItemId, serializedUnitId])
+  @@index([serializedUnitId])
+  @@index([returnRequestItemId])
+  @@map("ReturnRequestUnit")
+}
+
+model WarrantyClaim {
+  id                      String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId                 String              @db.Uuid
+  orderItemId             String              @db.Uuid
+  serializedUnitId        String              @db.Uuid
+  requesterCustomerId     String?             @db.Uuid
+  requesterGuestSessionId String?             @db.Uuid
+  idempotencyKey          String              @unique @db.VarChar(128)
+  requestHash             Bytes               @db.ByteA
+  issueDescription        String              @db.VarChar(2000)
+  remedy                  WarrantyRemedy
+  status                  WarrantyClaimStatus @default(REQUESTED)
+  warrantyDueAt           DateTime            @db.Timestamptz(6)
+  resolutionNote          String?             @db.VarChar(500)
+  refundId                String?             @unique @db.Uuid
+  version                 Int                 @default(0)
+  reviewedByAdminUserId   String?             @db.Uuid
+  reviewedAt              DateTime?           @db.Timestamptz(6)
+  resolvedAt              DateTime?           @db.Timestamptz(6)
+  createdAt               DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  order                   Order               @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  orderItem               OrderItem           @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  serializedUnit          SerializedUnit      @relation(fields: [serializedUnitId], references: [id], onDelete: Restrict)
+  requesterCustomer       Customer?           @relation(fields: [requesterCustomerId], references: [id], onDelete: Restrict)
+  requesterGuestSession   GuestOrderSession?  @relation(fields: [requesterGuestSessionId], references: [id], onDelete: Restrict)
+  refund                  OrderRefund?        @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  reviewedBy              AdminUser?          @relation("WarrantyClaimReviewer", fields: [reviewedByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([orderId, status, createdAt])
+  @@index([serializedUnitId, status, createdAt])
+  @@index([requesterCustomerId, createdAt])
+  @@index([requesterGuestSessionId, createdAt])
+  @@index([status, warrantyDueAt, createdAt])
+  @@map("WarrantyClaim")
+}
+
+model SupportTicket {
+  id                      String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketNumber            String                 @unique @db.VarChar(64)
+  orderId                 String?                @db.Uuid
+  requesterCustomerId     String?                @db.Uuid
+  requesterGuestSessionId String?                @db.Uuid
+  assignedToAdminUserId   String?                @db.Uuid
+  idempotencyKey          String                 @unique @db.VarChar(128)
+  requestHash             Bytes                  @db.ByteA
+  kind                    SupportTicketKind
+  status                  SupportTicketStatus    @default(OPEN)
+  subject                 String                 @db.VarChar(200)
+  contactEmailSnapshot    String                 @db.VarChar(320)
+  slaDueAt                DateTime               @db.Timestamptz(6)
+  firstResponseAt         DateTime?              @db.Timestamptz(6)
+  resolvedAt              DateTime?              @db.Timestamptz(6)
+  closedAt                DateTime?              @db.Timestamptz(6)
+  version                 Int                    @default(0)
+  createdAt               DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  order                   Order?                 @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  requesterCustomer       Customer?              @relation(fields: [requesterCustomerId], references: [id], onDelete: Restrict)
+  requesterGuestSession   GuestOrderSession?     @relation(fields: [requesterGuestSessionId], references: [id], onDelete: Restrict)
+  assignedTo              AdminUser?             @relation("SupportTicketAssignee", fields: [assignedToAdminUserId], references: [id], onDelete: Restrict)
+  messages                SupportTicketMessage[]
+
+  @@index([requesterCustomerId, createdAt])
+  @@index([requesterGuestSessionId, createdAt])
+  @@index([orderId, createdAt])
+  @@index([status, slaDueAt, createdAt])
+  @@index([assignedToAdminUserId, status, createdAt])
+  @@map("SupportTicket")
+}
+
+model SupportTicketMessage {
+  id                   String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ticketId             String               @db.Uuid
+  idempotencyKey       String               @unique @db.VarChar(128)
+  authorType           SupportMessageAuthor
+  authorCustomerId     String?              @db.Uuid
+  authorGuestSessionId String?              @db.Uuid
+  authorAdminUserId    String?              @db.Uuid
+  body                 String               @db.VarChar(5000)
+  createdAt            DateTime             @default(now()) @db.Timestamptz(6)
+  ticket               SupportTicket        @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  authorCustomer       Customer?            @relation(fields: [authorCustomerId], references: [id], onDelete: Restrict)
+  authorGuestSession   GuestOrderSession?   @relation(fields: [authorGuestSessionId], references: [id], onDelete: Restrict)
+  authorAdmin          AdminUser?           @relation("SupportMessageAuthor", fields: [authorAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([ticketId, createdAt, id])
+  @@index([authorCustomerId, createdAt])
+  @@index([authorGuestSessionId, createdAt])
+  @@index([authorAdminUserId, createdAt])
+  @@map("SupportTicketMessage")
+}
+
+model Review {
+  id                      String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderItemId             String             @unique @db.Uuid
+  productId               String             @db.Uuid
+  requesterCustomerId     String?            @db.Uuid
+  requesterGuestSessionId String?            @db.Uuid
+  idempotencyKey          String             @unique @db.VarChar(128)
+  requestHash             Bytes              @db.ByteA
+  rating                  Int
+  title                   String             @db.VarChar(120)
+  body                    String             @db.VarChar(2000)
+  authorDisplayName       String             @db.VarChar(80)
+  status                  ReviewStatus       @default(PENDING)
+  moderationNote          String?            @db.VarChar(500)
+  moderatedByAdminUserId  String?            @db.Uuid
+  moderatedAt             DateTime?          @db.Timestamptz(6)
+  createdAt               DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime           @default(now()) @updatedAt @db.Timestamptz(6)
+  orderItem               OrderItem          @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  product                 Product            @relation(fields: [productId], references: [id], onDelete: Restrict)
+  requesterCustomer       Customer?          @relation(fields: [requesterCustomerId], references: [id], onDelete: Restrict)
+  requesterGuestSession   GuestOrderSession? @relation(fields: [requesterGuestSessionId], references: [id], onDelete: Restrict)
+  moderatedBy             AdminUser?         @relation("ReviewModerator", fields: [moderatedByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([productId, status, createdAt])
+  @@index([requesterCustomerId, createdAt])
+  @@index([requesterGuestSessionId, createdAt])
+  @@index([status, createdAt])
+  @@map("Review")
+}

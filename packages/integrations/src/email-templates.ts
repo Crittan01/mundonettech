@@ -65,6 +65,30 @@ const definitions = {
       "El reembolso de {{orderNumber}} por {{totalCop}} quedó confirmado por {{storeName}}. Pedido: {{receiptUrl}}. Baja de avisos: {{unsubscribeUrl}}",
     variables: ["orderNumber", "storeName", "totalCop", "receiptUrl", "unsubscribeUrl"],
   },
+  "postsale.updated": {
+    subject: "Actualización de {{caseKind}} para {{orderNumber}}",
+    htmlBody:
+      '<p>Tu solicitud de {{caseKind}} <strong>{{caseId}}</strong> para el pedido {{orderNumber}} cambió a <strong>{{statusLabel}}</strong> en {{storeName}}.</p><p><a href="{{accessUrl}}">Consultar posventa</a></p><p><a href="{{unsubscribeUrl}}">Dejar de recibir avisos de posventa</a></p>',
+    textBody:
+      "Tu solicitud de {{caseKind}} {{caseId}} para {{orderNumber}} cambió a {{statusLabel}} en {{storeName}}. Posventa: {{accessUrl}}. Baja de avisos: {{unsubscribeUrl}}",
+    variables: [
+      "caseId",
+      "caseKind",
+      "orderNumber",
+      "statusLabel",
+      "storeName",
+      "accessUrl",
+      "unsubscribeUrl",
+    ],
+  },
+  "support.ticket": {
+    subject: "Actualización de tu PQR {{ticketNumber}}",
+    htmlBody:
+      '<p>Tu PQR <strong>{{ticketNumber}}</strong> cambió a <strong>{{statusLabel}}</strong> en {{storeName}}.</p><p><a href="{{supportUrl}}">Consultar PQR</a></p><p><a href="{{unsubscribeUrl}}">Dejar de recibir avisos de soporte</a></p>',
+    textBody:
+      "Tu PQR {{ticketNumber}} cambió a {{statusLabel}} en {{storeName}}. Consulta: {{supportUrl}}. Baja de avisos: {{unsubscribeUrl}}",
+    variables: ["ticketNumber", "statusLabel", "storeName", "supportUrl", "unsubscribeUrl"],
+  },
 } as const satisfies Readonly<Record<string, Omit<EmailTemplateDefinition, "templateKey">>>;
 
 export const emailTemplateKeys = Object.keys(definitions);

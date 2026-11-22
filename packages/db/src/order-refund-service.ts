@@ -8,6 +8,7 @@ import {
 } from "@mundonettech/core";
 
 import type { Order, OrderRefund, PrismaClient } from "./generated/client.js";
+import type { DatabaseExecutor } from "./primitives.js";
 import {
   acquireOperationLocks,
   assertUuid,
@@ -123,6 +124,20 @@ export class OrderRefundService {
   constructor(private readonly db: PrismaClient) {}
 
   async request(input: RefundRequestInput): Promise<RefundRequestResult> {
+    return this.requestWithExecutor(this.db, input);
+  }
+
+  async requestInTransaction(
+    db: DatabaseExecutor,
+    input: RefundRequestInput,
+  ): Promise<RefundRequestResult> {
+    return this.requestWithExecutor(db, input);
+  }
+
+  private async requestWithExecutor(
+    db: DatabaseExecutor,
+    input: RefundRequestInput,
+  ): Promise<RefundRequestResult> {
     assertUuid(input.orderId, "orderId");
     const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
@@ -150,7 +165,7 @@ export class OrderRefundService {
     const expectedHash = requestDigest({ ...input, idempotencyKey, note }, requestedItems);
 
     try {
-      return await inInventoryTransaction(this.db, async (tx) => {
+      return await inInventoryTransaction(db, async (tx) => {
         await acquireOperationLocks(tx, [`order-refund:${input.orderId}`]);
         const orderRows = await tx.$queryRaw<
           Order[]
@@ -356,12 +371,28 @@ export class OrderRefundService {
   }
 
   async cancel(input: RefundStatusTransitionInput): Promise<RefundRequestResult> {
-    return this.transition(
+    return this.transitionWithExecutor(
+      this.db,
       input,
       ["REQUESTED", "APPROVED", "FAILED"],
       "CANCELLED",
       "ORDER_REFUND_CANCELLED",
       "order.refund.cancelled.v1",
+    );
+  }
+
+  async cancelInTransaction(
+    db: DatabaseExecutor,
+    input: RefundStatusTransitionInput & { allowLinkedPostSale?: boolean },
+  ): Promise<RefundRequestResult> {
+    return this.transitionWithExecutor(
+      db,
+      input,
+      ["REQUESTED", "APPROVED", "FAILED"],
+      "CANCELLED",
+      "ORDER_REFUND_CANCELLED",
+      "order.refund.cancelled.v1",
+      input.allowLinkedPostSale === true,
     );
   }
 
@@ -372,10 +403,29 @@ export class OrderRefundService {
     auditAction: string,
     eventType: string,
   ): Promise<RefundRequestResult> {
+    return this.transitionWithExecutor(
+      this.db,
+      input,
+      allowedFrom,
+      targetStatus,
+      auditAction,
+      eventType,
+    );
+  }
+
+  private async transitionWithExecutor(
+    db: DatabaseExecutor,
+    input: RefundStatusTransitionInput,
+    allowedFrom: readonly ("REQUESTED" | "APPROVED" | "FAILED")[],
+    targetStatus: "APPROVED" | "REJECTED" | "CANCELLED",
+    auditAction: string,
+    eventType: string,
+    allowLinkedPostSale = false,
+  ): Promise<RefundRequestResult> {
     assertUuid(input.refundId, "refundId");
     const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
     const note = input.note === undefined ? undefined : optionalNote(input.note);
-    return inInventoryTransaction(this.db, async (tx) => {
+    return inInventoryTransaction(db, async (tx) => {
       const peek = await tx.orderRefund.findUnique({
         where: { id: input.refundId },
         select: { orderId: true },
@@ -409,6 +459,29 @@ export class OrderRefundService {
         throw new RefundConflictError(
           `Cannot transition refund from ${existing.status} to ${targetStatus}.`,
         );
+      }
+      if (!allowLinkedPostSale && (targetStatus === "REJECTED" || targetStatus === "CANCELLED")) {
+        const [linkedReturn, linkedWarranty] = await Promise.all([
+          tx.returnRequest.findFirst({
+            where: {
+              refundId: existing.id,
+              status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
+            },
+            select: { id: true },
+          }),
+          tx.warrantyClaim.findFirst({
+            where: {
+              refundId: existing.id,
+              status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
+            },
+            select: { id: true },
+          }),
+        ]);
+        if (linkedReturn || linkedWarranty) {
+          throw new RefundConflictError(
+            "Cancel the linked post-sale return or warranty from /admin/posventa instead.",
+          );
+        }
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;

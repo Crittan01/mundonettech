@@ -11,8 +11,8 @@ export function actionError(message: string, values?: Record<string, string>): A
   return values ? { status: "error", message, values } : { status: "error", message };
 }
 
-export function actionSuccess(message: string): ActionState {
-  return { status: "success", message };
+export function actionSuccess(message: string, values?: Record<string, string>): ActionState {
+  return values ? { status: "success", message, values } : { status: "success", message };
 }
 
 export function formString(formData: FormData, key: string): string {

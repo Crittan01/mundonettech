@@ -172,6 +172,9 @@ importers:
       '@mundonettech/core':
         specifier: workspace:*
         version: link:../core
+      '@mundonettech/legal-co':
+        specifier: workspace:*
+        version: link:../legal-co
       '@prisma/adapter-pg':
         specifier: 7.10.1
         version: 7.10.1

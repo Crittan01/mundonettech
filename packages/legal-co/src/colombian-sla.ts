@@ -231,3 +231,29 @@ export function calculateBusinessDayDeadline(receivedAt: DateLike, businessDays:
     businessDays,
   };
 }
+
+export function endOfColombianDate(value: string): Date {
+  const date = parseDateOnly(value);
+  return new Date(date.getTime() + millisecondsPerDay + 5 * 3_600_000 - 1);
+}
+
+export function calculateBusinessDayDeadlineAt(receivedAt: DateLike, businessDays: number): Date {
+  return endOfColombianDate(calculateBusinessDayDeadline(receivedAt, businessDays).dueDate);
+}
+
+export function addColombianCalendarMonths(value: DateLike, months: number): Date {
+  if (!Number.isInteger(months) || months < 0 || months > 1200) {
+    throw new RangeError("Calendar months must be an integer between 0 and 1200.");
+  }
+  const sourceDate = parseDateOnly(bogotaDateOnly(value));
+  const sourceDay = sourceDate.getUTCDate();
+  const targetMonthIndex = sourceDate.getUTCMonth() + months;
+  const targetYear = sourceDate.getUTCFullYear() + Math.floor(targetMonthIndex / 12);
+  const targetMonth = ((targetMonthIndex % 12) + 12) % 12;
+  if (targetYear < 1900 || targetYear > 9999) {
+    throw new RangeError("Target calendar date is outside the supported years.");
+  }
+  const maximumDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate();
+  const target = utcDate(targetYear, targetMonth + 1, Math.min(sourceDay, maximumDay));
+  return endOfColombianDate(formatDateOnly(target));
+}

@@ -198,6 +198,7 @@ model Product {
   compatibility     ProductCompatibility[]
   wholesaleTiers    WholesaleTier[]
   couponProducts    CouponProduct[]
+  reviews           Review[]
 
   @@index([status, deletedAt, updatedAt])
   @@index([brandId, status])
@@ -273,6 +274,7 @@ model ProductVariant {
   wholesaleTiers      WholesaleTier[]
   cartItems           CartItem[]
   orderItems          OrderItem[]
+  returnReplacements  ReturnRequestItem[]       @relation("ReturnReplacementVariant")
 
   @@unique([id, productId])
   @@index([productId, status])

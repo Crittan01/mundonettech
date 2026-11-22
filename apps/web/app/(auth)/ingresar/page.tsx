@@ -13,6 +13,9 @@ function reasonMessage(reason: string | undefined): string | null {
   if (reason === "security") {
     return "Inicia sesión para acceder a tu cuenta.";
   }
+  if (reason === "anonymized") {
+    return "Tu cuenta quedó anonimizada y cerramos tu sesión conforme a la Ley 1581.";
+  }
   return null;
 }
 

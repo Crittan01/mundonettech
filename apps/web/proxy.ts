@@ -182,6 +182,7 @@ export async function proxy(request: NextRequest) {
     (pathname === "/carrito" ||
       pathname.startsWith("/checkout") ||
       pathname.startsWith("/pagar/") ||
+      pathname.startsWith("/pedido/") ||
       pathname.startsWith("/recibo/"))
   ) {
     const customerToken = request.cookies.get(customerActivityCookie)?.value;

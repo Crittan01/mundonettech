@@ -140,3 +140,9 @@ export type {
 export { DomainEventWorker } from "./domain-event-worker.js";
 export type { DomainEventBatchResult, DomainEventWorkerOptions } from "./domain-event-worker.js";
 export { IntegrationTransportError, fetchWithLimit, parseHttpJson } from "./integration-http.js";
+
+export { GuestOrderAccessError, GuestOrderAccessService } from "./guest-order-access-service.js";
+export type {
+  GuestOrderAccessErrorCode,
+  GuestOrderAccessOptions,
+} from "./guest-order-access-service.js";

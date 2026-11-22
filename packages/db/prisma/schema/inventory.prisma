@@ -33,43 +33,43 @@ enum PurchaseOrderStatus {
 }
 
 model StockLocation {
-  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  code            String            @db.VarChar(40)
-  name            String            @db.VarChar(120)
-  type            StockLocationType
-  addressLine1    String?           @db.VarChar(200)
-  departmentCode  String?           @db.Char(2)
-  municipalityCode String?          @db.Char(5)
-  phoneE164       String?           @db.VarChar(16)
-  pickupInstructions String?        @db.VarChar(500)
-  createdAt       DateTime          @default(now()) @db.Timestamptz(6)
-  updatedAt       DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
-  deletedAt       DateTime?         @db.Timestamptz(6)
-  stockLevels     StockLevel[]
-  serializedUnits SerializedUnit[]
-  ledgerEntries   InventoryLedger[]
-  purchaseOrders  PurchaseOrder[]
-  orderReservations OrderItemReservation[]
+  id                 String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code               String                 @db.VarChar(40)
+  name               String                 @db.VarChar(120)
+  type               StockLocationType
+  addressLine1       String?                @db.VarChar(200)
+  departmentCode     String?                @db.Char(2)
+  municipalityCode   String?                @db.Char(5)
+  phoneE164          String?                @db.VarChar(16)
+  pickupInstructions String?                @db.VarChar(500)
+  createdAt          DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt          DateTime?              @db.Timestamptz(6)
+  stockLevels        StockLevel[]
+  serializedUnits    SerializedUnit[]
+  ledgerEntries      InventoryLedger[]
+  purchaseOrders     PurchaseOrder[]
+  orderReservations  OrderItemReservation[]
   clickCollectOrders Order[]
-  shipments       Shipment[]
-  municipality    DaneMunicipality? @relation(fields: [municipalityCode], references: [code], onDelete: Restrict)
+  shipments          Shipment[]
+  municipality       DaneMunicipality?      @relation(fields: [municipalityCode], references: [code], onDelete: Restrict)
 
   @@index([type, deletedAt])
   @@map("StockLocation")
 }
 
 model StockLevel {
-  id                   String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  locationId           String         @db.Uuid
-  variantId            String         @db.Uuid
-  onHand               Int            @default(0)
-  committed            Int            @default(0)
-  safetyStock          Int            @default(0)
-  weightedAvgCostCents BigInt         @default(0)
-  createdAt            DateTime       @default(now()) @db.Timestamptz(6)
-  updatedAt            DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
-  location             StockLocation  @relation(fields: [locationId], references: [id], onDelete: Restrict)
-  variant              ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  id                   String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  locationId           String            @db.Uuid
+  variantId            String            @db.Uuid
+  onHand               Int               @default(0)
+  committed            Int               @default(0)
+  safetyStock          Int               @default(0)
+  weightedAvgCostCents BigInt            @default(0)
+  createdAt            DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  location             StockLocation     @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  variant              ProductVariant    @relation(fields: [variantId], references: [id], onDelete: Restrict)
   ledgerEntries        InventoryLedger[]
 
   @@unique([locationId, variantId])
@@ -78,24 +78,26 @@ model StockLevel {
 }
 
 model SerializedUnit {
-  id                  String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  variantId           String              @db.Uuid
-  locationId          String              @db.Uuid
-  purchaseOrderItemId String?             @db.Uuid
-  orderId             String?             @db.Uuid
-  shipmentId          String?             @db.Uuid
-  serial              String              @db.VarChar(120)
-  imei                String?             @db.VarChar(15)
+  id                  String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  variantId           String               @db.Uuid
+  locationId          String               @db.Uuid
+  purchaseOrderItemId String?              @db.Uuid
+  orderId             String?              @db.Uuid
+  shipmentId          String?              @db.Uuid
+  serial              String               @db.VarChar(120)
+  imei                String?              @db.VarChar(15)
   status              SerializedUnitStatus @default(IN_STOCK)
-  reservationKey      String?             @db.VarChar(128)
-  soldAt              DateTime?           @db.Timestamptz(6)
-  createdAt           DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt           DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
-  variant             ProductVariant      @relation(fields: [variantId], references: [id], onDelete: Restrict)
-  location            StockLocation       @relation(fields: [locationId], references: [id], onDelete: Restrict)
-  purchaseOrderItem   PurchaseOrderItem?  @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
-  order               Order?              @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  shipment            Shipment?           @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  reservationKey      String?              @db.VarChar(128)
+  soldAt              DateTime?            @db.Timestamptz(6)
+  createdAt           DateTime             @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime             @default(now()) @updatedAt @db.Timestamptz(6)
+  variant             ProductVariant       @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  location            StockLocation        @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  purchaseOrderItem   PurchaseOrderItem?   @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
+  order               Order?               @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  shipment            Shipment?            @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  returnRequestUnits  ReturnRequestUnit[]
+  warrantyClaims      WarrantyClaim[]
 
   @@unique([variantId, serial])
   @@index([locationId, variantId, status, id])
@@ -107,29 +109,29 @@ model SerializedUnit {
 }
 
 model InventoryLedger {
-  id                       String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  locationId               String                  @db.Uuid
-  variantId                String                  @db.Uuid
-  orderId                  String?                 @db.Uuid
-  purchaseOrderItemId      String?                 @db.Uuid
-  entryType                InventoryLedgerEntryType
-  quantityDelta            Int
-  committedDelta           Int                     @default(0)
-  onHandAfter              Int
-  committedAfter           Int
-  safetyStockAfter         Int
+  id                        String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  locationId                String                   @db.Uuid
+  variantId                 String                   @db.Uuid
+  orderId                   String?                  @db.Uuid
+  purchaseOrderItemId       String?                  @db.Uuid
+  entryType                 InventoryLedgerEntryType
+  quantityDelta             Int
+  committedDelta            Int                      @default(0)
+  onHandAfter               Int
+  committedAfter            Int
+  safetyStockAfter          Int
   weightedAvgCostAfterCents BigInt
-  operationKey             String                  @db.VarChar(128)
-  operationHash            Bytes                   @db.ByteA
-  operationSequence        Int
-  referenceKey             String?                 @db.VarChar(128)
-  metadata                 Json                    @default("{}") @db.JsonB
-  occurredAt               DateTime                @default(now()) @db.Timestamptz(6)
-  location                 StockLocation           @relation(fields: [locationId], references: [id], onDelete: Restrict)
-  variant                  ProductVariant          @relation(fields: [variantId], references: [id], onDelete: Restrict)
-  order                    Order?                  @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  purchaseOrderItem        PurchaseOrderItem?      @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
-  stockLevel               StockLevel              @relation(fields: [locationId, variantId], references: [locationId, variantId], onDelete: Restrict)
+  operationKey              String                   @db.VarChar(128)
+  operationHash             Bytes                    @db.ByteA
+  operationSequence         Int
+  referenceKey              String?                  @db.VarChar(128)
+  metadata                  Json                     @default("{}") @db.JsonB
+  occurredAt                DateTime                 @default(now()) @db.Timestamptz(6)
+  location                  StockLocation            @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  variant                   ProductVariant           @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  order                     Order?                   @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  purchaseOrderItem         PurchaseOrderItem?       @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
+  stockLevel                StockLevel               @relation(fields: [locationId, variantId], references: [locationId, variantId], onDelete: Restrict)
 
   @@unique([operationKey, operationSequence])
   @@index([variantId, locationId, occurredAt, id])
@@ -178,16 +180,16 @@ model PurchaseOrder {
 }
 
 model PurchaseOrderItem {
-  id               String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  purchaseOrderId  String         @db.Uuid
-  variantId        String         @db.Uuid
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  purchaseOrderId  String            @db.Uuid
+  variantId        String            @db.Uuid
   quantityOrdered  Int
-  quantityReceived Int            @default(0)
+  quantityReceived Int               @default(0)
   unitCostCents    BigInt
-  createdAt        DateTime       @default(now()) @db.Timestamptz(6)
-  updatedAt        DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
-  purchaseOrder    PurchaseOrder  @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
-  variant          ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  createdAt        DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime          @default(now()) @updatedAt @db.Timestamptz(6)
+  purchaseOrder    PurchaseOrder     @relation(fields: [purchaseOrderId], references: [id], onDelete: Restrict)
+  variant          ProductVariant    @relation(fields: [variantId], references: [id], onDelete: Restrict)
   serializedUnits  SerializedUnit[]
   ledgerEntries    InventoryLedger[]
 

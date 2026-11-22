@@ -22,39 +22,44 @@ enum IntegrationEnvironment {
 }
 
 model AdminUser {
-  id             String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  authUserId     String                  @db.Uuid
-  email          String                  @db.VarChar(320)
-  displayName    String                  @db.VarChar(120)
-  role           AdminRole
-  status         AdminUserStatus         @default(INVITED)
-  mfaEnrolledAt  DateTime?               @db.Timestamptz(6)
-  lastSignInAt   DateTime?               @db.Timestamptz(6)
-  createdAt      DateTime                @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime                @default(now()) @updatedAt @db.Timestamptz(6)
-  deletedAt      DateTime?               @db.Timestamptz(6)
-  recoveryCodes  AdminRecoveryCode[]
-  initiatedLogs  AdminActionLog[]        @relation("AdminActionActor")
-  targetedLogs   AdminActionLog[]        @relation("AdminActionTarget")
-  securityEvents SecurityEvent[]
-  credentials    IntegrationCredential[] @relation("CredentialCreator")
-  rotations      IntegrationCredential[] @relation("CredentialRotator")
-  storeSettings  StoreSettings[]
-  cmsVersions    CmsBlockVersion[]
-  cmsMedia       CmsMedia[]
-  assistedCarts  Cart[]
-  requestedRefunds OrderRefund[]
-  confirmedPaymentAttempts PaymentAttempt[] @relation("PaymentAttemptConfirmer")
-  blockedIdentities BlockedIdentity[] @relation("IdentityBlocker")
-  unblockedIdentities BlockedIdentity[] @relation("IdentityUnblocker")
-  remittanceBatches RemittanceBatch[]
-  codReconciliations CodReconciliation[]
-  storeCreditEntries StoreCreditEntry[]
-  shipmentEvents ShipmentEvent[]
-  createdDeliveryZones LocalDeliveryZone[] @relation("DeliveryZoneCreator")
-  updatedDeliveryZones LocalDeliveryZone[] @relation("DeliveryZoneUpdater")
-  emailTemplateOverrides EmailTemplateOverride[]
-  notificationReads NotificationRead[]
+  id                       String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authUserId               String                  @db.Uuid
+  email                    String                  @db.VarChar(320)
+  displayName              String                  @db.VarChar(120)
+  role                     AdminRole
+  status                   AdminUserStatus         @default(INVITED)
+  mfaEnrolledAt            DateTime?               @db.Timestamptz(6)
+  lastSignInAt             DateTime?               @db.Timestamptz(6)
+  createdAt                DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime                @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt                DateTime?               @db.Timestamptz(6)
+  recoveryCodes            AdminRecoveryCode[]
+  initiatedLogs            AdminActionLog[]        @relation("AdminActionActor")
+  targetedLogs             AdminActionLog[]        @relation("AdminActionTarget")
+  securityEvents           SecurityEvent[]
+  credentials              IntegrationCredential[] @relation("CredentialCreator")
+  rotations                IntegrationCredential[] @relation("CredentialRotator")
+  storeSettings            StoreSettings[]
+  cmsVersions              CmsBlockVersion[]
+  cmsMedia                 CmsMedia[]
+  assistedCarts            Cart[]
+  requestedRefunds         OrderRefund[]
+  confirmedPaymentAttempts PaymentAttempt[]        @relation("PaymentAttemptConfirmer")
+  blockedIdentities        BlockedIdentity[]       @relation("IdentityBlocker")
+  unblockedIdentities      BlockedIdentity[]       @relation("IdentityUnblocker")
+  remittanceBatches        RemittanceBatch[]
+  codReconciliations       CodReconciliation[]
+  storeCreditEntries       StoreCreditEntry[]
+  shipmentEvents           ShipmentEvent[]
+  createdDeliveryZones     LocalDeliveryZone[]     @relation("DeliveryZoneCreator")
+  updatedDeliveryZones     LocalDeliveryZone[]     @relation("DeliveryZoneUpdater")
+  emailTemplateOverrides   EmailTemplateOverride[]
+  notificationReads        NotificationRead[]
+  reviewedReturnRequests   ReturnRequest[]         @relation("ReturnRequestReviewer")
+  reviewedWarrantyClaims   WarrantyClaim[]         @relation("WarrantyClaimReviewer")
+  assignedSupportTickets   SupportTicket[]         @relation("SupportTicketAssignee")
+  supportMessages          SupportTicketMessage[]  @relation("SupportMessageAuthor")
+  moderatedReviews         Review[]                @relation("ReviewModerator")
 
   @@index([role, status])
   @@index([createdAt])

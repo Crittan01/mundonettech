@@ -14,6 +14,7 @@ import {
   invoiceService,
   shippingService,
 } from "@/lib/integrations";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 export function domainEventWorker(): DomainEventWorker {
   const db = getDatabase();
@@ -26,5 +27,9 @@ export function domainEventWorker(): DomainEventWorker {
     publicSiteUrl: getPublicSiteUrl(),
     storeName: storeConfig.name,
     receiptTokenForSubmission,
+    eraseAuthUser: async (authUserId) => {
+      const { error } = await createSupabaseAdminClient().auth.admin.deleteUser(authUserId);
+      if (error && error.code !== "user_not_found") throw error;
+    },
   });
 }

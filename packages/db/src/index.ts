@@ -353,3 +353,46 @@ export type {
   FiscalWatchSnapshot,
 } from "./generated/client.js";
 export { FiscalWatchStatus, NotificationSeverity } from "./generated/client.js";
+
+export { AccountError, AccountService } from "./account-service.js";
+export type {
+  AccountAudit,
+  AccountErrorCode,
+  AddressInput,
+  ProfileInput,
+} from "./account-service.js";
+export { PostSaleError, PostSaleService } from "./postsale-service.js";
+export type {
+  PostSaleActor,
+  PostSaleErrorCode,
+  ReturnRequestInput,
+  ReturnRequestItemInput,
+  ReviewInput,
+  SupportTicketInput,
+  WarrantyClaimInput,
+} from "./postsale-service.js";
+export { PostSaleAdminService } from "./postsale-admin-service.js";
+export type { PostSaleAdminAudit } from "./postsale-admin-service.js";
+export {
+  GuestOrderChallengeStatus,
+  ReturnRequestKind,
+  ReturnRequestStatus,
+  ReviewStatus,
+  SupportMessageAuthor,
+  SupportTicketKind,
+  SupportTicketStatus,
+  WarrantyClaimStatus,
+  WarrantyRemedy,
+} from "./generated/client.js";
+export type {
+  Address,
+  GuestOrderChallenge,
+  GuestOrderSession,
+  ReturnRequest,
+  ReturnRequestItem,
+  ReturnRequestUnit,
+  Review,
+  SupportTicket,
+  SupportTicketMessage,
+  WarrantyClaim,
+} from "./generated/client.js";

@@ -13,6 +13,8 @@ export const factorResetCookie =
   process.env.NODE_ENV === "production" ? "__Host-admin_factor_reset" : "admin_factor_reset";
 export const cartTokenCookie =
   process.env.NODE_ENV === "production" ? "__Host-cart_token" : "cart_token";
+export const guestOrderCookie =
+  process.env.NODE_ENV === "production" ? "__Host-guest_order" : "guest_order";
 
 export const sessionCookieOptions = {
   httpOnly: true,

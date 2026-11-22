@@ -6,6 +6,7 @@ import {
   BlockedIdentityService,
   CodReconciliationService,
   EmailService,
+  GuestOrderAccessService,
   IntegrationCredentialVault,
   InvoiceService,
   PaymentRefundService,
@@ -17,6 +18,7 @@ import {
 } from "@mundonettech/integrations";
 
 import { getDatabase } from "@/lib/db";
+import { getSessionHmacSecret } from "@/lib/env";
 
 const state = globalThis as typeof globalThis & {
   __integrationCredentialVault?: IntegrationCredentialVault;
@@ -120,5 +122,13 @@ export function invoiceService(db: PrismaClient = getDatabase()): InvoiceService
   return new InvoiceService(db, {
     vault: getIntegrationCredentialVault(),
     environment: getIntegrationEnvironment(),
+  });
+}
+
+export function guestOrderAccessService(db: PrismaClient = getDatabase()): GuestOrderAccessService {
+  return new GuestOrderAccessService(db, {
+    secret: getSessionHmacSecret(),
+    storeName: storeConfig.name,
+    vault: getIntegrationCredentialVault(),
   });
 }

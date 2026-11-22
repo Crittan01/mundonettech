@@ -14,6 +14,10 @@ export type AdminRing = 1 | 2 | 3;
 export type AdminPermission =
   | "dashboard:read"
   | "orders:read"
+  | "postsale:read"
+  | "postsale:write"
+  | "reviews:read"
+  | "reviews:write"
   | "finance:read"
   | "users:read"
   | "users:write"
@@ -111,6 +115,17 @@ const orderReaders = [
   "CUSTOMER_SUPPORT",
   "FINANCE_ANALYST",
 ] as const satisfies readonly AdminRoleValue[];
+const postsaleWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "CUSTOMER_SUPPORT",
+] as const satisfies readonly AdminRoleValue[];
+const reviewReaders = [...orderReaders, "CMS_EDITOR"] as const satisfies readonly AdminRoleValue[];
+const reviewWriters = [
+  ...postsaleWriters,
+  "CMS_EDITOR",
+] as const satisfies readonly AdminRoleValue[];
 const integrationReaders = [
   "SUPERADMIN",
   "OPERATIONS_MANAGER",
@@ -169,6 +184,10 @@ const invoiceWriters = [
 const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> = {
   "dashboard:read": adminRoles,
   "orders:read": orderReaders,
+  "postsale:read": orderReaders,
+  "postsale:write": postsaleWriters,
+  "reviews:read": reviewReaders,
+  "reviews:write": reviewWriters,
   "finance:read": integrationReaders,
   "users:read": ["SUPERADMIN", "OPERATIONS_MANAGER"],
   "users:write": ["SUPERADMIN", "OPERATIONS_MANAGER"],
@@ -234,6 +253,8 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/hoy"
     | "/admin/dashboard"
     | "/admin/pedidos"
+    | "/admin/posventa"
+    | "/admin/resenas"
     | "/admin/finanzas"
     | "/admin/catalogo"
     | "/admin/precios"
@@ -256,6 +277,12 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     { href: "/admin/dashboard", label: "Embudo" },
     ...(hasAdminPermission(role, "orders:read")
       ? [{ href: "/admin/pedidos" as const, label: "Pedidos" }]
+      : []),
+    ...(hasAdminPermission(role, "postsale:read")
+      ? [{ href: "/admin/posventa" as const, label: "Posventa" }]
+      : []),
+    ...(hasAdminPermission(role, "reviews:read")
+      ? [{ href: "/admin/resenas" as const, label: "Reseñas" }]
       : []),
     ...(hasAdminPermission(role, "finance:read")
       ? [{ href: "/admin/finanzas" as const, label: "Finanzas" }]
