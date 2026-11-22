@@ -689,6 +689,12 @@ export class ShippingService {
     if (!Number.isInteger(claimSeconds) || claimSeconds < 60 || claimSeconds > 900)
       throw new ShippingValidationError("claimSeconds must be between 60 and 900.");
     const claim = await this.db.$transaction(async (tx) => {
+      const peek = await tx.shipmentPackage.findUnique({
+        where: { id: packageId },
+        select: { shipmentId: true },
+      });
+      if (!peek) throw new ShippingNotFoundError("Shipment package not found.");
+      const fulfillment = await lockFulfillment(tx, peek.shipmentId);
       const record = await lockPackage(tx, packageId);
       if (["LABELLED", "SHIPPED", "DELIVERED"].includes(record.status))
         return { outcome: "REPLAY" as const, record };
@@ -703,7 +709,6 @@ export class ShippingService {
           where: { id: packageId },
           data: { status: "RECONCILING" },
         });
-        const fulfillment = await lockFulfillment(tx, record.shipmentId);
         if (fulfillment.status === "PACKED")
           await tx.orderFulfillment.update({
             where: { id: fulfillment.id },
@@ -713,6 +718,20 @@ export class ShippingService {
       }
       if (record.status !== "SEALED" && record.status !== "CLAIMED")
         throw new ShippingConflictError("Package cannot be claimed in its current state.");
+      const siblingClaim = await tx.shipmentPackage.findFirst({
+        where: {
+          shipmentId: record.shipmentId,
+          id: { not: packageId },
+          status: { in: ["CLAIMED", "RECONCILING"] },
+        },
+        select: { id: true },
+      });
+      if (siblingClaim) {
+        throw new ShippingConflictError(
+          "Another package on this shipment has an active or uncertain claim.",
+          "SIBLING_CLAIM_ACTIVE",
+        );
+      }
       await tx.shipmentPackage.update({
         where: { id: packageId },
         data: {

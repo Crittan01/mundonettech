@@ -23,6 +23,12 @@ import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Operación logística" };
 
+const dateFormatter = new Intl.DateTimeFormat("es-CO", {
+  timeZone: "America/Bogota",
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
 const statusLabels: Record<string, string> = {
   PENDING: "Pendiente",
   PICKING: "En alistamiento",
@@ -215,9 +221,9 @@ export default async function LogisticsPage() {
                       {zone.code} · {zone.name}
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {zone.active ? "Activa" : "Inactiva"}
-                      {zone.updatedAt} · {formatCopCents(zone.baseFeeCents)} · corte{" "}
-                      {zone.cutoffMinutes} min
+                      {zone.active ? "Activa" : "Inactiva"} · Actualizada{" "}
+                      {dateFormatter.format(new Date(zone.updatedAt))} ·{" "}
+                      {formatCopCents(zone.baseFeeCents)} · corte {zone.cutoffMinutes} min
                     </p>
                   </div>
                   {canWrite ? <ArchiveDeliveryZoneForm zone={zone} /> : null}

@@ -41,6 +41,30 @@ export async function GET(_request: Request, { params }: { params: Promise<{ tok
   }
 }
 
+async function readBoundedText(request: Request, maxBytes: number): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length") ?? 0);
+  if (!Number.isFinite(declared) || declared < 0 || declared > maxBytes) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
 export async function POST(request: Request, { params }: { params: Promise<{ token: string }> }) {
   const contentType = request.headers.get("content-type") ?? "";
   if (
@@ -49,10 +73,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
   ) {
     return new Response(null, { status: 415, headers });
   }
-  const declaredLength = Number(request.headers.get("content-length") ?? 0);
-  if (declaredLength > 4096) return new Response(null, { status: 413, headers });
-  const raw = await request.text();
-  if (Buffer.byteLength(raw, "utf8") > 4096) return new Response(null, { status: 413, headers });
+  const raw = await readBoundedText(request, 4096);
+  if (raw === null) return new Response(null, { status: 413, headers });
   const form = await new Request(request.url, {
     method: "POST",
     headers: request.headers,
@@ -62,8 +84,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
     return new Response(null, { status: 400, headers });
   const { token } = await params;
   try {
-    await emailService().unsubscribe(token);
-    return new Response(null, { status: 200, headers });
+    const result = await emailService().unsubscribe(token);
+    return new Response(page(token, result.topic, true), {
+      status: 200,
+      headers: { ...headers, "Content-Type": "text/html; charset=utf-8" },
+    });
   } catch (error) {
     if (error instanceof EmailValidationError || error instanceof EmailNotFoundError)
       return new Response(null, { status: 404, headers });

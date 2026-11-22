@@ -7,10 +7,17 @@ import pg from "pg";
 import {
   CartService,
   LocalDeliveryService,
+  OrderLifecycleService,
   OrderService,
+  PaymentProvider,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
-import { ShippingProviderError, ShippingService } from "../packages/integrations/dist/index.js";
+import {
+  PaymentService,
+  ShippingConflictError,
+  ShippingProviderError,
+  ShippingService,
+} from "../packages/integrations/dist/index.js";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
 import { seedCatalogFixture } from "../scripts/lib/catalog-test-fixture.mjs";
 import { seedInventoryFixture } from "../scripts/lib/inventory-test-fixture.mjs";
@@ -391,5 +398,149 @@ describe("F3.4 Flex quote and checkout conversion", () => {
     });
     const sealedZone = await db.shipment.findFirstOrThrow({ where: { orderId: order.id } });
     assert.equal(sealedZone.localDeliveryZoneId, zone.id);
+  });
+
+  it("serializes sibling multi-package claims and cancels pending COD fulfillments on reservation expiry", async () => {
+    const orders = new OrderService(db, {
+      taxRegime: "NO_RESPONSABLE_IVA",
+      currency: "COP",
+      timeZone: "America/Bogota",
+      orderNumberPrefix: "MNT",
+      orderNumberPadding: 4,
+      uvtValueCents: 5_237_400n,
+      uvtYear: 2026,
+      standardShippingCents: 0n,
+      deliveryPromiseDays: 30,
+      reservationMinutes: 120,
+      clickAndCollectEnabled: false,
+      localDeliveryEnabled: false,
+    });
+    const carts = new CartService(db);
+    const payments = new PaymentService(db, {
+      vault: {
+        async list() {
+          return { items: [] };
+        },
+        async reveal() {
+          throw new Error("Unused");
+        },
+      },
+      environment: "LOCAL",
+    });
+
+    const multiCart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(720),
+    });
+    await carts.addVariant({ cartId: multiCart.id }, catalog.variantId, 2);
+    const multiPreview = await orders.preview({ cartId: multiCart.id });
+    const multiOrder = await orders.checkout({
+      cart: { cartId: multiCart.id },
+      contact: contact(`multi-${randomUUID()}@example.test`),
+      fulfillment: {
+        method: "HOME_DELIVERY",
+        departmentCode: "11",
+        municipalityCode: "11001",
+        addressLine1: "Carrera 7 # 71-21",
+      },
+      idempotency: {
+        keyHash: hash(),
+        subjectHash: hash(),
+        requestHash: hash(),
+        expiresAt: future(1),
+      },
+      receiptAccessTokenHash: hash(),
+      receiptDeliveryReference: randomUUID(),
+      expectedReviewFingerprint: multiPreview.homeDelivery.reviewFingerprint,
+    });
+    await payments.start({
+      orderId: multiOrder.orderId,
+      provider: PaymentProvider.COD,
+      environment: "LOCAL",
+      idempotencyKey: `cod-multi-${randomUUID()}`,
+      identityHashes: { EMAIL: hash(), PHONE: hash() },
+    });
+    const multiShipment = await db.shipment.findFirstOrThrow({
+      where: { orderId: multiOrder.orderId },
+      include: { items: true },
+    });
+    await shipping.startPicking(multiShipment.id, audit);
+    const packed = await shipping.pack(
+      multiShipment.id,
+      [
+        {
+          weightGrams: 500,
+          lengthMillimeters: 200,
+          widthMillimeters: 150,
+          heightMillimeters: 100,
+          items: [{ shipmentItemId: multiShipment.items[0].id, quantity: 1 }],
+        },
+        {
+          weightGrams: 500,
+          lengthMillimeters: 200,
+          widthMillimeters: 150,
+          heightMillimeters: 100,
+          items: [{ shipmentItemId: multiShipment.items[0].id, quantity: 1 }],
+        },
+      ],
+      audit,
+    );
+    uncertain = true;
+    const firstResult = await shipping.processLabel(packed.packageIds[0], "worker:first-sibling");
+    assert.equal(firstResult.status, "RECONCILING");
+    await assert.rejects(
+      shipping.processLabel(packed.packageIds[1], "worker:second-sibling"),
+      (error) => error instanceof ShippingConflictError && error.code === "SIBLING_CLAIM_ACTIVE",
+    );
+    uncertain = false;
+    await shipping.reconcileLabel(packed.packageIds[0], "worker:reconcile-sibling", audit);
+    const secondResult = await shipping.processLabel(packed.packageIds[1], "worker:second-sibling");
+    assert.equal(secondResult.status, "LABELLED");
+
+    const expiringCart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(720),
+    });
+    await carts.addVariant({ cartId: expiringCart.id }, catalog.variantId, 1);
+    const expiringPreview = await orders.preview({ cartId: expiringCart.id });
+    const expiringOrder = await orders.checkout({
+      cart: { cartId: expiringCart.id },
+      contact: contact(`expiring-cod-${randomUUID()}@example.test`),
+      fulfillment: {
+        method: "HOME_DELIVERY",
+        departmentCode: "11",
+        municipalityCode: "11001",
+        addressLine1: "Carrera 7 # 71-21",
+      },
+      idempotency: {
+        keyHash: hash(),
+        subjectHash: hash(),
+        requestHash: hash(),
+        expiresAt: future(1),
+      },
+      receiptAccessTokenHash: hash(),
+      receiptDeliveryReference: randomUUID(),
+      expectedReviewFingerprint: expiringPreview.homeDelivery.reviewFingerprint,
+    });
+    await payments.start({
+      orderId: expiringOrder.orderId,
+      provider: PaymentProvider.COD,
+      environment: "LOCAL",
+      idempotencyKey: `cod-expiring-${randomUUID()}`,
+      identityHashes: { EMAIL: hash(), PHONE: hash() },
+    });
+    await shipping.ensureFulfillments(expiringOrder.orderId);
+    await sql.query(
+      `UPDATE "Order" SET "reservationExpiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE "id" = $1`,
+      [expiringOrder.orderId],
+    );
+    const released = await new OrderLifecycleService(db).releaseExpiredOrderReservations({
+      limit: 10,
+    });
+    assert.ok(released.orderIds.includes(expiringOrder.orderId));
+    const cancelledFulfillment = await db.orderFulfillment.findFirstOrThrow({
+      where: { orderId: expiringOrder.orderId },
+    });
+    assert.equal(cancelledFulfillment.status, "CANCELLED");
   });
 });

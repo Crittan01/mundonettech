@@ -5,6 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { createTimeoutToken } from "../packages/core/dist/index.js";
 import { createDatabaseClient } from "../packages/db/dist/index.js";
+import { EmailService } from "../packages/integrations/dist/index.js";
 import {
   createSupabaseFixtureSession,
   encodeSupabaseFixtureCookie,
@@ -136,6 +137,68 @@ test("operational vault, communications and fiscal views stay accessible with MF
   ).toBeVisible();
   await page.goto("/admin/facturacion");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Facturación electrónica DIAN");
+
+  const unsubscribeSecret = Buffer.from("unsubscribe-secret-e2e-with-32bytes").toString("base64");
+  const svixSecret = "whsec_c2VjcmV0LWV2ZW50b3Mtd2l0aC0zMi1ieXRlcw";
+  const resendPlaintext = new TextEncoder().encode(
+    JSON.stringify({
+      apiKey: "re_e2e_1234567890abcdef",
+      fromEmail: "ventas@example.test",
+      fromName: "Tienda E2E",
+      replyTo: null,
+      svixSecret,
+      unsubscribeSecret,
+      apiUrl: "https://api.resend.com/emails",
+    }),
+  );
+  const email = new EmailService(db, {
+    vault: {
+      async list() {
+        return { items: [{ id: credential.id, provider: "resend", revokedAt: null }] };
+      },
+      async reveal() {
+        return resendPlaintext;
+      },
+    },
+    publicSiteUrl: "https://mundonettech.co",
+  });
+  const recipient = `unsubscribe-${randomUUID()}@example.test`;
+  const queued = await email.queue({
+    credentialId: credential.id,
+    templateKey: "order.paid",
+    topic: "orders",
+    recipientEmail: recipient,
+    idempotencyKey: `e2e-unsubscribe-${randomUUID()}`,
+    variables: {
+      orderNumber: "MNT-2026-9999",
+      storeName: "MundoNetTech",
+      receiptUrl: "https://mundonettech.co/recibo/token",
+    },
+  });
+  const eventRecord = await db.emailEvent.findUniqueOrThrow({ where: { id: queued.id } });
+  const unsubscribeUrl = String(
+    (eventRecord.variablesSnapshot as Record<string, unknown>).unsubscribeUrl,
+  );
+  await page.context().clearCookies();
+  await page.goto(new URL(unsubscribeUrl).pathname);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    "Confirmar baja de comunicaciones",
+  );
+  await page.getByRole("button", { name: "Confirmar baja" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Baja confirmada");
+  const suppression = await db.emailSuppression.findFirstOrThrow({
+    where: { sourceEventId: queued.id, topic: "orders" },
+  });
+  expect(suppression.reason).toBe("UNSUBSCRIBE");
+  const unsubscribeAxe = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  expect(unsubscribeAxe.violations).toEqual([]);
+
+  const badDocResponse = await page.request.get(
+    `/api/recibos/token-invalido/documentos/invoice/${randomUUID()}`,
+  );
+  expect(badDocResponse.status()).toBe(404);
 });
 
 test("Flex checkout and local fulfillment work end to end", async ({ page }) => {

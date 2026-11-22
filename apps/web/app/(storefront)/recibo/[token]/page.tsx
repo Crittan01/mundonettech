@@ -95,26 +95,40 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
   ]
     .filter(Boolean)
     .join(" · ");
-  const [attempts, rawAttempts, order, customerId, credentials] = await Promise.all([
-    paymentService().listOrderPayments(receipt.orderId),
-    getDatabase().paymentAttempt.findMany({
-      where: { orderId: receipt.orderId },
-      select: {
-        id: true,
-        provider: true,
-        status: true,
-        amountCents: true,
-        expiresAt: true,
-        transactions: { where: { kind: "CAPTURE" }, select: { id: true } },
-      },
-    }),
-    getDatabase().order.findUnique({
-      where: { id: receipt.orderId },
-      select: { customerId: true },
-    }),
-    optionalCustomerId(),
-    getIntegrationCredentialVault().list({ limit: 100 }),
-  ]);
+  const [attempts, rawAttempts, order, acceptedInvoice, customerId, credentials] =
+    await Promise.all([
+      paymentService().listOrderPayments(receipt.orderId),
+      getDatabase().paymentAttempt.findMany({
+        where: { orderId: receipt.orderId },
+        select: {
+          id: true,
+          provider: true,
+          status: true,
+          amountCents: true,
+          expiresAt: true,
+          transactions: { where: { kind: "CAPTURE" }, select: { id: true } },
+        },
+      }),
+      getDatabase().order.findUnique({
+        where: { id: receipt.orderId },
+        select: { customerId: true },
+      }),
+      getDatabase().taxInvoice.findFirst({
+        where: { orderId: receipt.orderId, status: "ACCEPTED" },
+        select: {
+          id: true,
+          fullNumber: true,
+          cufe: true,
+          creditNotes: {
+            where: { status: "ACCEPTED" },
+            select: { id: true, fullNumber: true, cude: true },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          },
+        },
+      }),
+      optionalCustomerId(),
+      getIntegrationCredentialVault().list({ limit: 100 }),
+    ]);
   const credit =
     customerId && order?.customerId === customerId
       ? await storeCreditService().get(customerId)
@@ -234,7 +248,9 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
           <h2 className="font-semibold">
             {receipt.fulfillmentMethod === "CLICK_COLLECT"
               ? "Recogida en sede"
-              : "Dirección de entrega"}
+              : receipt.fulfillmentMethod === "LOCAL_DELIVERY"
+                ? "Entrega Flex local"
+                : "Dirección de entrega"}
           </h2>
           {receipt.pickupLocationName ? (
             <p className="mt-2 text-sm font-medium">{receipt.pickupLocationName}</p>
@@ -327,6 +343,50 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
           </div>
         </dl>
       </section>
+
+      {acceptedInvoice ? (
+        <section
+          aria-labelledby="fiscal-documents"
+          className="space-y-3 rounded-xl border border-border bg-card p-5 text-sm"
+        >
+          <h2 id="fiscal-documents" className="font-semibold">
+            Documentos electrónicos aceptados por DIAN
+          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="font-medium">Factura electrónica {acceptedInvoice.fullNumber}</p>
+              <p className="mt-1 font-mono text-xs break-all text-muted-foreground">
+                CUFE: {acceptedInvoice.cufe}
+              </p>
+            </div>
+            <a
+              href={`/api/recibos/${encodeURIComponent(token)}/documentos/invoice/${acceptedInvoice.id}`}
+              className="font-medium text-primary underline print:hidden"
+            >
+              Descargar XML firmado
+            </a>
+          </div>
+          {acceptedInvoice.creditNotes.map((note) => (
+            <div
+              key={note.id}
+              className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3"
+            >
+              <div>
+                <p className="font-medium">Nota crédito {note.fullNumber}</p>
+                <p className="mt-1 font-mono text-xs break-all text-muted-foreground">
+                  CUDE: {note.cude}
+                </p>
+              </div>
+              <a
+                href={`/api/recibos/${encodeURIComponent(token)}/documentos/credit-note/${note.id}`}
+                className="font-medium text-primary underline print:hidden"
+              >
+                Descargar nota crédito XML
+              </a>
+            </div>
+          ))}
+        </section>
+      ) : null}
 
       <section className="rounded-xl border border-border bg-card p-5 text-sm leading-6 text-muted-foreground">
         <h2 className="font-semibold text-foreground">Comprobante de compra no fiscal</h2>

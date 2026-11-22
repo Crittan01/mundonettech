@@ -2,7 +2,18 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 import { domainEventWorker } from "@/lib/domain-worker";
 
-const headers = { "Cache-Control": "no-store" } as const;
+const headers = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "X-Robots-Tag": "noindex, nofollow, noarchive",
+} as const;
+
+export async function GET() {
+  return Response.json(
+    { error: "Method not allowed." },
+    { status: 405, headers: { ...headers, Allow: "POST" } },
+  );
+}
 
 function matches(provided: string, expected: string): boolean {
   return timingSafeEqual(

@@ -84,14 +84,17 @@ const submissionSchema = z
           message: "Departamento, municipio y dirección son obligatorios para la entrega.",
         });
       }
-      if (!value.buyerDocumentType || !/^[A-Za-z0-9.-]{3,30}$/.test(value.buyerDocumentNumber)) {
-        context.addIssue({
-          code: "custom",
-          message: "El tipo y número de documento son obligatorios para la entrega.",
-        });
-      }
     } else if (!value.clickCollectLocationId) {
       context.addIssue({ code: "custom", message: "Selecciona una sede de recogida disponible." });
+    }
+    if (
+      (value.fulfillmentMethod !== "CLICK_COLLECT" || value.buyerTaxRegime !== "") &&
+      (!value.buyerDocumentType || !/^[A-Za-z0-9.-]{3,30}$/.test(value.buyerDocumentNumber))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "El tipo y número de documento son obligatorios.",
+      });
     }
     if (
       value.fulfillmentMethod === "LOCAL_DELIVERY" &&

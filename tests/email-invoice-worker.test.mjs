@@ -454,5 +454,103 @@ describe("F3.4 domain worker over the real outbox", () => {
       where: { idempotencyKey: `domain:order.confirmed:${converted.orderId}` },
     });
     assert.equal(domainEmail.status, "SENT");
+
+    const nonFiscalOrderItem = await db.orderItem.findFirstOrThrow({
+      where: { orderId: converted.orderId },
+    });
+    const wompiCred = await db.integrationCredential.findFirstOrThrow({
+      where: { provider: "wompi" },
+    });
+    const nonFiscalAttemptId = randomUUID();
+    const nonFiscalRefundId = randomUUID();
+    await sql.query("BEGIN");
+    await sql.query(`UPDATE "Order" SET "paymentStatus" = 'PAID' WHERE "id" = $1`, [
+      converted.orderId,
+    ]);
+    await sql.query(
+      `INSERT INTO "PaymentAttempt" (
+        "id", "orderId", "provider", "environment", "status", "idempotencyKey", "requestHash",
+        "reference", "amountCents", "credentialId", "providerStatus", "completedAt"
+      ) VALUES ($1, $2, 'WOMPI', 'LOCAL', 'SUCCEEDED', $3, $4, $5, $6, $7, 'APPROVED', CURRENT_TIMESTAMP)`,
+      [
+        nonFiscalAttemptId,
+        converted.orderId,
+        `non-fiscal-pay-${randomUUID()}`,
+        randomBytes(32),
+        randomUUID(),
+        nonFiscalOrderItem.lineTotalCents,
+        wompiCred.id,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, 'WOMPI', 'CAPTURE', 'SUCCEEDED', $2, $3, $4, CURRENT_TIMESTAMP)`,
+      [
+        nonFiscalAttemptId,
+        nonFiscalOrderItem.lineTotalCents,
+        `cap-${randomUUID()}`,
+        randomBytes(32),
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "OrderRefund" (
+        "id", "orderId", "idempotencyKey", "requestHash", "reason", "subtotalCents",
+        "taxCents", "totalCents", "requestedByAdminUserId"
+      ) VALUES ($1, $2, $3, $4, 'RETRACT', 50000, 0, 50000, $5)`,
+      [
+        nonFiscalRefundId,
+        converted.orderId,
+        `non-fiscal-refund-${randomUUID()}`,
+        randomBytes(32),
+        audit.actorAdminUserId,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "OrderRefundItem" ("refundId", "orderItemId", "quantity", "subtotalCents", "taxCents", "totalCents")
+       VALUES ($1, $2, 1, 50000, 0, 50000)`,
+      [nonFiscalRefundId, nonFiscalOrderItem.id],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "refundId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, $2, 'WOMPI', 'REFUND', 'SUCCEEDED', 50000, $3, $4, CURRENT_TIMESTAMP)`,
+      [nonFiscalAttemptId, nonFiscalRefundId, `ref-${randomUUID()}`, randomBytes(32)],
+    );
+    await sql.query(`UPDATE "OrderRefund" SET "status" = 'APPROVED' WHERE "id" = $1`, [
+      nonFiscalRefundId,
+    ]);
+    await sql.query(`UPDATE "OrderRefund" SET "status" = 'PROCESSING' WHERE "id" = $1`, [
+      nonFiscalRefundId,
+    ]);
+    await sql.query(
+      `UPDATE "OrderRefund" SET "status" = 'COMPLETED', "processedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+      [nonFiscalRefundId],
+    );
+    await sql.query(`UPDATE "Order" SET "paymentStatus" = 'PARTIALLY_REFUNDED' WHERE "id" = $1`, [
+      converted.orderId,
+    ]);
+    await sql.query("COMMIT");
+    const refundOutbox = await db.domainOutbox.create({
+      data: {
+        eventType: "order.refund.completed.v1",
+        aggregateType: "OrderRefund",
+        aggregateId: nonFiscalRefundId,
+        deduplicationKey: `order-refund:${nonFiscalRefundId}:completed:v1`,
+        payload: { orderId: converted.orderId, refundId: nonFiscalRefundId },
+      },
+    });
+    await worker.runBatch(10);
+    await worker.runBatch(10);
+    const processedRefund = await db.domainOutbox.findUniqueOrThrow({
+      where: { id: refundOutbox.id },
+    });
+    assert.ok(processedRefund.processedAt);
+    assert.equal(processedRefund.failedAt, null);
+    assert.equal(await db.creditNote.count({ where: { refundId: nonFiscalRefundId } }), 0);
+    const refundEmail = await db.emailEvent.findUniqueOrThrow({
+      where: { idempotencyKey: `domain:refund.completed:${nonFiscalRefundId}` },
+    });
+    assert.equal(refundEmail.status, "SENT");
   });
 });

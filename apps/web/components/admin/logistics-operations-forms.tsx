@@ -117,7 +117,15 @@ export function PackShipmentForm({
                   min={1}
                   max={name === "weightGrams" ? 10_000_000 : 100_000}
                   value={record[name]}
-                  onChange={(event) => update(record.key, name, event.target.valueAsNumber)}
+                  onChange={(event) =>
+                    update(
+                      record.key,
+                      name,
+                      Number.isFinite(event.target.valueAsNumber)
+                        ? Math.max(0, Math.trunc(event.target.valueAsNumber))
+                        : 0,
+                    )
+                  }
                   required
                 />
               </div>
@@ -135,7 +143,15 @@ export function PackShipmentForm({
                   min={0}
                   max={item.quantity}
                   value={record.quantities[item.id]}
-                  onChange={(event) => quantity(record.key, item.id, event.target.valueAsNumber)}
+                  onChange={(event) =>
+                    quantity(
+                      record.key,
+                      item.id,
+                      Number.isFinite(event.target.valueAsNumber)
+                        ? Math.max(0, Math.trunc(event.target.valueAsNumber))
+                        : 0,
+                    )
+                  }
                   required
                 />
               </div>

@@ -217,6 +217,23 @@ export class DomainEventWorker {
     if (order?.taxRegime === "RESPONSABLE_IVA") await this.options.invoice.prepareInvoice(orderId);
   }
 
+  private async prepareCreditNoteIfRequired(refundId: string): Promise<void> {
+    const refund = await this.db.orderRefund.findUnique({
+      where: { id: refundId },
+      select: {
+        order: {
+          select: {
+            taxRegime: true,
+            taxInvoice: { select: { id: true } },
+          },
+        },
+      },
+    });
+    if (refund?.order.taxRegime === "RESPONSABLE_IVA" || refund?.order.taxInvoice !== null) {
+      await this.options.invoice.prepareCreditNote(refundId);
+    }
+  }
+
   private async independently(operations: readonly (() => Promise<void>)[]): Promise<void> {
     let firstError: unknown = null;
     for (const operation of operations) {
@@ -258,7 +275,7 @@ export class DomainEventWorker {
         const orderId = this.id(event, "orderId");
         const refundId = this.id(event, "refundId");
         await this.independently([
-          () => this.options.invoice.prepareCreditNote(refundId).then(() => undefined),
+          () => this.prepareCreditNoteIfRequired(refundId),
           () =>
             this.queueOrderEmail({
               orderId,
@@ -271,12 +288,19 @@ export class DomainEventWorker {
         return;
       }
       case "shipping.label.requested.v1": {
-        const result = await this.options.shipping.processLabel(
-          this.id(event, "packageId"),
-          this.options.workerId,
-        );
-        if (result.status === "RECONCILING") return;
-        return;
+        try {
+          const result = await this.options.shipping.processLabel(
+            this.id(event, "packageId"),
+            this.options.workerId,
+          );
+          if (result.status === "RECONCILING") return;
+          return;
+        } catch (error) {
+          if (error instanceof ShippingConflictError && error.code === "SIBLING_CLAIM_ACTIVE") {
+            throw new RetryableDomainEventError(new Date(Date.now() + 30_000));
+          }
+          throw error;
+        }
       }
       case "shipping.provider.uncertain.v1":
         await this.options.shipping.reconcileLabel(

@@ -209,6 +209,11 @@ export class OrderLifecycleService {
               WHERE attempt."orderId" = "Order"."id"
                 AND reconciliation."status" IN ('COLLECTED', 'REMITTED', 'DISCREPANCY', 'RECONCILED')
             )
+            AND NOT EXISTS (
+              SELECT 1 FROM "OrderFulfillment" fulfillment
+              WHERE fulfillment."orderId" = "Order"."id"
+                AND fulfillment."status" NOT IN ('PENDING', 'CANCELLED')
+            )
           ORDER BY "reservationExpiresAt", "id"
           FOR UPDATE SKIP LOCKED
           LIMIT 1
@@ -221,14 +226,20 @@ export class OrderLifecycleService {
           `order-release:${order.id}`,
           ...(order.couponId ? [`coupon-redemption:${order.couponId}`] : []),
         ]);
-        const [items, shipments] = await Promise.all([
+        const [items, shipments, fulfillments] = await Promise.all([
           tx.orderItem.findMany({
             where: { orderId: order.id },
             include: { reservations: true },
           }),
           tx.shipment.findMany({ where: { orderId: order.id } }),
+          tx.orderFulfillment.findMany({ where: { orderId: order.id } }),
         ]);
-        if (shipments.some((shipment) => shipment.status !== "PENDING")) {
+        if (
+          shipments.some((shipment) => shipment.status !== "PENDING") ||
+          fulfillments.some(
+            (fulfillment) => fulfillment.status !== "PENDING" && fulfillment.status !== "CANCELLED",
+          )
+        ) {
           throw new OrderLifecycleError(
             `Order ${order.id} has shipment progress despite being unpaid.`,
           );
@@ -294,6 +305,10 @@ export class OrderLifecycleService {
         if (cancelled.count !== shipments.length) {
           throw new OrderLifecycleError(`Order ${order.id} shipments changed concurrently.`);
         }
+        await tx.orderFulfillment.updateMany({
+          where: { orderId: order.id, status: "PENDING" },
+          data: { status: "CANCELLED", version: { increment: 1 } },
+        });
         await tx.couponUsage.updateMany({
           where: { orderId: order.id, status: "REDEEMED" },
           data: { status: "RELEASED", releasedAt: now },

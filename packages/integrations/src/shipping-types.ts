@@ -28,6 +28,7 @@ export class ShippingConflictError extends Error {
       | "INVALID_STATE"
       | "PACKAGE_INCOMPLETE"
       | "PROVIDER_UNCERTAIN"
+      | "SIBLING_CLAIM_ACTIVE"
       | "IDEMPOTENCY_CONFLICT"
       | "ZONE_UNAVAILABLE" = "INVALID_STATE",
   ) {
