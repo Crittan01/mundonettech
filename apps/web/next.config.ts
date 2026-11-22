@@ -4,6 +4,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
+  htmlLimitedBots: /.*/,
   images: {
     unoptimized: true,
   },

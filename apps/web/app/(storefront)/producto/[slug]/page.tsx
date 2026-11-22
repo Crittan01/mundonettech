@@ -25,6 +25,11 @@ const retractLabels = {
   LEGAL_EXCEPTION_REVIEW: "Sujeto a revisión de excepción legal",
 } as const;
 
+export async function generateStaticParams() {
+  const result = await searchCatalog({ pageSize: 48, sort: "newest" });
+  return result.items.map((product) => ({ slug: product.slug }));
+}
+
 export async function generateMetadata({ params }: PageProps<"/producto/[slug]">) {
   const { slug } = await params;
   const product = await getCatalogProduct(slug);

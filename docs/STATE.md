@@ -4,7 +4,7 @@
 
 ## Fotografía ejecutiva
 
-- **Estado:** **Fases 0–3 cerradas ✅ · Fase 4A activa: `F4A.1`–`F4A.2` ✅ · sigue `F4A.3`**.
+- **Estado:** **Fases 0–3 cerradas ✅ · Fase 4A activa: `F4A.1`–`F4A.2` ✅ · `F4A.3` [R] en auditoría**.
 - **Operación:** `mundonettech.co` · `MNT-YYYY-NNNN` · Retail/mayorista tech CO · **`NO_RESPONSABLE_IVA`** (`3.500 UVT`, motor dual `ADR-009`).
 - **Base activa (`F0`–`F4A.2`):** Next.js 16 standalone (`'use cache'`/`connection()`), PG 17 (`96` tablas RLS, `1.677` casos), bóveda `AES-256-GCM`, MFA `aal2` + RBAC 8 roles, `@mundonettech/{core,db,integrations,media,cms,legal-co}`, DIVIPOLA, `OrderReceipt` SHA-256, SEO/XML, monitor `3.500 UVT` y posventa RMA/PQR/reseñas.
 
@@ -23,8 +23,9 @@
 - **Fase 2 (`F2.1`–`F2.3` ✅):** `cms` (`StoreSettings`, 6 bloques Zod, R2, `/pagina/[slug]` PPR, Live Edit `aal2`, SERP/OG), `legal-co` (8 docs, 18 festivos CO, SLA), `UrlRedirect` MFA y SEO/Merchant XML.
 - **Fase 3 (`F3.1`–`F3.4` ✅):** Carrito/mayorista/bundles/cupones/`/pagar/[token]`, checkout DANE/Flex/*Click & Collect* + IVA dual + `OrderReceipt` + `DomainOutbox` 0-PII, `PaymentProvider`, Aveonline/Flex, Resend/Svix/RFC 8058 y DIAN UBL.
 - **Fase 4A (`F4A.1`–`F4A.2` ✅):** `/admin/{hoy,dashboard,pedidos,finanzas,posventa,resenas}` con RBAC/PII, `Notification`/`NotificationRead`, `DailyFunnelMetric` 0-PII, `FiscalWatchSnapshot` `3.500 UVT` (`ADR-034`), `/mi-cuenta/*` DANE/anonimización Ley 1581, `/pedido/[token]` OTP HMAC, RMA parcial por entrega/serial + `OrderRefund`, PQR SLA CO y reseñas verificadas (`ADR-035`).
+- **`F4A.3` [R]:** OWASP/CSP/sondas, `54` E2E + axe sin violaciones, `8` auditorías Lighthouse ≥ 96 (rendimiento `99–100`), k6 con `28` éxitos/`60` rechazos y `71` invariantes, auditoría de dependencias limpia y `release:verify` STG→PRD (`ADR-036`).
 
-## Pendientes externos de negocio (no bloquean `F4A.3`)
+## Pendientes externos de negocio (bloquean el Go-Live, no `[R]`)
 
 1. Paleta definitiva y logo `.svg` de **MundoNetTech** (opera con *Tech Precision* en `config/theme.config.ts`).
 2. Cuentas Fase 3 / 6: Cloudflare (`mundonettech.co` + R2), Resend, Wompi, Aveonline, proveedor DIAN y Mercado Libre `MCO`.

@@ -153,6 +153,14 @@ test("Merchant feed and PDP JSON-LD use persisted variants, money, brand and sto
   expect(xml).toContain("?variant=");
   expect(xml).not.toContain("<script>");
 
+  const pdpResponse = await page.request.get("/producto/sony-wh-1000xm5");
+  const pdpHtml = await pdpResponse.text();
+  const headEnd = pdpHtml.indexOf("</head>");
+  expect(headEnd).toBeGreaterThan(0);
+  expect(pdpHtml.slice(0, headEnd)).toContain(
+    '<meta name="description" content="Sony WH-1000XM5 con cancelación de ruido y Bluetooth multipunto."/>',
+  );
+
   await page.goto("/producto/sony-wh-1000xm5");
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
     "href",

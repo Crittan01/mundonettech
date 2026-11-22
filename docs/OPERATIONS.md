@@ -72,17 +72,25 @@ pnpm test:rls         # matriz autónoma sobre PG17 real (1.677 denegaciones baj
 pnpm build            # build productivo + empaquetado standalone completo
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
+pnpm test:owasp       # CSP/aislamiento/auth/CSRF/CORS/límites sobre standalone y PG17
+pnpm test:lighthouse  # 4 categorías ≥ 95, móvil/escritorio, home/PLP/PDP/legal
+pnpm test:k6          # contención real stock/cupones/checkout/pagos + invariantes PG17
+pnpm audit:dependencies # vulnerabilidades altas/críticas en dependencias productivas
 ```
 
 En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 1.677 casos reales: 480 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 1.197 operaciones sobre `anon`, `authenticated` y `service_role` en las 96 tablas y 15 funciones RPC.
 
 `pnpm test:e2e` crea o reutiliza exclusivamente el PostgreSQL aislado de pruebas, aplica migraciones y seed canónico, y luego arranca el artefacto real `.next/standalone` en `127.0.0.1:4110`. Playwright recorre catálogo/PDP/comparador, carrito, checkout domicilio/Click & Collect/Flex, recibo/descarga, scheduler de órdenes, cupones, bundles, precios, venta asistida, bóveda y ciclo local de alistamiento/empaquetado/despacho/entrega con MFA `aal2`, auth y seguridad, los cuatro paneles operativos, asignación Serial/IMEI, reembolso conciliado, finanzas netas y CSV, cuenta/perfil/direcciones DANE, RMA/garantías/PQR/reseñas con moderación MFA, acceso invitado OTP, controles de teclado, CSP/HSTS, `no-store`/`noindex` transaccional y `@axe-core` WCAG A/AA. Las ausencias dinámicas se validan con `noindex` según el streaming de Cache Components; el 404 estático conserva su status. `test-results/`, `playwright-report/` y traces no se versionan.
 
+`pnpm test:owasp` repite las cabeceras y rechazos negativos en respuestas exitosas y de error. `pnpm test:lighthouse` siembra PG17, fuerza el build standalone sobre esos mismos datos y exige ≥ 95 en rendimiento, accesibilidad, buenas prácticas y SEO para `/`, `/productos`, `/producto/sony-wh-1000xm5` y `/legal`, con perfiles móvil y escritorio; conserva reportes JSON/HTML en `tmp/lighthouse/`. `pnpm test:k6` usa el binario de `PATH`/`K6_BINARY` o la imagen acotada `grafana/k6:1.3.0`, ejecuta 32 reservas multi-variante, 24 canjes, 16 checkouts y 16 pagos en contención, y exige 28 éxitos, 60 rechazos de negocio, cero deadlocks/errores y 71 invariantes persistidas; conserva métricas e invariantes en `tmp/k6/`. Estas suites usan los mismos puertos aislados y deben ejecutarse en serie, nunca contra STG/PRD ni en paralelo local.
+
+Las sondas `GET /api/health/live` y `GET /api/health/ready` responden `no-store` y `noindex`, sin versiones, cadenas de conexión ni detalles internos. `live` confirma el proceso; `ready` exige PostgreSQL 17 y ausencia de migraciones incompletas o revertidas, y devuelve 503 ante cualquier falla.
+
 ## 5. GitHub Actions PostgreSQL 17
 
-`.github/workflows/ci.yml` corre en PRs contra `develop` y pushes a `develop`, con permisos de solo lectura y cancelación de ejecuciones duplicadas. El job usa `postgres:17.12-alpine` en `:54422`, health checks, secretos HMAC aleatorios y `EMAIL_SEND_DISABLED=1`; no requiere Supabase remoto ni cuentas comerciales.
+`.github/workflows/ci.yml` corre en PRs contra `develop` y pushes a `develop`, con permisos de solo lectura y cancelación de ejecuciones duplicadas. El job usa `postgres:17.12-alpine` en `:54422`, health checks, secretos HMAC aleatorios y `EMAIL_SEND_DISABLED=1`; no requiere Supabase remoto ni cuentas comerciales. La acción de k6 está fijada por commit y la auditoría de dependencias productivas bloquea vulnerabilidades altas o críticas.
 
-Orden del gate: instalación frozen → validación/migración → `make check` → `pnpm test` + `verify-security-posture` + `pnpm test:rls` → `pnpm build` standalone → Chromium (`--with-deps`) → `pnpm test:e2e` → verificación de árbol Git limpio (y carga de diagnósticos Playwright si falla).
+Orden del gate: instalación frozen → auditoría de dependencias → validación/migración → `make check` → `pnpm test` + `verify-security-posture` + `pnpm test:rls` → `pnpm build` standalone → Chromium → `pnpm test:e2e` → `pnpm test:owasp` → `pnpm test:lighthouse` → `pnpm test:k6` → árbol Git limpio. Los diagnósticos Playwright y las evidencias Lighthouse/k6 se cargan como artefactos retenidos siete días.
 
 ## 6. Build standalone y ambientes
 
@@ -93,6 +101,16 @@ Orden del gate: instalación frozen → validación/migración → `make check` 
 - **PRD:** rama `production`, dominio comercial, Supabase PRD/R2; promoción humana, sin acceso desde tests.
 
 Los cambios de esquema se despliegan hacia adelante y se verifican con `db:verify`. Ante una migración fallida, conserva logs y evidencia, detén la promoción y aplica una migración correctiva; no edites el historial aplicado ni uses resets destructivos.
+
+### Checklist STG → PRD y Go-Live
+
+1. **Candidato:** exige el commit completo de `develop` con CI y los cuatro gates de calidad en verde, árbol limpio y reportes del mismo SHA. Despliega ese artefacto en STG con `pnpm db:validate && pnpm db:migrate`, secretos STG independientes y `EMAIL_SEND_DISABLED` ausente.
+2. **STG funcional:** carga el catálogo canónico explícitamente si corresponde, crea el administrador real y verifica MFA `aal2`, step-up, RBAC, RLS/Data API, schedulers, webhooks y R2. Ejecuta compras de extremo a extremo con proveedores de prueba, reembolso/posventa, correos y documentos; conserva evidencia sin secretos ni PII.
+3. **Aprobaciones STG:** completa identidad legal/NIT/dirección/teléfono, revisión jurídica, buzones, pasarela, logística, Resend, DIAN, Merchant Center, respaldo y restauración, schedulers y rollback. Son requisitos humanos de `docs/COMPLIANCE.md`, no valores que el código pueda inventar.
+4. **Compuerta STG:** exporta la configuración del ambiente y las attestaciones `RELEASE_*` únicamente después de verificar cada evidencia. Ejecuta `RELEASE_ENVIRONMENT=STG RELEASE_TARGET_URL="$STG_URL" pnpm release:verify`; cualquier comprobación fallida detiene la promoción.
+5. **Promoción:** abre PR protegido `develop → production`, revisa diff y CI, y obtiene aprobación humana. Prohibido push directo o force-push. Despliega el mismo build, aplica migraciones hacia adelante y configura llaves PRD/Wompi `prod`, R2, Supabase, Turnstile y schedulers sin reutilizar secretos STG.
+6. **Go-Live:** verifica DNS/TLS, respaldo y restauración PRD, monitoreo, alertas y rollback. Ejecuta `RELEASE_ENVIRONMENT=PRD RELEASE_TARGET_URL="https://mundonettech.co" pnpm release:verify` con las evidencias STG y `RELEASE_GO_LIVE_APPROVED=YES`. Solo una persona autorizada habilita el tráfico después del resultado exitoso; el comando nunca cambia DNS, ramas, despliegues ni tráfico.
+7. **Después:** repite sondas y una compra controlada, observa pagos/outbox/DIAN/correo y conserva evidencia. Para revertir, restaura el artefacto standalone previo y detén la promoción; no edites migraciones aplicadas ni uses resets destructivos, y crea una migración correctiva si el esquema lo requiere.
 
 ## 7. Diagnóstico seguro
 

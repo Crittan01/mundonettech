@@ -23,11 +23,11 @@ function securityPolicy(
     "default-src 'self'",
     `script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com${isDevelopment ? " 'unsafe-eval'" : ""}`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
+    `img-src 'self' data: blob:${mediaOrigin ? ` ${mediaOrigin}` : ""}`,
     "font-src 'self' data:",
     `connect-src 'self' blob: ${supabaseUrl}${mediaOrigin ? ` ${mediaOrigin}` : ""} https://challenges.cloudflare.com${isDevelopment ? " ws:" : ""}`,
     "frame-src https://challenges.cloudflare.com",
-    "media-src 'self' blob: https:",
+    `media-src 'self' blob:${mediaOrigin ? ` ${mediaOrigin}` : ""}`,
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
@@ -51,6 +51,8 @@ function applyHeaders(response: NextResponse, csp: string, isDevelopment: boolea
   response.headers.set("Cross-Origin-Opener-Policy", "same-origin");
   response.headers.set("Cross-Origin-Resource-Policy", "same-origin");
   response.headers.set("Origin-Agent-Cluster", "?1");
+  response.headers.set("X-DNS-Prefetch-Control", "off");
+  response.headers.set("X-Permitted-Cross-Domain-Policies", "none");
   if (!isDevelopment) {
     response.headers.set(
       "Strict-Transport-Security",

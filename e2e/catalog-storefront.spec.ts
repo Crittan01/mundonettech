@@ -100,7 +100,10 @@ test("N-level breadcrumbs, category/brand, malformed URLs, validation, empty and
     await expect(page.getByRole("heading", { level: 1 })).toContainText(
       "No encontramos esta página",
     );
-    await expect(page.locator('meta[name="robots"]').first()).toHaveAttribute("content", "noindex");
+    await expect(page.locator('meta[name="robots"]').first()).toHaveAttribute(
+      "content",
+      /(?:^|,\s*)noindex(?:,\s*nofollow)?/,
+    );
   }
   expect(errors).toEqual([]);
 });
