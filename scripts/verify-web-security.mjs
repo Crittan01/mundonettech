@@ -169,6 +169,7 @@ export async function verifyWebSecurity(
 
   for (const [routePath, expected] of [
     ["/admin", "/admin/login"],
+    ["/admin/crm", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios.svg", "/admin/login"],

@@ -140,3 +140,22 @@ export {
   pointInDeliveryPolygon,
 } from "./delivery.js";
 export type { DeliveryPoint } from "./delivery.js";
+export {
+  assertCrmRetentionMonths,
+  contactPairKey,
+  contactVerificationLevels,
+  crmActivityKindLabels,
+  crmContactStatusLabels,
+  crmIdentityKindLabels,
+  crmMatchReasonLabels,
+  crmSuppressionReasonLabels,
+  crmTaskPriorityLabels,
+  crmTaskStatusLabels,
+  crmVerificationLevelLabels,
+  deriveContactVerificationLevel,
+  formatCrmMatchReasons,
+  normalizeContactIdentity,
+  normalizeContactPhone,
+  strongestContactVerificationLevel,
+} from "./crm.js";
+export type { ContactIdentityKindValue, ContactVerificationLevelValue } from "./crm.js";

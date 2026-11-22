@@ -33,7 +33,7 @@ El footer enlaza el centro legal, retracto, garantías, PQR y la Superintendenci
 
 Las políticas describen finalidades, autorización, excepciones, derechos, datos sensibles, menores, encargados, transferencias, retención y seguridad. Las consultas se documentan con diez días hábiles y los reclamos con quince, incluidas las reglas de información incompleta y prórroga legal.
 
-Controles técnicos activos: RBAC de ocho roles, MFA `aal2` y step-up, RLS *deny-by-default*, PostgREST revocado, bóveda AES-256-GCM, máscaras PII, sesiones HMAC con expiración, `AdminActionLog`, `SecurityEvent` y `Consent` append-only con revocación. La supresión/anonimización self-service de `/mi-cuenta` está implementada con revocación de sesiones, borrado de direcciones y disociación de identificadores directos; la retención CRM completa se aborda en F4B/F5.
+Controles técnicos activos: RBAC de ocho roles, MFA `aal2` y step-up, RLS *deny-by-default*, PostgREST revocado, bóveda AES-256-GCM, máscaras PII, sesiones HMAC con expiración, `AdminActionLog`, `SecurityEvent` y `Consent` append-only con revocación. La supresión/anonimización self-service de `/mi-cuenta` está implementada con revocación de sesiones, borrado de direcciones y disociación de identificadores directos. CRM aplica retención de 24 meses con revisión programada y supresión manual Anillo 1 + MFA: bloquea obligaciones abiertas, anonimiza comprador y linaje, elimina identidades directas y redacta actividades, tareas y snapshots conservando únicamente la historia legal/financiera exigida.
 
 Las cookies actuales se documentan como necesarias para Auth, actividad y seguridad. Cualquier analítica/publicidad no esencial exige actualizar inventario, finalidad, duración, terceros y consentimiento antes de activarse.
 

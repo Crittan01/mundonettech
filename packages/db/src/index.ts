@@ -396,3 +396,33 @@ export type {
   SupportTicketMessage,
   WarrantyClaim,
 } from "./generated/client.js";
+export { CrmService } from "./crm-service.js";
+export { CrmMergeService } from "./crm-merge-service.js";
+export { CrmRetentionService } from "./crm-retention-service.js";
+export type { CrmSuppressionReason } from "./crm-retention-service.js";
+export { CrmError } from "./crm-shared.js";
+export type {
+  CrmAudit,
+  CrmContactInput,
+  CrmContactUpdateInput,
+  CrmErrorCode,
+  CrmOrganizationInput,
+  CrmOrganizationUpdateInput,
+} from "./crm-shared.js";
+export {
+  ContactActivityKind,
+  ContactIdentityKind,
+  ContactStatus,
+  ContactVerificationLevel,
+  IdentityMergeStatus,
+  TaskPriority,
+  TaskStatus,
+} from "./generated/client.js";
+export type {
+  Contact,
+  ContactActivity,
+  ContactIdentity,
+  IdentityMergeCandidate,
+  Organization,
+  Task,
+} from "./generated/client.js";

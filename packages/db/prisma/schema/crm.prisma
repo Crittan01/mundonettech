@@ -1,3 +1,206 @@
+enum ContactStatus {
+  ACTIVE
+  MERGED
+  ANONYMIZED
+}
+
+enum ContactVerificationLevel {
+  UNVERIFIED
+  SINGLE_CHANNEL_VERIFIED
+  DUAL_CHANNEL_VERIFIED
+  IDENTITY_VERIFIED
+}
+
+enum ContactIdentityKind {
+  EMAIL
+  PHONE
+  DOCUMENT
+}
+
+enum IdentityMergeStatus {
+  PENDING
+  MERGED
+  REJECTED
+  REVERSED
+}
+
+enum ContactActivityKind {
+  NOTE
+  CALL
+  EMAIL
+  MEETING
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model Organization {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  legalName      String    @db.VarChar(200)
+  commercialName String?   @db.VarChar(200)
+  taxId          String?   @db.VarChar(30)
+  priceListId    String?   @db.Uuid
+  version        Int       @default(0)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt      DateTime? @db.Timestamptz(6)
+  contacts       Contact[]
+
+  @@index([legalName])
+  @@index([priceListId])
+  @@index([deletedAt])
+  @@map("Organization")
+}
+
+model Contact {
+  id                     String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId         String?                  @db.Uuid
+  customerId             String?                  @db.Uuid
+  givenName              String?                  @db.VarChar(100)
+  familyName             String?                  @db.VarChar(100)
+  email                  String?                  @db.VarChar(320)
+  phoneE164              String?                  @db.VarChar(16)
+  status                 ContactStatus            @default(ACTIVE)
+  verificationLevel      ContactVerificationLevel @default(UNVERIFIED)
+  source                 String                   @db.VarChar(60)
+  retentionReviewAt      DateTime                 @db.Timestamptz(6)
+  lastActivityAt         DateTime?                @db.Timestamptz(6)
+  mergedIntoContactId    String?                  @db.Uuid
+  suppressionReason      String?                  @db.VarChar(500)
+  suppressedAt           DateTime?                @db.Timestamptz(6)
+  anonymizedAt           DateTime?                @db.Timestamptz(6)
+  version                Int                      @default(0)
+  createdAt              DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                 @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt              DateTime?                @db.Timestamptz(6)
+  organization           Organization?            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer               Customer?                @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  mergedInto             Contact?                 @relation("ContactMergeLineage", fields: [mergedIntoContactId], references: [id], onDelete: Restrict)
+  mergedFrom             Contact[]                @relation("ContactMergeLineage")
+  identities             ContactIdentity[]
+  activities             ContactActivity[]
+  tasks                  Task[]
+  sourceMergeCandidates  IdentityMergeCandidate[] @relation("IdentityMergeSource")
+  targetMergeCandidates  IdentityMergeCandidate[] @relation("IdentityMergeTarget")
+
+  @@index([organizationId, status, createdAt])
+  @@index([customerId, deletedAt])
+  @@index([status, retentionReviewAt])
+  @@index([email])
+  @@index([phoneE164])
+  @@index([deletedAt])
+  @@map("Contact")
+}
+
+model ContactIdentity {
+  id              String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contactId       String              @db.Uuid
+  kind            ContactIdentityKind
+  normalizedValue String              @db.VarChar(320)
+  valueHash       Bytes               @db.ByteA
+  verifiedAt      DateTime?           @db.Timestamptz(6)
+  createdAt       DateTime            @default(now()) @db.Timestamptz(6)
+  retiredAt       DateTime?           @db.Timestamptz(6)
+  contact         Contact             @relation(fields: [contactId], references: [id], onDelete: Restrict)
+
+  @@unique([contactId, kind, normalizedValue])
+  @@index([kind, normalizedValue, retiredAt])
+  @@index([contactId, retiredAt])
+  @@map("ContactIdentity")
+}
+
+model IdentityMergeCandidate {
+  id                    String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  pairKey               String              @db.VarChar(73)
+  sourceContactId       String              @db.Uuid
+  targetContactId       String              @db.Uuid
+  status                IdentityMergeStatus @default(PENDING)
+  matchScore            Int
+  matchReasons          Json                @db.JsonB
+  sourceSnapshot        Json?               @db.JsonB
+  targetSnapshot        Json?               @db.JsonB
+  movedIdentityIds      Json                @default("[]") @db.JsonB
+  retiredIdentityIds    Json                @default("[]") @db.JsonB
+  movedActivityIds      Json                @default("[]") @db.JsonB
+  movedTaskIds          Json                @default("[]") @db.JsonB
+  mergedTargetVersion   Int?
+  mergedSourceVersion   Int?
+  resolutionNote        String?             @db.VarChar(500)
+  version               Int                 @default(0)
+  mergedByAdminUserId   String?             @db.Uuid
+  rejectedByAdminUserId String?             @db.Uuid
+  reversedByAdminUserId String?             @db.Uuid
+  mergedAt              DateTime?           @db.Timestamptz(6)
+  rejectedAt            DateTime?           @db.Timestamptz(6)
+  reversedAt            DateTime?           @db.Timestamptz(6)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  sourceContact         Contact             @relation("IdentityMergeSource", fields: [sourceContactId], references: [id], onDelete: Restrict)
+  targetContact         Contact             @relation("IdentityMergeTarget", fields: [targetContactId], references: [id], onDelete: Restrict)
+  mergedBy              AdminUser?          @relation("IdentityMergeApprover", fields: [mergedByAdminUserId], references: [id], onDelete: Restrict)
+  rejectedBy            AdminUser?          @relation("IdentityMergeRejector", fields: [rejectedByAdminUserId], references: [id], onDelete: Restrict)
+  reversedBy            AdminUser?          @relation("IdentityMergeReverser", fields: [reversedByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([status, createdAt])
+  @@index([sourceContactId, status])
+  @@index([targetContactId, status])
+  @@map("IdentityMergeCandidate")
+}
+
+model ContactActivity {
+  id                  String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contactId           String             @db.Uuid
+  kind                ContactActivityKind
+  subject             String?            @db.VarChar(200)
+  body                String             @db.VarChar(5000)
+  occurredAt          DateTime           @db.Timestamptz(6)
+  createdByAdminUserId String            @db.Uuid
+  redactedAt          DateTime?          @db.Timestamptz(6)
+  createdAt           DateTime           @default(now()) @db.Timestamptz(6)
+  contact             Contact            @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  createdBy           AdminUser          @relation("ContactActivityAuthor", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([contactId, occurredAt, id])
+  @@index([createdByAdminUserId, createdAt])
+  @@map("ContactActivity")
+}
+
+model Task {
+  id                   String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  contactId            String       @db.Uuid
+  title                String       @db.VarChar(160)
+  description          String?      @db.VarChar(5000)
+  status               TaskStatus   @default(PENDING)
+  priority             TaskPriority @default(NORMAL)
+  dueAt                DateTime     @db.Timestamptz(6)
+  assignedToAdminUserId String?     @db.Uuid
+  createdByAdminUserId String       @db.Uuid
+  completedAt          DateTime?    @db.Timestamptz(6)
+  redactedAt           DateTime?    @db.Timestamptz(6)
+  version              Int          @default(0)
+  createdAt            DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime     @default(now()) @updatedAt @db.Timestamptz(6)
+  contact              Contact      @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  assignedTo           AdminUser?   @relation("TaskAssignee", fields: [assignedToAdminUserId], references: [id], onDelete: Restrict)
+  createdBy            AdminUser    @relation("TaskCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([contactId, status, dueAt])
+  @@index([assignedToAdminUserId, status, dueAt])
+  @@index([status, dueAt])
+  @@map("Task")
+}
+
 enum CustomerStatus {
   GUEST
   ACTIVE
@@ -43,6 +246,7 @@ model Customer {
   supportTickets           SupportTicket[]
   supportMessages          SupportTicketMessage[]
   reviews                  Review[]
+  crmContacts              Contact[]
 
   @@index([status, createdAt])
   @@index([deletedAt])

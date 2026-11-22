@@ -60,6 +60,12 @@ model AdminUser {
   assignedSupportTickets   SupportTicket[]         @relation("SupportTicketAssignee")
   supportMessages          SupportTicketMessage[]  @relation("SupportMessageAuthor")
   moderatedReviews         Review[]                @relation("ReviewModerator")
+  contactActivities        ContactActivity[]       @relation("ContactActivityAuthor")
+  assignedCrmTasks         Task[]                  @relation("TaskAssignee")
+  createdCrmTasks          Task[]                  @relation("TaskCreator")
+  approvedIdentityMerges   IdentityMergeCandidate[] @relation("IdentityMergeApprover")
+  rejectedIdentityMerges   IdentityMergeCandidate[] @relation("IdentityMergeRejector")
+  reversedIdentityMerges   IdentityMergeCandidate[] @relation("IdentityMergeReverser")
 
   @@index([role, status])
   @@index([createdAt])

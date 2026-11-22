@@ -15,6 +15,7 @@ import {
 } from "@mundonettech/core";
 
 import { CartService, CartNotFoundError } from "./cart-service.js";
+import { CrmService } from "./crm-service.js";
 import { LocalDeliveryConflictError, quoteLocalDeliveryZone } from "./local-delivery-service.js";
 import type { CartReference, CartSnapshot } from "./cart-types.js";
 import type {
@@ -1108,6 +1109,7 @@ export class OrderService {
             customerId = customer.id;
           }
         }
+        await new CrmService(this.db).syncCustomerContactInTransaction(tx, customerId);
         await tx.consent.create({
           data: {
             customerId,

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { normalizeEmail } from "@mundonettech/core";
 
 import type { Customer, PrismaClient } from "./generated/client.js";
+import { suppressCustomerCrmLineageInTransaction } from "./crm-shared.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 
 export type AccountErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION";
@@ -409,198 +410,214 @@ export class AccountService {
     if (confirmation !== "ELIMINAR MI CUENTA") {
       throw new AccountError("VALIDATION", "The account deletion confirmation does not match.");
     }
+    return inInventoryTransaction(this.db, async (tx) =>
+      this.anonymizeInTransaction(tx, customerId, auditInput),
+    );
+  }
+
+  async anonymizeInTransaction(
+    tx: import("./generated/client.js").Prisma.TransactionClient,
+    customerId: string,
+    auditInput: AccountAudit,
+    options: { readonly skipCrmCascade?: boolean } = {},
+  ) {
+    assertUuid(customerId, "customerId");
     const audit = this.audit(auditInput);
-    return inInventoryTransaction(this.db, async (tx) => {
-      const customer = await this.lockActiveCustomer(tx, customerId);
-      if (customer.loyaltyPoints !== 0) {
-        throw new AccountError("CONFLICT", "Redeem loyalty points before deleting the account.");
-      }
-      const credit = await tx.storeCreditAccount.aggregate({
-        where: { customerId },
-        _sum: { availableCents: true, heldCents: true },
-      });
-      if ((credit._sum.availableCents ?? 0n) !== 0n || (credit._sum.heldCents ?? 0n) !== 0n) {
-        throw new AccountError(
-          "CONFLICT",
-          "Use or resolve store credit before deleting the account.",
-        );
-      }
-      const [blockingOrder, blockingPayment, blockingRefund, blockingReturn, blockingWarranty] =
-        await Promise.all([
-          tx.order.findFirst({
-            where: {
-              customerId,
-              OR: [
-                { orderStatus: "PENDING" },
-                {
-                  orderStatus: "CONFIRMED",
-                  OR: [
-                    { fulfillmentStatus: { not: "FULFILLED" } },
-                    { paymentStatus: { in: ["UNPAID", "PARTIALLY_PAID"] } },
-                    { shipments: { some: { status: { notIn: ["DELIVERED", "CANCELLED"] } } } },
-                  ],
-                },
-              ],
-            },
-            select: { id: true },
-          }),
-          tx.paymentAttempt.findFirst({
-            where: { order: { customerId }, status: { in: ["PENDING", "PROCESSING"] } },
-            select: { id: true },
-          }),
-          tx.orderRefund.findFirst({
-            where: {
-              order: { customerId },
-              status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
-            },
-            select: { id: true },
-          }),
-          tx.returnRequest.findFirst({
-            where: {
-              order: { customerId },
-              status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
-            },
-            select: { id: true },
-          }),
-          tx.warrantyClaim.findFirst({
-            where: {
-              order: { customerId },
-              status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
-            },
-            select: { id: true },
-          }),
-        ]);
-      if (
-        blockingOrder ||
-        blockingPayment ||
-        blockingRefund ||
-        blockingReturn ||
-        blockingWarranty
-      ) {
-        throw new AccountError(
-          "CONFLICT",
-          "Complete or resolve active orders, payments, refunds and post-sale requests before deleting the account.",
-        );
-      }
-      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-      const now = nowRows[0]!.now;
-      const previousEmail = customer.email;
-      const anonymizedEmail = `anon-${customerId.replaceAll("-", "")}@anonymized.invalid`;
-      const activeConsents = await tx.consent.findMany({
-        where: {
-          customerId,
-          purpose: { in: ["MARKETING_EMAIL", "MARKETING_SMS", "ANALYTICS"] },
-          status: "GRANTED",
-          revokedBy: null,
-        },
-      });
-      for (const consent of activeConsents) {
-        await tx.consent.create({
-          data: {
+    await acquireOperationLocks(tx, [`customer-account:${customerId}`]);
+    const customers = await tx.$queryRaw<
+      Customer[]
+    >`SELECT * FROM "Customer" WHERE "id" = ${customerId}::uuid FOR UPDATE`;
+    const customer = customers[0];
+    if (
+      !customer ||
+      !["ACTIVE", "GUEST"].includes(customer.status) ||
+      customer.deletedAt !== null
+    ) {
+      throw new AccountError("NOT_FOUND", "Customer eligible for anonymization not found.");
+    }
+    if (customer.loyaltyPoints !== 0) {
+      throw new AccountError("CONFLICT", "Redeem loyalty points before deleting the account.");
+    }
+    const credit = await tx.storeCreditAccount.aggregate({
+      where: { customerId },
+      _sum: { availableCents: true, heldCents: true },
+    });
+    if ((credit._sum.availableCents ?? 0n) !== 0n || (credit._sum.heldCents ?? 0n) !== 0n) {
+      throw new AccountError(
+        "CONFLICT",
+        "Use or resolve store credit before deleting the account.",
+      );
+    }
+    const [blockingOrder, blockingPayment, blockingRefund, blockingReturn, blockingWarranty] =
+      await Promise.all([
+        tx.order.findFirst({
+          where: {
             customerId,
-            purpose: consent.purpose,
-            status: "REVOKED",
-            source: "customer-anonymization",
-            policyVersion: this.options.privacyPolicyVersion,
-            proofHash: createHash("sha256")
-              .update(`anonymize:${customerId}:${consent.id}`)
-              .digest(),
-            ipHash: audit.ipHash,
-            userAgentHash: audit.userAgentHash,
-            revokesId: consent.id,
+            OR: [
+              { orderStatus: "PENDING" },
+              {
+                orderStatus: "CONFIRMED",
+                OR: [
+                  { fulfillmentStatus: { not: "FULFILLED" } },
+                  { paymentStatus: { in: ["UNPAID", "PARTIALLY_PAID"] } },
+                  { shipments: { some: { status: { notIn: ["DELIVERED", "CANCELLED"] } } } },
+                ],
+              },
+            ],
           },
-        });
-      }
-      await tx.address.deleteMany({ where: { customerId } });
-      await tx.wishlistItem.deleteMany({ where: { customerId } });
-      await tx.backInStockSubscription.updateMany({
-        where: { customerId },
-        data: { customerId: null, email: anonymizedEmail, status: "CANCELLED", cancelledAt: now },
-      });
-      await tx.cart.updateMany({
-        where: { customerId, status: "ACTIVE" },
-        data: { status: "CANCELLED" },
-      });
-      await tx.abandonedCart.updateMany({ where: { customerId }, data: { contactEmail: null } });
-      await tx.storeCreditAccount.updateMany({ where: { customerId }, data: { active: false } });
-      await tx.guestOrderSession.updateMany({
-        where: { order: { customerId }, revokedAt: null },
-        data: { revokedAt: now },
-      });
-      await tx.guestOrderChallenge.updateMany({
-        where: { order: { customerId }, status: { in: ["PENDING", "SENT", "FAILED"] } },
-        data: { status: "EXPIRED" },
-      });
-      await tx.order.updateMany({
-        where: { customerId, anonymizedAt: null },
+          select: { id: true },
+        }),
+        tx.paymentAttempt.findFirst({
+          where: { order: { customerId }, status: { in: ["PENDING", "PROCESSING"] } },
+          select: { id: true },
+        }),
+        tx.orderRefund.findFirst({
+          where: {
+            order: { customerId },
+            status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
+          },
+          select: { id: true },
+        }),
+        tx.returnRequest.findFirst({
+          where: {
+            order: { customerId },
+            status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
+          },
+          select: { id: true },
+        }),
+        tx.warrantyClaim.findFirst({
+          where: {
+            order: { customerId },
+            status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
+          },
+          select: { id: true },
+        }),
+      ]);
+    if (blockingOrder || blockingPayment || blockingRefund || blockingReturn || blockingWarranty) {
+      throw new AccountError(
+        "CONFLICT",
+        "Complete or resolve active orders, payments, refunds and post-sale requests before deleting the account.",
+      );
+    }
+    const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+    const now = nowRows[0]!.now;
+    if (!options.skipCrmCascade) {
+      await suppressCustomerCrmLineageInTransaction(tx, customerId, now);
+    }
+    const previousEmail = customer.email;
+    const anonymizedEmail = `anon-${customerId.replaceAll("-", "")}@anonymized.invalid`;
+    const activeConsents = await tx.consent.findMany({
+      where: {
+        customerId,
+        purpose: { in: ["MARKETING_EMAIL", "MARKETING_SMS", "ANALYTICS"] },
+        status: "GRANTED",
+        revokedBy: null,
+      },
+    });
+    for (const consent of activeConsents) {
+      await tx.consent.create({
         data: {
-          emailSnapshot: null,
-          recipientNameSnapshot: null,
-          phoneE164Snapshot: null,
-          buyerDocumentTypeSnapshot: null,
-          buyerDocumentNumberSnapshot: null,
-          buyerTaxRegimeSnapshot: null,
-          addressLine1Snapshot: null,
-          addressLine2Snapshot: null,
-          neighborhoodSnapshot: null,
-          postalCodeSnapshot: null,
-          deliveryNotesSnapshot: null,
-          deliveryLatitudeE6: null,
-          deliveryLongitudeE6: null,
-          acceptanceIpHash: null,
-          acceptanceUserAgentHash: null,
-          anonymizedAt: now,
+          customerId,
+          purpose: consent.purpose,
+          status: "REVOKED",
+          source: "customer-anonymization",
+          policyVersion: this.options.privacyPolicyVersion,
+          proofHash: createHash("sha256").update(`anonymize:${customerId}:${consent.id}`).digest(),
+          ipHash: audit.ipHash,
+          userAgentHash: audit.userAgentHash,
+          revokesId: consent.id,
         },
       });
-      await tx.customer.update({
-        where: { id: customerId },
-        data: {
-          authUserId: null,
-          email: anonymizedEmail,
-          givenName: null,
-          familyName: null,
-          phoneE164: null,
-          loyaltyPoints: 0,
-          status: "ANONYMIZED",
-          deletedAt: now,
-        },
-      });
-      await tx.emailEvent.updateMany({
-        where: {
-          anonymizedAt: null,
-          OR: [{ order: { customerId } }, { orderId: null, recipientEmail: previousEmail }],
-        },
-        data: { recipientEmail: anonymizedEmail, anonymizedAt: now },
-      });
-      await tx.supportTicket.updateMany({
-        where: { requesterCustomerId: customerId, contactEmailSnapshot: { not: anonymizedEmail } },
-        data: { contactEmailSnapshot: anonymizedEmail, version: { increment: 1 } },
-      });
-      await tx.review.updateMany({
-        where: {
-          requesterCustomerId: customerId,
-          authorDisplayName: { not: "Cliente verificado" },
-        },
-        data: { authorDisplayName: "Cliente verificado" },
-      });
-      await tx.$executeRaw`
+    }
+    await tx.address.deleteMany({ where: { customerId } });
+    await tx.wishlistItem.deleteMany({ where: { customerId } });
+    await tx.backInStockSubscription.updateMany({
+      where: { customerId },
+      data: { customerId: null, email: anonymizedEmail, status: "CANCELLED", cancelledAt: now },
+    });
+    await tx.cart.updateMany({
+      where: { customerId, status: "ACTIVE" },
+      data: { status: "CANCELLED" },
+    });
+    await tx.abandonedCart.updateMany({ where: { customerId }, data: { contactEmail: null } });
+    await tx.storeCreditAccount.updateMany({ where: { customerId }, data: { active: false } });
+    await tx.guestOrderSession.updateMany({
+      where: { order: { customerId }, revokedAt: null },
+      data: { revokedAt: now },
+    });
+    await tx.guestOrderChallenge.updateMany({
+      where: { order: { customerId }, status: { in: ["PENDING", "SENT", "FAILED"] } },
+      data: { status: "EXPIRED" },
+    });
+    await tx.order.updateMany({
+      where: { customerId, anonymizedAt: null },
+      data: {
+        emailSnapshot: null,
+        recipientNameSnapshot: null,
+        phoneE164Snapshot: null,
+        buyerDocumentTypeSnapshot: null,
+        buyerDocumentNumberSnapshot: null,
+        buyerTaxRegimeSnapshot: null,
+        addressLine1Snapshot: null,
+        addressLine2Snapshot: null,
+        neighborhoodSnapshot: null,
+        postalCodeSnapshot: null,
+        deliveryNotesSnapshot: null,
+        deliveryLatitudeE6: null,
+        deliveryLongitudeE6: null,
+        acceptanceIpHash: null,
+        acceptanceUserAgentHash: null,
+        anonymizedAt: now,
+      },
+    });
+    await tx.customer.update({
+      where: { id: customerId },
+      data: {
+        authUserId: null,
+        email: anonymizedEmail,
+        givenName: null,
+        familyName: null,
+        phoneE164: null,
+        loyaltyPoints: 0,
+        status: "ANONYMIZED",
+        deletedAt: now,
+      },
+    });
+    await tx.emailEvent.updateMany({
+      where: {
+        anonymizedAt: null,
+        OR: [{ order: { customerId } }, { orderId: null, recipientEmail: previousEmail }],
+      },
+      data: { recipientEmail: anonymizedEmail, anonymizedAt: now },
+    });
+    await tx.supportTicket.updateMany({
+      where: { requesterCustomerId: customerId, contactEmailSnapshot: { not: anonymizedEmail } },
+      data: { contactEmailSnapshot: anonymizedEmail, version: { increment: 1 } },
+    });
+    await tx.review.updateMany({
+      where: {
+        requesterCustomerId: customerId,
+        authorDisplayName: { not: "Cliente verificado" },
+      },
+      data: { authorDisplayName: "Cliente verificado" },
+    });
+    await tx.$executeRaw`
         INSERT INTO "SecurityEvent" ("customerId", "eventType", "ipHash", "userAgentHash", "metadata", "dedupMinute")
         VALUES (${customerId}::uuid, 'CUSTOMER_ACCOUNT_ANONYMIZED', ${audit.ipHash}, ${audit.userAgentHash}, '{"retention":"financial-history-only"}'::jsonb, date_trunc('minute', CURRENT_TIMESTAMP))
         ON CONFLICT ("eventType", "ipHash", "dedupMinute") DO NOTHING
       `;
-      if (customer.authUserId) {
-        await tx.domainOutbox.create({
-          data: {
-            eventType: "customer.auth-erasure.requested.v1",
-            aggregateType: "Customer",
-            aggregateId: customerId,
-            deduplicationKey: `customer:${customerId}:auth-erasure:v1`,
-            payload: { customerId, authUserId: customer.authUserId },
-          },
-        });
-      }
-      return { customerId, anonymizedAt: now };
-    });
+    if (customer.authUserId) {
+      await tx.domainOutbox.create({
+        data: {
+          eventType: "customer.auth-erasure.requested.v1",
+          aggregateType: "Customer",
+          aggregateId: customerId,
+          deduplicationKey: `customer:${customerId}:auth-erasure:v1`,
+          payload: { customerId, authUserId: customer.authUserId },
+        },
+      });
+    }
+    return { customerId, anonymizedAt: now };
   }
 
   async getDaneDirectory() {

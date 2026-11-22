@@ -921,6 +921,12 @@ describe("F4A.2 — account anonymization and concurrency", () => {
     assert.equal(customer.phoneE164, null);
     assert.match(customer.email, /^anon-[0-9a-f]{32}@anonymized\.invalid$/);
     assert.equal(await db.address.count({ where: { customerId } }), 0);
+    assert.equal(await db.contact.count({ where: { customerId } }), 0);
+    assert.equal(await db.contact.count({ where: { email: order.email } }), 0);
+    assert.equal(await db.contactIdentity.count({ where: { normalizedValue: order.email } }), 0);
+    assert.equal(await db.contact.count({ where: { customerId } }), 0);
+    assert.equal(await db.contact.count({ where: { email: order.email } }), 0);
+    assert.equal(await db.contactIdentity.count({ where: { normalizedValue: order.email } }), 0);
     const persistedOrder = await db.order.findUniqueOrThrow({ where: { id: order.orderId } });
     assert.ok(persistedOrder.anonymizedAt);
     assert.equal(persistedOrder.emailSnapshot, null);

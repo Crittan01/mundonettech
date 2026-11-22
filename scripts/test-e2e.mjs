@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import pg from "pg";
+
 import { seedCanonicalCatalog } from "./lib/catalog-seed.mjs";
 import { acquireIsolatedTestDatabase } from "./lib/postgres-test-harness.mjs";
 import { startSupabaseAuthFixture } from "./lib/supabase-auth-fixture.mjs";
@@ -17,6 +19,23 @@ let authFixture;
 try {
   authFixture = await startSupabaseAuthFixture();
   await seedCanonicalCatalog(harness.databaseUrl);
+  const fixtureDatabase = new pg.Client({ connectionString: harness.databaseUrl });
+  await fixtureDatabase.connect();
+  try {
+    await fixtureDatabase.query(
+      `INSERT INTO "AdminUser" ("id", "authUserId", "email", "displayName", "role", "status")
+       VALUES ('00000000-0000-4000-8000-00000000c201', $1, $2, 'Scheduler E2E', 'SUPERADMIN', 'ACTIVE')
+       ON CONFLICT ("id") DO UPDATE SET "role" = 'SUPERADMIN', "status" = 'ACTIVE', "deletedAt" = NULL`,
+      [
+        randomBytes(16)
+          .toString("hex")
+          .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"),
+        `scheduler-${randomBytes(8).toString("hex")}@example.test`,
+      ],
+    );
+  } finally {
+    await fixtureDatabase.end();
+  }
   const child = spawn("pnpm", ["exec", "playwright", "test", ...process.argv.slice(2)], {
     cwd: repositoryRoot,
     stdio: "inherit",
