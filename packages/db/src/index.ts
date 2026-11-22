@@ -96,9 +96,11 @@ export type { ImportInventoryStockCsvOptions, InventoryCsvImportResult } from ".
 export {
   acquireIdempotencyKey,
   claimDomainOutbox,
+  claimDomainOutboxEvents,
   completeDomainOutbox,
   completeIdempotencyKey,
   consumeAdminRecoveryCode,
+  failDomainOutbox,
   purgeExpiredIdempotencyKeys,
   retryDomainOutbox,
 } from "./primitives.js";
@@ -218,6 +220,8 @@ export type {
   DaneDepartmentSnapshot,
   DaneMunicipalitySnapshot,
   HomeDeliveryInput,
+  LocalDeliveryInput,
+  LocalDeliveryQuoteSnapshot,
   OrderReceiptSnapshot,
   PickupLocationSnapshot,
   ReceiptItemSnapshot,
@@ -275,4 +279,39 @@ export type {
   OrderReservationReleaseResult,
   PartialPaymentReviewResult,
 } from "./order-lifecycle-service.js";
+export {
+  EmailEventStatus,
+  EmailSuppressionReason,
+  EmailTemplateStatus,
+  FiscalDocumentStatus,
+  OrderFulfillmentStatus,
+  ShipmentEventType,
+  ShipmentPackageStatus,
+  ShippingProviderCode,
+} from "./generated/client.js";
+export type {
+  CreditNote,
+  EmailEvent,
+  EmailSuppression,
+  EmailTemplateOverride,
+  EmailWebhookEvent,
+  LocalDeliveryZone,
+  OrderFulfillment,
+  ShipmentEvent,
+  ShipmentPackage,
+  ShipmentPackageItem,
+  TaxInvoice,
+} from "./generated/client.js";
+export {
+  LocalDeliveryConflictError,
+  LocalDeliveryNotFoundError,
+  LocalDeliveryService,
+  LocalDeliveryValidationError,
+  quoteLocalDeliveryZone,
+} from "./local-delivery-service.js";
+export type {
+  DeliveryMutationAudit,
+  LocalDeliveryQuote,
+  LocalDeliveryZoneInput,
+} from "./local-delivery-service.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";

@@ -24,3 +24,25 @@ Configura `INTEGRATION_CREDENTIAL_KEYS_<AMBIENTE>` como JSON `{ "1": "base64-de-
 - Toda captura total descuenta inventario reservado una única vez y emite outbox sin PII. Reembolsos y anulaciones actualizan el estado agregado sin superar las capturas disponibles.
 
 `INTEGRATION_ENVIRONMENT` selecciona `LOCAL`, `STG` o `PRD` (con inferencia segura de Vercel). Wompi exige llaves `test` fuera de PRD y `prod` en PRD. Los proveedores HTTP no reintentan automáticamente resultados inciertos y validan tamaño, esquema, importe y referencias de cada respuesta.
+
+## Logística asíncrona y Flex
+
+`ShippingService` crea fulfillments solo tras pago o con COD abierto, valida alistamiento y empaqueta cada unidad exactamente una vez con valor declarado `BigInt`. `AveonlineShippingProvider` autentica y genera una guía por bulto con `dsreferencia` determinista; el claim persistente impide dobles emisiones concurrentes y un timeout pasa a `RECONCILING`, donde `findLabel` debe confirmar existencia o ausencia antes de cualquier reintento. `FlexShippingProvider` emite referencias locales deterministas y el conductor queda sellado al despachar.
+
+Las credenciales `aveonline` contienen usuario, clave, empresa, remitente y endpoints oficiales de autenticación/generación/consulta; se almacenan exclusivamente en la bóveda. `/admin/logistica` opera con `fulfillment:*` + MFA y permite multi-bulto, conciliación, despacho, entrega y zonas Flex. `LocalDeliveryZone` conserva polígonos enteros E6, DANE, tarifa y corte; checkout recotiza en servidor y sella zona/coordenadas/promesa.
+
+## Resend, Svix y baja RFC 8058
+
+`EmailService` versiona plantillas, congela asunto/HTML/texto/variables por evento y reutiliza la misma clave idempotente de Resend en reintentos. Los eventos Svix se verifican con HMAC y ventana anti-replay, deduplican `svix-id` y solo avanzan la jerarquía de entrega. Rebotes y quejas crean supresión por destinatario/tema; `/email/baja/[token]` acepta `POST` RFC 8058 sin cookies ni redirección y el token HMAC solo se guarda como hash.
+
+La credencial `resend` contiene API key, remitente, endpoint, secreto Svix y secreto HMAC de baja en la bóveda. `EMAIL_SEND_DISABLED=1` bloquea todo envío externo antes del fetch. `/admin/comunicaciones` usa `communications:*` + MFA y enmascara destinatarios.
+
+## Factura electrónica DIAN
+
+`InvoiceService` serializa consecutivos por resolución, sella el régimen IVA del comprador, genera UBL 2.1 con CUFE/CUDE SHA-384 y montos enteros COP, y solo acepta documentos cuando el proveedor autorizado devuelve XML firmado y el identificador coincide. `DianInvoiceProvider` transmite y consulta por CUFE/CUDE; claims y estados `TRANSMITTING`/`UNCERTAIN` evitan doble transmisión. Las notas crédito se vinculan a factura aceptada y reembolso completado con cuadre diferido en PG17, incluidos casos de flete sin productos.
+
+La credencial `dian` incluye token, endpoint del proveedor autorizado, identidad/DANE del emisor, software y resolución vigente; nunca se fabrican esos datos. `/admin/facturacion` usa `invoices:*` + MFA, auditoría transaccional y máscaras de PII. `/api/recibos/[token]/documentos/[kind]/[id]` entrega XML aceptado con el token del recibo, `no-store` y `nosniff`.
+
+## Worker de dominio
+
+`DomainEventWorker` usa `claim_domain_outbox_events` para no consumir eventos ajenos, ejecuta efectos idempotentes y aplica backoff acotado antes de `fail_domain_outbox`. Los payloads llevan UUIDs y referencias, nunca correos, direcciones, teléfonos, documentos ni tokens; el enlace del recibo se deriva en servidor desde su UUID de envío. `POST /api/jobs/domain-events` exige `DOMAIN_WORKER_CRON_SECRET` y procesa hasta cuatro lotes por invocación.

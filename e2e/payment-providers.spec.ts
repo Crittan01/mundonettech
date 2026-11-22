@@ -87,6 +87,7 @@ async function fillCheckout(page: Page, email = `wompi-${randomUUID()}@example.t
   await page.getByLabel("Apellidos", { exact: true }).fill("Rodríguez");
   await page.getByLabel("Persona que recibe").fill("Laura Rodríguez");
   await page.getByLabel("Teléfono", { exact: true }).fill("3001234567");
+  await page.getByLabel("Número de documento").fill("1020304050");
   await page.getByLabel("Departamento", { exact: true }).selectOption("11");
   await page.getByLabel("Municipio o territorio").selectOption("11001");
   await page.getByLabel("Dirección", { exact: true }).fill("Carrera 7 # 71-21");
@@ -158,7 +159,10 @@ test("integration wizard seals Wompi credentials and keeps an accessible MFA vau
   await page.getByLabel("Secreto de eventos", { exact: true }).fill(credentials.eventsSecret);
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
   await page.getByLabel(/Confirmo que las llaves/).check();
-  await page.getByRole("button", { name: "Cifrar y guardar credencial" }).click();
+  await page
+    .getByRole("region", { name: "Conectar una cuenta Wompi" })
+    .getByRole("button", { name: "Cifrar y guardar credencial" })
+    .click();
   await expect(page.getByText(/cifrada y registrada en LOCAL/)).toBeVisible();
   const credential = await db.integrationCredential.findFirstOrThrow({
     where: { provider: "wompi", accountName: primaryAccountName, environment: "LOCAL" },
@@ -268,7 +272,10 @@ test("enforces recent MFA on financial actions, blocks COD pre-checkout without 
   await page.getByLabel("Secreto de eventos", { exact: true }).fill(credentials.eventsSecret);
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
   await page.getByLabel(/Confirmo que las llaves/).check();
-  await page.getByRole("button", { name: "Cifrar y guardar credencial" }).click();
+  await page
+    .getByRole("region", { name: "Conectar una cuenta Wompi" })
+    .getByRole("button", { name: "Cifrar y guardar credencial" })
+    .click();
   await expect(page.getByText(/cifrada y registrada en LOCAL/)).toBeVisible();
 
   await page.goto("/admin/pagos");

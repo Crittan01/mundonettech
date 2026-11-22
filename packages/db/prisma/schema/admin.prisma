@@ -50,6 +50,10 @@ model AdminUser {
   remittanceBatches RemittanceBatch[]
   codReconciliations CodReconciliation[]
   storeCreditEntries StoreCreditEntry[]
+  shipmentEvents ShipmentEvent[]
+  createdDeliveryZones LocalDeliveryZone[] @relation("DeliveryZoneCreator")
+  updatedDeliveryZones LocalDeliveryZone[] @relation("DeliveryZoneUpdater")
+  emailTemplateOverrides EmailTemplateOverride[]
 
   @@index([role, status])
   @@index([createdAt])
@@ -130,6 +134,12 @@ model IntegrationCredential {
   createdBy                AdminUser              @relation("CredentialCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
   lastRotatedBy            AdminUser?             @relation("CredentialRotator", fields: [lastRotatedByAdminUserId], references: [id], onDelete: Restrict)
   paymentAttempts          PaymentAttempt[]
+  fulfillments             OrderFulfillment[]
+  shipmentPackages         ShipmentPackage[]
+  emailEvents              EmailEvent[]
+  emailWebhookEvents       EmailWebhookEvent[]
+  taxInvoices              TaxInvoice[]
+  creditNotes              CreditNote[]
 
   @@index([environment, revokedAt])
   @@index([environment, createdAt, id])

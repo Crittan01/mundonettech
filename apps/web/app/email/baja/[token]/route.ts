@@ -1,0 +1,72 @@
+import { storeConfig } from "@mundonettech/config/store";
+import { EmailNotFoundError, EmailValidationError } from "@mundonettech/integrations";
+
+import { emailService } from "@/lib/integrations";
+
+const headers = {
+  "Cache-Control": "no-store",
+  "Content-Security-Policy":
+    "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'",
+  "X-Content-Type-Options": "nosniff",
+  "X-Robots-Tag": "noindex, nofollow",
+} as const;
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function page(token: string, topic: string, completed: boolean): string {
+  return `<!doctype html><html lang="es-CO"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Baja de comunicaciones · ${escapeHtml(storeConfig.name)}</title></head><body style="font-family:system-ui;max-width:42rem;margin:3rem auto;padding:1rem"><main><h1>${completed ? "Baja confirmada" : "Confirmar baja de comunicaciones"}</h1><p>${completed ? "La supresión quedó registrada para el tema" : "Confirma la baja para el tema"} <strong>${escapeHtml(topic)}</strong> en ${escapeHtml(storeConfig.name)}.</p>${completed ? "" : `<form method="post" action="/email/baja/${encodeURIComponent(token)}"><input type="hidden" name="List-Unsubscribe" value="One-Click"><button type="submit">Confirmar baja</button></form>`}</main></body></html>`;
+}
+
+export async function GET(_request: Request, { params }: { params: Promise<{ token: string }> }) {
+  const { token } = await params;
+  try {
+    const topic = await emailService().unsubscribeTopic(token);
+    return new Response(page(token, topic, false), {
+      headers: { ...headers, "Content-Type": "text/html; charset=utf-8" },
+    });
+  } catch (error) {
+    if (error instanceof EmailValidationError || error instanceof EmailNotFoundError) {
+      return new Response("Enlace no disponible", {
+        status: 404,
+        headers: { ...headers, "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+    throw error;
+  }
+}
+
+export async function POST(request: Request, { params }: { params: Promise<{ token: string }> }) {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (
+    !contentType.includes("application/x-www-form-urlencoded") &&
+    !contentType.includes("multipart/form-data")
+  ) {
+    return new Response(null, { status: 415, headers });
+  }
+  const declaredLength = Number(request.headers.get("content-length") ?? 0);
+  if (declaredLength > 4096) return new Response(null, { status: 413, headers });
+  const raw = await request.text();
+  if (Buffer.byteLength(raw, "utf8") > 4096) return new Response(null, { status: 413, headers });
+  const form = await new Request(request.url, {
+    method: "POST",
+    headers: request.headers,
+    body: raw,
+  }).formData();
+  if (form.get("List-Unsubscribe") !== "One-Click")
+    return new Response(null, { status: 400, headers });
+  const { token } = await params;
+  try {
+    await emailService().unsubscribe(token);
+    return new Response(null, { status: 200, headers });
+  } catch (error) {
+    if (error instanceof EmailValidationError || error instanceof EmailNotFoundError)
+      return new Response(null, { status: 404, headers });
+    throw error;
+  }
+}

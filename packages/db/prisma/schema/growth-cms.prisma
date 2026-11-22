@@ -95,6 +95,124 @@ model CmsBlockVersion {
   @@map("CmsBlockVersion")
 }
 
+enum EmailTemplateStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum EmailEventStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERY_DELAYED
+  DELIVERED
+  BOUNCED
+  COMPLAINED
+  SUPPRESSED
+  CANCELLED
+  FAILED
+}
+
+enum EmailSuppressionReason {
+  UNSUBSCRIBE
+  BOUNCE
+  COMPLAINT
+  MANUAL
+}
+
+model EmailTemplateOverride {
+  id                   String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  templateKey          String              @db.VarChar(80)
+  locale               String              @db.VarChar(10)
+  version              Int
+  status               EmailTemplateStatus @default(DRAFT)
+  subject              String              @db.VarChar(200)
+  htmlBody             String              @db.Text
+  textBody             String              @db.Text
+  variables            Json                @default("[]") @db.JsonB
+  createdByAdminUserId String              @db.Uuid
+  createdAt            DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  createdBy            AdminUser           @relation(fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@unique([templateKey, locale, version])
+  @@index([templateKey, locale, status, version])
+  @@map("EmailTemplateOverride")
+}
+
+model EmailEvent {
+  id                   String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId              String?          @db.Uuid
+  credentialId         String           @db.Uuid
+  templateKey          String           @db.VarChar(80)
+  locale               String           @default("es-CO") @db.VarChar(10)
+  topic                String           @db.VarChar(80)
+  subjectSnapshot      String           @db.VarChar(200)
+  htmlBodySnapshot     String           @db.Text
+  textBodySnapshot     String           @db.Text
+  variablesSnapshot    Json             @db.JsonB
+  recipientEmail       String           @db.VarChar(320)
+  recipientHash        Bytes            @db.ByteA
+  idempotencyKey       String           @unique @db.VarChar(128)
+  unsubscribeTokenHash Bytes            @db.ByteA
+  status               EmailEventStatus @default(QUEUED)
+  statusRank           Int              @default(0)
+  attemptCount         Int              @default(0)
+  nextAttemptAt        DateTime?        @db.Timestamptz(6)
+  providerMessageId    String?          @db.VarChar(128)
+  lastError            String?          @db.VarChar(1000)
+  queuedAt             DateTime         @default(now()) @db.Timestamptz(6)
+  sentAt               DateTime?        @db.Timestamptz(6)
+  deliveredAt          DateTime?        @db.Timestamptz(6)
+  finalAt              DateTime?        @db.Timestamptz(6)
+  createdAt            DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime         @default(now()) @updatedAt @db.Timestamptz(6)
+  order                Order?           @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  credential           IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  webhookEvents        EmailWebhookEvent[]
+  suppressions         EmailSuppression[]
+
+  @@unique([credentialId, providerMessageId])
+  @@index([status, nextAttemptAt, queuedAt])
+  @@index([recipientHash, topic, createdAt])
+  @@index([orderId, createdAt])
+  @@map("EmailEvent")
+}
+
+model EmailSuppression {
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recipientHash     Bytes                 @db.ByteA
+  topic             String                @db.VarChar(80)
+  reason            EmailSuppressionReason
+  sourceEventId     String?               @db.Uuid
+  createdAt         DateTime              @default(now()) @db.Timestamptz(6)
+  sourceEvent       EmailEvent?           @relation(fields: [sourceEventId], references: [id], onDelete: Restrict)
+
+  @@unique([recipientHash, topic])
+  @@index([sourceEventId])
+  @@map("EmailSuppression")
+}
+
+model EmailWebhookEvent {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  credentialId   String        @db.Uuid
+  emailEventId   String?       @db.Uuid
+  svixEventId    String        @db.VarChar(128)
+  eventType      String        @db.VarChar(80)
+  payloadHash    Bytes         @db.ByteA
+  occurredAt     DateTime      @db.Timestamptz(6)
+  receivedAt     DateTime      @default(now()) @db.Timestamptz(6)
+  processedAt    DateTime?     @db.Timestamptz(6)
+  error          String?       @db.VarChar(1000)
+  credential     IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  emailEvent     EmailEvent?   @relation(fields: [emailEventId], references: [id], onDelete: Restrict)
+
+  @@unique([credentialId, svixEventId])
+  @@index([emailEventId, occurredAt])
+  @@map("EmailWebhookEvent")
+}
+
 model CmsMedia {
   id                   String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   storageKey           String     @db.VarChar(500)

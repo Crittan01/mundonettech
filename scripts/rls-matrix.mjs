@@ -11,8 +11,10 @@ import { cmsTables, seedCmsFixture } from "./lib/cms-test-fixture.mjs";
 import { pricingTables, seedPricingFixture } from "./lib/pricing-test-fixture.mjs";
 import {
   checkoutTables,
+  logisticsTables,
   paymentTables,
   seedCheckoutFixture,
+  seedLogisticsFixture,
   seedPaymentFixture,
 } from "./lib/checkout-test-fixture.mjs";
 
@@ -32,6 +34,7 @@ const expectedTables = [
   ...pricingTables,
   ...checkoutTables,
   ...paymentTables,
+  ...logisticsTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -52,6 +55,14 @@ const rpcProbes = [
   {
     name: "retry_domain_outbox",
     sql: "SELECT public.retry_domain_outbox(NULL, 'rls-probe', CURRENT_TIMESTAMP + INTERVAL '1 minute', 'err')",
+  },
+  {
+    name: "claim_domain_outbox_events",
+    sql: "SELECT * FROM public.claim_domain_outbox_events('rls-probe', ARRAY['probe'], 1)",
+  },
+  {
+    name: "fail_domain_outbox",
+    sql: "SELECT public.fail_domain_outbox(NULL, 'rls-probe', 'err')",
   },
   {
     name: "acquire_idempotency_key",
@@ -194,10 +205,15 @@ async function ensureMatrixFixtures(client) {
   await seedCmsFixture(client, adminId);
   const pricing = await seedPricingFixture(client, catalog);
   const checkout = await seedCheckoutFixture(client, { catalog, inventory, pricing, adminId });
-  await seedPaymentFixture(client, { checkout, catalog, adminId });
+  const payments = await seedPaymentFixture(client, { checkout, catalog, adminId });
+  await seedLogisticsFixture(client, { checkout, payments, adminId });
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {
+    const requestedRefundFilter =
+      table === "OrderRefundItem"
+        ? `AND EXISTS (SELECT 1 FROM public."OrderRefund" refund WHERE refund."id" = t."refundId" AND refund."status" = 'REQUESTED')`
+        : "";
     const freshRow = await client.query(
       `SELECT t."id"
        FROM public."${table}" t
@@ -205,6 +221,7 @@ async function ensureMatrixFixtures(client) {
          SELECT 1 FROM pg_temp.matrix_preexisting_ids p
          WHERE p.table_name = $1 AND p.row_id = t."id"
        )
+       ${requestedRefundFilter}
        LIMIT 1`,
       [table],
     );

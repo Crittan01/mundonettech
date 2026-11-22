@@ -36,6 +36,16 @@ enum CartKind {
 enum OrderFulfillmentMethod {
   HOME_DELIVERY
   CLICK_COLLECT
+  LOCAL_DELIVERY
+}
+
+enum FiscalDocumentStatus {
+  DRAFT
+  TRANSMITTING
+  ACCEPTED
+  REJECTED
+  UNCERTAIN
+  CANCELLED
 }
 
 enum OrderTaxRule {
@@ -70,6 +80,9 @@ model Order {
   emailSnapshot            String?                @db.VarChar(320)
   recipientNameSnapshot    String?                @db.VarChar(200)
   phoneE164Snapshot        String?                @db.VarChar(16)
+  buyerDocumentTypeSnapshot String?               @db.Char(2)
+  buyerDocumentNumberSnapshot String?             @db.VarChar(30)
+  buyerTaxRegimeSnapshot   StoreTaxRegime?
   countryCode              String                 @default("CO") @db.Char(2)
   departmentCode           String?                @db.Char(2)
   departmentNameSnapshot   String?                @db.VarChar(120)
@@ -79,6 +92,8 @@ model Order {
   addressLine2Snapshot     String?                @db.VarChar(200)
   neighborhoodSnapshot     String?                @db.VarChar(120)
   postalCodeSnapshot       String?                @db.VarChar(6)
+  deliveryLatitudeE6       Int?
+  deliveryLongitudeE6      Int?
   deliveryNotesSnapshot    String?                @db.VarChar(500)
   clickCollectLocationId   String?                @db.Uuid
   couponCodeSnapshot       String?                @db.VarChar(64)
@@ -118,6 +133,9 @@ model Order {
   shipments                Shipment[]
   refunds                  OrderRefund[]
   paymentAttempts          PaymentAttempt[]
+  fulfillments             OrderFulfillment[]
+  emailEvents              EmailEvent[]
+  taxInvoice               TaxInvoice?
 
   @@index([customerId, createdAt])
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
@@ -195,6 +213,83 @@ model OrderItemReservation {
   @@unique([orderItemId, locationId])
   @@index([locationId, orderItemId])
   @@map("OrderItemReservation")
+}
+
+model TaxInvoice {
+  id                       String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  orderId                  String              @unique @db.Uuid
+  credentialId             String              @db.Uuid
+  environment              IntegrationEnvironment
+  prefix                   String              @db.VarChar(20)
+  number                   Int
+  fullNumber               String              @db.VarChar(40)
+  cufe                     String              @db.Char(96)
+  currency                 String              @default("COP") @db.Char(3)
+  subtotalCents            BigInt
+  discountCents            BigInt
+  taxCents                 BigInt
+  shippingCents            BigInt
+  totalCents               BigInt
+  requestHash              Bytes               @db.ByteA
+  claimedBy                String?             @db.VarChar(120)
+  claimExpiresAt           DateTime?           @db.Timestamptz(6)
+  unsignedXml              String              @db.Text
+  signedXml                String?             @db.Text
+  documentHash             Bytes?              @db.ByteA
+  providerDocumentId       String?             @db.VarChar(128)
+  status                   FiscalDocumentStatus @default(DRAFT)
+  failureCode              String?             @db.VarChar(200)
+  transmittedAt            DateTime?           @db.Timestamptz(6)
+  acceptedAt               DateTime?           @db.Timestamptz(6)
+  createdAt                DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  order                    Order               @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  credential               IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  creditNotes              CreditNote[]
+
+  @@unique([credentialId, prefix, number])
+  @@unique([credentialId, fullNumber])
+  @@index([status, createdAt])
+  @@map("TaxInvoice")
+}
+
+model CreditNote {
+  id                       String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  invoiceId                String              @db.Uuid
+  refundId                 String              @unique @db.Uuid
+  credentialId             String              @db.Uuid
+  prefix                   String              @db.VarChar(20)
+  number                   Int
+  fullNumber               String              @db.VarChar(40)
+  cude                     String              @db.Char(96)
+  currency                 String              @default("COP") @db.Char(3)
+  subtotalCents            BigInt
+  discountCents            BigInt
+  taxCents                 BigInt
+  shippingCents            BigInt
+  totalCents               BigInt
+  reasonCode               Int
+  requestHash              Bytes               @db.ByteA
+  claimedBy                String?             @db.VarChar(120)
+  claimExpiresAt           DateTime?           @db.Timestamptz(6)
+  unsignedXml              String              @db.Text
+  signedXml                String?             @db.Text
+  documentHash             Bytes?              @db.ByteA
+  providerDocumentId       String?             @db.VarChar(128)
+  status                   FiscalDocumentStatus @default(DRAFT)
+  failureCode              String?             @db.VarChar(200)
+  transmittedAt            DateTime?           @db.Timestamptz(6)
+  acceptedAt               DateTime?           @db.Timestamptz(6)
+  createdAt                DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  invoice                  TaxInvoice          @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  refund                   OrderRefund         @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  credential               IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+
+  @@unique([credentialId, prefix, number])
+  @@unique([credentialId, fullNumber])
+  @@index([invoiceId, status, createdAt])
+  @@map("CreditNote")
 }
 
 model OrderReceipt {

@@ -250,3 +250,60 @@ export async function purgeExpiredIdempotencyKeys(
   `;
   return rows[0]?.purged ?? 0;
 }
+
+export async function claimDomainOutboxEvents(
+  db: DatabaseExecutor,
+  options: {
+    workerId: string;
+    eventTypes: readonly string[];
+    limit: number;
+    now?: Date;
+  },
+): Promise<DomainOutbox[]> {
+  assertTrimmedRange(options.workerId, "workerId", 120);
+  if (
+    !Array.isArray(options.eventTypes) ||
+    options.eventTypes.length < 1 ||
+    options.eventTypes.length > 100
+  ) {
+    throw new RangeError("eventTypes must contain between 1 and 100 entries.");
+  }
+  for (const eventType of options.eventTypes) assertTrimmedRange(eventType, "eventType", 120);
+  if (new Set(options.eventTypes).size !== options.eventTypes.length)
+    throw new TypeError("eventTypes cannot contain duplicates.");
+  if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100)
+    throw new RangeError("limit must be an integer between 1 and 100.");
+  const now = resolveOptionalNow(options.now);
+  return db.$queryRaw<DomainOutbox[]>`
+    SELECT * FROM claim_domain_outbox_events(
+      ${options.workerId},
+      ${options.eventTypes}::text[],
+      ${options.limit}::int,
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
+    )
+  `;
+}
+
+export async function failDomainOutbox(
+  db: DatabaseExecutor,
+  options: {
+    id: string;
+    workerId: string;
+    error: string;
+    now?: Date;
+  },
+): Promise<boolean> {
+  assertUuid(options.id, "id");
+  assertTrimmedRange(options.workerId, "workerId", 120);
+  assertTrimmedRange(options.error, "error", 2000);
+  const now = resolveOptionalNow(options.now);
+  const rows = await db.$queryRaw<Array<{ failed: boolean }>>`
+    SELECT fail_domain_outbox(
+      ${options.id}::uuid,
+      ${options.workerId},
+      ${options.error},
+      COALESCE(${now}::timestamptz, CURRENT_TIMESTAMP)
+    ) AS failed
+  `;
+  return rows[0]?.failed === true;
+}

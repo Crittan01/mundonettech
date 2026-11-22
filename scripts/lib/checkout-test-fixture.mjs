@@ -27,6 +27,20 @@ export const checkoutTables = [
   "OrderRefundItem",
 ];
 
+export const logisticsTables = [
+  "LocalDeliveryZone",
+  "OrderFulfillment",
+  "ShipmentPackage",
+  "ShipmentPackageItem",
+  "ShipmentEvent",
+  "EmailTemplateOverride",
+  "EmailEvent",
+  "EmailSuppression",
+  "EmailWebhookEvent",
+  "TaxInvoice",
+  "CreditNote",
+];
+
 export async function seedCheckoutFixture(client, { catalog, inventory, pricing, adminId }) {
   const orderId = randomUUID();
   const orderItemId = randomUUID();
@@ -47,14 +61,15 @@ export async function seedCheckoutFixture(client, { catalog, inventory, pricing,
     `INSERT INTO "Order" (
       "id", "orderNumber", "cartId", "customerId", "couponId", "orderStatus", "paymentStatus",
       "fulfillmentMethod", "taxRegime", "uvtValueCents", "uvtYear", "emailSnapshot",
-      "recipientNameSnapshot", "phoneE164Snapshot", "departmentCode", "departmentNameSnapshot",
+      "recipientNameSnapshot", "phoneE164Snapshot", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot", "buyerTaxRegimeSnapshot",
+      "departmentCode", "departmentNameSnapshot",
       "municipalityCode", "municipalityNameSnapshot", "addressLine1Snapshot", "couponCodeSnapshot",
       "subtotalCents", "couponDiscountCents", "discountCents", "totalCents", "reservationKey",
       "reservationExpiresAt", "deliveryPromiseAt", "termsVersion", "privacyPolicyVersion",
       "acceptanceProofHash", "acceptedAt", "confirmedAt"
     ) VALUES (
-      $1, $2, $3, $4, $5, 'CONFIRMED', 'PAID', 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', 5237400, 2026,
-      'rls-checkout@example.test', 'Matriz Cliente', '+573001234567', '11', 'BOGOTÁ, D.C.',
+      $1, $2, $3, $4, $5, 'CONFIRMED', 'PAID', 'HOME_DELIVERY', 'RESPONSABLE_IVA', 5237400, 2026,
+      'rls-checkout@example.test', 'Matriz Cliente', '+573001234567', '13', '1020304050', 'NO_RESPONSABLE_IVA', '11', 'BOGOTÁ, D.C.',
       '11001', 'BOGOTÁ, D.C.', 'Carrera 7 # 71-21', $6, 200000, 5000, 5000, 195000, $7,
       CURRENT_TIMESTAMP + INTERVAL '2 hours', CURRENT_TIMESTAMP + INTERVAL '30 days',
       '1.0.0', '1.0.0', $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
@@ -89,7 +104,7 @@ export async function seedCheckoutFixture(client, { catalog, inventory, pricing,
     `INSERT INTO "OrderItemTaxLine" (
       "orderItemId", "taxGroupCode", "taxGroupName", "treatment", "rule", "catalogRateBps",
       "appliedRateBps", "uvtValueCents", "uvtYear", "unitValueCents", "taxableBaseCents", "taxCents"
-    ) VALUES ($1, 'IVA_19', 'IVA general 19 %', 'STANDARD', 'NOT_RESPONSABLE', 1900, 0, 5237400, 2026, 97500, 195000, 0)`,
+    ) VALUES ($1, 'IVA_19', 'IVA general 19 %', 'EXCLUDED', 'EXCLUDED', 0, 0, 5237400, 2026, 97500, 195000, 0)`,
     [orderItemId],
   );
   await client.query(
@@ -101,7 +116,7 @@ export async function seedCheckoutFixture(client, { catalog, inventory, pricing,
     `INSERT INTO "OrderReceipt" (
       "orderId", "receiptNumber", "accessTokenHash", "taxRegime", "currency", "subtotalCents",
       "discountCents", "taxCents", "shippingCents", "totalCents", "contentHash"
-    ) VALUES ($1, $2, $3, 'NO_RESPONSABLE_IVA', 'COP', 200000, 5000, 0, 0, 195000, $4)`,
+    ) VALUES ($1, $2, $3, 'RESPONSABLE_IVA', 'COP', 200000, 5000, 0, 0, 195000, $4)`,
     [orderId, `R-${orderNumber}`, randomBytes(32), randomBytes(32)],
   );
   await client.query(
@@ -120,7 +135,7 @@ export async function seedCheckoutFixture(client, { catalog, inventory, pricing,
     [shipmentId, orderId, inventory.locationId],
   );
   await client.query(
-    `INSERT INTO "ShipmentItem" ("shipmentId", "orderItemId", "quantity") VALUES ($1, $2, 2)`,
+    `INSERT INTO "ShipmentItem" ("shipmentId", "orderItemId", "quantity", "declaredValueCents") VALUES ($1, $2, 2, 195000)`,
     [shipmentId, orderItemId],
   );
   await client.query(
@@ -211,4 +226,178 @@ export async function seedPaymentFixture(client, { checkout, catalog, adminId })
     ) VALUES ($1, $2, 'GRANT', $3, 1, $4, 50000, 50000, 0, 'Abono de conciliación')`,
     [creditAccountId, adminId, `rls-credit-${randomUUID()}`, randomBytes(32)],
   );
+  return { wompiAttemptId };
+}
+
+export async function seedLogisticsFixture(client, { checkout, payments, adminId }) {
+  async function credential(provider, accountName) {
+    const result = await client.query(
+      `INSERT INTO "IntegrationCredential" (
+        "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+      ) VALUES ($1, 'LOCAL', $2, 1, $3, $4, $5, $6) RETURNING "id"`,
+      [provider, accountName, randomBytes(12), randomBytes(32), randomBytes(16), adminId],
+    );
+    return result.rows[0].id;
+  }
+  const aveonlineCredentialId = await credential(
+    "aveonline",
+    `matrix-shipping-${randomUUID().slice(0, 8)}`,
+  );
+  const resendCredentialId = await credential("resend", `matrix-email-${randomUUID().slice(0, 8)}`);
+  const dianCredentialId = await credential("dian", `matrix-fiscal-${randomUUID().slice(0, 8)}`);
+
+  const zoneId = randomUUID();
+  await client.query(
+    `INSERT INTO "LocalDeliveryZone" (
+      "id", "code", "name", "municipalityCodes", "polygon", "baseFeeCents", "cutoffMinutes",
+      "deliveryPromiseMinutes", "createdByAdminUserId", "updatedByAdminUserId"
+    ) VALUES ($1, $2, 'Zona matriz', $3::jsonb, $4::jsonb, 500000, 720, 120, $5, $5)`,
+    [
+      zoneId,
+      `MATRIX-${randomUUID().slice(0, 8).toUpperCase()}`,
+      JSON.stringify(["11001"]),
+      JSON.stringify([
+        { latitudeE6: 46000000, longitudeE6: -74100000 },
+        { latitudeE6: 46000000, longitudeE6: -74000000 },
+        { latitudeE6: 47000000, longitudeE6: -74000000 },
+        { latitudeE6: 47000000, longitudeE6: -74100000 },
+      ]),
+      adminId,
+    ],
+  );
+  const fulfillmentId = randomUUID();
+  await client.query(
+    `INSERT INTO "OrderFulfillment" ("id", "orderId", "shipmentId", "provider", "status", "credentialId", "environment", "version")
+     VALUES ($1, $2, $3, 'AVEONLINE', 'PICKING', $4, 'LOCAL', 1)`,
+    [fulfillmentId, checkout.orderId, checkout.shipmentId, aveonlineCredentialId],
+  );
+  const packageId = randomUUID();
+  await client.query(
+    `INSERT INTO "ShipmentPackage" (
+      "id", "shipmentId", "packageNumber", "weightGrams", "lengthMillimeters", "widthMillimeters",
+      "heightMillimeters", "declaredValueCents", "requestKey", "requestHash", "credentialId"
+    ) VALUES ($1, $2, 1, 1500, 300, 200, 100, 195000, $3, $4, $5)`,
+    [
+      packageId,
+      checkout.shipmentId,
+      `matrix-package-${randomUUID()}`,
+      randomBytes(32),
+      aveonlineCredentialId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO "ShipmentPackageItem" ("packageId", "shipmentItemId", "quantity", "declaredValueCents")
+     SELECT $1, "id", 2, 195000 FROM "ShipmentItem" WHERE "shipmentId" = $2 AND "orderItemId" = $3`,
+    [packageId, checkout.shipmentId, checkout.orderItemId],
+  );
+  await client.query(
+    `INSERT INTO "ShipmentEvent" ("shipmentId", "packageId", "actorAdminUserId", "type", "eventKey", "metadata")
+     VALUES ($1, $2, $3, 'PACKAGE_SEALED', $4, '{"source":"matrix"}'::jsonb)`,
+    [checkout.shipmentId, packageId, adminId, `matrix-package-event-${randomUUID()}`],
+  );
+
+  await client.query(
+    `INSERT INTO "EmailTemplateOverride" (
+      "templateKey", "locale", "version", "subject", "htmlBody", "textBody", "variables", "createdByAdminUserId"
+    ) VALUES ('order.paid', 'es-CO', 1, 'Aviso {{unsubscribeUrl}}', '<p>{{unsubscribeUrl}}</p>', '{{unsubscribeUrl}}', '["unsubscribeUrl"]'::jsonb, $1)`,
+    [adminId],
+  );
+  const emailEventId = randomUUID();
+  await client.query(
+    `INSERT INTO "EmailEvent" (
+      "id", "orderId", "credentialId", "templateKey", "topic", "subjectSnapshot", "htmlBodySnapshot",
+      "textBodySnapshot", "variablesSnapshot", "recipientEmail", "recipientHash", "idempotencyKey", "unsubscribeTokenHash"
+    ) VALUES ($1, $2, $3, 'order.paid', 'orders', 'Pago confirmado', '<p>Confirmado</p>', 'Confirmado',
+      '{"unsubscribeUrl":"https://example.test/baja"}'::jsonb, 'rls-checkout@example.test', $4, $5, $6)`,
+    [
+      emailEventId,
+      checkout.orderId,
+      resendCredentialId,
+      randomBytes(32),
+      `matrix-email-${randomUUID()}`,
+      randomBytes(32),
+    ],
+  );
+  await client.query(
+    `INSERT INTO "EmailSuppression" ("recipientHash", "topic", "reason", "sourceEventId")
+     VALUES ($1, 'orders', 'UNSUBSCRIBE', $2)`,
+    [randomBytes(32), emailEventId],
+  );
+  await client.query(
+    `INSERT INTO "EmailWebhookEvent" ("credentialId", "emailEventId", "svixEventId", "eventType", "payloadHash", "occurredAt", "processedAt")
+     VALUES ($1, $2, $3, 'email.sent', $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    [resendCredentialId, emailEventId, `msg_${randomUUID().replaceAll("-", "")}`, randomBytes(32)],
+  );
+
+  const completedRefundId = randomUUID();
+  await client.query(
+    `INSERT INTO "OrderRefund" ("id", "orderId", "idempotencyKey", "requestHash", "reason", "subtotalCents", "taxCents", "totalCents", "requestedByAdminUserId")
+     VALUES ($1, $2, $3, $4, 'RETRACT', 50000, 0, 50000, $5)`,
+    [
+      completedRefundId,
+      checkout.orderId,
+      `matrix-completed-refund-${randomUUID()}`,
+      randomBytes(32),
+      adminId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO "OrderRefundItem" ("refundId", "orderItemId", "quantity", "subtotalCents", "taxCents", "totalCents")
+     VALUES ($1, $2, 1, 50000, 0, 50000)`,
+    [completedRefundId, checkout.orderItemId],
+  );
+  await client.query(
+    `INSERT INTO "PaymentTransaction" ("attemptId", "refundId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt")
+     VALUES ($1, $2, 'WOMPI', 'REFUND', 'SUCCEEDED', 50000, $3, $4, CURRENT_TIMESTAMP)`,
+    [payments.wompiAttemptId, completedRefundId, `refund-${randomUUID()}`, randomBytes(32)],
+  );
+  await client.query(`UPDATE "OrderRefund" SET "status" = 'APPROVED' WHERE "id" = $1`, [
+    completedRefundId,
+  ]);
+  await client.query(`UPDATE "OrderRefund" SET "status" = 'PROCESSING' WHERE "id" = $1`, [
+    completedRefundId,
+  ]);
+  await client.query(
+    `UPDATE "OrderRefund" SET "status" = 'COMPLETED', "processedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+    [completedRefundId],
+  );
+
+  const invoiceId = randomUUID();
+  await client.query(
+    `INSERT INTO "TaxInvoice" (
+      "id", "orderId", "credentialId", "environment", "prefix", "number", "fullNumber", "cufe",
+      "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "requestHash",
+      "unsignedXml", "signedXml", "documentHash", "providerDocumentId", "status", "acceptedAt"
+    ) VALUES ($1, $2, $3, 'LOCAL', 'RLS', 1, 'RLS1', $4, 200000, 5000, 0, 0, 195000, $5,
+      '<Invoice>RLS1</Invoice>', '<Invoice><Signature>RLS1</Signature></Invoice>', $6, $7, 'ACCEPTED', CURRENT_TIMESTAMP)`,
+    [
+      invoiceId,
+      checkout.orderId,
+      dianCredentialId,
+      randomBytes(48).toString("hex"),
+      randomBytes(32),
+      randomBytes(32),
+      `dian-${randomUUID()}`,
+    ],
+  );
+  const creditNoteId = randomUUID();
+  await client.query(
+    `INSERT INTO "CreditNote" (
+      "id", "invoiceId", "refundId", "credentialId", "prefix", "number", "fullNumber", "cude",
+      "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "reasonCode", "requestHash",
+      "unsignedXml", "signedXml", "documentHash", "providerDocumentId", "status", "acceptedAt"
+    ) VALUES ($1, $2, $3, $4, 'RLSNC', 1, 'RLSNC1', $5, 100000, 50000, 0, 0, 50000, 1, $6,
+      '<CreditNote>RLSNC1</CreditNote>', '<CreditNote><Signature>RLSNC1</Signature></CreditNote>', $7, $8, 'ACCEPTED', CURRENT_TIMESTAMP)`,
+    [
+      creditNoteId,
+      invoiceId,
+      completedRefundId,
+      dianCredentialId,
+      randomBytes(48).toString("hex"),
+      randomBytes(32),
+      randomBytes(32),
+      `dian-${randomUUID()}`,
+    ],
+  );
+  return { zoneId, fulfillmentId, packageId, emailEventId, invoiceId, creditNoteId };
 }

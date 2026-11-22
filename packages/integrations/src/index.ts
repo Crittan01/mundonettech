@@ -63,3 +63,80 @@ export type {
   WompiCredentials,
   WompiTransactionEvent,
 } from "./payment-types.js";
+export { ShippingService } from "./shipping-service.js";
+export type { LabelProcessResult, PackShipmentResult } from "./shipping-service.js";
+export {
+  AveonlineShippingProvider,
+  FlexShippingProvider,
+  parseAveonlineCredentials,
+} from "./shipping-providers.js";
+export {
+  ShippingAuthorizationError,
+  ShippingConflictError,
+  ShippingNotFoundError,
+  ShippingProviderError,
+  ShippingValidationError,
+} from "./shipping-types.js";
+export type {
+  AveonlineCredentials,
+  ShippingAuditContext,
+  ShippingLabelRequest,
+  ShippingLabelResult,
+  ShippingPackageInput,
+  ShippingParty,
+  ShippingProvider,
+  ShippingServiceOptions,
+} from "./shipping-types.js";
+export { EmailService } from "./email-service.js";
+export type { EmailSendOutcome } from "./email-service.js";
+export {
+  defaultEmailTemplate,
+  emailTemplateKeys,
+  renderEmailTemplate,
+  validateEmailTemplate,
+} from "./email-templates.js";
+export type { EmailTemplateDefinition } from "./email-templates.js";
+export { parseEmailCredentials, ResendEmailProvider } from "./resend.js";
+export { verifySvixWebhook } from "./svix.js";
+export type { VerifiedSvixEvent } from "./svix.js";
+export {
+  EmailConflictError,
+  EmailNotFoundError,
+  EmailProviderError,
+  EmailValidationError,
+} from "./email-types.js";
+export type {
+  EmailAuditContext,
+  EmailCredentials,
+  EmailProvider,
+  EmailQueueInput,
+  EmailSendInput,
+  EmailServiceOptions,
+  EmailTemplateInput,
+} from "./email-types.js";
+export { InvoiceService } from "./invoice-service.js";
+export type { FiscalOperationResult } from "./invoice-service.js";
+export { calculateCude, calculateCufe, dianTimestamp, parseDianCredentials } from "./dian.js";
+export { DianInvoiceProvider, signedDocumentHash } from "./dian-provider.js";
+export { buildCreditNoteUbl, buildInvoiceUbl } from "./ubl.js";
+export {
+  InvoiceConflictError,
+  InvoiceNotFoundError,
+  InvoiceProviderError,
+  InvoiceValidationError,
+} from "./invoice-types.js";
+export type {
+  CreditNoteDocumentInput,
+  DianCredentials,
+  FiscalLine,
+  FiscalParty,
+  FiscalTransmissionInput,
+  FiscalTransmissionResult,
+  InvoiceAuditContext,
+  InvoiceDocumentInput,
+  InvoiceProvider,
+  InvoiceServiceOptions,
+} from "./invoice-types.js";
+export { DomainEventWorker } from "./domain-event-worker.js";
+export type { DomainEventBatchResult, DomainEventWorkerOptions } from "./domain-event-worker.js";
+export { IntegrationTransportError, fetchWithLimit, parseHttpJson } from "./integration-http.js";

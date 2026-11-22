@@ -191,6 +191,9 @@ importers:
 
   packages/integrations:
     dependencies:
+      '@mundonettech/core':
+        specifier: workspace:*
+        version: link:../core
       '@mundonettech/db':
         specifier: workspace:*
         version: link:../db

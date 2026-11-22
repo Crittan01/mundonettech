@@ -31,7 +31,13 @@ export type AdminPermission =
   | "integrations:read"
   | "integrations:write"
   | "payments:read"
-  | "payments:write";
+  | "payments:write"
+  | "fulfillment:read"
+  | "fulfillment:write"
+  | "communications:read"
+  | "communications:write"
+  | "invoices:read"
+  | "invoices:write";
 
 const rings: Readonly<Record<AdminRoleValue, AdminRing>> = {
   SUPERADMIN: 1,
@@ -111,6 +117,43 @@ const paymentReaders = [
   "FINANCE_ANALYST",
 ] as const satisfies readonly AdminRoleValue[];
 const paymentWriters = integrationReaders;
+const fulfillmentReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "INVENTORY_BUYER",
+  "FULFILLMENT",
+  "CUSTOMER_SUPPORT",
+] as const satisfies readonly AdminRoleValue[];
+const fulfillmentWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "FULFILLMENT",
+] as const satisfies readonly AdminRoleValue[];
+const communicationReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "CUSTOMER_SUPPORT",
+] as const satisfies readonly AdminRoleValue[];
+const communicationWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+] as const satisfies readonly AdminRoleValue[];
+const invoiceReaders = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+  "CUSTOMER_SUPPORT",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
+const invoiceWriters = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "FINANCE_ANALYST",
+] as const satisfies readonly AdminRoleValue[];
 
 const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> = {
   "dashboard:read": adminRoles,
@@ -133,6 +176,12 @@ const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> 
   "integrations:write": integrationWriters,
   "payments:read": paymentReaders,
   "payments:write": paymentWriters,
+  "fulfillment:read": fulfillmentReaders,
+  "fulfillment:write": fulfillmentWriters,
+  "communications:read": communicationReaders,
+  "communications:write": communicationWriters,
+  "invoices:read": invoiceReaders,
+  "invoices:write": invoiceWriters,
 };
 
 export function isAdminRole(value: unknown): value is AdminRoleValue {
@@ -174,6 +223,9 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/venta-asistida"
     | "/admin/integraciones"
     | "/admin/pagos"
+    | "/admin/logistica"
+    | "/admin/comunicaciones"
+    | "/admin/facturacion"
     | "/admin/contenido"
     | "/admin/configuracion"
     | "/admin/usuarios"
@@ -197,6 +249,15 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       : []),
     ...(hasAdminPermission(role, "payments:read")
       ? [{ href: "/admin/pagos" as const, label: "Pagos" }]
+      : []),
+    ...(hasAdminPermission(role, "fulfillment:read")
+      ? [{ href: "/admin/logistica" as const, label: "Logística" }]
+      : []),
+    ...(hasAdminPermission(role, "communications:read")
+      ? [{ href: "/admin/comunicaciones" as const, label: "Comunicaciones" }]
+      : []),
+    ...(hasAdminPermission(role, "invoices:read")
+      ? [{ href: "/admin/facturacion" as const, label: "Facturación" }]
       : []),
     ...(hasAdminPermission(role, "content:read")
       ? [{ href: "/admin/contenido" as const, label: "Contenido" }]
