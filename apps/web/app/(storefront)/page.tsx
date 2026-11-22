@@ -34,6 +34,7 @@ export default async function HomePage() {
             </Link>
             <Link
               href="/comparar"
+              prefetch={false}
               className="inline-flex min-h-11 items-center rounded-md border border-border px-6 font-medium hover:bg-accent"
             >
               Comparar productos

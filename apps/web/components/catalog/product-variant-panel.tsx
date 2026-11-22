@@ -238,6 +238,7 @@ export function ProductVariantPanel({
 
       <Link
         href={`/comparar?productos=${encodeURIComponent(productSlug)}`}
+        prefetch={false}
         className="inline-flex min-h-10 items-center font-medium text-primary underline-offset-4 hover:underline"
       >
         Comparar este producto

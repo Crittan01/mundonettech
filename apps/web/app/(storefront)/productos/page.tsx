@@ -48,7 +48,7 @@ export default function ProductsPage({ searchParams }: PageProps<"/productos">) 
       </header>
       <Suspense
         fallback={
-          <p role="status" className="rounded-2xl border border-border bg-card p-6">
+          <p role="status" className="min-h-[80vh] rounded-2xl border border-border bg-card p-6">
             Cargando catálogo y disponibilidad…
           </p>
         }

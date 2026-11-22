@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 interface PendingCounters {
   pageViews: number;
@@ -21,34 +21,45 @@ export function FunnelMetrics() {
   const pathname = usePathname();
   const previousPath = useRef<string | null>(null);
   const counters = useRef<PendingCounters>(emptyCounters());
+  const timer = useRef<number | null>(null);
+
+  const flushPending = useCallback(() => {
+    if (timer.current !== null) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+    const pending = counters.current;
+    if (Object.values(pending).every((value) => value === 0)) return;
+    const body = JSON.stringify(pending);
+    counters.current = emptyCounters();
+    void fetch("/api/metrics/funnel", {
+      method: "POST",
+      credentials: "omit",
+      keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body,
+    })
+      .then((response) => response.arrayBuffer())
+      .catch(() => undefined);
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (timer.current !== null) return;
+    timer.current = window.setTimeout(flushPending, 2_000);
+  }, [flushPending]);
 
   useEffect(() => {
-    function flush() {
-      const pending = counters.current;
-      if (Object.values(pending).every((value) => value === 0)) return;
-      const body = JSON.stringify(pending);
-      counters.current = emptyCounters();
-      void fetch("/api/metrics/funnel", {
-        method: "POST",
-        credentials: "omit",
-        keepalive: true,
-        headers: { "Content-Type": "application/json" },
-        body,
-      }).catch(() => undefined);
-    }
-    const interval = window.setInterval(flush, 15_000);
     function visibility() {
-      if (document.visibilityState === "hidden") flush();
+      if (document.visibilityState === "hidden") flushPending();
     }
-    window.addEventListener("pagehide", flush);
+    window.addEventListener("pagehide", flushPending);
     document.addEventListener("visibilitychange", visibility);
     return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("pagehide", flushPending);
       document.removeEventListener("visibilitychange", visibility);
-      flush();
+      flushPending();
     };
-  }, []);
+  }, [flushPending]);
 
   useEffect(() => {
     if (previousPath.current === pathname) return;
@@ -56,15 +67,17 @@ export function FunnelMetrics() {
     counters.current.pageViews += 1;
     if (pathname.startsWith("/producto/")) counters.current.productViews += 1;
     if (pathname === "/checkout") counters.current.checkoutStarts += 1;
-  }, [pathname]);
+    scheduleFlush();
+  }, [pathname, scheduleFlush]);
 
   useEffect(() => {
     function added() {
       counters.current.cartAdditions += 1;
+      scheduleFlush();
     }
     window.addEventListener("store:cart-add", added);
     return () => window.removeEventListener("store:cart-add", added);
-  }, []);
+  }, [scheduleFlush]);
 
   return null;
 }

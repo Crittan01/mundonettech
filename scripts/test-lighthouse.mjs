@@ -23,8 +23,46 @@ const harness = await acquireIsolatedTestDatabase({
 });
 let authFixture;
 let runtime;
-let chrome;
 const summary = [];
+
+const chromeFlags = [
+  "--headless=new",
+  "--remote-debugging-address=127.0.0.1",
+  "--no-sandbox",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--no-first-run",
+  "--no-default-browser-check",
+];
+
+async function runAudit(url, profile) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const chrome = await launch({
+      chromePath: process.env.CHROME_PATH ?? chromium.executablePath(),
+      startingUrl: "about:blank",
+      chromeFlags,
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const result = await lighthouse(
+        url,
+        {
+          port: chrome.port,
+          onlyCategories: categories,
+          logLevel: "error",
+          output: "json",
+        },
+        profile === "desktop" ? desktopConfig : undefined,
+      );
+      if (result && (!result.lhr.runtimeError || attempt === 2)) {
+        return result;
+      }
+    } finally {
+      await chrome.kill();
+    }
+  }
+  throw new Error(`Lighthouse returned no result for ${profile} ${url}.`);
+}
 
 function routeName(route) {
   return route === "/" ? "home" : route.replaceAll("/", "-").replace(/^-/, "");
@@ -66,33 +104,11 @@ try {
     await response.arrayBuffer();
   }
   await mkdir(outputDirectory, { recursive: true });
-  chrome = await launch({
-    chromePath: process.env.CHROME_PATH ?? chromium.executablePath(),
-    chromeFlags: [
-      "--headless=new",
-      "--remote-debugging-address=127.0.0.1",
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--no-first-run",
-      "--no-default-browser-check",
-    ],
-  });
 
   for (const profile of lighthouseProfiles) {
     for (const route of lighthouseRoutes) {
       const url = `${runtime.origin}${route}`;
-      const result = await lighthouse(
-        url,
-        {
-          port: chrome.port,
-          onlyCategories: categories,
-          logLevel: "error",
-          output: "json",
-        },
-        profile === "desktop" ? desktopConfig : undefined,
-      );
-      if (!result) throw new Error(`Lighthouse returned no result for ${profile} ${route}.`);
+      const result = await runAudit(url, profile);
       const basename = `${routeName(route)}-${profile}`;
       await writeFile(
         path.join(outputDirectory, `${basename}.json`),
@@ -121,7 +137,6 @@ try {
     ),
   );
 } finally {
-  if (chrome) await chrome.kill();
   if (runtime) await runtime.stop();
   if (authFixture) await authFixture.stop();
   await harness.stop();

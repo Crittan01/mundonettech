@@ -28,10 +28,10 @@ export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }>
             <Link href="/productos" className="hover:text-primary">
               Catálogo
             </Link>
-            <Link href="/comparar" className="hover:text-primary">
+            <Link href="/comparar" prefetch={false} className="hover:text-primary">
               Comparar
             </Link>
-            <Link href="/carrito" className="hover:text-primary">
+            <Link href="/carrito" prefetch={false} className="hover:text-primary">
               Carrito
             </Link>
           </nav>

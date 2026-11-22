@@ -62,6 +62,7 @@ export function ProductCard({
     <article className="flex h-full flex-col overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-sm">
       <Link
         href={`/producto/${product.slug}`}
+        prefetch={false}
         className="relative block aspect-[4/3] bg-secondary outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         aria-label={`${image ? "" : "Imagen no disponible. "}Ver ${product.name}`}
       >
@@ -84,6 +85,7 @@ export function ProductCard({
         <div>
           <Link
             href={`/marca/${product.brand.slug}`}
+            prefetch={false}
             className="text-xs font-semibold tracking-wide text-muted-foreground uppercase hover:text-foreground"
           >
             {product.brand.name}
@@ -126,6 +128,7 @@ export function ProductCard({
           {compareSlugs.length < 4 || compared ? (
             <Link
               href={compareHref}
+              prefetch={false}
               className="inline-flex min-h-10 items-center text-sm font-medium text-primary underline-offset-4 hover:underline"
             >
               {compared ? "Quitar del comparador" : "Añadir al comparador"}
