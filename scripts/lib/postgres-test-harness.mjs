@@ -63,13 +63,49 @@ export async function acquireIsolatedTestDatabase(options = {}) {
   if (externalDatabaseUrl) {
     assertSafeTestEnvironment(process.env, externalDatabaseUrl);
     await waitForPostgresReady(externalDatabaseUrl);
-    if (options.migrate !== false) {
-      deployPrismaMigrations(externalDatabaseUrl);
+    if (options.migrate === false) {
+      return {
+        databaseUrl: externalDatabaseUrl,
+        managedContainer: false,
+        async stop() {},
+      };
     }
+
+    const isolatedDbName = `test_mnt_${randomBytes(6).toString("hex")}`;
+    const isolatedUrlObject = new URL(externalDatabaseUrl);
+    isolatedUrlObject.pathname = `/${isolatedDbName}`;
+    const isolatedDatabaseUrl = isolatedUrlObject.toString();
+    assertSafeTestEnvironment(process.env, isolatedDatabaseUrl);
+
+    const adminClient = new pg.Client({ connectionString: externalDatabaseUrl });
+    await adminClient.connect();
+    try {
+      await adminClient.query(`CREATE DATABASE "${isolatedDbName}"`);
+    } finally {
+      await adminClient.end();
+    }
+
+    const dropIsolatedDatabase = async () => {
+      const dropClient = new pg.Client({ connectionString: externalDatabaseUrl });
+      await dropClient.connect();
+      try {
+        await dropClient.query(`DROP DATABASE IF EXISTS "${isolatedDbName}" WITH (FORCE)`);
+      } finally {
+        await dropClient.end();
+      }
+    };
+
+    try {
+      deployPrismaMigrations(isolatedDatabaseUrl);
+    } catch (error) {
+      await dropIsolatedDatabase().catch(() => undefined);
+      throw error;
+    }
+
     return {
-      databaseUrl: externalDatabaseUrl,
+      databaseUrl: isolatedDatabaseUrl,
       managedContainer: false,
-      async stop() {},
+      stop: dropIsolatedDatabase,
     };
   }
 

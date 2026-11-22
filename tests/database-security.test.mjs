@@ -116,6 +116,7 @@ before(
       await admin.connect();
       await admin.query(`DROP ROLE IF EXISTS ${probeRole}`);
       await admin.query(`CREATE ROLE ${probeRole} NOLOGIN NOBYPASSRLS`);
+      await admin.query(`GRANT ${probeRole} TO CURRENT_USER`);
       await admin.query(`GRANT USAGE ON SCHEMA public TO ${probeRole}`);
       await admin.query(
         `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${probeRole}`,
