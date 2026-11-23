@@ -112,6 +112,7 @@ export const reservedRedirectSourcePrefixes = [
   "/recibo",
   "/pagar",
   "/pedido",
+  "/referido",
   "/propuesta",
   "/empresas",
 ] as const;

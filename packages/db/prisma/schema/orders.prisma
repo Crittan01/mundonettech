@@ -144,6 +144,8 @@ model Order {
   warrantyClaims              WarrantyClaim[]
   supportTickets              SupportTicket[]
   sourceProposal              OpportunityProposal?
+  loyaltyTxns                 LoyaltyTxn[]
+  referral                    Referral?
 
   @@index([customerId, createdAt])
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
@@ -339,24 +341,28 @@ model OrderStatusEvent {
 }
 
 model AbandonedCart {
-  id             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  cartId         String              @unique @db.Uuid
-  customerId     String?             @db.Uuid
-  contactEmail   String?             @db.VarChar(320)
-  status         AbandonedCartStatus @default(DETECTED)
-  lastActivityAt DateTime            @db.Timestamptz(6)
-  detectedAt     DateTime            @default(now()) @db.Timestamptz(6)
-  recoveredAt    DateTime?           @db.Timestamptz(6)
-  expiredAt      DateTime?           @db.Timestamptz(6)
-  reminderCount  Int                 @default(0)
-  lastReminderAt DateTime?           @db.Timestamptz(6)
-  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
-  updatedAt      DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
-  cart           Cart                @relation(fields: [cartId], references: [id], onDelete: Restrict)
-  customer       Customer?           @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  id                     String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cartId                 String              @unique @db.Uuid
+  customerId             String?             @db.Uuid
+  contactEmail           String?             @db.VarChar(320)
+  status                 AbandonedCartStatus @default(DETECTED)
+  lastActivityAt         DateTime            @db.Timestamptz(6)
+  detectedAt             DateTime            @default(now()) @db.Timestamptz(6)
+  recoveredAt            DateTime?           @db.Timestamptz(6)
+  expiredAt              DateTime?           @db.Timestamptz(6)
+  reminderCount          Int                 @default(0)
+  lastReminderAt         DateTime?           @db.Timestamptz(6)
+  lastReminderActivityAt DateTime?           @db.Timestamptz(6)
+  lastReminderOutcome    String?             @db.VarChar(40)
+  createdAt              DateTime            @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
+  cart                   Cart                @relation(fields: [cartId], references: [id], onDelete: Restrict)
+  customer               Customer?           @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  emailEvents            EmailEvent[]
 
   @@index([status, detectedAt])
   @@index([customerId, status])
+  @@index([status, lastReminderOutcome, detectedAt])
   @@map("AbandonedCart")
 }
 

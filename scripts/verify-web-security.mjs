@@ -171,12 +171,14 @@ export async function verifyWebSecurity(
   for (const [routePath, expected] of [
     ["/admin", "/admin/login"],
     ["/admin/crm", "/admin/login"],
+    ["/admin/fidelizacion", "/admin/login"],
     ["/admin/b2b", "/admin/login"],
     ["/admin/b2b?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios.svg", "/admin/login"],
     ["/mi-cuenta", "/ingresar"],
+    ["/mi-cuenta/beneficios", "/ingresar"],
     ["/mi-cuenta.png", "/ingresar"],
   ]) {
     const response = await request(origin, routePath);
@@ -214,6 +216,14 @@ export async function verifyWebSecurity(
       );
     }
   }
+
+  const invalidReferral = await request(origin, "/referido/codigo-invalido");
+  requireCondition(invalidReferral.status === 404, "/referido/codigo-invalido: must return 404.");
+  requireCondition(
+    (invalidReferral.headers.get("cache-control") ?? "").includes("no-store") &&
+      (invalidReferral.headers.get("x-robots-tag") ?? "").includes("noindex"),
+    "/referido/codigo-invalido: referral error must be no-store/noindex.",
+  );
 
   for (const receiptAssetPath of [
     "/api/recibos/token-invalido/descargar",

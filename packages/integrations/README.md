@@ -20,8 +20,8 @@ Configura `INTEGRATION_CREDENTIAL_KEYS_<AMBIENTE>` como JSON `{ "1": "base64-de-
 - Wompi usa Web Checkout con firma SHA-256 de referencia, centavos, moneda y expiración. El navegador recibe solo la URL pública firmada; llaves privadas y secretos permanecen en la bóveda. Los webhooks validan propiedades variables, timestamp, ambiente y checksum, y persisten su hash sin almacenar PII.
 - COD consulta y bloquea identidades por HMAC (`BlockedIdentityService.isBlocked`) antes de comprometer stock y solo captura cuando lo esperado, recaudado y remitido coinciden. Las discrepancias se conservan y pueden corregirse en una nueva remesa.
 - Transferencia requiere confirmación MFA de un actor financiero y una referencia bancaria única. Las instrucciones públicas se habilitan con `BANK_TRANSFER_INSTRUCTIONS`; si no están configuradas, el método no aparece.
-- `StoreCreditAccount` y `StoreCreditEntry` mantienen saldos disponible/retenido, versiones monotónicas y una secuencia por cuenta. `HOLD`, `CAPTURE`, `RELEASE` y `REFUND` se validan como cadena en PostgreSQL.
-- Toda captura total descuenta inventario reservado una única vez y emite outbox sin PII. Reembolsos y anulaciones actualizan el estado agregado sin superar las capturas disponibles.
+- `StoreCreditAccount` y `StoreCreditEntry` mantienen saldos disponible/retenido, versiones monotónicas y una secuencia por cuenta. `HOLD`, `CAPTURE`, `RELEASE` y `REFUND` se validan como cadena en PostgreSQL y la primitiva serializa por cliente antes de bloquear la cuenta, evitando deadlocks entre pagos y ajustes concurrentes.
+- Toda captura total descuenta inventario reservado una única vez, acumula `EARN`/bonos de referido en la misma transacción y emite outbox sin PII. Todo reembolso completado o anulación (`VOID`) capturada revierte proporcionalmente esos puntos antes de actualizar el estado agregado, sin superar las capturas disponibles.
 
 `INTEGRATION_ENVIRONMENT` selecciona `LOCAL`, `STG` o `PRD` (con inferencia segura de Vercel). Wompi exige llaves `test` fuera de PRD y `prod` en PRD. Los proveedores HTTP no reintentan automáticamente resultados inciertos y validan tamaño, esquema, importe y referencias de cada respuesta.
 
@@ -35,7 +35,7 @@ Las credenciales `aveonline` contienen usuario, clave, empresa, remitente y endp
 
 ## Resend, Svix y baja RFC 8058
 
-`EmailService` versiona plantillas, congela asunto/HTML/texto/variables por evento y reutiliza la misma clave idempotente de Resend en reintentos. Los eventos Svix se verifican con HMAC y ventana anti-replay, deduplican `svix-id` y solo avanzan la jerarquía de entrega. Rebotes y quejas crean supresión por destinatario/tema; `/email/baja/[token]` acepta `POST` RFC 8058 sin cookies ni redirección y el token HMAC solo se guarda como hash.
+`EmailService` versiona plantillas, congela asunto/HTML/texto/variables por evento y reutiliza la misma clave idempotente de Resend en reintentos. Los eventos Svix se verifican con HMAC y ventana anti-replay, deduplican `svix-id` y solo avanzan la jerarquía de entrega. Rebotes y quejas crean supresión por destinatario/tema; `/email/baja/[token]` acepta `POST` RFC 8058 sin cookies ni redirección y el token HMAC solo se guarda como hash. Antes de cada envío vuelve a comprobar la supresión; para `cart.recovery` también exige carrito activo, misma actividad, cliente y consentimiento comercial vigentes, bloqueando reintentos ya obsoletos.
 
 La credencial `resend` contiene API key, remitente, endpoint, secreto Svix y secreto HMAC de baja en la bóveda. `EMAIL_SEND_DISABLED=1` bloquea todo envío externo antes del fetch. `/admin/comunicaciones` usa `communications:*` + MFA y enmascara destinatarios.
 
@@ -53,4 +53,4 @@ La credencial `gemini` contiene API key, modelo y base oficial `https://generati
 
 ## Worker de dominio
 
-`DomainEventWorker` usa `claim_domain_outbox_events` para no consumir eventos ajenos, ejecuta efectos idempotentes y aplica backoff acotado antes de `fail_domain_outbox`. Los payloads llevan UUIDs y referencias, nunca correos, direcciones, teléfonos, documentos ni tokens; el enlace del recibo se deriva en servidor desde su UUID de envío. `POST /api/jobs/domain-events` exige `DOMAIN_WORKER_CRON_SECRET` y procesa hasta cuatro lotes por invocación.
+`DomainEventWorker` usa `claim_domain_outbox_events` para no consumir eventos ajenos, ejecuta efectos idempotentes y aplica backoff acotado antes de `fail_domain_outbox`. Los payloads llevan UUIDs y referencias, nunca correos, direcciones, teléfonos, documentos ni tokens; el enlace del recibo se deriva en servidor desde su UUID de envío. Para `cart.abandoned.v1` recupera el estado real del carrito, valida contacto/consentimiento, genera una clave por actividad y registra `QUEUED`, `NO_CONTACT`, `NO_CONSENT`, `SUPPRESSED` o `STALE`. `POST /api/jobs/domain-events` exige `DOMAIN_WORKER_CRON_SECRET` y procesa hasta cuatro lotes por invocación.

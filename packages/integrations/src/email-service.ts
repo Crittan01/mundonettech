@@ -1,7 +1,11 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { normalizeEmail } from "@mundonettech/core";
-import type { EmailEventStatus } from "@mundonettech/db";
+import {
+  marketingEmailConsentGranted,
+  type EmailEvent,
+  type EmailEventStatus,
+} from "@mundonettech/db";
 
 import {
   defaultEmailTemplate,
@@ -178,6 +182,19 @@ export class EmailService {
     assertIntegrationKey(input.idempotencyKey);
     assertIntegrationUuid(input.credentialId, "credentialId");
     if (input.orderId !== undefined) assertIntegrationUuid(input.orderId, "orderId");
+    if (input.customerId !== undefined) assertIntegrationUuid(input.customerId, "customerId");
+    if (input.abandonedCartId !== undefined)
+      assertIntegrationUuid(input.abandonedCartId, "abandonedCartId");
+    if (
+      (key === "cart.recovery" &&
+        (topic !== "cart-recovery" ||
+          input.orderId !== undefined ||
+          input.customerId === undefined ||
+          input.abandonedCartId === undefined)) ||
+      (key !== "cart.recovery" && input.abandonedCartId !== undefined)
+    ) {
+      throw new EmailValidationError("Cart recovery email relations are inconsistent.");
+    }
     let recipientEmail: string;
     try {
       recipientEmail = normalizeEmail(input.recipientEmail);
@@ -195,6 +212,8 @@ export class EmailService {
         existing.recipientEmail === recipientEmail &&
         existing.credentialId === input.credentialId &&
         (existing.orderId ?? null) === (input.orderId ?? null) &&
+        (existing.customerId ?? null) === (input.customerId ?? null) &&
+        (existing.abandonedCartId ?? null) === (input.abandonedCartId ?? null) &&
         Object.entries(input.variables).every(
           ([name, value]) =>
             (existing.variablesSnapshot as Record<string, unknown>)[name] === value,
@@ -251,6 +270,8 @@ export class EmailService {
         data: {
           id: eventId,
           orderId: input.orderId ?? null,
+          customerId: input.customerId ?? null,
+          abandonedCartId: input.abandonedCartId ?? null,
           credentialId: input.credentialId,
           templateKey: key,
           topic,
@@ -283,6 +304,79 @@ export class EmailService {
       }
       return { id: created.id, status: created.status };
     });
+  }
+
+  private async suppressedBeforeSend(claimed: EmailEvent): Promise<EmailSendOutcome | null> {
+    const suppression = await this.db.emailSuppression.findUnique({
+      where: {
+        recipientHash_topic: { recipientHash: claimed.recipientHash, topic: claimed.topic },
+      },
+      select: { id: true },
+    });
+    let outcome: "SUPPRESSED" | "NO_CONSENT" | "STALE" | null = suppression ? "SUPPRESSED" : null;
+    let abandonedCartId: string | null = null;
+    let lastActivityAt: Date | null = null;
+    if (!outcome && claimed.templateKey === "cart.recovery") {
+      const abandoned = claimed.abandonedCartId
+        ? await this.db.abandonedCart.findUnique({
+            where: { id: claimed.abandonedCartId },
+            include: {
+              customer: true,
+              cart: { select: { status: true, order: { select: { id: true } } } },
+            },
+          })
+        : null;
+      const activityPrefix = `domain:cart.recovery:${claimed.abandonedCartId}:`;
+      const activityAt = claimed.idempotencyKey.startsWith(activityPrefix)
+        ? claimed.idempotencyKey.slice(activityPrefix.length)
+        : null;
+      abandonedCartId = abandoned?.id ?? null;
+      lastActivityAt = abandoned?.lastActivityAt ?? null;
+      const stale =
+        !abandoned ||
+        abandoned.status !== "DETECTED" ||
+        abandoned.cart.status !== "ACTIVE" ||
+        abandoned.cart.order !== null ||
+        !abandoned.customer ||
+        abandoned.customer.id !== claimed.customerId ||
+        abandoned.customer.status !== "ACTIVE" ||
+        abandoned.customer.deletedAt !== null ||
+        abandoned.customer.email !== claimed.recipientEmail ||
+        typeof activityAt !== "string" ||
+        abandoned.lastActivityAt.toISOString() !== activityAt;
+      if (stale) {
+        outcome = "STALE";
+      } else if (!(await marketingEmailConsentGranted(this.db, abandoned.customer!.id))) {
+        outcome = "NO_CONSENT";
+      }
+    }
+    if (!outcome) return null;
+    const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+    const now = nowRows[0]!.now;
+    const current = await this.db.$transaction(async (tx) => {
+      await tx.emailEvent.updateMany({
+        where: { id: claimed.id, status: { in: ["QUEUED", "SENDING"] } },
+        data: {
+          status: "SUPPRESSED",
+          statusRank: statusRank("SUPPRESSED"),
+          finalAt: now,
+          nextAttemptAt: null,
+        },
+      });
+      if (abandonedCartId && lastActivityAt) {
+        await tx.abandonedCart.updateMany({
+          where: { id: abandonedCartId, lastActivityAt },
+          data: { lastReminderActivityAt: lastActivityAt, lastReminderOutcome: outcome },
+        });
+      }
+      return tx.emailEvent.findUniqueOrThrow({ where: { id: claimed.id } });
+    });
+    return {
+      id: current.id,
+      status: current.status,
+      providerMessageId: current.providerMessageId,
+      nextAttemptAt: current.nextAttemptAt,
+    };
   }
 
   async send(emailEventId: string): Promise<EmailSendOutcome> {
@@ -323,6 +417,8 @@ export class EmailService {
         nextAttemptAt: claimed.nextAttemptAt,
       };
     }
+    const suppressed = await this.suppressedBeforeSend(claimed);
+    if (suppressed) return suppressed;
     try {
       const credentials = await this.credentials(claimed.credentialId);
       const tokenEventUrl = (claimed.variablesSnapshot as Record<string, unknown>).unsubscribeUrl;
@@ -429,6 +525,14 @@ export class EmailService {
             nextAttemptAt: null,
           },
         });
+      }
+      if (event.abandonedCartId) {
+        await tx.$executeRaw`
+          UPDATE "AbandonedCart" SET
+            "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
+            "lastReminderOutcome" = 'SUPPRESSED'
+          WHERE "id" = ${event.abandonedCartId}::uuid
+        `;
       }
       return { eventId: event.id, topic: event.topic, replayed: inserted.length === 0 };
     });

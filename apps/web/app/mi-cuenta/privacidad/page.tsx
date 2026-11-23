@@ -69,9 +69,10 @@ export default async function PrivacyPage() {
           Anonimizar cuenta
         </h2>
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Debes usar primero cualquier saldo de crédito o puntos disponibles. Las direcciones y
-          preferencias se eliminan; los pedidos conservan solo la información financiera y los
-          documentos legalmente exigidos, disociados de tus identificadores personales.
+          Debes usar o resolver primero cualquier saldo de crédito a favor; al continuar renunciarás
+          de forma trazada a tus puntos disponibles. Las direcciones y preferencias se eliminan; los
+          pedidos conservan solo la información financiera y los documentos legalmente exigidos,
+          disociados de tus identificadores personales.
         </p>
         <AnonymizeAccountForm />
       </section>

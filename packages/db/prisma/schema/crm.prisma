@@ -251,6 +251,11 @@ model Customer {
   supportMessages          SupportTicketMessage[]
   reviews                  Review[]
   crmContacts              Contact[]
+  loyaltyTxns              LoyaltyTxn[]
+  referralCode             ReferralCode?
+  referralsMade            Referral[]            @relation("ReferralReferrer")
+  referralsReceived        Referral[]            @relation("ReferralReferred")
+  emailEvents              EmailEvent[]
 
   @@index([status, createdAt])
   @@index([deletedAt])

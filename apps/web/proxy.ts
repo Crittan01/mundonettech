@@ -186,6 +186,7 @@ export async function proxy(request: NextRequest) {
       pathname.startsWith("/checkout") ||
       pathname.startsWith("/pagar/") ||
       pathname.startsWith("/pedido/") ||
+      pathname.startsWith("/referido/") ||
       pathname.startsWith("/propuesta/") ||
       pathname.startsWith("/recibo/"))
   ) {

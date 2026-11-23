@@ -15,6 +15,8 @@ export const cartTokenCookie =
   process.env.NODE_ENV === "production" ? "__Host-cart_token" : "cart_token";
 export const guestOrderCookie =
   process.env.NODE_ENV === "production" ? "__Host-guest_order" : "guest_order";
+export const referralCookie =
+  process.env.NODE_ENV === "production" ? "__Host-mnt_referral" : "mnt_referral";
 
 export const sessionCookieOptions = {
   httpOnly: true,

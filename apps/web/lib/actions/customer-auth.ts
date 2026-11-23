@@ -15,6 +15,7 @@ import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
 import { isPasswordCompromised } from "@/lib/security/hibp";
 import { isServerOutboundEmailDisabled } from "@/lib/security/outbound-email";
 import { getRequestSecurityContext, recordSecurityEvent } from "@/lib/security/request-context";
+import { clearReferralCode, consumeReferralPath } from "@/lib/security/referral";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -179,7 +180,7 @@ export async function verifyCustomerOtpAction(
     await supabase.auth.signOut();
     return actionError("No pudimos activar tu cuenta. Inténtalo de nuevo o contacta soporte.");
   }
-  redirect("/mi-cuenta");
+  redirect((await consumeReferralPath()) ?? "/mi-cuenta");
 }
 
 export async function resetCustomerPasswordAction(
@@ -222,7 +223,7 @@ export async function resetCustomerPasswordAction(
     await supabase.auth.signOut();
     return actionError("No pudimos activar tu cuenta. Contacta soporte.");
   }
-  redirect("/mi-cuenta");
+  redirect((await consumeReferralPath()) ?? "/mi-cuenta");
 }
 
 export async function signOutCustomerAction(): Promise<void> {
@@ -230,5 +231,6 @@ export async function signOutCustomerAction(): Promise<void> {
   await supabase.auth.signOut();
   await clearActivityCookies();
   await clearCustomerCartCookie();
+  await clearReferralCode();
   redirect("/");
 }

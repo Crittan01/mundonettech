@@ -7,6 +7,7 @@ const links = [
   ["/mi-cuenta", "Perfil"],
   ["/mi-cuenta/direcciones", "Direcciones"],
   ["/mi-cuenta/pedidos", "Pedidos y posventa"],
+  ["/mi-cuenta/beneficios", "Puntos y referidos"],
   ["/mi-cuenta/soporte", "PQR"],
   ["/mi-cuenta/privacidad", "Privacidad"],
 ] as const;

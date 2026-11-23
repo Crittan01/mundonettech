@@ -169,3 +169,17 @@ export {
   opportunityStatusLabels,
   priceListStatusLabels,
 } from "./b2b.js";
+export {
+  abandonedCartReminderOutcomeLabels,
+  compensatedOrderMerchandiseCents,
+  cumulativeLoyaltyReversal,
+  loyaltyEarnUnitCents,
+  loyaltyPointsForMerchandise,
+  loyaltyReferralPoints,
+  loyaltyTxnTypeLabels,
+  normalizeReferralCode,
+  referralCodeLength,
+  referralRejectionReasonLabels,
+  referralStatusLabels,
+} from "./growth.js";
+export type { ReferralRejectionReason } from "./growth.js";

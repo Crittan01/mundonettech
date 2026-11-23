@@ -4,6 +4,7 @@ import { normalizeEmail } from "@mundonettech/core";
 
 import type { Customer, PrismaClient } from "./generated/client.js";
 import { CrmError, suppressCustomerCrmLineageInTransaction } from "./crm-shared.js";
+import { GrowthService, marketingEmailConsentGranted } from "./growth-service.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 
 export type AccountErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION";
@@ -189,16 +190,13 @@ export class AccountService {
     const audit = this.audit(auditInput);
     return inInventoryTransaction(this.db, async (tx) => {
       const customer = await this.lockActiveCustomer(tx, customerId);
-      const unrevokedGrant = await tx.consent.findFirst({
-        where: {
-          customerId,
-          purpose: "MARKETING_EMAIL",
-          status: "GRANTED",
-          revokedBy: null,
-        },
+      const latestConsent = await tx.consent.findFirst({
+        where: { customerId, purpose: "MARKETING_EMAIL" },
+        include: { revokedBy: { select: { id: true } } },
         orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
       });
-      const currentlyGranted = unrevokedGrant !== null;
+      const currentlyGranted =
+        latestConsent?.status === "GRANTED" && latestConsent.revokedBy === null;
       const proofHash = createHash("sha256")
         .update(
           JSON.stringify({
@@ -230,9 +228,27 @@ export class AccountService {
             proofHash,
             ipHash: audit.ipHash,
             userAgentHash: audit.userAgentHash,
-            revokesId: values.marketingEmail ? null : unrevokedGrant!.id,
+            revokesId: values.marketingEmail ? null : latestConsent!.id,
           },
         });
+      }
+      if (!values.marketingEmail) {
+        const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+        const now = nowRows[0]!.now;
+        await tx.emailEvent.updateMany({
+          where: {
+            customerId,
+            templateKey: "cart.recovery",
+            status: { in: ["QUEUED", "SENDING"] },
+          },
+          data: { status: "SUPPRESSED", statusRank: 70, finalAt: now, nextAttemptAt: null },
+        });
+        await tx.$executeRaw`
+          UPDATE "AbandonedCart" SET
+            "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
+            "lastReminderOutcome" = 'NO_CONSENT'
+          WHERE "customerId" = ${customerId}::uuid AND "status" = 'DETECTED'
+        `;
       }
       await tx.$executeRaw`
         INSERT INTO "SecurityEvent" ("customerId", "eventType", "ipHash", "userAgentHash", "metadata", "dedupMinute")
@@ -423,6 +439,8 @@ export class AccountService {
   ) {
     assertUuid(customerId, "customerId");
     const audit = this.audit(auditInput);
+    await acquireOperationLocks(tx, [`store-credit:${customerId}`]);
+    await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
     await acquireOperationLocks(tx, [`customer-account:${customerId}`]);
     const customers = await tx.$queryRaw<
       Customer[]
@@ -434,9 +452,6 @@ export class AccountService {
       customer.deletedAt !== null
     ) {
       throw new AccountError("NOT_FOUND", "Customer eligible for anonymization not found.");
-    }
-    if (customer.loyaltyPoints !== 0) {
-      throw new AccountError("CONFLICT", "Redeem loyalty points before deleting the account.");
     }
     const credit = await tx.storeCreditAccount.aggregate({
       where: { customerId },
@@ -501,6 +516,7 @@ export class AccountService {
     }
     const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]!.now;
+    await new GrowthService(tx).forfeitCustomerPointsInTransaction(tx, customerId);
     if (!options.skipCrmCascade) {
       try {
         await suppressCustomerCrmLineageInTransaction(tx, customerId, now);
@@ -546,8 +562,11 @@ export class AccountService {
       where: { customerId, status: "ACTIVE" },
       data: { status: "CANCELLED" },
     });
-    await tx.abandonedCart.updateMany({ where: { customerId }, data: { contactEmail: null } });
-    await tx.storeCreditAccount.updateMany({ where: { customerId }, data: { active: false } });
+    await new GrowthService(tx).suppressCustomerGrowthInTransaction(tx, customerId, now);
+    await tx.storeCreditAccount.updateMany({
+      where: { customerId },
+      data: { active: false, version: { increment: 1 } },
+    });
     await tx.guestOrderSession.updateMany({
       where: { order: { customerId }, revokedAt: null },
       data: { revokedAt: now },
@@ -593,7 +612,11 @@ export class AccountService {
     await tx.emailEvent.updateMany({
       where: {
         anonymizedAt: null,
-        OR: [{ order: { customerId } }, { orderId: null, recipientEmail: previousEmail }],
+        OR: [
+          { order: { customerId } },
+          { customerId },
+          { orderId: null, recipientEmail: previousEmail },
+        ],
       },
       data: { recipientEmail: anonymizedEmail, anonymizedAt: now },
     });
@@ -635,11 +658,7 @@ export class AccountService {
   }
 
   async marketingEmailGranted(customerId: string): Promise<boolean> {
-    const unrevoked = await this.db.consent.findFirst({
-      where: { customerId, purpose: "MARKETING_EMAIL", status: "GRANTED", revokedBy: null },
-      select: { id: true },
-    });
-    return unrevoked !== null;
+    return marketingEmailConsentGranted(this.db, customerId);
   }
 
   anonymizedEmailFor(customerId: string): string {

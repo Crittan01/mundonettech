@@ -1,5 +1,6 @@
 import {
   acquireOperationLocks,
+  GrowthService,
   inInventoryTransaction,
   IntegrationEnvironment,
   PaymentProvider,
@@ -413,8 +414,9 @@ export class WompiWebhookService {
             const existingVoid = await tx.paymentTransaction.findFirst({
               where: { attemptId: attempt.id, kind: "VOID" },
             });
-            if (!existingVoid) {
-              await tx.paymentTransaction.create({
+            const voidTxn =
+              existingVoid ??
+              (await tx.paymentTransaction.create({
                 data: {
                   attemptId: attempt.id,
                   provider: PaymentProvider.WOMPI,
@@ -427,7 +429,11 @@ export class WompiWebhookService {
                   statusMessage: transaction.statusMessage,
                   completedAt: event.occurredAt,
                 },
-              });
+              }));
+            if (voidTxn.status === "SUCCEEDED") {
+              await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, voidTxn.id);
+            }
+            if (!existingVoid) {
               await refreshOrderPaymentStatus(tx, order.id);
             }
           } else if (!["FAILED", "CANCELLED", "EXPIRED"].includes(attempt.status)) {
