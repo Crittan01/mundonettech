@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import pg from "pg";
@@ -7,6 +9,16 @@ import pg from "pg";
 import { assertSafeTestDatabase, assertSafeTestEnvironment } from "./test-environment.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+export const ephemeralPostgresFlags = [
+  "-c",
+  "fsync=off",
+  "-c",
+  "synchronous_commit=off",
+  "-c",
+  "full_page_writes=off",
+];
+
+let cachedMigrationDigest;
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, {
@@ -18,6 +30,26 @@ function run(command, args, options = {}) {
 
 async function delay(milliseconds) {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function migrationChainDigest() {
+  if (cachedMigrationDigest) return cachedMigrationDigest;
+  const migrationsRoot = path.join(repositoryRoot, "packages", "db", "prisma", "migrations");
+  const hash = createHash("sha256");
+  const entries = readdirSync(migrationsRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  for (const entry of entries) {
+    const sqlPath = path.join(migrationsRoot, entry, "migration.sql");
+    if (!existsSync(sqlPath)) continue;
+    hash.update(entry);
+    hash.update("\0");
+    hash.update(readFileSync(sqlPath));
+    hash.update("\0");
+  }
+  cachedMigrationDigest = hash.digest("hex").slice(0, 16);
+  return cachedMigrationDigest;
 }
 
 export async function waitForPostgresReady(databaseUrl) {
@@ -52,6 +84,59 @@ export function deployPrismaMigrations(databaseUrl) {
   }
 }
 
+async function ensureMigratedTemplateDatabase(externalDatabaseUrl) {
+  const templateDbName = `mnt_tpl_${migrationChainDigest()}`;
+  const templateUrlObject = new URL(externalDatabaseUrl);
+  templateUrlObject.pathname = `/${templateDbName}`;
+  const templateDatabaseUrl = templateUrlObject.toString();
+  assertSafeTestEnvironment(process.env, templateDatabaseUrl);
+
+  const adminClient = new pg.Client({ connectionString: externalDatabaseUrl });
+  await adminClient.connect();
+  try {
+    await adminClient.query("SELECT pg_advisory_lock(hashtextextended('mnt-test-template', 0))");
+    try {
+      const existing = await adminClient.query(
+        "SELECT datistemplate, datallowconn FROM pg_database WHERE datname = $1",
+        [templateDbName],
+      );
+      if (existing.rowCount === 0) {
+        await adminClient.query(`CREATE DATABASE "${templateDbName}"`);
+        try {
+          deployPrismaMigrations(templateDatabaseUrl);
+        } catch (error) {
+          await adminClient
+            .query(`DROP DATABASE IF EXISTS "${templateDbName}" WITH (FORCE)`)
+            .catch(() => undefined);
+          throw error;
+        }
+        await adminClient.query(
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+          [templateDbName],
+        );
+        await adminClient.query(
+          `ALTER DATABASE "${templateDbName}" WITH IS_TEMPLATE true ALLOW_CONNECTIONS false`,
+        );
+      } else if (!existing.rows[0].datistemplate || existing.rows[0].datallowconn) {
+        await adminClient.query(
+          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+          [templateDbName],
+        );
+        await adminClient.query(
+          `ALTER DATABASE "${templateDbName}" WITH IS_TEMPLATE true ALLOW_CONNECTIONS false`,
+        );
+      }
+    } finally {
+      await adminClient
+        .query("SELECT pg_advisory_unlock(hashtextextended('mnt-test-template', 0))")
+        .catch(() => undefined);
+    }
+  } finally {
+    await adminClient.end();
+  }
+  return templateDbName;
+}
+
 export async function acquireIsolatedTestDatabase(options = {}) {
   const containerName = options.containerName ?? "f03-security-test_mundonettech";
   const hostPort = String(options.port ?? 54428);
@@ -71,6 +156,7 @@ export async function acquireIsolatedTestDatabase(options = {}) {
       };
     }
 
+    const templateDbName = await ensureMigratedTemplateDatabase(externalDatabaseUrl);
     const isolatedDbName = `test_mnt_${randomBytes(6).toString("hex")}`;
     const isolatedUrlObject = new URL(externalDatabaseUrl);
     isolatedUrlObject.pathname = `/${isolatedDbName}`;
@@ -80,7 +166,7 @@ export async function acquireIsolatedTestDatabase(options = {}) {
     const adminClient = new pg.Client({ connectionString: externalDatabaseUrl });
     await adminClient.connect();
     try {
-      await adminClient.query(`CREATE DATABASE "${isolatedDbName}"`);
+      await adminClient.query(`CREATE DATABASE "${isolatedDbName}" TEMPLATE "${templateDbName}"`);
     } finally {
       await adminClient.end();
     }
@@ -94,13 +180,6 @@ export async function acquireIsolatedTestDatabase(options = {}) {
         await dropClient.end();
       }
     };
-
-    try {
-      deployPrismaMigrations(isolatedDatabaseUrl);
-    } catch (error) {
-      await dropIsolatedDatabase().catch(() => undefined);
-      throw error;
-    }
 
     return {
       databaseUrl: isolatedDatabaseUrl,
@@ -133,6 +212,7 @@ export async function acquireIsolatedTestDatabase(options = {}) {
     "--publish",
     `127.0.0.1:${hostPort}:5432`,
     "docker.io/library/postgres:17.12-alpine",
+    ...ephemeralPostgresFlags,
   ]);
   if (started.status !== 0) {
     throw new Error(`Unable to start PostgreSQL 17 test container: ${started.stderr}`);
