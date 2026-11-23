@@ -426,3 +426,34 @@ export type {
   Organization,
   Task,
 } from "./generated/client.js";
+
+export { B2bService } from "./b2b-service.js";
+export { B2bError } from "./b2b-shared.js";
+export type { B2bErrorCode } from "./b2b-shared.js";
+export type {
+  B2bAudit,
+  B2bLeadInput,
+  B2bOpportunityListItem,
+  B2bPriceListView,
+  B2bProposalAcceptance,
+  B2bProposalLineInput,
+  B2bProposalLineSnapshot,
+  CreateB2bProposalInput,
+  PriceListInput,
+  PriceListItemInput,
+  PublicB2bProposal,
+} from "./b2b-types.js";
+export {
+  OpportunityCopilotRunStatus,
+  OpportunityProposalStatus,
+  OpportunityStatus,
+  PriceListStatus,
+} from "./generated/client.js";
+export type {
+  Opportunity,
+  OpportunityCopilotRun,
+  OpportunityProposal,
+  OpportunityProposalItem,
+  PriceList,
+  PriceListItem,
+} from "./generated/client.js";

@@ -25,7 +25,7 @@ export interface CartLineSnapshot {
 
 export interface CartSnapshot {
   readonly id: string;
-  readonly kind: "STOREFRONT" | "ASSISTED";
+  readonly kind: "STOREFRONT" | "ASSISTED" | "B2B";
   readonly status: "ACTIVE" | "CONVERTED" | "CANCELLED" | "EXPIRED";
   readonly customerId: string | null;
   readonly items: CartLineSnapshot[];

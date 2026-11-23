@@ -106,6 +106,19 @@ export class CrmRetentionService {
       if (pendingMerge) {
         throw new CrmError("CONFLICT", "Resolve pending identity merges before suppression.");
       }
+      const openOpportunity = await tx.opportunity.findFirst({
+        where: {
+          contactId: { in: lineageIds },
+          status: { in: ["NEW", "QUALIFYING", "PROPOSAL_SENT"] },
+        },
+        select: { id: true },
+      });
+      if (openOpportunity) {
+        throw new CrmError(
+          "CONFLICT",
+          "Close active B2B opportunities and proposals before suppressing this lineage.",
+        );
+      }
       const customerIds = [
         ...new Set(
           contacts
@@ -175,6 +188,7 @@ export class CrmRetentionService {
             retiredIdentityIds: [],
             movedActivityIds: [],
             movedTaskIds: [],
+            movedOpportunityIds: [],
             resolutionNote: "[contenido suprimido por retención]",
             version: { increment: 1 },
           },
@@ -187,6 +201,34 @@ export class CrmRetentionService {
         },
         data: { resolutionNote: "[contenido suprimido por retención]" },
       });
+      const opportunities = await tx.opportunity.findMany({
+        where: { contactId: { in: lineageIds }, anonymizedAt: null },
+        select: { id: true },
+      });
+      const opportunityIds = opportunities.map((opportunity) => opportunity.id);
+      if (opportunityIds.length > 0) {
+        await tx.opportunity.updateMany({
+          where: { id: { in: opportunityIds } },
+          data: {
+            requirements: "[contenido suprimido por retención]",
+            acceptanceIpHash: null,
+            acceptanceUserAgentHash: null,
+            anonymizedAt: now,
+          },
+        });
+        await tx.opportunityProposal.updateMany({
+          where: { opportunityId: { in: opportunityIds }, anonymizedAt: null },
+          data: {
+            commercialNotes: null,
+            signerName: null,
+            signerDocumentType: null,
+            signerDocumentNumber: null,
+            acceptanceIpHash: null,
+            acceptanceUserAgentHash: null,
+            anonymizedAt: now,
+          },
+        });
+      }
       for (const contact of contacts) {
         if (contact.status === "ANONYMIZED") continue;
         await tx.contact.update({

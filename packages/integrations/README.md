@@ -45,6 +45,12 @@ La credencial `resend` contiene API key, remitente, endpoint, secreto Svix y sec
 
 La credencial `dian` incluye token, endpoint del proveedor autorizado, identidad/DANE del emisor, software y resolución vigente; nunca se fabrican esos datos. `/admin/facturacion` usa `invoices:*` + MFA, auditoría transaccional y máscaras de PII. `/api/recibos/[token]/documentos/[kind]/[id]` entrega XML aceptado con el token del recibo, `no-store` y `nosniff`.
 
+## Gemini y Copiloto B2B 0-PII
+
+`GeminiB2bCopilot` consume el endpoint oficial `generateContent` con la llave en `x-goog-api-key`, timeout y respuesta limitada. El request contiene exclusivamente estados y agregados de cantidades/importes/vigencia; nunca IDs, nombres, documentos, correos, teléfonos, direcciones, requisitos ni notas. La respuesta es JSON cerrado de prioridad, siguiente acción, motivos enumerados y confianza en basis points, sin texto libre ni cambios automáticos de precios u oportunidades.
+
+La credencial `gemini` contiene API key, modelo y base oficial `https://generativelanguage.googleapis.com/v1beta/models`, cifrados en la bóveda por ambiente y administrados desde `/admin/integraciones`. `B2bCopilotService` exige `b2b:write`, registra ejecuciones idempotentes en `OpportunityCopilotRun`, escribe auditoría y conserva solo hashes de entrada/prompt y la salida enumerada; errores HTTP/transporte se clasifican sin reintentos ciegos ni respuestas crudas. `/admin/b2b/[id]` ejecuta y presenta resultados con MFA reciente.
+
 ## Worker de dominio
 
 `DomainEventWorker` usa `claim_domain_outbox_events` para no consumir eventos ajenos, ejecuta efectos idempotentes y aplica backoff acotado antes de `fail_domain_outbox`. Los payloads llevan UUIDs y referencias, nunca correos, direcciones, teléfonos, documentos ni tokens; el enlace del recibo se deriva en servidor desde su UUID de envío. `POST /api/jobs/domain-events` exige `DOMAIN_WORKER_CRON_SECRET` y procesa hasta cuatro lotes por invocación.

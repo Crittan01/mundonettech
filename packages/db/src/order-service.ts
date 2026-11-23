@@ -15,6 +15,7 @@ import {
 } from "@mundonettech/core";
 
 import { CartService, CartNotFoundError } from "./cart-service.js";
+import { assertProposalIntegrity } from "./b2b-shared.js";
 import { CrmService } from "./crm-service.js";
 import { LocalDeliveryConflictError, quoteLocalDeliveryZone } from "./local-delivery-service.js";
 import type { CartReference, CartSnapshot } from "./cart-types.js";
@@ -282,6 +283,36 @@ async function lockedSettings(
   return validateSettings(stored ? settingsFromRecord(stored) : defaults);
 }
 
+async function b2bProposalForCart(tx: Prisma.TransactionClient, cartId: string) {
+  const proposal = await tx.opportunityProposal.findUnique({
+    where: { cartId },
+    include: { opportunity: true, items: true },
+  });
+  if (!proposal) throw new CheckoutConflictError("The B2B cart has no source proposal.");
+  assertProposalIntegrity(proposal);
+  return proposal;
+}
+
+async function settingsForCart(
+  tx: Prisma.TransactionClient,
+  defaults: CheckoutDefaults,
+  cart: CartSnapshot,
+): Promise<RuntimeSettings> {
+  const settings = await lockedSettings(tx, defaults);
+  if (cart.kind !== "B2B") return settings;
+  const proposal = await b2bProposalForCart(tx, cart.id);
+  return validateSettings({
+    ...settings,
+    taxRegime: proposal.taxRegime,
+    uvtValueCents: proposal.uvtValueCents,
+    uvtYear: proposal.uvtYear,
+    standardShippingCents: proposal.shippingCents,
+    deliveryPromiseDays: proposal.deliveryPromiseDays,
+    reservationMinutes: proposal.reservationMinutes,
+    clickAndCollectEnabled: false,
+  });
+}
+
 function fingerprint(input: {
   readonly cart: CartSnapshot;
   readonly taxes: readonly CalculatedOrderTaxLine[];
@@ -340,6 +371,30 @@ async function taxesForCart(
   cart: CartSnapshot,
   settings: RuntimeSettings,
 ): Promise<CalculatedOrderTaxLine[]> {
+  if (cart.kind === "B2B") {
+    const proposal = await b2bProposalForCart(tx, cart.id);
+    return cart.items.map((item) => {
+      const snapshot = proposal.items.find((candidate) => candidate.variantId === item.variantId);
+      if (!snapshot || snapshot.lineTotalCents !== BigInt(item.lineTotalCents)) {
+        throw new CheckoutConflictError("A B2B tax snapshot is missing or inconsistent.");
+      }
+      return {
+        lineId: item.id,
+        taxGroupCode: snapshot.taxGroupCode,
+        taxGroupName: snapshot.taxGroupName,
+        treatment: snapshot.treatment,
+        rule: snapshot.taxRule,
+        catalogRateBps: snapshot.catalogRateBps,
+        appliedRateBps: snapshot.appliedRateBps,
+        uvtLimit: snapshot.uvtLimit,
+        uvtValueCents: proposal.uvtValueCents,
+        uvtYear: proposal.uvtYear,
+        unitValueCents: snapshot.unitValueCents,
+        taxableBaseCents: snapshot.taxableBaseCents,
+        taxCents: snapshot.taxCents,
+      };
+    });
+  }
   const records = await tx.cartItem.findMany({
     where: { cartId: cart.id },
     select: {
@@ -574,7 +629,7 @@ export class OrderService {
           ? await carts.getByAccessToken(reference.accessTokenHash)
           : await carts.getById(reference.cartId);
       if (!cart || cart.status !== "ACTIVE") return null;
-      const settings = await lockedSettings(tx, this.defaults);
+      const settings = await settingsForCart(tx, this.defaults, cart);
       const taxes = await taxesForCart(tx, cart, settings);
       const merchandiseTotalCents = BigInt(cart.totalCents) + totalTax(taxes);
       const homeFingerprint = fingerprint({
@@ -731,7 +786,7 @@ export class OrderService {
           ? await carts.getByAccessToken(reference.accessTokenHash)
           : await carts.getById(reference.cartId);
       if (!cart || cart.status !== "ACTIVE") return [];
-      const settings = await lockedSettings(tx, this.defaults);
+      const settings = await settingsForCart(tx, this.defaults, cart);
       if (!settings.localDeliveryEnabled) return [];
       const municipality = await tx.daneMunicipality.findUnique({
         where: { code: municipalityCode },
@@ -814,6 +869,33 @@ export class OrderService {
         "acceptanceUserAgentHash",
       ),
     };
+    const b2bAcceptance = input.b2bAcceptance
+      ? {
+          proposalId: assertUuid(input.b2bAcceptance.proposalId, "proposalId"),
+          signerName: text(input.b2bAcceptance.signerName, "signerName", 2, 200),
+          signerDocumentType: text(
+            input.b2bAcceptance.signerDocumentType,
+            "signerDocumentType",
+            2,
+            2,
+          ),
+          signerDocumentNumber: text(
+            input.b2bAcceptance.signerDocumentNumber,
+            "signerDocumentNumber",
+            3,
+            30,
+          ).toUpperCase(),
+        }
+      : null;
+    if (
+      b2bAcceptance &&
+      (!["11", "12", "13", "21", "22", "31", "41", "42", "50", "91"].includes(
+        b2bAcceptance.signerDocumentType,
+      ) ||
+        !/^[A-Z0-9.-]{3,30}$/.test(b2bAcceptance.signerDocumentNumber))
+    ) {
+      throw new OrderValidationError("The B2B signer document is invalid.");
+    }
     const idempotency = {
       keyHash: hash32(input.idempotency.keyHash, "keyHash"),
       subjectHash: hash32(input.idempotency.subjectHash, "subjectHash"),
@@ -911,7 +993,22 @@ export class OrderService {
         ) {
           throw new CheckoutCouponError("The cart coupon is no longer eligible.");
         }
-        const settings = await lockedSettings(tx, this.defaults);
+        const b2bProposal = cart.kind === "B2B" ? await b2bProposalForCart(tx, cart.id) : null;
+        if (cart.kind === "B2B") {
+          if (
+            !b2bProposal ||
+            !b2bAcceptance ||
+            b2bAcceptance.proposalId !== b2bProposal.id ||
+            input.fulfillment.method !== "HOME_DELIVERY"
+          ) {
+            throw new OrderValidationError(
+              "B2B checkout requires its matching signature and home delivery terms.",
+            );
+          }
+        } else if (b2bAcceptance) {
+          throw new OrderValidationError("B2B acceptance is not valid for a storefront cart.");
+        }
+        const settings = await settingsForCart(tx, this.defaults, cart);
         const taxes = await taxesForCart(tx, cart, settings);
         const isPickup = input.fulfillment.method === "CLICK_COLLECT";
         const isLocal = input.fulfillment.method === "LOCAL_DELIVERY";
@@ -1082,20 +1179,24 @@ export class OrderService {
             WHERE "email" = ${contact.email} AND "deletedAt" IS NULL FOR UPDATE
           `;
           const existing = existingRows[0];
-          if (existing?.status === "ACTIVE") throw new CheckoutAuthenticationRequiredError();
+          if (existing?.status === "ACTIVE" && locked.kind !== "B2B") {
+            throw new CheckoutAuthenticationRequiredError();
+          }
           if (existing?.status === "ANONYMIZED") {
             throw new CheckoutConflictError("The customer identity is unavailable.");
           }
           if (existing) {
             customerId = existing.id;
-            await tx.customer.update({
-              where: { id: existing.id },
-              data: {
-                givenName: contact.givenName,
-                familyName: contact.familyName,
-                phoneE164: contact.phoneE164,
-              },
-            });
+            if (existing.status !== "ACTIVE") {
+              await tx.customer.update({
+                where: { id: existing.id },
+                data: {
+                  givenName: contact.givenName,
+                  familyName: contact.familyName,
+                  phoneE164: contact.phoneE164,
+                },
+              });
+            }
           } else {
             const customer = await tx.customer.create({
               data: {
@@ -1109,7 +1210,9 @@ export class OrderService {
             customerId = customer.id;
           }
         }
-        await new CrmService(this.db).syncCustomerContactInTransaction(tx, customerId);
+        await new CrmService(this.db).syncCustomerContactInTransaction(tx, customerId, {
+          ...(b2bProposal ? { preferredContactId: b2bProposal.opportunity.contactId } : {}),
+        });
         await tx.consent.create({
           data: {
             customerId,
@@ -1377,24 +1480,26 @@ export class OrderService {
           where: { id: cart.id },
           data: { status: "CONVERTED", customerId },
         });
-        await tx.abandonedCart.upsert({
-          where: { cartId: cart.id },
-          create: {
-            cartId: cart.id,
-            customerId,
-            contactEmail: contact.email,
-            status: "RECOVERED",
-            lastActivityAt: cart.revalidatedAt ? new Date(cart.revalidatedAt) : now,
-            recoveredAt: now,
-          },
-          update: {
-            customerId,
-            contactEmail: contact.email,
-            status: "RECOVERED",
-            recoveredAt: now,
-            expiredAt: null,
-          },
-        });
+        if (cart.kind !== "B2B") {
+          await tx.abandonedCart.upsert({
+            where: { cartId: cart.id },
+            create: {
+              cartId: cart.id,
+              customerId,
+              contactEmail: contact.email,
+              status: "RECOVERED",
+              lastActivityAt: cart.revalidatedAt ? new Date(cart.revalidatedAt) : now,
+              recoveredAt: now,
+            },
+            update: {
+              customerId,
+              contactEmail: contact.email,
+              status: "RECOVERED",
+              recoveredAt: now,
+              expiredAt: null,
+            },
+          });
+        }
         const order = await tx.order.update({
           where: { id: created.id },
           data: { orderStatus: "CONFIRMED", confirmedAt: now },
@@ -1405,8 +1510,14 @@ export class OrderService {
             orderStatus: "CONFIRMED",
             paymentStatus: "UNPAID",
             fulfillmentStatus: "UNFULFILLED",
-            reason: "CHECKOUT_CONFIRMED",
-            metadata: { fulfillmentMethod: input.fulfillment.method, pickupLocationName },
+            reason: b2bProposal ? "B2B_PROPOSAL_ACCEPTED" : "CHECKOUT_CONFIRMED",
+            metadata: {
+              fulfillmentMethod: input.fulfillment.method,
+              pickupLocationName,
+              ...(b2bProposal
+                ? { proposalId: b2bProposal.id, proposalVersion: b2bProposal.version }
+                : {}),
+            },
           },
         });
         assertReceiptBalanced({
@@ -1442,6 +1553,37 @@ export class OrderService {
             issuedAt,
           },
         });
+        if (b2bProposal && b2bAcceptance) {
+          const converted = await tx.opportunityProposal.updateMany({
+            where: { id: b2bProposal.id, status: "SENT", orderId: null },
+            data: {
+              status: "CONVERTED",
+              orderId,
+              acceptedAt: now,
+              convertedAt: now,
+              signerName: b2bAcceptance.signerName,
+              signerDocumentType: b2bAcceptance.signerDocumentType,
+              signerDocumentNumber: b2bAcceptance.signerDocumentNumber,
+              acceptanceProofHash: contact.acceptanceProofHash,
+              acceptanceIpHash: contact.acceptanceIpHash,
+              acceptanceUserAgentHash: contact.acceptanceUserAgentHash,
+            },
+          });
+          if (converted.count !== 1) {
+            throw new CheckoutConflictError("The B2B proposal was accepted concurrently.");
+          }
+          const won = await tx.opportunity.updateMany({
+            where: {
+              id: b2bProposal.opportunityId,
+              currentVersion: b2bProposal.version,
+              status: "PROPOSAL_SENT",
+            },
+            data: { status: "WON", version: { increment: 1 } },
+          });
+          if (won.count !== 1) {
+            throw new CheckoutConflictError("The B2B opportunity changed during acceptance.");
+          }
+        }
         await tx.domainOutbox.create({
           data: {
             eventType: "order.confirmed.v1",

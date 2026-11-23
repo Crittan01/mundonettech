@@ -146,3 +146,20 @@ export type {
   GuestOrderAccessErrorCode,
   GuestOrderAccessOptions,
 } from "./guest-order-access-service.js";
+
+export {
+  copilotActions,
+  copilotReasons,
+  createGeminiRequest,
+  GeminiB2bCopilot,
+  GeminiProviderError,
+  parseGeminiCredentials,
+} from "./gemini.js";
+export type {
+  B2bCopilotAggregate,
+  B2bCopilotSuggestion,
+  GeminiCredentials,
+  GeminiErrorCode,
+} from "./gemini.js";
+export { B2bCopilotError, B2bCopilotService } from "./b2b-copilot-service.js";
+export type { B2bCopilotAudit, B2bCopilotRunResult } from "./b2b-copilot-service.js";

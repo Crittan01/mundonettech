@@ -1,0 +1,1 @@
+ALTER TYPE "CartKind" ADD VALUE 'B2B';

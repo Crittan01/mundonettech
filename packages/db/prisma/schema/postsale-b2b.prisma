@@ -300,3 +300,162 @@ model Review {
   @@index([status, createdAt])
   @@map("Review")
 }
+
+
+enum OpportunityStatus {
+  NEW
+  QUALIFYING
+  PROPOSAL_SENT
+  WON
+  LOST
+  CANCELLED
+}
+
+enum OpportunityProposalStatus {
+  DRAFT
+  SENT
+  CONVERTED
+  SUPERSEDED
+  CANCELLED
+  EXPIRED
+}
+
+enum OpportunityCopilotRunStatus {
+  REQUESTED
+  SUCCEEDED
+  FAILED
+}
+
+model Opportunity {
+  id                       String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId           String                   @db.Uuid
+  contactId                String                   @db.Uuid
+  status                   OpportunityStatus        @default(NEW)
+  source                   String                   @db.VarChar(60)
+  requirements             String                   @db.VarChar(5000)
+  currentVersion           Int                      @default(0)
+  version                  Int                      @default(0)
+  privacyPolicyVersion     String                   @db.VarChar(50)
+  acceptanceProofHash      Bytes                    @db.ByteA
+  acceptanceIpHash         Bytes?                   @db.ByteA
+  acceptanceUserAgentHash  Bytes?                   @db.ByteA
+  acceptedAt               DateTime                 @db.Timestamptz(6)
+  anonymizedAt             DateTime?                @db.Timestamptz(6)
+  createdAt                DateTime                 @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime                 @default(now()) @updatedAt @db.Timestamptz(6)
+  organization             Organization             @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  contact                  Contact                  @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  proposals                OpportunityProposal[]
+  copilotRuns              OpportunityCopilotRun[]
+
+  @@index([organizationId, status, createdAt])
+  @@index([contactId, status, createdAt])
+  @@index([status, createdAt, id])
+  @@index([anonymizedAt])
+  @@map("Opportunity")
+}
+
+model OpportunityProposal {
+  id                       String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  opportunityId            String                    @db.Uuid
+  version                  Int
+  status                   OpportunityProposalStatus @default(DRAFT)
+  publicTokenHash          Bytes?                    @db.ByteA
+  contentHash              Bytes                     @db.ByteA
+  priceListId              String?                   @db.Uuid
+  priceListCodeSnapshot    String?                   @db.VarChar(40)
+  priceListVersionSnapshot Int?
+  currency                 String                    @default("COP") @db.Char(3)
+  subtotalCents            BigInt
+  discountCents            BigInt
+  taxCents                 BigInt
+  shippingCents            BigInt
+  totalCents               BigInt
+  taxRegime                StoreTaxRegime
+  uvtValueCents            BigInt
+  uvtYear                  Int
+  deliveryPromiseDays      Int
+  reservationMinutes       Int
+  commercialNotes          String?                   @db.VarChar(2000)
+  expiresAt                DateTime                  @db.Timestamptz(6)
+  issuedAt                 DateTime?                 @db.Timestamptz(6)
+  acceptedAt               DateTime?                 @db.Timestamptz(6)
+  convertedAt              DateTime?                 @db.Timestamptz(6)
+  signerName               String?                   @db.VarChar(200)
+  signerDocumentType       String?                   @db.Char(2)
+  signerDocumentNumber     String?                   @db.VarChar(30)
+  acceptanceProofHash      Bytes?                    @db.ByteA
+  acceptanceIpHash         Bytes?                    @db.ByteA
+  acceptanceUserAgentHash  Bytes?                    @db.ByteA
+  orderId                  String?                   @unique @db.Uuid
+  cartId                   String?                   @unique @db.Uuid
+  anonymizedAt             DateTime?                 @db.Timestamptz(6)
+  createdByAdminUserId     String                    @db.Uuid
+  createdAt                DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime                  @default(now()) @updatedAt @db.Timestamptz(6)
+  opportunity              Opportunity               @relation(fields: [opportunityId], references: [id], onDelete: Restrict)
+  priceList                PriceList?                @relation(fields: [priceListId], references: [id], onDelete: Restrict)
+  order                    Order?                    @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  cart                     Cart?                     @relation(fields: [cartId], references: [id], onDelete: Restrict)
+  createdBy                AdminUser                 @relation("B2bProposalCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  items                    OpportunityProposalItem[]
+
+  @@unique([opportunityId, version])
+  @@index([status, expiresAt])
+  @@index([createdByAdminUserId, createdAt])
+  @@index([anonymizedAt])
+  @@map("OpportunityProposal")
+}
+
+model OpportunityProposalItem {
+  id                     String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  proposalId             String              @db.Uuid
+  variantId              String              @db.Uuid
+  quantity               Int
+  titleSnapshot          String              @db.VarChar(200)
+  productSlugSnapshot    String              @db.VarChar(160)
+  skuSnapshot            String              @db.VarChar(64)
+  catalogUnitPriceCents  BigInt
+  unitPriceCents         BigInt
+  discountCents          BigInt
+  lineTotalCents         BigInt
+  taxGroupCode           String              @db.VarChar(40)
+  taxGroupName           String              @db.VarChar(120)
+  treatment              TaxTreatment
+  taxRule                OrderTaxRule
+  catalogRateBps         Int
+  appliedRateBps         Int
+  uvtLimit               Int?
+  unitValueCents         BigInt
+  taxableBaseCents       BigInt
+  taxCents               BigInt
+  createdAt              DateTime            @default(now()) @db.Timestamptz(6)
+  proposal               OpportunityProposal @relation(fields: [proposalId], references: [id], onDelete: Restrict)
+  variant                ProductVariant      @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@unique([proposalId, variantId])
+  @@index([variantId, proposalId])
+  @@map("OpportunityProposalItem")
+}
+
+model OpportunityCopilotRun {
+  id                       String                      @id @db.Uuid
+  opportunityId            String                      @db.Uuid
+  credentialId             String                      @db.Uuid
+  model                    String                      @db.VarChar(120)
+  inputHash                Bytes                       @db.ByteA
+  promptHash               Bytes                       @db.ByteA
+  status                   OpportunityCopilotRunStatus @default(REQUESTED)
+  output                   Json?                       @db.JsonB
+  failureCode              String?                     @db.VarChar(100)
+  requestedByAdminUserId   String                      @db.Uuid
+  completedAt              DateTime?                   @db.Timestamptz(6)
+  createdAt                DateTime                    @default(now()) @db.Timestamptz(6)
+  opportunity              Opportunity                 @relation(fields: [opportunityId], references: [id], onDelete: Restrict)
+  credential               IntegrationCredential       @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  requestedBy              AdminUser                   @relation("B2bCopilotRequester", fields: [requestedByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([opportunityId, createdAt])
+  @@index([status, createdAt])
+  @@map("OpportunityCopilotRun")
+}

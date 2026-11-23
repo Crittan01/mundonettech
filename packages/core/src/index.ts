@@ -159,3 +159,12 @@ export {
   strongestContactVerificationLevel,
 } from "./crm.js";
 export type { ContactIdentityKindValue, ContactVerificationLevelValue } from "./crm.js";
+export {
+  assertB2bExpiry,
+  copilotActionLabels,
+  copilotReasonLabels,
+  normalizePriceListCode,
+  opportunityProposalStatusLabels,
+  opportunityStatusLabels,
+  priceListStatusLabels,
+} from "./b2b.js";

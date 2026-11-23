@@ -113,6 +113,7 @@ export const reservedRedirectSourcePrefixes = [
   "/pagar",
   "/pedido",
   "/propuesta",
+  "/empresas",
 ] as const;
 
 export const reservedRedirectTargetPrefixes = ["/api", "/_next", "/admin", "/email"] as const;

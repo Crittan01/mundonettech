@@ -217,6 +217,7 @@ export function validateReleaseConfiguration(environment) {
     Boolean(environment.TURNSTILE_SECRET_KEY) &&
       !/^[123]x0{10}/.test(environment.TURNSTILE_SECRET_KEY),
   );
+  check("release.turnstileVerificationEndpoint", !environment.TURNSTILE_VERIFY_ENDPOINT);
   check(
     "release.credentialKeyRing",
     validKeyRing(

@@ -5,6 +5,7 @@ import type {
   StoreTaxRegimeValue,
 } from "@mundonettech/core";
 
+import type { B2bProposalAcceptance } from "./b2b-types.js";
 import type { CartReference, CartSnapshot } from "./cart-types.js";
 import type { OrderStatus, PaymentStatus } from "./generated/client.js";
 
@@ -77,6 +78,7 @@ export interface CheckoutConversionInput {
   readonly idempotency: CheckoutIdempotencyInput;
   readonly receiptAccessTokenHash: Uint8Array;
   readonly receiptDeliveryReference?: string;
+  readonly b2bAcceptance?: B2bProposalAcceptance;
   readonly expectedReviewFingerprint: string;
 }
 

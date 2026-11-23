@@ -3,7 +3,7 @@ import "server-only";
 import { createHmac } from "node:crypto";
 
 import { storeConfig } from "@mundonettech/config/store";
-import { OrderService, type CheckoutPreview } from "@mundonettech/db";
+import { OrderService, type CheckoutDefaults, type CheckoutPreview } from "@mundonettech/db";
 
 import { checkoutCartReference, existingCartReference } from "@/lib/cart";
 import { getDatabase } from "@/lib/db";
@@ -22,8 +22,8 @@ export interface StorefrontCheckoutPreview extends CheckoutPreview {
   };
 }
 
-export function orderService(): OrderService {
-  return new OrderService(getDatabase(), {
+export function checkoutDefaults(): CheckoutDefaults {
+  return {
     taxRegime: storeConfig.tax.regime,
     currency: storeConfig.currency,
     timeZone: storeConfig.timeZone,
@@ -35,7 +35,11 @@ export function orderService(): OrderService {
     deliveryPromiseDays: storeConfig.checkout.deliveryPromiseDays,
     reservationMinutes: storeConfig.checkout.reservationMinutes,
     clickAndCollectEnabled: false,
-  });
+  };
+}
+
+export function orderService(): OrderService {
+  return new OrderService(getDatabase(), checkoutDefaults());
 }
 
 export async function readCheckoutPreview(): Promise<StorefrontCheckoutPreview | null> {

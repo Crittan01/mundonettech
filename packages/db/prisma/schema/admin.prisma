@@ -66,6 +66,8 @@ model AdminUser {
   approvedIdentityMerges   IdentityMergeCandidate[] @relation("IdentityMergeApprover")
   rejectedIdentityMerges   IdentityMergeCandidate[] @relation("IdentityMergeRejector")
   reversedIdentityMerges   IdentityMergeCandidate[] @relation("IdentityMergeReverser")
+  createdB2bProposals      OpportunityProposal[] @relation("B2bProposalCreator")
+  requestedB2bCopilotRuns  OpportunityCopilotRun[] @relation("B2bCopilotRequester")
 
   @@index([role, status])
   @@index([createdAt])
@@ -152,6 +154,7 @@ model IntegrationCredential {
   emailWebhookEvents       EmailWebhookEvent[]
   taxInvoices              TaxInvoice[]
   creditNotes              CreditNote[]
+  b2bCopilotRuns           OpportunityCopilotRun[]
 
   @@index([environment, revokedAt])
   @@index([environment, createdAt, id])

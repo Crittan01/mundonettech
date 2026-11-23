@@ -275,6 +275,8 @@ model ProductVariant {
   cartItems           CartItem[]
   orderItems          OrderItem[]
   returnReplacements  ReturnRequestItem[]       @relation("ReturnReplacementVariant")
+  priceListItems      PriceListItem[]
+  proposalItems       OpportunityProposalItem[]
 
   @@unique([id, productId])
   @@index([productId, status])

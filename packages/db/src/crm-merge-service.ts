@@ -250,14 +250,19 @@ export class CrmMergeService {
         );
       }
       const now = await crmNow(tx);
-      const [sourceIdentities, targetIdentities, sourceActivities, sourceTasks] = await Promise.all(
-        [
-          tx.contactIdentity.findMany({ where: { contactId: source.id, retiredAt: null } }),
-          tx.contactIdentity.findMany({ where: { contactId: target.id, retiredAt: null } }),
-          tx.contactActivity.findMany({ where: { contactId: source.id }, select: { id: true } }),
-          tx.task.findMany({ where: { contactId: source.id }, select: { id: true } }),
-        ],
-      );
+      const [
+        sourceIdentities,
+        targetIdentities,
+        sourceActivities,
+        sourceTasks,
+        sourceOpportunities,
+      ] = await Promise.all([
+        tx.contactIdentity.findMany({ where: { contactId: source.id, retiredAt: null } }),
+        tx.contactIdentity.findMany({ where: { contactId: target.id, retiredAt: null } }),
+        tx.contactActivity.findMany({ where: { contactId: source.id }, select: { id: true } }),
+        tx.task.findMany({ where: { contactId: source.id }, select: { id: true } }),
+        tx.opportunity.findMany({ where: { contactId: source.id }, select: { id: true } }),
+      ]);
       const targetIdentityKeys = new Set(
         targetIdentities.map((item) => `${item.kind}:${item.normalizedValue}`),
       );
@@ -296,6 +301,13 @@ export class CrmMergeService {
       if (movedTaskIds.length > 0) {
         await tx.task.updateMany({
           where: { id: { in: movedTaskIds }, contactId: source.id },
+          data: { contactId: target.id },
+        });
+      }
+      const movedOpportunityIds = sourceOpportunities.map((item) => item.id);
+      if (movedOpportunityIds.length > 0) {
+        await tx.opportunity.updateMany({
+          where: { id: { in: movedOpportunityIds }, contactId: source.id },
           data: { contactId: target.id },
         });
       }
@@ -370,6 +382,7 @@ export class CrmMergeService {
           retiredIdentityIds,
           movedActivityIds,
           movedTaskIds,
+          movedOpportunityIds,
           mergedSourceVersion: mergedSource.version,
           mergedTargetVersion: mergedTarget.version,
           mergedByAdminUserId: audit.actorAdminUserId,
@@ -416,6 +429,10 @@ export class CrmMergeService {
       );
       const movedActivityIds = crmJsonStringArray(candidate.movedActivityIds, "movedActivityIds");
       const movedTaskIds = crmJsonStringArray(candidate.movedTaskIds, "movedTaskIds");
+      const movedOpportunityIds = crmJsonStringArray(
+        candidate.movedOpportunityIds,
+        "movedOpportunityIds",
+      );
       const contacts = await tx.$queryRaw<
         Contact[]
       >`SELECT * FROM "Contact" WHERE "id" IN (${candidate.sourceContactId}::uuid, ${candidate.targetContactId}::uuid) ORDER BY "id" FOR UPDATE`;
@@ -469,6 +486,15 @@ export class CrmMergeService {
         });
         if (moved.count !== movedTaskIds.length) {
           throw new CrmError("CONFLICT", "A merged task changed before reversal.");
+        }
+      }
+      if (movedOpportunityIds.length > 0) {
+        const moved = await tx.opportunity.updateMany({
+          where: { id: { in: movedOpportunityIds }, contactId: target.id },
+          data: { contactId: source.id },
+        });
+        if (moved.count !== movedOpportunityIds.length) {
+          throw new CrmError("CONFLICT", "A merged opportunity changed before reversal.");
         }
       }
       const targetFields = restoredContactFields(targetSnapshot);

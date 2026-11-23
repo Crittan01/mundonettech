@@ -105,6 +105,12 @@ const requiredTables = [
   "SupportTicket",
   "SupportTicketMessage",
   "Review",
+  "PriceList",
+  "PriceListItem",
+  "Opportunity",
+  "OpportunityProposal",
+  "OpportunityProposalItem",
+  "OpportunityCopilotRun",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -316,6 +322,16 @@ const requiredConstraints = [
   "Task_content_valid",
   "Task_completion_consistent",
   "Task_version_nonnegative",
+  "PriceList_identity_valid",
+  "PriceList_state_consistent",
+  "PriceListItem_unitPrice_nonnegative",
+  "Opportunity_hashes_length",
+  "Opportunity_anonymization_consistent",
+  "OpportunityProposal_total_balanced",
+  "OpportunityProposal_issue_consistent",
+  "OpportunityProposalItem_total_balanced",
+  "OpportunityCopilotRun_completion_consistent",
+  "Cart_b2b_consistent",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -366,6 +382,10 @@ const requiredPartialIndexes = [
   "Organization_taxId_active_key",
   "Contact_customer_active_key",
   "IdentityMergeCandidate_pending_pair_key",
+  "PriceList_code_active_key",
+  "OpportunityProposal_publicTokenHash_key",
+  "OpportunityProposal_orderId_key",
+  "OpportunityProposal_cartId_key",
 ] as const;
 const requiredCatalogIndexes = [
   "Product_searchVector_idx",
@@ -475,6 +495,14 @@ const requiredSecurityTriggers = [
   "IdentityMergeCandidate_enforce_state",
   "ContactActivity_enforce_state",
   "Task_enforce_state",
+  "PriceListItem_enforce_mutable",
+  "PriceList_enforce_state",
+  "Organization_enforce_price_list",
+  "Opportunity_enforce_state",
+  "OpportunityProposal_enforce_state",
+  "OpportunityProposalItem_immutable_update",
+  "OpportunityProposalItem_immutable_delete",
+  "OpportunityCopilotRun_enforce_state",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

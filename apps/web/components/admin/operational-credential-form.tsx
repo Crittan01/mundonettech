@@ -12,7 +12,7 @@ import {
 } from "@/lib/actions/admin-operational-credentials";
 import { initialActionState } from "@/lib/action-state";
 
-type Provider = "aveonline" | "resend" | "dian";
+type Provider = "aveonline" | "resend" | "dian" | "gemini";
 type Field = {
   readonly name: string;
   readonly label: string;
@@ -61,6 +61,16 @@ const fields: Record<Provider, readonly Field[]> = {
     },
     { section: "Firmas y baja", name: "svixSecret", label: "Secreto Svix (whsec_…)", secret: true },
     { name: "unsubscribeSecret", label: "Secreto HMAC de baja (base64, ≥32 bytes)", secret: true },
+  ],
+  gemini: [
+    { section: "Copiloto B2B 0-PII", name: "apiKey", label: "Llave API de Gemini", secret: true },
+    { name: "model", label: "Modelo habilitado (por ejemplo, gemini-2.5-flash)" },
+    {
+      name: "apiUrl",
+      label: "Base oficial de modelos",
+      type: "url",
+      defaultValue: "https://generativelanguage.googleapis.com/v1beta/models",
+    },
   ],
   dian: [
     {
@@ -134,6 +144,7 @@ export function OperationalCredentialForm({
               <option value="aveonline">Aveonline</option>
               <option value="resend">Resend</option>
               <option value="dian">Proveedor autorizado DIAN</option>
+              <option value="gemini">Gemini para Copiloto B2B</option>
             </select>
           </div>
         ) : null}

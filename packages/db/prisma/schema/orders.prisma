@@ -31,6 +31,7 @@ enum CartStatus {
 enum CartKind {
   STOREFRONT
   ASSISTED
+  B2B
 }
 
 enum OrderFulfillmentMethod {
@@ -142,6 +143,7 @@ model Order {
   returnRequests              ReturnRequest[]
   warrantyClaims              WarrantyClaim[]
   supportTickets              SupportTicket[]
+  sourceProposal              OpportunityProposal?
 
   @@index([customerId, createdAt])
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
@@ -420,6 +422,7 @@ model Cart {
   couponUsages           CouponUsage[]
   order                  Order?
   abandonedCart          AbandonedCart?
+  sourceProposal         OpportunityProposal?
 
   @@index([customerId, status, updatedAt])
   @@index([kind, status, updatedAt])
