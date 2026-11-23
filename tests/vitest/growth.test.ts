@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  compensatedOrderMerchandiseCents,
   cumulativeLoyaltyReversal,
   loyaltyEarnUnitCents,
   loyaltyPointsForMerchandise,
   normalizeReferralCode,
+  referralRejectionReasonLabels,
 } from "../../packages/core/dist/index.js";
 
 describe("F5.1 loyalty arithmetic and referral identities", () => {
@@ -67,5 +69,56 @@ describe("F5.1 loyalty arithmetic and referral identities", () => {
     expect(() => normalizeReferralCode("OOOOOOOOOOOO")).toThrow(TypeError);
     expect(() => normalizeReferralCode("23456789ABC")).toThrow(TypeError);
     expect(() => normalizeReferralCode("23456789ABCD1")).toThrow(TypeError);
+  });
+
+  it("computes compensated merchandise across refunds, voids and split captures", () => {
+    expect(
+      compensatedOrderMerchandiseCents({
+        netMerchandiseCents: 20_000_000n,
+        orderTotalCents: 22_000_000n,
+        capturedCents: 22_000_000n,
+        completedRefundMerchandiseCents: 0n,
+        completedRefundTotalCents: 0n,
+        succeededVoidCents: 22_000_000n,
+      }),
+    ).toBe(20_000_000n);
+    expect(
+      compensatedOrderMerchandiseCents({
+        netMerchandiseCents: 20_000_000n,
+        orderTotalCents: 20_000_000n,
+        capturedCents: 20_000_000n,
+        completedRefundMerchandiseCents: 0n,
+        completedRefundTotalCents: 0n,
+        succeededVoidCents: 10_000_000n,
+      }),
+    ).toBe(10_000_000n);
+    expect(
+      compensatedOrderMerchandiseCents({
+        netMerchandiseCents: 20_000_000n,
+        orderTotalCents: 20_000_000n,
+        capturedCents: 20_000_000n,
+        completedRefundMerchandiseCents: 10_000_000n,
+        completedRefundTotalCents: 10_000_000n,
+        succeededVoidCents: 10_000_000n,
+      }),
+    ).toBe(20_000_000n);
+    expect(() =>
+      compensatedOrderMerchandiseCents({
+        netMerchandiseCents: 10_000_000n,
+        orderTotalCents: 10_000_000n,
+        capturedCents: 10_000_000n,
+        completedRefundMerchandiseCents: 10_000_001n,
+        completedRefundTotalCents: 10_000_001n,
+        succeededVoidCents: 0n,
+      }),
+    ).toThrow(RangeError);
+    expect(Object.keys(referralRejectionReasonLabels)).toEqual([
+      "SELF_REFERRAL",
+      "REFERRER_UNAVAILABLE",
+      "REFERRED_UNAVAILABLE",
+      "PREVIOUS_PAID_ORDER",
+      "BELOW_MINIMUM",
+      "B2B_ORDER",
+    ]);
   });
 });

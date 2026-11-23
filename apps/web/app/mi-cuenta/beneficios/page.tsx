@@ -1,4 +1,9 @@
-import { formatCopCents, loyaltyTxnTypeLabels, referralStatusLabels } from "@mundonettech/core";
+import {
+  formatCopCents,
+  loyaltyTxnTypeLabels,
+  referralRejectionReasonLabels,
+  referralStatusLabels,
+} from "@mundonettech/core";
 import { z } from "zod";
 
 import { AttributeReferralForm, CreateReferralCodeForm } from "@/components/account/growth-forms";
@@ -101,6 +106,9 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
         {overview.referralReceived ? (
           <p className="rounded-xl border border-border bg-card p-5 text-sm">
             Estado de tu atribución: {referralStatusLabels[overview.referralReceived.status]}
+            {overview.referralReceived.rejectionReason
+              ? ` · ${referralRejectionReasonLabels[overview.referralReceived.rejectionReason]}`
+              : ""}
             {overview.referralReceived.orderNumber
               ? ` · Pedido ${overview.referralReceived.orderNumber}`
               : ""}

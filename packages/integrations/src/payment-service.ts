@@ -273,6 +273,7 @@ export class PaymentService {
       if (providerCode === PaymentProvider.STORE_CREDIT) {
         if (!order.customerId)
           throw new PaymentConflictError("Store credit requires an authenticated customer.");
+        await acquireOperationLocks(tx, [`store-credit:${order.customerId}`]);
         const account = await tx.storeCreditAccount.findUnique({
           where: { customerId_currency: { customerId: order.customerId, currency: "COP" } },
         });

@@ -295,24 +295,27 @@ model Referral {
 }
 
 model LoyaltyTxn {
-  id            String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  customerId    String          @db.Uuid
-  orderId       String          @db.Uuid
-  refundId      String?         @db.Uuid
-  referralId    String?         @db.Uuid
-  type          LoyaltyTxnType
-  points        Int
-  balanceAfter  Int
-  operationKey  String          @unique @db.VarChar(128)
-  createdAt     DateTime        @default(now()) @db.Timestamptz(6)
-  customer      Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  order         Order           @relation(fields: [orderId], references: [id], onDelete: Restrict)
-  refund        OrderRefund?    @relation(fields: [refundId], references: [id], onDelete: Restrict)
-  referral      Referral?       @relation(fields: [referralId], references: [id], onDelete: Restrict)
+  id                   String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId           String              @db.Uuid
+  orderId              String              @db.Uuid
+  refundId             String?             @db.Uuid
+  paymentTransactionId String?             @db.Uuid
+  referralId           String?             @db.Uuid
+  type                 LoyaltyTxnType
+  points               Int
+  balanceAfter         Int
+  operationKey         String              @unique @db.VarChar(128)
+  createdAt            DateTime            @default(now()) @db.Timestamptz(6)
+  customer             Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  order                Order               @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  refund               OrderRefund?        @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  paymentTransaction   PaymentTransaction? @relation(fields: [paymentTransactionId], references: [id], onDelete: Restrict)
+  referral             Referral?           @relation(fields: [referralId], references: [id], onDelete: Restrict)
 
   @@index([customerId, createdAt, id])
   @@index([orderId, type, createdAt])
   @@index([refundId, type])
+  @@index([paymentTransactionId, type])
   @@index([referralId, type])
   @@map("LoyaltyTxn")
 }

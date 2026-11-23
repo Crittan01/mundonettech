@@ -415,6 +415,7 @@ model PaymentTransaction {
   completedAt       DateTime?                @db.Timestamptz(6)
   attempt           PaymentAttempt           @relation(fields: [attemptId], references: [id], onDelete: Restrict)
   refund            OrderRefund?             @relation(fields: [refundId], references: [id], onDelete: Restrict)
+  loyaltyTxns       LoyaltyTxn[]
 
   @@unique([provider, kind, externalId])
   @@index([attemptId, kind, status, createdAt])

@@ -612,7 +612,11 @@ export class AccountService {
     await tx.emailEvent.updateMany({
       where: {
         anonymizedAt: null,
-        OR: [{ order: { customerId } }, { orderId: null, recipientEmail: previousEmail }],
+        OR: [
+          { order: { customerId } },
+          { customerId },
+          { orderId: null, recipientEmail: previousEmail },
+        ],
       },
       data: { recipientEmail: anonymizedEmail, anonymizedAt: now },
     });

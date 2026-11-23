@@ -218,7 +218,9 @@ test("customer generates and attributes a verifiable referral and admin reviews 
     maxRedirects: 0,
   });
   expect(publicRedirect.status()).toBe(307);
-  expect(publicRedirect.headers()["set-cookie"]).toContain(`mnt_referral=${referralCode.code}`);
+  expect(publicRedirect.headers()["set-cookie"]).toContain(
+    `__Host-mnt_referral=${referralCode.code}`,
+  );
   const invalidRedirect = await request.get("/referido/OOOOOOOOOOOO", { maxRedirects: 0 });
   expect(invalidRedirect.status()).toBe(404);
 

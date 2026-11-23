@@ -286,6 +286,7 @@ export const legalConfig = {
             bullets: [
               "Sesión de Supabase: mantiene y renueva el acceso autenticado mediante cookies httpOnly.",
               "Actividad administrativa y de cliente: verifica inactividad, duración máxima y tipo de sesión con tokens firmados.",
+              "Continuidad funcional solicitada: conserva el carrito activo, el acceso temporal verificado de posventa invitada y el código al abrir un enlace de referido mediante cookies httpOnly, sin rastreo publicitario.",
               "Seguridad: permite retos anti-automatización y controles necesarios para impedir accesos fraudulentos.",
             ],
           },

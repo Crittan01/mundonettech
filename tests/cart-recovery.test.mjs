@@ -318,4 +318,90 @@ describe("F5.1 — abandoned-cart recovery with privacy enforcement", () => {
       outboxEvents: 0,
     });
   });
+
+  it("upgrades guest abandoned carts on login, updates outcome on unsubscribe and anonymizes historical emails", async () => {
+    const guestCart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: new Date(Date.now() + 48 * 3_600_000),
+    });
+    await carts.addVariant({ cartId: guestCart.id }, catalog.variantId, 1);
+    const staleCutoff = new Date(Date.now() - 2 * 3_600_000);
+    await db.$executeRawUnsafe(`ALTER TABLE "Cart" DISABLE TRIGGER "Cart_set_updated_at"`);
+    try {
+      await db.$executeRaw`UPDATE "Cart" SET "updatedAt" = ${staleCutoff} WHERE "id" = ${guestCart.id}::uuid`;
+    } finally {
+      await db.$executeRawUnsafe(`ALTER TABLE "Cart" ENABLE TRIGGER "Cart_set_updated_at"`);
+    }
+    const firstCapture = await lifecycle.captureAbandonedCarts({
+      inactivityMinutes: 60,
+      limit: 50,
+    });
+    assert.ok(firstCapture.detected >= 1);
+    await worker.runBatch(20);
+    let abandoned = await db.abandonedCart.findUniqueOrThrow({ where: { cartId: guestCart.id } });
+    assert.equal(abandoned.lastReminderOutcome, "NO_CONTACT");
+
+    const oldEmail = `recovery-old-${randomUUID()}@example.test`;
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: oldEmail,
+        status: "ACTIVE",
+        givenName: "Cliente",
+        familyName: "Migrado",
+      },
+    });
+    await db.consent.create({
+      data: {
+        customerId: customer.id,
+        purpose: "MARKETING_EMAIL",
+        status: "GRANTED",
+        source: "recovery-test",
+        policyVersion: "2026-01",
+        proofHash: hash(),
+      },
+    });
+    await carts.assignCustomer({ cartId: guestCart.id }, customer.id);
+    const secondCutoff = new Date(Date.now() - 65 * 60_000);
+    await db.$executeRawUnsafe(`ALTER TABLE "Cart" DISABLE TRIGGER "Cart_set_updated_at"`);
+    try {
+      await db.$executeRaw`UPDATE "Cart" SET "updatedAt" = ${secondCutoff} WHERE "id" = ${guestCart.id}::uuid`;
+    } finally {
+      await db.$executeRawUnsafe(`ALTER TABLE "Cart" ENABLE TRIGGER "Cart_set_updated_at"`);
+    }
+    const secondCapture = await lifecycle.captureAbandonedCarts({
+      inactivityMinutes: 60,
+      limit: 50,
+    });
+    assert.ok(secondCapture.detected >= 1);
+    abandoned = await db.abandonedCart.findUniqueOrThrow({ where: { cartId: guestCart.id } });
+    assert.equal(abandoned.customerId, customer.id);
+    assert.equal(abandoned.lastReminderOutcome, null);
+
+    await worker.runBatch(20);
+    await worker.runBatch(20);
+    assert.equal(providerCalls.length, 1);
+    const recoveryEvent = await db.emailEvent.findFirstOrThrow({
+      where: { abandonedCartId: abandoned.id },
+    });
+    const token = new URL(recoveryEvent.variablesSnapshot.unsubscribeUrl).pathname
+      .split("/")
+      .at(-1);
+    await email.unsubscribe(token);
+    abandoned = await db.abandonedCart.findUniqueOrThrow({ where: { id: abandoned.id } });
+    assert.equal(abandoned.lastReminderOutcome, "SUPPRESSED");
+
+    await db.customer.update({
+      where: { id: customer.id },
+      data: { email: `recovery-new-${randomUUID()}@example.test` },
+    });
+    await new AccountService(db, { privacyPolicyVersion: "2026-01" }).anonymize(
+      customer.id,
+      "ELIMINAR MI CUENTA",
+      { ipHash: hash(), userAgentHash: hash() },
+    );
+    const erasedEvent = await db.emailEvent.findUniqueOrThrow({ where: { id: recoveryEvent.id } });
+    assert.ok(erasedEvent.anonymizedAt !== null);
+    assert.match(erasedEvent.recipientEmail, /^anon-[0-9a-f]{32}@anonymized\.invalid$/);
+  });
 });

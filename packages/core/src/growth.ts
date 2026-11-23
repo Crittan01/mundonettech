@@ -52,6 +52,44 @@ export function cumulativeLoyaltyReversal(options: {
   return assertPoints(Number(roundDivHalfUp(BigInt(earnedPoints) * refunded, netMerchandiseCents)));
 }
 
+export function compensatedOrderMerchandiseCents(options: {
+  readonly netMerchandiseCents: bigint;
+  readonly orderTotalCents: bigint;
+  readonly capturedCents: bigint;
+  readonly completedRefundMerchandiseCents: bigint;
+  readonly completedRefundTotalCents: bigint;
+  readonly succeededVoidCents: bigint;
+}): bigint {
+  const netMerchandiseCents = assertNonnegativeMoney(
+    options.netMerchandiseCents,
+    "netMerchandiseCents",
+  );
+  const orderTotalCents = assertNonnegativeMoney(options.orderTotalCents, "orderTotalCents");
+  const capturedCents = assertNonnegativeMoney(options.capturedCents, "capturedCents");
+  const refundMerchandise = assertNonnegativeMoney(
+    options.completedRefundMerchandiseCents,
+    "completedRefundMerchandiseCents",
+  );
+  const refundTotal = assertNonnegativeMoney(
+    options.completedRefundTotalCents,
+    "completedRefundTotalCents",
+  );
+  const voidCents = assertNonnegativeMoney(options.succeededVoidCents, "succeededVoidCents");
+  if (refundMerchandise > netMerchandiseCents) {
+    throw new RangeError("Refunded merchandise exceeds the original eligible merchandise.");
+  }
+  if (netMerchandiseCents === 0n) return 0n;
+  if (capturedCents > 0n && refundTotal + voidCents >= capturedCents) {
+    return netMerchandiseCents;
+  }
+  if (voidCents === 0n || orderTotalCents === 0n) {
+    return refundMerchandise;
+  }
+  const voidMerchandise = roundDivHalfUp(netMerchandiseCents * voidCents, orderTotalCents);
+  const combined = refundMerchandise + voidMerchandise;
+  return combined > netMerchandiseCents ? netMerchandiseCents : combined;
+}
+
 export function normalizeReferralCode(value: string): string {
   if (typeof value !== "string") throw new TypeError("Referral code must be a string.");
   const normalized = value.trim().toUpperCase();
@@ -75,6 +113,17 @@ export const referralStatusLabels = {
   REJECTED: "No elegible",
   REVERSED: "Recompensa reversada",
 } as const;
+
+export const referralRejectionReasonLabels = {
+  SELF_REFERRAL: "Autorreferido no permitido",
+  REFERRER_UNAVAILABLE: "Código referidor no disponible",
+  REFERRED_UNAVAILABLE: "Cuenta referida no disponible",
+  PREVIOUS_PAID_ORDER: "Cuenta con compra pagada previa",
+  BELOW_MINIMUM: "Compra inferior al mínimo elegible",
+  B2B_ORDER: "Pedido corporativo B2B excluido",
+} as const;
+
+export type ReferralRejectionReason = keyof typeof referralRejectionReasonLabels;
 
 export const abandonedCartReminderOutcomeLabels = {
   QUEUED: "Recordatorio en cola",

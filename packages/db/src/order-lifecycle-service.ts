@@ -113,6 +113,7 @@ export class OrderLifecycleService {
               expiredAt: now,
             },
             update: {
+              customerId: cart.customerId,
               contactEmail: customer?.email ?? null,
               status: "EXPIRED",
               recoveredAt: null,
@@ -157,9 +158,12 @@ export class OrderLifecycleService {
             lastActivityAt: cart.updatedAt,
           },
           update: {
+            customerId: cart.customerId,
             contactEmail: customer?.email ?? null,
             status: "DETECTED",
             lastActivityAt: cart.updatedAt,
+            lastReminderActivityAt: null,
+            lastReminderOutcome: null,
             recoveredAt: null,
             expiredAt: null,
           },

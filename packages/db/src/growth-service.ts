@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import {
+  compensatedOrderMerchandiseCents,
   cumulativeLoyaltyReversal,
   hasAdminPermission,
   isAdminRole,
@@ -9,6 +10,7 @@ import {
   loyaltyReferralPoints,
   maskEmail,
   normalizeReferralCode,
+  type ReferralRejectionReason,
 } from "@mundonettech/core";
 
 import type { Customer, LoyaltyTxnType, Prisma, ReferralStatus } from "./generated/client.js";
@@ -39,6 +41,7 @@ interface LoyaltyAppendInput {
   readonly customerId: string;
   readonly orderId: string;
   readonly refundId?: string;
+  readonly paymentTransactionId?: string;
   readonly referralId?: string;
   readonly type: LoyaltyTxnType;
   readonly points: number;
@@ -106,6 +109,7 @@ export class GrowthService {
     assertUuid(input.customerId, "customerId");
     assertUuid(input.orderId, "orderId");
     if (input.refundId) assertUuid(input.refundId, "refundId");
+    if (input.paymentTransactionId) assertUuid(input.paymentTransactionId, "paymentTransactionId");
     if (input.referralId) assertUuid(input.referralId, "referralId");
     const delta = points(input.points, "points");
     const existing = await tx.loyaltyTxn.findUnique({
@@ -118,6 +122,7 @@ export class GrowthService {
         existing.type !== input.type ||
         existing.points !== delta ||
         (existing.refundId ?? null) !== (input.refundId ?? null) ||
+        (existing.paymentTransactionId ?? null) !== (input.paymentTransactionId ?? null) ||
         (existing.referralId ?? null) !== (input.referralId ?? null)
       ) {
         throw new GrowthError(
@@ -148,6 +153,7 @@ export class GrowthService {
         customerId: input.customerId,
         orderId: input.orderId,
         refundId: input.refundId ?? null,
+        paymentTransactionId: input.paymentTransactionId ?? null,
         referralId: input.referralId ?? null,
         type: input.type,
         points: delta,
@@ -348,20 +354,26 @@ export class GrowthService {
     return { earnedPoints, referralPoints: awardedReferralPoints };
   }
 
-  async reverseCompletedRefundInTransaction(
+  private async reverseOrderCompensationInTransaction(
     tx: Prisma.TransactionClient,
-    refundId: string,
+    source: {
+      readonly orderId: string;
+      readonly refundId?: string;
+      readonly paymentTransactionId?: string;
+    },
   ): Promise<{ reversedPoints: number }> {
-    assertUuid(refundId, "refundId");
-    const refund = await tx.orderRefund.findUnique({
-      where: { id: refundId },
-      include: { order: { include: { items: true } } },
-    });
-    if (!refund) throw new GrowthError("NOT_FOUND", "Completed refund not found.");
-    if (refund.status !== "COMPLETED") {
-      throw new GrowthError("CONFLICT", "Loyalty reversal requires a completed refund.");
+    assertUuid(source.orderId, "orderId");
+    if (Boolean(source.refundId) === Boolean(source.paymentTransactionId)) {
+      throw new GrowthError(
+        "VALIDATION",
+        "Loyalty reversal requires either a refundId or a paymentTransactionId.",
+      );
     }
-    const order = refund.order;
+    const order = await tx.order.findUnique({
+      where: { id: source.orderId },
+      include: { items: true },
+    });
+    if (!order) throw new GrowthError("NOT_FOUND", "Order not found for loyalty reversal.");
     const baseEarn = await tx.loyaltyTxn.findUnique({
       where: { operationKey: `loyalty:order:${order.id}:earn:v1` },
     });
@@ -369,6 +381,7 @@ export class GrowthService {
     const referralEarns = referral
       ? await tx.loyaltyTxn.findMany({
           where: { referralId: referral.id, type: "REFERRAL_EARN" },
+          orderBy: [{ customerId: "asc" }],
         })
       : [];
     const customers = await lockCustomers(
@@ -377,32 +390,63 @@ export class GrowthService {
         (id): id is string => typeof id === "string",
       ),
     );
-    if (customers.some((customer) => customer.status === "ANONYMIZED")) {
-      throw new GrowthError("CONFLICT", "An anonymized customer cannot change loyalty balances.");
-    }
+    const customerMap = new Map(customers.map((customer) => [customer.id, customer]));
     const netMerchandiseCents = order.items.reduce((sum, item) => sum + item.lineTotalCents, 0n);
-    const completedRefunds = await tx.orderRefund.findMany({
-      where: { orderId: order.id, status: "COMPLETED" },
-      select: { subtotalCents: true },
-    });
-    const cumulativeRefunded = completedRefunds.reduce(
+    const [completedRefunds, paymentTotals, reversals] = await Promise.all([
+      tx.orderRefund.findMany({
+        where: { orderId: order.id, status: "COMPLETED" },
+        select: { subtotalCents: true, totalCents: true },
+      }),
+      tx.$queryRaw<Array<{ captured: bigint; voided: bigint }>>`
+        SELECT COALESCE(sum(transaction."amountCents") FILTER (WHERE transaction."kind" = 'CAPTURE'), 0) AS captured,
+               COALESCE(sum(transaction."amountCents") FILTER (WHERE transaction."kind" = 'VOID'), 0) AS voided
+        FROM "PaymentTransaction" transaction
+        JOIN "PaymentAttempt" attempt ON attempt."id" = transaction."attemptId"
+        WHERE attempt."orderId" = ${order.id}::uuid AND transaction."status" = 'SUCCEEDED'
+      `,
+      tx.loyaltyTxn.findMany({
+        where: { orderId: order.id, type: { in: ["EARN_REVERSAL", "REFERRAL_REVERSAL"] } },
+      }),
+    ]);
+    const completedRefundMerchandiseCents = completedRefunds.reduce(
       (sum, entry) => sum + entry.subtotalCents,
       0n,
     );
-    const reversals = await tx.loyaltyTxn.findMany({
-      where: { orderId: order.id, type: { in: ["EARN_REVERSAL", "REFERRAL_REVERSAL"] } },
+    const completedRefundTotalCents = completedRefunds.reduce(
+      (sum, entry) => sum + entry.totalCents,
+      0n,
+    );
+    const capturedCents = BigInt(paymentTotals[0]?.captured ?? 0n);
+    const succeededVoidCents = BigInt(paymentTotals[0]?.voided ?? 0n);
+    const compensatedMerchandise = compensatedOrderMerchandiseCents({
+      netMerchandiseCents,
+      orderTotalCents: order.totalCents,
+      capturedCents,
+      completedRefundMerchandiseCents,
+      completedRefundTotalCents,
+      succeededVoidCents,
     });
     let reversedPoints = 0;
+    const keyScope = source.refundId
+      ? `refund:${source.refundId}`
+      : `void:${source.paymentTransactionId!}`;
     const reverse = async (options: {
       earn: { customerId: string; points: number };
       type: "EARN_REVERSAL" | "REFERRAL_REVERSAL";
       referralId?: string;
     }) => {
+      const customer = customerMap.get(options.earn.customerId);
+      if (!customer) throw new GrowthError("NOT_FOUND", "Loyalty customer not found.");
+      // Anonymized accounts already forfeited their entire balance to 0 via FORFEIT.
+      if (customer.status === "ANONYMIZED") return;
       const target = cumulativeLoyaltyReversal({
         earnedPoints: options.earn.points,
-        cumulativeRefundedMerchandiseCents: cumulativeRefunded,
+        cumulativeRefundedMerchandiseCents: compensatedMerchandise,
         netMerchandiseCents,
       });
+      const suffix = options.type === "EARN_REVERSAL" ? "earn" : "referral";
+      const operationKey = `loyalty:${keyScope}:${suffix}:${options.earn.customerId}:v1`;
+      if (reversals.some((entry) => entry.operationKey === operationKey)) return;
       const previous = reversals
         .filter(
           (entry) => entry.customerId === options.earn.customerId && entry.type === options.type,
@@ -412,15 +456,17 @@ export class GrowthService {
       if (amount < 0)
         throw new GrowthError("CONFLICT", "Loyalty reversal history moved backwards.");
       if (amount === 0) return;
-      const suffix = options.type === "EARN_REVERSAL" ? "earn" : "referral";
       await this.appendLoyaltyTxn(tx, {
         customerId: options.earn.customerId,
         orderId: order.id,
-        refundId: refund.id,
+        ...(source.refundId ? { refundId: source.refundId } : {}),
+        ...(source.paymentTransactionId
+          ? { paymentTransactionId: source.paymentTransactionId }
+          : {}),
         ...(options.referralId ? { referralId: options.referralId } : {}),
         type: options.type,
         points: -amount,
-        operationKey: `loyalty:refund:${refund.id}:${suffix}:${options.earn.customerId}:v1`,
+        operationKey,
       });
       reversedPoints += amount;
     };
@@ -428,13 +474,54 @@ export class GrowthService {
     for (const earn of referralEarns) {
       await reverse({ earn, type: "REFERRAL_REVERSAL", referralId: referral!.id });
     }
-    if (referral?.status === "QUALIFIED" && cumulativeRefunded === netMerchandiseCents) {
+    if (referral?.status === "QUALIFIED" && compensatedMerchandise === netMerchandiseCents) {
       await tx.referral.update({
         where: { id: referral.id },
         data: { status: "REVERSED", reversedAt: await databaseNow(tx) },
       });
     }
     return { reversedPoints };
+  }
+
+  async reverseCompletedRefundInTransaction(
+    tx: Prisma.TransactionClient,
+    refundId: string,
+  ): Promise<{ reversedPoints: number }> {
+    assertUuid(refundId, "refundId");
+    const refund = await tx.orderRefund.findUnique({
+      where: { id: refundId },
+      select: { id: true, orderId: true, status: true },
+    });
+    if (!refund) throw new GrowthError("NOT_FOUND", "Completed refund not found.");
+    if (refund.status !== "COMPLETED") {
+      throw new GrowthError("CONFLICT", "Loyalty reversal requires a completed refund.");
+    }
+    return this.reverseOrderCompensationInTransaction(tx, {
+      orderId: refund.orderId,
+      refundId: refund.id,
+    });
+  }
+
+  async reverseVoidedPaymentInTransaction(
+    tx: Prisma.TransactionClient,
+    paymentTransactionId: string,
+  ): Promise<{ reversedPoints: number }> {
+    assertUuid(paymentTransactionId, "paymentTransactionId");
+    const transaction = await tx.paymentTransaction.findUnique({
+      where: { id: paymentTransactionId },
+      select: { id: true, kind: true, status: true, attempt: { select: { orderId: true } } },
+    });
+    if (!transaction) throw new GrowthError("NOT_FOUND", "Voided payment transaction not found.");
+    if (transaction.kind !== "VOID" || transaction.status !== "SUCCEEDED") {
+      throw new GrowthError(
+        "CONFLICT",
+        "Loyalty void reversal requires a succeeded void payment transaction.",
+      );
+    }
+    return this.reverseOrderCompensationInTransaction(tx, {
+      orderId: transaction.attempt.orderId,
+      paymentTransactionId: transaction.id,
+    });
   }
 
   async marketingEmailGranted(customerId: string): Promise<boolean> {
@@ -524,6 +611,9 @@ export class GrowthService {
       referralReceived: customer.referralsReceived[0]
         ? {
             status: customer.referralsReceived[0].status,
+            rejectionReason:
+              (customer.referralsReceived[0].rejectionReason as ReferralRejectionReason | null) ??
+              null,
             orderNumber: customer.referralsReceived[0].order?.orderNumber ?? null,
             createdAt: customer.referralsReceived[0].createdAt,
           }
@@ -543,7 +633,7 @@ export class GrowthService {
     const [ledger, referrals, abandonedCarts, totals] = await Promise.all([
       this.db.loyaltyTxn.findMany({
         include: {
-          customer: { select: { email: true } },
+          customer: { select: { email: true, status: true } },
           order: { select: { orderNumber: true } },
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -552,8 +642,8 @@ export class GrowthService {
       this.db.referral.findMany({
         include: {
           code: true,
-          referrer: { select: { email: true } },
-          referred: { select: { email: true } },
+          referrer: { select: { email: true, status: true } },
+          referred: { select: { email: true, status: true } },
           order: { select: { orderNumber: true } },
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -561,7 +651,7 @@ export class GrowthService {
       }),
       this.db.abandonedCart.findMany({
         include: {
-          customer: { select: { email: true } },
+          customer: { select: { email: true, status: true } },
           cart: { select: { itemCount: true, totalCents: true } },
         },
         orderBy: [{ detectedAt: "desc" }, { id: "desc" }],
@@ -573,11 +663,18 @@ export class GrowthService {
           (SELECT count(*)::int FROM "Referral" WHERE "status" = 'QUALIFIED') AS referrals
       `,
     ]);
+    const maskedCustomer = (
+      party: { email: string; status: string } | null | undefined,
+      fallback?: string | null,
+    ) =>
+      party?.status === "ANONYMIZED"
+        ? "Cuenta anonimizada"
+        : maskEmail(party?.email ?? fallback ?? null);
     return {
       totals: totals[0] ?? { customers: 0, points: "0", referrals: 0 },
       ledger: ledger.map((entry) => ({
         id: entry.id,
-        customerEmail: maskEmail(entry.customer.email),
+        customerEmail: maskedCustomer(entry.customer),
         orderNumber: entry.order.orderNumber,
         type: entry.type,
         points: entry.points,
@@ -588,11 +685,11 @@ export class GrowthService {
       referrals: referrals.map((referral) => ({
         id: referral.id,
         code: referral.code.code,
-        referrerEmail: maskEmail(referral.referrer.email),
-        referredEmail: maskEmail(referral.referred.email),
+        referrerEmail: maskedCustomer(referral.referrer),
+        referredEmail: maskedCustomer(referral.referred),
         orderNumber: referral.order?.orderNumber ?? null,
         status: referral.status,
-        rejectionReason: referral.rejectionReason,
+        rejectionReason: (referral.rejectionReason as ReferralRejectionReason | null) ?? null,
         createdAt: referral.createdAt,
         qualifiedAt: referral.qualifiedAt,
         reversedAt: referral.reversedAt,
@@ -600,7 +697,7 @@ export class GrowthService {
       abandonedCarts: abandonedCarts.map((abandoned) => ({
         id: abandoned.id,
         cartId: abandoned.cartId,
-        customerEmail: maskEmail(abandoned.customer?.email ?? abandoned.contactEmail),
+        customerEmail: maskedCustomer(abandoned.customer, abandoned.contactEmail),
         itemCount: abandoned.cart.itemCount,
         totalCents: abandoned.cart.totalCents.toString(),
         status: abandoned.status,

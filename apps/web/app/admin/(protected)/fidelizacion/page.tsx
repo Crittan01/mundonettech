@@ -2,6 +2,7 @@ import {
   abandonedCartReminderOutcomeLabels,
   formatCopCents,
   loyaltyTxnTypeLabels,
+  referralRejectionReasonLabels,
   referralStatusLabels,
 } from "@mundonettech/core";
 
@@ -15,6 +16,7 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+const numberFormatter = new Intl.NumberFormat("es-CO");
 const abandonedStatusLabels = {
   DETECTED: "Detectado",
   RECOVERED: "Recuperado",
@@ -44,15 +46,21 @@ export default async function GrowthAdminPage() {
       <dl className="grid gap-4 sm:grid-cols-3">
         <div className="rounded-xl border border-border bg-card p-5">
           <dt className="text-sm text-muted-foreground">Puntos vigentes</dt>
-          <dd className="mt-2 text-2xl font-bold">{overview.totals.points}</dd>
+          <dd className="mt-2 text-2xl font-bold">
+            {numberFormatter.format(BigInt(overview.totals.points))}
+          </dd>
         </div>
         <div className="rounded-xl border border-border bg-card p-5">
           <dt className="text-sm text-muted-foreground">Cuentas con saldo</dt>
-          <dd className="mt-2 text-2xl font-bold">{overview.totals.customers}</dd>
+          <dd className="mt-2 text-2xl font-bold">
+            {numberFormatter.format(overview.totals.customers)}
+          </dd>
         </div>
         <div className="rounded-xl border border-border bg-card p-5">
           <dt className="text-sm text-muted-foreground">Referidos con recompensa vigente</dt>
-          <dd className="mt-2 text-2xl font-bold">{overview.totals.referrals}</dd>
+          <dd className="mt-2 text-2xl font-bold">
+            {numberFormatter.format(overview.totals.referrals)}
+          </dd>
         </div>
       </dl>
       <section aria-labelledby="admin-ledger" className="space-y-4">
@@ -148,7 +156,9 @@ export default async function GrowthAdminPage() {
                     <td className="p-3">{referral.referredEmail}</td>
                     <td className="p-3">
                       {referralStatusLabels[referral.status]}
-                      {referral.rejectionReason ? ` · ${referral.rejectionReason}` : ""}
+                      {referral.rejectionReason
+                        ? ` · ${referralRejectionReasonLabels[referral.rejectionReason]}`
+                        : ""}
                     </td>
                     <td className="p-3">{referral.orderNumber ?? "—"}</td>
                     <td className="p-3">{dateFormatter.format(referral.createdAt)}</td>

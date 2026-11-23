@@ -171,6 +171,7 @@ export {
 } from "./b2b.js";
 export {
   abandonedCartReminderOutcomeLabels,
+  compensatedOrderMerchandiseCents,
   cumulativeLoyaltyReversal,
   loyaltyEarnUnitCents,
   loyaltyPointsForMerchandise,
@@ -178,5 +179,7 @@ export {
   loyaltyTxnTypeLabels,
   normalizeReferralCode,
   referralCodeLength,
+  referralRejectionReasonLabels,
   referralStatusLabels,
 } from "./growth.js";
+export type { ReferralRejectionReason } from "./growth.js";

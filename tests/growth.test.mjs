@@ -7,6 +7,8 @@ import pg from "pg";
 import {
   AccountService,
   CartService,
+  CrmRetentionService,
+  CrmService,
   GrowthError,
   GrowthService,
   OrderRefundService,
@@ -419,5 +421,91 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     await assert.rejects(
       db.loyaltyTxn.update({ where: { id: forfeiture.id }, data: { points: 0 } }),
     );
+  });
+
+  it("reverses loyalty and referral points when a captured bank transfer is voided", async () => {
+    const referrer = await makeCustomer();
+    const referred = await makeCustomer();
+    const { code } = await growth.createReferralCode(referrer.id);
+    const attributed = await growth.attributeReferral(referred.id, code);
+    const { orderId } = await createOrder(referred, 2);
+    const attempt = await payments.start({
+      orderId,
+      provider: "BANK_TRANSFER",
+      environment: "LOCAL",
+      idempotencyKey: `growth-void-bank:${randomUUID()}`,
+    });
+    await payments.confirmBankTransfer({
+      paymentAttemptId: attempt.id,
+      externalReference: `VOID-REF-${randomUUID()}`,
+      audit,
+    });
+    assert.equal(await balance(referred.id), 52);
+    assert.equal(await balance(referrer.id), 50);
+
+    const voidStarted = await refunds.void(attempt.id, audit);
+    assert.equal(voidStarted.status, "PROCESSING");
+    const voidTxnId = voidStarted.transactionIds[0];
+    await assert.rejects(
+      sql.query(
+        `INSERT INTO "LoyaltyTxn" ("customerId", "orderId", "paymentTransactionId", "type", "points", "balanceAfter", "operationKey")
+         VALUES ($1, $2, $3, 'EARN_REVERSAL', -2, 50, $4)`,
+        [referred.id, orderId, voidTxnId, `forged-pending-void-${randomUUID()}`],
+      ),
+      (error) => error.code === "23514",
+    );
+
+    const reconciled = await refunds.completeManualTransaction({
+      transactionId: voidTxnId,
+      externalId: `VOID-EXT-${randomUUID()}`,
+      audit,
+    });
+    assert.equal(reconciled.status, "COMPLETED");
+    assert.equal(await balance(referred.id), 0);
+    assert.equal(await balance(referrer.id), 0);
+    assert.equal(
+      (await db.referral.findUniqueOrThrow({ where: { id: attributed.id } })).status,
+      "REVERSED",
+    );
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "REFUNDED",
+    );
+  });
+
+  it("completes referred order refunds cleanly after the referrer anonymized via CRM suppression", async () => {
+    const referrer = await makeCustomer();
+    const referred = await makeCustomer();
+    const { code } = await growth.createReferralCode(referrer.id);
+    const attributed = await growth.attributeReferral(referred.id, code);
+    const { orderId, totalCents } = await createOrder(referred);
+    await payOrder(orderId, totalCents, referred.id);
+    assert.equal(await balance(referrer.id), 50);
+    assert.equal(await balance(referred.id), 51);
+
+    const crm = new CrmService(db);
+    const contact = await crm.syncCustomerContact(referrer.id);
+    const retention = new CrmRetentionService(db);
+    await retention.suppress(
+      {
+        contactId: contact.id,
+        expectedVersion: contact.version,
+        reason: "DATA_SUBJECT_REQUEST",
+        privacyPolicyVersion: "2026-01",
+      },
+      audit,
+    );
+    assert.equal(await balance(referrer.id), 0);
+
+    await requestRefund(orderId, 1);
+    assert.equal(await balance(referred.id), 0);
+    assert.equal(await balance(referrer.id), 0);
+    assert.equal(
+      (await db.referral.findUniqueOrThrow({ where: { id: attributed.id } })).status,
+      "REVERSED",
+    );
+    const admin = await growth.getAdminOverview(adminId);
+    const overviewReferral = admin.referrals.find((entry) => entry.id === attributed.id);
+    assert.equal(overviewReferral?.referrerEmail, "Cuenta anonimizada");
   });
 });

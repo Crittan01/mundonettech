@@ -17,6 +17,7 @@ import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { clearActivityCookies, clearCustomerCartCookie } from "@/lib/security/activity-cookies";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 import { clearGuestOrderSession } from "@/lib/security/guest-order-access";
+import { clearReferralCode } from "@/lib/security/referral";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const profileSchema = z.object({
@@ -44,6 +45,7 @@ const addressSchema = z.object({
 
 function revalidateAccount(): void {
   revalidatePath("/mi-cuenta");
+  revalidatePath("/mi-cuenta/beneficios");
   revalidatePath("/mi-cuenta/direcciones");
   revalidatePath("/mi-cuenta/pedidos");
   revalidatePath("/mi-cuenta/privacidad");
@@ -194,6 +196,7 @@ export async function anonymizeAccountAction(
     await clearActivityCookies();
     await clearCustomerCartCookie();
     await clearGuestOrderSession();
+    await clearReferralCode();
   } catch (error) {
     return failure(error, values);
   }

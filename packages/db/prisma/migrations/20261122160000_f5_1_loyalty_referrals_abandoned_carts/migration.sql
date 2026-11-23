@@ -30,6 +30,7 @@ CREATE TABLE "LoyaltyTxn" (
   "customerId" UUID NOT NULL,
   "orderId" UUID NOT NULL,
   "refundId" UUID,
+  "paymentTransactionId" UUID,
   "referralId" UUID,
   "type" "LoyaltyTxnType" NOT NULL,
   "points" INTEGER NOT NULL,
@@ -56,6 +57,7 @@ ALTER TABLE "LoyaltyTxn"
   ADD CONSTRAINT "LoyaltyTxn_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer"("id") ON DELETE RESTRICT ON UPDATE CASCADE,
   ADD CONSTRAINT "LoyaltyTxn_orderId_fkey" FOREIGN KEY ("orderId") REFERENCES "Order"("id") ON DELETE RESTRICT ON UPDATE CASCADE,
   ADD CONSTRAINT "LoyaltyTxn_refundId_fkey" FOREIGN KEY ("refundId") REFERENCES "OrderRefund"("id") ON DELETE RESTRICT ON UPDATE CASCADE,
+  ADD CONSTRAINT "LoyaltyTxn_paymentTransactionId_fkey" FOREIGN KEY ("paymentTransactionId") REFERENCES "PaymentTransaction"("id") ON DELETE RESTRICT ON UPDATE CASCADE,
   ADD CONSTRAINT "LoyaltyTxn_referralId_fkey" FOREIGN KEY ("referralId") REFERENCES "Referral"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "EmailEvent"
   ADD CONSTRAINT "EmailEvent_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer"("id") ON DELETE RESTRICT ON UPDATE CASCADE,
@@ -73,6 +75,7 @@ CREATE UNIQUE INDEX "LoyaltyTxn_operationKey_key" ON "LoyaltyTxn"("operationKey"
 CREATE INDEX "LoyaltyTxn_customerId_createdAt_id_idx" ON "LoyaltyTxn"("customerId", "createdAt", "id");
 CREATE INDEX "LoyaltyTxn_orderId_type_createdAt_idx" ON "LoyaltyTxn"("orderId", "type", "createdAt");
 CREATE INDEX "LoyaltyTxn_refundId_type_idx" ON "LoyaltyTxn"("refundId", "type");
+CREATE INDEX "LoyaltyTxn_paymentTransactionId_type_idx" ON "LoyaltyTxn"("paymentTransactionId", "type");
 CREATE INDEX "LoyaltyTxn_referralId_type_idx" ON "LoyaltyTxn"("referralId", "type");
 CREATE INDEX "AbandonedCart_status_lastReminderOutcome_detectedAt_idx" ON "AbandonedCart"("status", "lastReminderOutcome", "detectedAt");
 CREATE INDEX "EmailEvent_customerId_templateKey_createdAt_idx" ON "EmailEvent"("customerId", "templateKey", "createdAt");
@@ -95,11 +98,11 @@ ALTER TABLE "LoyaltyTxn"
   ADD CONSTRAINT "LoyaltyTxn_balance_nonnegative" CHECK ("balanceAfter" >= 0),
   ADD CONSTRAINT "LoyaltyTxn_operation_key_valid" CHECK ("operationKey" ~ '^[A-Za-z0-9._:-]{3,128}$'),
   ADD CONSTRAINT "LoyaltyTxn_references_consistent" CHECK (
-    ("type" = 'EARN' AND "points" > 0 AND "refundId" IS NULL AND "referralId" IS NULL) OR
-    ("type" = 'EARN_REVERSAL' AND "points" < 0 AND "refundId" IS NOT NULL AND "referralId" IS NULL) OR
-    ("type" = 'REFERRAL_EARN' AND "points" > 0 AND "refundId" IS NULL AND "referralId" IS NOT NULL) OR
-    ("type" = 'REFERRAL_REVERSAL' AND "points" < 0 AND "refundId" IS NOT NULL AND "referralId" IS NOT NULL) OR
-    ("type" = 'FORFEIT' AND "points" < 0 AND "refundId" IS NULL AND "referralId" IS NULL)
+    ("type" = 'EARN' AND "points" > 0 AND "refundId" IS NULL AND "paymentTransactionId" IS NULL AND "referralId" IS NULL) OR
+    ("type" = 'EARN_REVERSAL' AND "points" < 0 AND num_nonnulls("refundId", "paymentTransactionId") = 1 AND "referralId" IS NULL) OR
+    ("type" = 'REFERRAL_EARN' AND "points" > 0 AND "refundId" IS NULL AND "paymentTransactionId" IS NULL AND "referralId" IS NOT NULL) OR
+    ("type" = 'REFERRAL_REVERSAL' AND "points" < 0 AND num_nonnulls("refundId", "paymentTransactionId") = 1 AND "referralId" IS NOT NULL) OR
+    ("type" = 'FORFEIT' AND "points" < 0 AND "refundId" IS NULL AND "paymentTransactionId" IS NULL AND "referralId" IS NULL)
   );
 ALTER TABLE "AbandonedCart" DROP CONSTRAINT "AbandonedCart_reminders_valid";
 ALTER TABLE "AbandonedCart"
@@ -196,9 +199,16 @@ BEGIN
       )
     )
   ) THEN RAISE EXCEPTION 'Forfeited points require an order linked to the customer' USING ERRCODE = '23514'; END IF;
-  IF NEW."type" IN ('EARN_REVERSAL', 'REFERRAL_REVERSAL') AND NOT EXISTS (
-    SELECT 1 FROM "OrderRefund" WHERE "id" = NEW."refundId" AND "orderId" = NEW."orderId" AND "status" = 'COMPLETED'
-  ) THEN RAISE EXCEPTION 'Loyalty reversals require a completed order refund' USING ERRCODE = '23514'; END IF;
+  IF NEW."type" IN ('EARN_REVERSAL', 'REFERRAL_REVERSAL') THEN
+    IF NEW."refundId" IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM "OrderRefund" WHERE "id" = NEW."refundId" AND "orderId" = NEW."orderId" AND "status" = 'COMPLETED'
+    ) THEN RAISE EXCEPTION 'Loyalty reversals require a completed order refund' USING ERRCODE = '23514'; END IF;
+    IF NEW."paymentTransactionId" IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM "PaymentTransaction" pt
+      JOIN "PaymentAttempt" pa ON pa."id" = pt."attemptId"
+      WHERE pt."id" = NEW."paymentTransactionId" AND pa."orderId" = NEW."orderId" AND pt."kind" = 'VOID' AND pt."status" = 'SUCCEEDED'
+    ) THEN RAISE EXCEPTION 'Loyalty void reversals require a succeeded void payment transaction' USING ERRCODE = '23514'; END IF;
+  END IF;
   IF NEW."type" IN ('REFERRAL_EARN', 'REFERRAL_REVERSAL') AND NOT EXISTS (
     SELECT 1 FROM "Referral" WHERE "id" = NEW."referralId" AND "orderId" = NEW."orderId" AND
       NEW."customerId" IN ("referrerCustomerId", "referredCustomerId")
@@ -243,7 +253,8 @@ BEGIN
       )) OR
       (NEW."orderId" IS NULL AND NOT EXISTS (
         SELECT 1 FROM "Customer" customer
-        WHERE customer."status" = 'ANONYMIZED' AND customer."email" = NEW."recipientEmail"
+        WHERE (NEW."customerId" IS NULL OR customer."id" = NEW."customerId")
+          AND customer."status" = 'ANONYMIZED' AND customer."email" = NEW."recipientEmail"
       ))
     ) THEN RAISE EXCEPTION 'Email recipient anonymization does not match the customer erasure' USING ERRCODE = '55000'; END IF;
     RETURN NEW;

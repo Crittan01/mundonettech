@@ -448,6 +448,10 @@ export class PaymentRefundService {
               "Transaction already has another external ID.",
               "DUPLICATE_REFERENCE",
             );
+          if (transaction.kind === "VOID") {
+            await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, transaction.id);
+            await refreshOrderPaymentStatus(tx, peek.attempt.orderId);
+          }
           return { refundId: transaction.refundId, replayed: true };
         }
         if (!["PENDING", "PROCESSING"].includes(transaction.status)) {
@@ -467,6 +471,10 @@ export class PaymentRefundService {
             completedAt: now,
           },
         });
+        if (transaction.kind === "VOID") {
+          await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, transaction.id);
+          await refreshOrderPaymentStatus(tx, peek.attempt.orderId);
+        }
         await writePaymentAudit(tx, {
           action:
             transaction.kind === "REFUND" ? "PAYMENT_REFUND_RECONCILED" : "PAYMENT_VOID_RECONCILED",
@@ -481,7 +489,6 @@ export class PaymentRefundService {
         return {
           refundId: transaction.refundId,
           replayed: false,
-          orderId: peek.attempt.orderId,
         };
       });
     } catch (error) {
@@ -494,12 +501,6 @@ export class PaymentRefundService {
       throw error;
     }
     if (outcome.refundId) return this.finalizeRefund(outcome.refundId, options.audit);
-    if (outcome.orderId) {
-      await inInventoryTransaction(this.db, async (tx) => {
-        await acquireOperationLocks(tx, [`order-payment:${outcome.orderId!}`]);
-        await refreshOrderPaymentStatus(tx, outcome.orderId!);
-      });
-    }
     return {
       refundId: options.transactionId,
       status: "COMPLETED",
@@ -710,6 +711,9 @@ export class PaymentRefundService {
           completedAt: result.status === "PENDING" ? null : now,
         },
       });
+      if (result.status === "SUCCEEDED") {
+        await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, prepared.transaction.id);
+      }
       if (result.status !== "PENDING")
         await refreshOrderPaymentStatus(tx, prepared.attempt.orderId);
       await writePaymentAudit(tx, {

@@ -526,6 +526,14 @@ export class EmailService {
           },
         });
       }
+      if (event.abandonedCartId) {
+        await tx.$executeRaw`
+          UPDATE "AbandonedCart" SET
+            "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
+            "lastReminderOutcome" = 'SUPPRESSED'
+          WHERE "id" = ${event.abandonedCartId}::uuid
+        `;
+      }
       return { eventId: event.id, topic: event.topic, replayed: inserted.length === 0 };
     });
   }
