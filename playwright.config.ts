@@ -40,6 +40,7 @@ const webServerEnv: Record<string, string> = {
   ORDER_CRON_SECRET: process.env.ORDER_CRON_SECRET ?? "e2e-order-scheduler-secret-32-chars-ok",
   DOMAIN_WORKER_CRON_SECRET:
     process.env.DOMAIN_WORKER_CRON_SECRET ?? "e2e-domain-worker-scheduler-secret-32-chars",
+  HEALTH_CRON_SECRET: process.env.HEALTH_CRON_SECRET ?? "e2e-health-scheduler-secret-32-chars",
   BANK_TRANSFER_INSTRUCTIONS:
     process.env.BANK_TRANSFER_INSTRUCTIONS ??
     "Cuenta de ahorros 001-00234567-89, banco de pruebas E2E. Usa la referencia del pedido.",

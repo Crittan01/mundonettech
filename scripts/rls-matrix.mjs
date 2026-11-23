@@ -244,9 +244,13 @@ async function ensureMatrixFixtures(client) {
                 ? `AND EXISTS (SELECT 1 FROM public."Customer" customer WHERE customer."id" = t."customerId" AND customer."loyaltyPoints" = t."balanceAfter")`
                 : table === "LifecycleStep"
                   ? `AND EXISTS (SELECT 1 FROM public."LifecycleJourney" journey WHERE journey."id" = t."journeyId" AND journey."status" = 'DRAFT')`
-                  : ["CustomerSegment", "LifecycleJourney"].includes(table)
-                    ? `AND t."status" = 'DRAFT'`
-                    : "";
+                  : ["BackupRun", "DisasterRecoveryDrill"].includes(table)
+                    ? `AND t."status" = 'RUNNING'`
+                    : table === "RecoveryBucketCheck"
+                      ? `AND EXISTS (SELECT 1 FROM public."BackupRun" parent WHERE parent."id" = t."backupRunId" AND parent."status" = 'RUNNING')`
+                      : ["CustomerSegment", "LifecycleJourney"].includes(table)
+                        ? `AND t."status" = 'DRAFT'`
+                        : "";
     const freshRow = await client.query(
       `SELECT t."id"
        FROM public."${table}" t

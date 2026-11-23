@@ -12,7 +12,7 @@ export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }>
 
   return (
     <header className="border-b border-border bg-background">
-      <div className="mx-auto flex h-18 w-full max-w-6xl items-center justify-between px-6 sm:px-8">
+      <div className="mx-auto flex min-h-18 w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-6 py-3 sm:px-8">
         <Link
           href="/"
           className="text-lg font-bold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -23,13 +23,16 @@ export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }>
         <div className="flex items-center gap-4">
           <nav
             aria-label="Navegación principal"
-            className="flex items-center gap-4 text-sm font-medium"
+            className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-medium"
           >
             <Link href="/productos" className="hover:text-primary">
               Catálogo
             </Link>
             <Link href="/comparar" prefetch={false} className="hover:text-primary">
               Comparar
+            </Link>
+            <Link href="/ayuda" className="hover:text-primary">
+              Ayuda
             </Link>
             <Link href="/carrito" prefetch={false} className="hover:text-primary">
               Carrito

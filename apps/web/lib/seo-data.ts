@@ -1,5 +1,6 @@
 import "server-only";
 
+import { helpArticles } from "@mundonettech/config/help";
 import { storeConfig } from "@mundonettech/config/store";
 import { CmsService } from "@mundonettech/cms";
 import {
@@ -26,7 +27,7 @@ function absolute(path: string): string {
 async function readSitemapEntries(): Promise<SitemapXmlEntry[]> {
   "use cache";
   cacheLife(seoLife);
-  cacheTag("seo", "sitemap", "catalog", "cms", "legal");
+  cacheTag("seo", "sitemap", "catalog", "cms", "legal", "help-center");
   const db = getDatabase();
   const [catalog, pages, legalDocuments] = await Promise.all([
     new CatalogService(db).getSeoEntries(),
@@ -52,6 +53,12 @@ async function readSitemapEntries(): Promise<SitemapXmlEntry[]> {
     },
     { url: absolute("/comparar"), changeFrequency: "weekly", priority: 0.5 },
     { url: absolute("/legal"), changeFrequency: "yearly", priority: 0.4 },
+    { url: absolute("/ayuda"), changeFrequency: "monthly", priority: 0.6 },
+    ...helpArticles.map((article) => ({
+      url: absolute(`/ayuda/${article.slug}`),
+      changeFrequency: "monthly" as const,
+      priority: 0.6,
+    })),
     ...legalDocuments.map((document) => ({
       url: absolute(`/legal/${document.slug}`),
       lastModified: document.effectiveDate,

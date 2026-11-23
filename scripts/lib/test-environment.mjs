@@ -69,27 +69,38 @@ export function assertSafeTestEnvironment(
   if (!databaseUrl) throw new Error("TEST_DATABASE_URL or DATABASE_URL is required.");
   const ci = env.CI === "true";
   const primary = assertSafeTestDatabase(databaseUrl, { ci });
-  if (env.DIRECT_URL?.trim()) {
-    assertSafeTestDatabase(env.DIRECT_URL, { ci });
+  for (const candidate of [env.DIRECT_URL, env.DR_DATABASE_URL]) {
+    if (candidate?.trim()) assertSafeTestDatabase(candidate, { ci });
   }
   for (const candidate of [env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_URL]) {
     if (candidate?.trim()) {
       assertSafeTestSupabaseUrl(candidate);
     }
   }
-  if (env.R2_ENDPOINT?.trim()) {
+  for (const [name, value] of [
+    ["R2_ENDPOINT", env.R2_ENDPOINT],
+    ["R2_BACKUP_ENDPOINT", env.R2_BACKUP_ENDPOINT],
+  ]) {
+    if (!value?.trim()) continue;
     let r2Url;
     try {
-      r2Url = new URL(env.R2_ENDPOINT);
+      r2Url = new URL(value);
     } catch {
-      throw new Error("Test R2_ENDPOINT must be a valid URL.");
+      throw new Error(`Test ${name} must be a valid URL.`);
     }
     if (!["http:", "https:"].includes(r2Url.protocol) || !isLoopbackHostname(r2Url.hostname)) {
-      throw new Error("Tests may only target a loopback R2 media endpoint.");
+      throw new Error(`Tests may only target a loopback ${name} endpoint.`);
     }
   }
-  if (env.R2_BUCKET?.trim() && productionNamePattern.test(env.R2_BUCKET.trim())) {
-    throw new Error("Production-like R2 bucket names are forbidden in tests.");
+  const bucketNames = [
+    env.R2_BUCKET,
+    env.R2_BACKUP_BUCKET,
+    ...(env.R2_RECOVERY_BUCKETS ?? "").split(","),
+  ];
+  for (const bucket of bucketNames) {
+    if (bucket?.trim() && productionNamePattern.test(bucket.trim())) {
+      throw new Error("Production-like R2 bucket names are forbidden in tests.");
+    }
   }
   return primary;
 }

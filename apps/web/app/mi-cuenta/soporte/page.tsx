@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import Link from "next/link";
+
 import { SupportReplyForm, SupportTicketForm } from "@/components/orders/postsale-forms";
 import { postSaleService } from "@/lib/account";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
@@ -32,6 +34,13 @@ export default async function SupportPage() {
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Radica y sigue tus PQR con constancia persistente. Las consultas tienen un SLA de diez
           días hábiles y quejas, reclamos y recursos de quince.
+        </p>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Antes de radicar, también puedes consultar las{" "}
+          <Link href="/ayuda" className="font-semibold underline">
+            guías del Centro de ayuda
+          </Link>
+          .
         </p>
       </div>
       <section aria-labelledby="new-ticket" className="space-y-4">

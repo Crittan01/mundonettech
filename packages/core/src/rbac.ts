@@ -298,7 +298,8 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/configuracion"
     | "/admin/usuarios"
     | "/admin/seguridad"
-    | "/admin/auditoria";
+    | "/admin/auditoria"
+    | "/admin/salud";
   label: string;
 }[] {
   return [
@@ -366,7 +367,10 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       : []),
     { href: "/admin/seguridad", label: "Seguridad" },
     ...(hasAdminPermission(role, "audit:read")
-      ? [{ href: "/admin/auditoria" as const, label: "Auditoría" }]
+      ? [
+          { href: "/admin/auditoria" as const, label: "Auditoría" },
+          { href: "/admin/salud" as const, label: "Salud y recuperación" },
+        ]
       : []),
   ];
 }

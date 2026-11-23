@@ -30,6 +30,7 @@ export function standaloneTestEnvironment({ databaseUrl, authOrigin, port = 4110
     CMS_CRON_SECRET: secret(),
     ORDER_CRON_SECRET: secret(),
     DOMAIN_WORKER_CRON_SECRET: secret(),
+    HEALTH_CRON_SECRET: secret(),
     BANK_TRANSFER_INSTRUCTIONS:
       "Cuenta de ahorros 001-00234567-89, banco de pruebas E2E. Usa la referencia del pedido.",
     INTEGRATION_ENVIRONMENT: "LOCAL",

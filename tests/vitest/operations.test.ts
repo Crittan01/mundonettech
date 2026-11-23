@@ -61,6 +61,15 @@ describe("F4A.1 — RBAC for operational and finance surfaces", () => {
       expect(canReadNotificationCategory(role, "outbox.failed")).toBe(
         hasAdminPermission(role, "audit:read"),
       );
+      expect(canReadNotificationCategory(role, "health.backup")).toBe(
+        hasAdminPermission(role, "audit:read"),
+      );
+      expect(canReadNotificationCategory(role, "health.recovery")).toBe(
+        hasAdminPermission(role, "audit:read"),
+      );
+      expect(navigation.some((item) => item.href === "/admin/salud")).toBe(
+        hasAdminPermission(role, "audit:read"),
+      );
       expect(canReadNotificationCategory(role, "operations.general")).toBe(true);
     }
     expect(hasAdminPermission("FULFILLMENT", "orders:read")).toBe(true);

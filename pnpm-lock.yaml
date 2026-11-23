@@ -10,6 +10,13 @@ overrides:
 importers:
 
   .:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: 3.1174.0
+        version: 3.1174.0
+      pg:
+        specifier: 8.23.1
+        version: 8.23.1
     devDependencies:
       '@axe-core/playwright':
         specifier: ^4.14.0
@@ -44,9 +51,6 @@ importers:
       lighthouse:
         specifier: 13.6.0
         version: 13.6.0(ajv@8.20.0)(yauzl@3.4.0)
-      pg:
-        specifier: 8.23.1
-        version: 8.23.1
       prettier:
         specifier: 3.10.1
         version: 3.10.1
