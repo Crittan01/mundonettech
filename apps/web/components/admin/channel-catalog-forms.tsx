@@ -235,7 +235,7 @@ export function ChannelListingCreateForm({
             key={selected.id}
             id="listing-family"
             name="familyName"
-            maxLength={60}
+            maxLength={200}
             defaultValue={state.values?.familyName ?? selected.productName}
             required
           />

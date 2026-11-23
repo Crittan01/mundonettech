@@ -28,8 +28,10 @@ let db;
 let fixture;
 let ring;
 let actor;
+let accounts;
 let account;
 let service;
+let tokenBehavior;
 let createBehavior;
 let itemBehavior;
 let stockBehavior;
@@ -130,15 +132,17 @@ before(
         serializedKeys: JSON.stringify({ 1: randomBytes(32).toString("base64") }),
       });
       fixture = await startMercadoLibreFixture({
+        onToken: (body, count) => tokenBehavior?.(body, count),
         onCreateItem: (body, call) => createBehavior?.(body, call),
         onItem: (input, call) => itemBehavior?.(input, call),
         onStock: (input, call) => stockBehavior?.(input, call),
         onWarehouseStock: (input, call) => warehouseBehavior?.(input, call),
         onSeller: (call) => sellerBehavior?.(call),
       });
-      const accounts = new ChannelAccountService(db, {
+      accounts = new ChannelAccountService(db, {
         ring,
         tokenUrl: `${fixture.origin}/oauth/token`,
+        revokeUrlBase: fixture.origin,
         allowLoopback: true,
         timeoutMs: 2_000,
       });
@@ -172,6 +176,7 @@ beforeEach(() => {
   fixture.calls.length = 0;
   fixture.items.clear();
   fixture.stocks.clear();
+  tokenBehavior = undefined;
   createBehavior = undefined;
   itemBehavior = undefined;
   stockBehavior = undefined;
@@ -437,7 +442,117 @@ describe("F6.2 — User Products, offers and prices", () => {
     const writesBefore = fixture.calls.filter((call) => call.method === "PUT").length;
     assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
     assert.equal(fixture.calls.filter((call) => call.method === "PUT").length, writesBefore);
+    assert.equal(current.localQuantity, 8);
     assert.equal(current.remoteFullQuantity, 0);
+    const afterFullStockSync = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: { orderBy: { createdAt: "asc" } } },
+    });
+    assert.equal(afterFullStockSync.localQuantity, 8);
+
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "SYNC_CONTENT",
+      desiredStatus: "PAUSED",
+      audit: audit(),
+    });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    const paused = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: { orderBy: { createdAt: "asc" } } },
+    });
+    assert.equal(paused.status, "PAUSED");
+    assert.deepEqual(
+      paused.offers.map((offer) => offer.status),
+      ["PAUSED", "PAUSED"],
+    );
+
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "SYNC_CONTENT",
+      desiredStatus: "ACTIVE",
+      audit: audit(),
+    });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    const reactivated = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: { orderBy: { createdAt: "asc" } } },
+    });
+    assert.equal(reactivated.status, "ACTIVE");
+    assert.deepEqual(
+      reactivated.offers.map((offer) => offer.status),
+      ["ACTIVE", "ACTIVE"],
+    );
+
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "SYNC_CONTENT",
+      desiredStatus: "CLOSED",
+      audit: audit(),
+    });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    const closed = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: { orderBy: { createdAt: "asc" } } },
+    });
+    assert.equal(closed.status, "CLOSED");
+    assert.deepEqual(
+      closed.offers.map((offer) => offer.status),
+      ["CLOSED", "CLOSED"],
+    );
+  });
+
+  it("flags missing meli_facility stock during reconciliation and clears once Full stock matches", async () => {
+    const catalog = await makeCatalog({ local: false, full: true });
+    stockBehavior = ({ current }) => ({
+      status: 200,
+      version: 4,
+      body: {
+        id: current.id,
+        user_id: current.user_id,
+        locations: [],
+      },
+    });
+    const listing = await createListing(catalog, { offer: { fulfillment: true } });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "RECONCILE_REMOTE",
+      force: true,
+      audit: audit(),
+    });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    const diverged = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: true },
+    });
+    assert.equal(diverged.status, "RECONCILE_REQUIRED");
+    assert.equal(diverged.lastProviderError, "REMOTE_DIVERGENCE");
+    assert.equal(diverged.offers[0].status, "RECONCILE_REQUIRED");
+
+    stockBehavior = ({ current }) => ({
+      status: 200,
+      version: 5,
+      body: {
+        id: current.id,
+        user_id: current.user_id,
+        locations: [{ type: "meli_facility", quantity: 3 }],
+      },
+    });
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "RECONCILE_REMOTE",
+      force: true,
+      audit: audit(),
+    });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    const converged = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: true },
+    });
+    assert.equal(converged.status, "ACTIVE");
+    assert.equal(converged.lastProviderError, null);
+    assert.equal(converged.offers[0].status, "ACTIVE");
   });
 });
 
@@ -606,5 +721,125 @@ describe("F6.2 — claims, reconciliation and failure safety", () => {
     const repeated = await service.processSyncJobs(audit(), { listingId: listing.id });
     assert.equal(repeated.claimed, 0);
     assert.equal(fixture.calls.length, calls);
+  });
+
+  it("cancels pending and retry-scheduled sync jobs cleanly when disconnecting a channel account", async () => {
+    const sellerUserId = 9035444;
+    tokenBehavior = () => ({
+      status: 200,
+      body: {
+        access_token: `APP_USR-test-${randomUUID()}`,
+        token_type: "bearer",
+        expires_in: 3600,
+        scope: "offline_access read write",
+        user_id: sellerUserId,
+        refresh_token: `TG-test-${randomUUID()}`,
+      },
+    });
+    sellerBehavior = () => ({
+      status: 200,
+      body: { id: sellerUserId, tags: ["user_product_seller", "normal"] },
+    });
+    const started = await accounts.startMercadoLibreOAuth({
+      label: "Mercado Libre desconexión F6.2",
+      clientId: "123456789012",
+      clientSecret: "integration-secret-not-production-123456",
+      redirectUri,
+      audit: audit(),
+    });
+    const disposableAccount = await accounts.completeMercadoLibreOAuth({
+      attemptId: started.attemptId,
+      state: started.state,
+      code: `TG-code-${randomUUID()}`,
+      redirectUri,
+      audit: audit(),
+    });
+    const publishedCatalog = await makeCatalog();
+    const publishedListing = await service.createListing({
+      accountId: disposableAccount.id,
+      variantId: publishedCatalog.variantId,
+      externalCategoryId: "MCO12345",
+      familyName: "Router desconexión publicada",
+      sellerStoreId: "store-bogota",
+      sellerNetworkNodeId: "node-bogota",
+      offer: formula(),
+      audit: audit(),
+    });
+    createBehavior = (body) => {
+      const item = {
+        id: "MCO988888881",
+        user_product_id: "MCOU988888881",
+        seller_id: sellerUserId,
+        status: "active",
+        price: body.price,
+        available_quantity: body.available_quantity ?? 8,
+        seller_sku: publishedCatalog.sku,
+        shipping: body.shipping ?? {},
+      };
+      fixture.items.set(item.id, item);
+      fixture.stocks.set(item.user_product_id, {
+        id: item.user_product_id,
+        user_id: sellerUserId,
+        version: 1,
+        locations: [{ type: "selling_address", quantity: 8 }],
+      });
+      return { status: 201, body: item };
+    };
+    assert.equal(
+      (await service.processSyncJobs(audit(), { listingId: publishedListing.id })).succeeded,
+      1,
+    );
+
+    // Enqueue a retry-scheduled job (via repeated x-version 409) and a pending job
+    await admin.query(`UPDATE "StockLevel" SET "onHand" = 9 WHERE "variantId" = $1`, [
+      publishedCatalog.variantId,
+    ]);
+    warehouseBehavior = () => ({ status: 409, body: { error: "version_conflict" } });
+    const retryJob = await service.enqueueSync({
+      listingId: publishedListing.id,
+      kind: "SYNC_LOCAL_STOCK",
+      force: true,
+      audit: audit(),
+    });
+    assert.equal(
+      (await service.processSyncJobs(audit(), { listingId: publishedListing.id })).retryScheduled,
+      1,
+    );
+    const pendingCatalog = await makeCatalog();
+    const pendingListing = await service.createListing({
+      accountId: disposableAccount.id,
+      variantId: pendingCatalog.variantId,
+      externalCategoryId: "MCO12345",
+      familyName: "Router desconexión pendiente",
+      offer: formula(),
+      audit: audit(),
+    });
+    const pendingJob = await db.channelSyncJob.findFirstOrThrow({
+      where: { listingId: pendingListing.id },
+    });
+
+    const disconnected = await accounts.disconnectAccount(disposableAccount.id, audit());
+    assert.equal(disconnected.alreadyDisconnected, false);
+    assert.equal(
+      (await db.channelAccount.findUniqueOrThrow({ where: { id: disposableAccount.id } })).status,
+      "DISCONNECTED",
+    );
+
+    const jobsAfter = await db.channelSyncJob.findMany({
+      where: { id: { in: [retryJob.id, pendingJob.id] } },
+    });
+    assert.equal(jobsAfter.length, 2);
+    for (const job of jobsAfter) {
+      assert.equal(job.status, ChannelSyncJobStatus.FAILED);
+      assert.equal(job.failureCode, "ACCOUNT_DISCONNECTED");
+      assert.ok(job.completedAt);
+    }
+    const pausedAfter = await db.channelListing.findUniqueOrThrow({
+      where: { id: publishedListing.id },
+      include: { offers: true },
+    });
+    assert.equal(pausedAfter.status, "PAUSED");
+    assert.equal(pausedAfter.lastProviderError, "ACCOUNT_DISCONNECTED");
+    assert.equal(pausedAfter.offers[0].status, "PAUSED");
   });
 });

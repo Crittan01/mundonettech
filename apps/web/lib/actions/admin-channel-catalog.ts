@@ -26,7 +26,7 @@ const listingSchema = z.object({
     .string()
     .trim()
     .min(1)
-    .max(60)
+    .max(200)
     .regex(/^[^\u0000-\u001f\u007f]+$/),
   sellerStoreId: z.union([z.literal(""), z.string().regex(/^[A-Za-z0-9_-]{1,64}$/)]),
   sellerNetworkNodeId: z.union([z.literal(""), z.string().regex(/^[A-Za-z0-9_-]{1,64}$/)]),

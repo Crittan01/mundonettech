@@ -172,7 +172,13 @@ interface SyncPayload {
   readonly listingTypeId?: "gold_special" | "gold_pro";
   readonly fulfillment?: boolean;
   readonly desiredStatus?: "ACTIVE" | "PAUSED" | "CLOSED";
-  readonly expectedOffers?: readonly { readonly offerId: string; readonly priceCents: string }[];
+  readonly expectedOffers?: readonly {
+    readonly offerId: string;
+    readonly priceCents: string;
+    readonly offerVersion: number;
+    readonly logisticType: ChannelLogisticType;
+    readonly quantity: number;
+  }[];
 }
 
 interface ExecutionSuccess {
@@ -786,6 +792,9 @@ export class ChannelCatalogService {
       ? this.content(variant, options.listing)
       : null;
     const stock = channelStockQuantities(variant);
+    const hasLocalOffer =
+      options.listing.offers.some((candidate) => candidate.logisticType === "CROSS_DOCKING") ||
+      offer?.logisticType === "CROSS_DOCKING";
     const makePayload = (listingVersion: number, offers: readonly ChannelOffer[]): SyncPayload => ({
       listingVersion,
       offerVersion: offer?.version ?? null,
@@ -809,6 +818,9 @@ export class ChannelCatalogService {
             expectedOffers: offers.map((candidate) => ({
               offerId: candidate.id,
               priceCents: candidate.priceCents.toString(),
+              offerVersion: candidate.version,
+              logisticType: candidate.logisticType,
+              quantity: candidate.logisticType === "FULFILLMENT" ? stock.full : stock.local,
             })),
           }
         : {}),
@@ -824,12 +836,23 @@ export class ChannelCatalogService {
       const existing = await tx.channelSyncJob.findUnique({ where: { deduplicationKey } });
       if (existing) return existing;
     }
-    if (offer && ["PUBLISH", "SYNC_LOCAL_STOCK", "RECONCILE_REMOTE"].includes(options.kind)) {
+    const now = await this.now(tx);
+    if (options.kind === "RECONCILE_REMOTE") {
+      for (const candidate of options.listing.offers) {
+        await tx.channelOffer.update({
+          where: { id: candidate.id },
+          data: {
+            stockQuantity: candidate.logisticType === "FULFILLMENT" ? stock.full : stock.local,
+            updatedAt: now,
+          },
+        });
+      }
+    } else if (offer && ["PUBLISH", "SYNC_LOCAL_STOCK"].includes(options.kind)) {
       await tx.channelOffer.update({
         where: { id: offer.id },
         data: {
           stockQuantity: offer.logisticType === "FULFILLMENT" ? stock.full : stock.local,
-          updatedAt: await this.now(tx),
+          updatedAt: now,
         },
       });
     }
@@ -837,11 +860,11 @@ export class ChannelCatalogService {
       where: { id: options.listing.id },
       data: {
         ...(content ? { sourceHash: Buffer.from(hash(content)) } : {}),
-        localQuantity: offer?.logisticType === "FULFILLMENT" ? stock.full : stock.local,
+        localQuantity: hasLocalOffer ? stock.local : stock.full,
         version: { increment: 1 },
-        updatedAt: await this.now(tx),
+        updatedAt: now,
       },
-      include: { offers: true },
+      include: { offers: { orderBy: { createdAt: "asc" } } },
     });
     return this.createJob(tx, {
       audit: options.audit,
@@ -1491,10 +1514,18 @@ export class ChannelCatalogService {
       ) {
         matches = false;
       }
+      if (expected.logisticType === "FULFILLMENT") {
+        if (remote.full !== expected.quantity) matches = false;
+      } else if (remote.local !== null && remote.local !== expected.quantity) {
+        matches = false;
+      }
     }
-    if (payload.quantity !== undefined) {
-      const remoteQuantity = job.offer?.logisticType === "FULFILLMENT" ? remote.full : remote.local;
-      if (remoteQuantity !== null && remoteQuantity !== payload.quantity) matches = false;
+    if (!payload.expectedOffers?.length && payload.quantity !== undefined) {
+      if (job.offer?.logisticType === "FULFILLMENT") {
+        if (remote.full !== payload.quantity) matches = false;
+      } else if (remote.local !== null && remote.local !== payload.quantity) {
+        matches = false;
+      }
     }
     return {
       externalUserProductId,
@@ -1530,13 +1561,24 @@ export class ChannelCatalogService {
           updatedAt: now,
         },
       });
-      const listing = await tx.channelListing.findUniqueOrThrow({ where: { id: job.listingId } });
+      const listing = await tx.channelListing.findUniqueOrThrow({
+        where: { id: job.listingId },
+        include: { account: true, offers: { orderBy: { createdAt: "asc" } } },
+      });
       const sameVersion = listing.version === payload.listingVersion;
-      const status = sameVersion
+      const rawStatus = sameVersion
         ? result.status
         : result.externalUserProductId
           ? "RECONCILE_REQUIRED"
           : listing.status;
+      const disconnected =
+        listing.account.status === "DISCONNECTED" &&
+        rawStatus !== "CLOSED" &&
+        listing.status !== "CLOSED";
+      const status = disconnected ? "PAUSED" : rawStatus;
+      const hasLocalOffer = listing.offers.some(
+        (candidate) => candidate.logisticType === "CROSS_DOCKING",
+      );
       await tx.channelListing.update({
         where: { id: listing.id },
         data: {
@@ -1544,7 +1586,9 @@ export class ChannelCatalogService {
             ? { externalUserProductId: result.externalUserProductId }
             : {}),
           status,
-          ...(sameVersion && payload.quantity !== undefined
+          ...(sameVersion &&
+          payload.quantity !== undefined &&
+          (job.offer?.logisticType !== "FULFILLMENT" || !hasLocalOffer)
             ? { localQuantity: payload.quantity }
             : {}),
           ...(result.remoteLocalQuantity !== undefined
@@ -1557,16 +1601,50 @@ export class ChannelCatalogService {
             ? { remoteStockVersion: result.remoteStockVersion }
             : {}),
           stockSyncedAt: now,
-          lastProviderError: result.providerError ?? null,
+          lastProviderError: disconnected ? "ACCOUNT_DISCONNECTED" : (result.providerError ?? null),
           syncClaimId: null,
           syncClaimedAt: null,
           syncClaimExpiresAt: null,
           updatedAt: now,
         },
       });
-      if (job.offerId) {
-        const offer = await tx.channelOffer.findUnique({ where: { id: job.offerId } });
-        if (offer) {
+      if (job.kind === "SYNC_CONTENT" || job.kind === "RECONCILE_REMOTE") {
+        for (const offer of listing.offers) {
+          const attachItemId =
+            offer.id === job.offerId && result.externalItemId && !offer.externalItemId
+              ? result.externalItemId
+              : undefined;
+          const hasExternalItem = Boolean(offer.externalItemId || attachItemId);
+          if (!hasExternalItem || offer.status === "CLOSED") continue;
+          const expectedVersion =
+            job.kind === "RECONCILE_REMOTE"
+              ? (payload.expectedOffers?.find((candidate) => candidate.offerId === offer.id)
+                  ?.offerVersion ??
+                (offer.id === job.offerId ? payload.offerVersion : offer.version))
+              : offer.id === job.offerId
+                ? payload.offerVersion
+                : offer.version;
+          const sameOfferVersion = offer.version === expectedVersion;
+          const nextOfferStatus = disconnected
+            ? "PAUSED"
+            : result.status === "CLOSED" || result.status === "PAUSED"
+              ? result.status
+              : result.status === "RECONCILE_REQUIRED" || !sameVersion || !sameOfferVersion
+                ? "RECONCILE_REQUIRED"
+                : result.status;
+          await tx.channelOffer.update({
+            where: { id: offer.id },
+            data: {
+              ...(attachItemId ? { externalItemId: attachItemId } : {}),
+              status: nextOfferStatus,
+              updatedAt: now,
+            },
+          });
+        }
+      } else if (job.offerId) {
+        const offer = listing.offers.find((candidate) => candidate.id === job.offerId);
+        const hasExternalItem = Boolean(offer?.externalItemId || result.externalItemId);
+        if (offer && hasExternalItem && offer.status !== "CLOSED") {
           const sameOfferVersion = offer.version === payload.offerVersion;
           await tx.channelOffer.update({
             where: { id: offer.id },
@@ -1574,8 +1652,9 @@ export class ChannelCatalogService {
               ...(result.externalItemId && !offer.externalItemId
                 ? { externalItemId: result.externalItemId }
                 : {}),
-              status:
-                result.status === "RECONCILE_REQUIRED"
+              status: disconnected
+                ? "PAUSED"
+                : result.status === "RECONCILE_REQUIRED"
                   ? "RECONCILE_REQUIRED"
                   : sameOfferVersion
                     ? result.status

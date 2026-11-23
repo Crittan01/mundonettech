@@ -5,7 +5,7 @@ import {
   ChannelPricingError,
   mercadoLibreCopDeadZoneEndCents,
   mercadoLibreCopFreeShippingThresholdCents,
-} from "../../packages/core/src/channel-pricing";
+} from "../../packages/core/dist/index.js";
 
 const fees = {
   commissionBps: 1_000,

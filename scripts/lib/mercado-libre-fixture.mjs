@@ -79,32 +79,33 @@ export async function startMercadoLibreFixture(options = {}) {
       if (method === "POST" && url.pathname === "/oauth/token") {
         const body = await formBody(request);
         recordCall(Object.fromEntries(body));
-        const result = options.onToken
-          ? await options.onToken(body, calls.length)
-          : defaultGrant(body);
+        const result =
+          (options.onToken ? await options.onToken(body, calls.length) : undefined) ??
+          defaultGrant(body);
         if (result !== undefined && (await reply(result))) return;
       }
       const revokeMatch = /^\/users\/([0-9]+)\/applications\/([0-9]+)$/.exec(url.pathname);
       if (method === "DELETE" && revokeMatch) {
         recordCall();
-        const result = options.onRevoke
-          ? await options.onRevoke(calls.at(-1))
-          : { status: 200, body: {} };
+        const result = (options.onRevoke ? await options.onRevoke(calls.at(-1)) : undefined) ?? {
+          status: 200,
+          body: {},
+        };
         if (result !== undefined && (await reply(result))) return;
       }
       const searchMatch = /^\/users\/([0-9]+)\/items\/search$/.exec(url.pathname);
       if (method === "GET" && searchMatch) {
         recordCall();
-        const result = options.onSearchItems
+        const result = (options.onSearchItems
           ? await options.onSearchItems(url.searchParams, calls.at(-1))
-          : {
-              status: 200,
-              body: {
-                results: [...items.values()]
-                  .filter((item) => item.seller_sku === url.searchParams.get("seller_sku"))
-                  .map((item) => item.id),
-              },
-            };
+          : undefined) ?? {
+          status: 200,
+          body: {
+            results: [...items.values()]
+              .filter((item) => item.seller_sku === url.searchParams.get("seller_sku"))
+              .map((item) => item.id),
+          },
+        };
         if (result !== undefined && (await reply(result))) return;
       }
       const sellerMatch = /^\/users\/([0-9]+)$/.exec(url.pathname);
@@ -119,12 +120,12 @@ export async function startMercadoLibreFixture(options = {}) {
       if (method === "POST" && url.pathname === "/pictures/items/upload") {
         const body = await jsonBody(request);
         recordCall(body);
-        const result = options.onPictureUpload
+        const result = (options.onPictureUpload
           ? await options.onPictureUpload(body, calls.at(-1))
-          : {
-              status: 200,
-              body: { id: `picture-${++sequence}`, url: body.source },
-            };
+          : undefined) ?? {
+          status: 200,
+          body: { id: `picture-${++sequence}`, url: body.source },
+        };
         if (result !== undefined && (await reply(result))) return;
       }
       if (method === "POST" && url.pathname === "/items") {
@@ -268,6 +269,7 @@ export async function startMercadoLibreFixture(options = {}) {
     items,
     stocks,
     async stop() {
+      if (!server.listening) return;
       await new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });

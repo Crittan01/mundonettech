@@ -275,6 +275,7 @@ BEGIN
   END IF;
   IF NEW."attempts" < OLD."attempts" OR NOT (
     (OLD."status" IN ('PENDING', 'RETRY_SCHEDULED') AND NEW."status" IN ('PENDING', 'RETRY_SCHEDULED', 'PROCESSING', 'SUPERSEDED')) OR
+    (OLD."status" IN ('PENDING', 'RETRY_SCHEDULED') AND NEW."status" = 'FAILED' AND NEW."failureCode" = 'ACCOUNT_DISCONNECTED') OR
     (OLD."status" = 'PROCESSING' AND NEW."status" IN ('PROCESSING', 'RETRY_SCHEDULED', 'SUCCEEDED', 'FAILED', 'UNCERTAIN')) OR
     (OLD."status" = NEW."status" AND OLD."status" IN ('PENDING', 'RETRY_SCHEDULED', 'PROCESSING'))
   ) THEN
