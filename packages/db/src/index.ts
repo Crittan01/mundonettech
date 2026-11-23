@@ -462,3 +462,34 @@ export { GrowthError, GrowthService, marketingEmailConsentGranted } from "./grow
 export type { CartReminderOutcome, GrowthErrorCode } from "./growth-service.js";
 export { LoyaltyTxnType, ReferralStatus } from "./generated/client.js";
 export type { LoyaltyTxn, Referral, ReferralCode } from "./generated/client.js";
+export { LifecycleError } from "./lifecycle-shared.js";
+export type { LifecycleAudit, LifecycleErrorCode } from "./lifecycle-shared.js";
+export { LifecycleService } from "./lifecycle-service.js";
+export type {
+  LifecycleEligibilityReason,
+  LifecycleJourneyInput,
+  LifecycleJourneyMutation,
+} from "./lifecycle-service.js";
+export { SegmentationService } from "./segmentation-service.js";
+export type { CustomerSegmentInput, CustomerSegmentMutation } from "./segmentation-service.js";
+export { RfmAnalyticsError, RfmAnalyticsService } from "./rfm-analytics-service.js";
+export type {
+  RfmAnalyticsCursor,
+  RfmAnalyticsErrorCode,
+  RfmAnalyticsFilter,
+} from "./rfm-analytics-service.js";
+export {
+  CustomerSegmentStatus,
+  LifecycleEnrollmentStatus,
+  LifecycleJourneyStatus,
+  LifecycleMessageStatus,
+  SegmentMembershipStatus,
+} from "./generated/client.js";
+export type {
+  CustomerSegment,
+  CustomerSegmentMembership,
+  LifecycleEnrollment,
+  LifecycleJourney,
+  LifecycleMessage,
+  LifecycleStep,
+} from "./generated/client.js";

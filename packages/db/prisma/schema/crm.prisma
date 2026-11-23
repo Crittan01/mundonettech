@@ -254,8 +254,11 @@ model Customer {
   loyaltyTxns              LoyaltyTxn[]
   referralCode             ReferralCode?
   referralsMade            Referral[]            @relation("ReferralReferrer")
-  referralsReceived        Referral[]            @relation("ReferralReferred")
-  emailEvents              EmailEvent[]
+  referralsReceived         Referral[] @relation("ReferralReferred")
+  emailEvents               EmailEvent[]
+  segmentMemberships        CustomerSegmentMembership[]
+  lifecycleEnrollments      LifecycleEnrollment[]
+  lifecycleMessages         LifecycleMessage[]
 
   @@index([status, createdAt])
   @@index([deletedAt])
@@ -263,20 +266,22 @@ model Customer {
 }
 
 model Consent {
-  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  customerId    String         @db.Uuid
-  purpose       ConsentPurpose
-  status        ConsentStatus
-  source        String         @db.VarChar(100)
-  policyVersion String         @db.VarChar(50)
-  proofHash     Bytes          @db.ByteA
-  ipHash        Bytes?         @db.ByteA
-  userAgentHash Bytes?         @db.ByteA
-  revokesId     String?        @db.Uuid
-  occurredAt    DateTime       @default(now()) @db.Timestamptz(6)
-  customer      Customer       @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  revokes       Consent?       @relation("ConsentRevocation", fields: [revokesId], references: [id], onDelete: Restrict)
-  revokedBy     Consent?       @relation("ConsentRevocation")
+  id                    String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  customerId            String                      @db.Uuid
+  purpose               ConsentPurpose
+  status                ConsentStatus
+  source                String                      @db.VarChar(100)
+  policyVersion         String                      @db.VarChar(50)
+  proofHash             Bytes                       @db.ByteA
+  ipHash                Bytes?                      @db.ByteA
+  userAgentHash         Bytes?                      @db.ByteA
+  revokesId             String?                     @db.Uuid
+  occurredAt            DateTime                    @default(now()) @db.Timestamptz(6)
+  customer              Customer                    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  revokes               Consent?                    @relation("ConsentRevocation", fields: [revokesId], references: [id], onDelete: Restrict)
+  revokedBy             Consent?                    @relation("ConsentRevocation")
+  segmentMemberships    CustomerSegmentMembership[]
+  lifecycleEnrollments  LifecycleEnrollment[]
 
   @@unique([revokesId])
   @@index([customerId, purpose, occurredAt])

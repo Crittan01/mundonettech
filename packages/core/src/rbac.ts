@@ -280,6 +280,9 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/posventa"
     | "/admin/crm"
     | "/admin/fidelizacion"
+    | "/admin/segmentos"
+    | "/admin/lifecycle"
+    | "/admin/analitica-rfm"
     | "/admin/b2b"
     | "/admin/resenas"
     | "/admin/finanzas"
@@ -312,6 +315,8 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       ? [
           { href: "/admin/crm" as const, label: "CRM 360" },
           { href: "/admin/fidelizacion" as const, label: "Fidelización" },
+          { href: "/admin/segmentos" as const, label: "Segmentos" },
+          { href: "/admin/lifecycle" as const, label: "Lifecycle" },
         ]
       : []),
     ...(hasAdminPermission(role, "b2b:read")
@@ -321,7 +326,10 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       ? [{ href: "/admin/resenas" as const, label: "Reseñas" }]
       : []),
     ...(hasAdminPermission(role, "finance:read")
-      ? [{ href: "/admin/finanzas" as const, label: "Finanzas" }]
+      ? [
+          { href: "/admin/finanzas" as const, label: "Finanzas" },
+          { href: "/admin/analitica-rfm" as const, label: "Analítica RFM" },
+        ]
       : []),
     ...(hasAdminPermission(role, "catalog:read")
       ? [{ href: "/admin/catalogo" as const, label: "Catálogo" }]

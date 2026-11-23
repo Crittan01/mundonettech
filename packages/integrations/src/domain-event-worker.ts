@@ -4,6 +4,7 @@ import {
   completeDomainOutbox,
   failDomainOutbox,
   GrowthService,
+  LifecycleService,
   retryDomainOutbox,
   type DomainOutbox,
 } from "@mundonettech/db";
@@ -26,6 +27,8 @@ import { EmailProviderError, EmailValidationError } from "./email-types.js";
 
 const supportedEvents = [
   "cart.abandoned.v1",
+  "lifecycle.enrollment.started.v1",
+  "lifecycle.message.dispatch.v1",
   "order.confirmed.v1",
   "order.payment.paid.v1",
   "order.refund.completed.v1",
@@ -55,6 +58,13 @@ class RetryableDomainEventError extends Error {
   constructor(readonly availableAt: Date) {
     super("Domain event requires a scheduled retry.");
     this.name = "RetryableDomainEventError";
+  }
+}
+
+class PausedDomainEventError extends Error {
+  constructor(readonly availableAt: Date) {
+    super("Domain event is deferred while its lifecycle journey is paused.");
+    this.name = "PausedDomainEventError";
   }
 }
 
@@ -293,6 +303,25 @@ export class DomainEventWorker {
     await record(queued.status === "SUPPRESSED" ? "SUPPRESSED" : "QUEUED");
   }
 
+  private async queueLifecycleEmail(event: DomainOutbox): Promise<void> {
+    const dispatchVersion = this.payload(event).dispatchVersion;
+    if (
+      dispatchVersion !== undefined &&
+      (typeof dispatchVersion !== "number" ||
+        !Number.isInteger(dispatchVersion) ||
+        dispatchVersion < 1)
+    ) {
+      throw new EmailValidationError("Lifecycle dispatch version is invalid.");
+    }
+    await this.options.email.queueLifecycle({
+      lifecycleMessageId: this.id(event, "lifecycleMessageId"),
+      ...(dispatchVersion !== undefined ? { dispatchVersion: dispatchVersion as number } : {}),
+      credentialId: await this.emailCredentialId(),
+      storeName: this.options.storeName,
+      accountUrl: `${this.publicSiteUrl}/mi-cuenta`,
+    });
+  }
+
   private statusLabel(status: string): string {
     const labels: Record<string, string> = {
       REQUESTED: "Solicitud recibida",
@@ -416,6 +445,11 @@ export class DomainEventWorker {
       case "cart.abandoned.v1":
         await this.queueCartRecoveryEmail(event);
         return;
+      case "lifecycle.enrollment.started.v1":
+        return;
+      case "lifecycle.message.dispatch.v1":
+        await this.queueLifecycleEmail(event);
+        return;
       case "order.confirmed.v1":
         await this.queueOrderEmail({
           orderId: this.id(event, "orderId"),
@@ -494,6 +528,8 @@ export class DomainEventWorker {
       }
       case "email.requested.v1": {
         const outcome = await this.options.email.send(this.id(event, "emailEventId"));
+        if (outcome.deferredByPause && outcome.nextAttemptAt)
+          throw new PausedDomainEventError(outcome.nextAttemptAt);
         if (outcome.status === "SENDING" && outcome.nextAttemptAt)
           throw new RetryableDomainEventError(outcome.nextAttemptAt);
         return;
@@ -613,12 +649,37 @@ export class DomainEventWorker {
           throw new Error("Domain outbox claim expired before completion.");
         completed += 1;
       } catch (error) {
-        if (event.attempts >= this.maximumAttempts) {
+        if (error instanceof PausedDomainEventError) {
+          await this.db.$executeRaw`
+            UPDATE "DomainOutbox"
+            SET "availableAt" = ${error.availableAt},
+                "claimedAt" = NULL,
+                "claimedBy" = NULL,
+                "claimExpiresAt" = NULL,
+                "attempts" = GREATEST(0, "attempts" - 1),
+                "lastError" = 'PAUSED'
+            WHERE "id" = ${event.id}::uuid
+              AND "claimedBy" = ${this.options.workerId}
+              AND "claimExpiresAt" > CURRENT_TIMESTAMP
+              AND "processedAt" IS NULL
+              AND "failedAt" IS NULL
+          `;
+          retries += 1;
+        } else if (event.attempts >= this.maximumAttempts) {
           await failDomainOutbox(this.db, {
             id: event.id,
             workerId: this.options.workerId,
             error: this.errorText(error),
           });
+          if (event.eventType === "lifecycle.message.dispatch.v1") {
+            const messageId = recordValue(event.payload)?.lifecycleMessageId;
+            if (typeof messageId === "string") {
+              await new LifecycleService(this.db).markDispatchFailed(
+                messageId,
+                this.errorText(error),
+              );
+            }
+          }
           failed += 1;
         } else {
           const availableAt =

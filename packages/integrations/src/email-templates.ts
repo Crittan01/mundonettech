@@ -89,6 +89,14 @@ const definitions = {
       "Guardamos tu carrito en {{storeName}} con {{itemCount}} unidades por {{totalCop}}. Volver al carrito: {{cartUrl}}. Baja de recordatorios: {{unsubscribeUrl}}",
     variables: ["storeName", "itemCount", "totalCop", "cartUrl", "unsubscribeUrl"],
   },
+  "lifecycle.campaign": {
+    subject: "Novedades de {{storeName}}",
+    htmlBody:
+      '<p>Hola {{customerFirstName}}. Tenemos novedades para ti en {{storeName}}.</p><p><a href="{{accountUrl}}">Visitar mi cuenta</a></p><p><a href="{{unsubscribeUrl}}">Dejar de recibir comunicaciones comerciales</a></p>',
+    textBody:
+      "Hola {{customerFirstName}}. Tenemos novedades para ti en {{storeName}}. Cuenta: {{accountUrl}}. Baja: {{unsubscribeUrl}}",
+    variables: ["storeName", "customerFirstName", "accountUrl", "unsubscribeUrl"],
+  },
   "support.ticket": {
     subject: "Actualización de tu PQR {{ticketNumber}}",
     htmlBody:
@@ -134,7 +142,7 @@ export function validateEmailTemplate(input: EmailTemplateDefinition): EmailTemp
     );
   }
   if (
-    /<\/?(?:script|iframe|object|embed|form|meta|link|base)\b|\son[a-z]+\s*=|javascript\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
+    /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|style)\b|[\s/]on[a-z]+\s*=|(?:javascript|vbscript)\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
       input.htmlBody,
     )
   ) {
@@ -159,7 +167,8 @@ export function validateEmailTemplate(input: EmailTemplateDefinition): EmailTemp
   }
   if (
     /\{\{|\}\}/.test(input.subject.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, "")) ||
-    /\{\{|\}\}/.test(input.htmlBody.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, ""))
+    /\{\{|\}\}/.test(input.htmlBody.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, "")) ||
+    /\{\{|\}\}/.test(input.textBody.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, ""))
   ) {
     throw new EmailValidationError("Email template contains malformed interpolation tokens.");
   }

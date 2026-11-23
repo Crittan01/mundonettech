@@ -17,6 +17,7 @@ const statusLabels: Record<string, string> = {
   BOUNCED: "Rebotado",
   COMPLAINED: "Reportado como spam",
   SUPPRESSED: "Suprimido",
+  CANCELLED: "Cancelado",
   FAILED: "Fallido",
 };
 
@@ -31,18 +32,20 @@ export default async function CommunicationsPage() {
     }),
   ]);
   const defaults = Object.fromEntries(
-    emailTemplateKeys.map((key) => {
-      const template = defaultEmailTemplate(key);
-      return [
-        key,
-        {
-          subject: template.subject,
-          htmlBody: template.htmlBody,
-          textBody: template.textBody,
-          variables: template.variables,
-        } satisfies EmailTemplateView,
-      ];
-    }),
+    emailTemplateKeys
+      .filter((key) => key !== "lifecycle.campaign")
+      .map((key) => {
+        const template = defaultEmailTemplate(key);
+        return [
+          key,
+          {
+            subject: template.subject,
+            htmlBody: template.htmlBody,
+            textBody: template.textBody,
+            variables: template.variables,
+          } satisfies EmailTemplateView,
+        ];
+      }),
   );
   const canWrite = hasAdminPermission(session.profile.role, "communications:write");
   return (
@@ -105,7 +108,8 @@ export default async function CommunicationsPage() {
                       {event.templateKey} · {event.topic}
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {maskEmail(event.recipientEmail)} · intentos {event.attemptCount}
+                      {event.anonymizedAt ? "Cuenta anonimizada" : maskEmail(event.recipientEmail)}{" "}
+                      · intentos {event.attemptCount}
                     </p>
                   </div>
                   <span className="text-sm font-medium">
