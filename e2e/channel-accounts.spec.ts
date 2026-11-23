@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 
 import { expect, test, type Page } from "@playwright/test";
 import pg from "pg";
@@ -29,6 +29,7 @@ let reader: { id: string; authUserId: string; email: string };
 let accountId: string;
 let catalog: CatalogTestFixture;
 let authorizationState = "";
+let channelOrderExternalId = "";
 
 async function authenticateAdmin(
   page: Page,
@@ -335,7 +336,198 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   expect(stockSynced.localQuantity).toBe(7);
   expect(stockSynced.remoteLocalQuantity).toBe(7);
 
+  const suffix = Math.floor(Math.random() * 1_000_000);
+  const externalOrderId = 2_100_000_000 + suffix;
+  const externalPackId = 2_200_000_000 + suffix;
+  const externalShipmentId = 4_400_000_000 + suffix;
+  const externalPaymentId = 9_100_000_000 + suffix;
+  const externalCreatedAt = new Date(Date.now() - 60_000).toISOString();
+  const externalUpdatedAt = new Date().toISOString();
+  const remoteOrder = {
+    id: externalOrderId,
+    pack_id: externalPackId,
+    date_created: externalCreatedAt,
+    last_updated: externalUpdatedAt,
+    date_closed: externalUpdatedAt,
+    seller: { id: 8035443 },
+    buyer: { id: 42, email: "e2e-buyer-pii@example.test" },
+    currency_id: "COP",
+    status: "paid",
+    total_amount: 140_000,
+    paid_amount: 140_000,
+    shipping_cost: 0,
+    order_items: [
+      {
+        item: {
+          id: published.offers[0]!.externalItemId,
+          user_product_id: stockSynced.externalUserProductId,
+          seller_sku: catalog.sku,
+        },
+        quantity: 2,
+        unit_price: 70_000,
+        full_unit_price: 70_000,
+        currency_id: "COP",
+        sale_fee: 100,
+        listing_type_id: "gold_special",
+      },
+    ],
+    payments: [
+      {
+        id: externalPaymentId,
+        order_id: externalOrderId,
+        status: "approved",
+        currency_id: "COP",
+        transaction_amount: 140_000,
+        total_paid_amount: 140_000,
+        transaction_amount_refunded: 0,
+        marketplace_fee: 200,
+        date_created: externalCreatedAt,
+        date_approved: externalUpdatedAt,
+        date_last_modified: externalUpdatedAt,
+      },
+    ],
+    shipping: { id: externalShipmentId },
+  };
+  const remotePack = {
+    id: externalPackId,
+    status: "released",
+    status_detail: null,
+    orders: [{ id: externalOrderId }],
+    shipment: { id: externalShipmentId },
+    date_created: externalCreatedAt,
+    last_updated: externalUpdatedAt,
+  };
+  const remoteShipment = {
+    id: externalShipmentId,
+    order_id: externalOrderId,
+    pack_id: externalPackId,
+    status: "ready_to_ship",
+    substatus: null,
+    logistic_type: "cross_docking",
+    mode: "me2",
+    tracking_number: `E2E-${externalShipmentId}`,
+    cost: 2500,
+    date_created: externalCreatedAt,
+    last_updated: externalUpdatedAt,
+    date_shipped: null as string | null,
+  };
+  const seeded = await page.request.post("http://127.0.0.1:54420/__fixture/resources", {
+    data: { orders: [remoteOrder], packs: [remotePack], shipments: [remoteShipment] },
+  });
+  expect(seeded.status()).toBe(200);
+  const signNotification = (requestId: string, ts: string) =>
+    createHmac("sha256", clientSecret)
+      .update(`id:;request-id:${requestId};ts:${ts};`)
+      .digest("hex");
+  const notificationBody = JSON.stringify({
+    resource: `/orders/${externalOrderId}`,
+    user_id: 8035443,
+    topic: "orders_v2",
+    application_id: 123456789012,
+  });
+  const requestId = `req-${randomUUID()}`;
+  const ts = String(Math.floor(Date.now() / 1000));
+  const rejectedWebhook = await page.request.post("/api/webhooks/mercado-libre", {
+    headers: {
+      "content-type": "application/json",
+      "x-request-id": requestId,
+      "x-signature": `ts=${ts},v1=${"0".repeat(64)}`,
+    },
+    data: notificationBody,
+  });
+  expect(rejectedWebhook.status()).toBe(401);
+  const webhook = await page.request.post("/api/webhooks/mercado-libre", {
+    headers: {
+      "content-type": "application/json",
+      "x-request-id": requestId,
+      "x-signature": `ts=${ts},v1=${signNotification(requestId, ts)}`,
+    },
+    data: notificationBody,
+  });
+  expect(webhook.status()).toBe(202);
+  const ingested = await page.request.post("/api/jobs/channels", {
+    headers: { authorization: `Bearer ${channelCronSecret}` },
+  });
+  expect(ingested.status()).toBe(200);
+  const ingestionResult = await ingested.json();
+  expect(ingestionResult.ingestion.completed).toBe(1);
+  expect(ingestionResult.ingestion.failed).toBe(0);
+  const channelOrder = await db.channelOrder.findUniqueOrThrow({
+    where: {
+      accountId_externalOrderId: { accountId, externalOrderId: String(externalOrderId) },
+    },
+  });
+  channelOrderExternalId = String(externalOrderId);
+  expect(channelOrder.stockStatus).toBe("RESERVED");
+  expect(channelOrder.reconciliationStatus).toBe("RECONCILED");
+  expect(
+    await db.serializedUnit.count({
+      where: { reservationKey: channelOrder.reservationKey, status: "RESERVED" },
+    }),
+  ).toBe(2);
+  const reservedStock = await db.stockLevel.findFirstOrThrow({
+    where: { variantId: catalog.variantId },
+  });
+  expect(reservedStock.onHand).toBe(10);
+  expect(reservedStock.committed).toBe(2);
+
+  remoteShipment.status = "shipped";
+  remoteShipment.date_shipped = new Date().toISOString();
+  remoteShipment.last_updated = new Date().toISOString();
+  const updatedShipment = await page.request.post("http://127.0.0.1:54420/__fixture/resources", {
+    data: { orders: [], packs: [], shipments: [remoteShipment] },
+  });
+  expect(updatedShipment.status()).toBe(200);
+  const shipmentRequestId = `req-${randomUUID()}`;
+  const shipmentBody = JSON.stringify({
+    resource: `/shipments/${externalShipmentId}`,
+    user_id: 8035443,
+    topic: "shipments",
+    application_id: 123456789012,
+  });
+  const shipmentWebhook = await page.request.post("/api/webhooks/mercado-libre", {
+    headers: {
+      "content-type": "application/json",
+      "x-request-id": shipmentRequestId,
+      "x-signature": `ts=${ts},v1=${signNotification(shipmentRequestId, ts)}`,
+    },
+    data: shipmentBody,
+  });
+  expect(shipmentWebhook.status()).toBe(202);
+  const shipped = await page.request.post("/api/jobs/channels", {
+    headers: { authorization: `Bearer ${channelCronSecret}` },
+  });
+  expect(shipped.status()).toBe(200);
+  expect((await shipped.json()).ingestion.completed).toBe(1);
+  const fulfilledOrder = await db.channelOrder.findUniqueOrThrow({
+    where: { id: channelOrder.id },
+  });
+  expect(fulfilledOrder.stockStatus).toBe("FULFILLED");
+  expect(
+    await db.serializedUnit.count({ where: { channelOrderId: channelOrder.id, status: "SOLD" } }),
+  ).toBe(2);
+  expect((await db.stockLevel.findUniqueOrThrow({ where: { id: reservedStock.id } })).onHand).toBe(
+    8,
+  );
+  expect(
+    await db.channelLedgerEntry.count({
+      where: { packId: channelOrder.packId, entryType: "SHIPPING_COST" },
+    }),
+  ).toBe(1);
+  expect(JSON.stringify(await db.domainOutbox.findMany())).not.toContain("e2e-buyer-pii");
+
   await page.goto("/admin/canales");
+  await expect(
+    page.getByRole("heading", { name: `Pedido ${channelOrderExternalId}`, exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/Descontado por despacho/)).toBeVisible();
+  await page.getByRole("button", { name: "Sincronizar pedido y envío", exact: true }).click();
+  await expect(page.getByText(/Pedido, pack, envío y ledger sincronizados/)).toBeVisible();
+  const orderAxe = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  expect(orderAxe.violations).toEqual([]);
+
   await page.getByText(`Desvincular ${accountLabel}`, { exact: true }).click();
   await page.getByLabel("Escribe DESVINCULAR para confirmar").fill("DESVINCULAR");
   await page.getByRole("button", { name: "Desvincular cuenta", exact: true }).click();
@@ -366,4 +558,9 @@ test("finance role can inspect channel descriptors without mutation controls", a
   await expect(page.getByText("Audífonos TÁCTILES Pro", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Preparar una publicación", { exact: true })).toHaveCount(0);
   await expect(page.getByText("Editar precio y tarifas", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: `Pedido ${channelOrderExternalId}`, exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/Descontado por despacho/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sincronizar pedido y envío" })).toHaveCount(0);
 });

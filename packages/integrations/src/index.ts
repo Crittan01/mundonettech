@@ -225,3 +225,31 @@ export type {
   MercadoLibreStockLocation,
   MercadoLibreStockSnapshot,
 } from "./mercado-libre-catalog.js";
+
+export { ChannelOrderError, ChannelOrderService } from "./channel-order-service.js";
+export type {
+  ChannelLedgerEntryView,
+  ChannelNotificationResult,
+  ChannelOrderDashboard,
+  ChannelOrderErrorCode,
+  ChannelOrderServiceOptions,
+  ChannelOrderView,
+  ChannelPackView,
+  ChannelResourceBatchResult,
+  ChannelResourceSyncResult,
+  ChannelShipmentView,
+  ChannelStockLocationChoice,
+} from "./channel-order-service.js";
+export {
+  MercadoLibreOrderClient,
+  parseMercadoLibreNotification,
+  verifyMercadoLibreNotificationSignature,
+} from "./mercado-libre-orders.js";
+export type {
+  MercadoLibreNotification,
+  MercadoLibreOrderSnapshot,
+  MercadoLibrePackSnapshot,
+  MercadoLibrePaymentSnapshot,
+  MercadoLibreResourceKind,
+  MercadoLibreShipmentSnapshot,
+} from "./mercado-libre-orders.js";

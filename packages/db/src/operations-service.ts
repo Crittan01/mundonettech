@@ -22,6 +22,7 @@ const managedCategories = [
   "b2b.opportunities",
   "channels.reauth",
   "channels.sync",
+  "channels.orders",
   "outbox.failed",
 ] as const;
 
@@ -257,6 +258,14 @@ export class OperationsService {
         WHERE listings."lastProviderError" IS NOT NULL AND
           (listings."status" = 'RECONCILE_REQUIRED' OR
            (listings."status" = 'DRAFT' AND listings."lastProviderError" <> 'ACCOUNT_DISCONNECTED'))
+        UNION ALL
+        SELECT 'channel-order-review:' || channel_orders."id", 'channels.orders',
+          CASE WHEN channel_orders."reconciliationStatus" = 'REVIEW_REQUIRED' THEN 'CRITICAL' ELSE 'WARNING' END,
+          'Pedido de canal requiere revisión',
+          left('Revisa stock (' || COALESCE(channel_orders."stockError", 'SIN_ERROR') || ') y conciliación (' || COALESCE(channel_orders."reconciliationReason", 'SIN_ERROR') || ') en Canales.', 500),
+          '/admin/canales', 'ChannelOrder', channel_orders."id"::text
+        FROM "ChannelOrder" channel_orders
+        WHERE channel_orders."stockStatus" = 'REVIEW_REQUIRED' OR channel_orders."reconciliationStatus" = 'REVIEW_REQUIRED'
         UNION ALL
         SELECT 'outbox-failed:' || outbox."id", 'outbox.failed', 'CRITICAL',
           'Evento de integración fallido',

@@ -42,6 +42,9 @@ export async function startMercadoLibreFixture(options = {}) {
   const calls = [];
   const items = new Map();
   const stocks = new Map();
+  const orders = new Map();
+  const packs = new Map();
+  const shipments = new Map();
   const sellerId = String(options.externalAccountId ?? 8035443);
   let sequence = 0;
   const server = createServer(async (request, response) => {
@@ -76,6 +79,25 @@ export async function startMercadoLibreFixture(options = {}) {
         response.end(result.body === undefined ? "" : JSON.stringify(result.body));
         return true;
       };
+      if (method === "POST" && url.pathname === "/__fixture/resources") {
+        const body = await jsonBody(request);
+        for (const [kind, collection] of [
+          ["orders", orders],
+          ["packs", packs],
+          ["shipments", shipments],
+        ]) {
+          if (!Array.isArray(body[kind]) || body[kind].length > 100) {
+            if (await reply({ status: 400, body: { error: `invalid_${kind}` } })) return;
+          }
+          for (const resource of body[kind]) {
+            if (!resource || !/^[0-9]{1,20}$/.test(String(resource.id))) {
+              if (await reply({ status: 400, body: { error: "invalid_resource_id" } })) return;
+            }
+            collection.set(String(resource.id), resource);
+          }
+        }
+        if (await reply({ status: 200, body: { accepted: true } })) return;
+      }
       if (method === "POST" && url.pathname === "/oauth/token") {
         const body = await formBody(request);
         recordCall(Object.fromEntries(body));
@@ -107,6 +129,26 @@ export async function startMercadoLibreFixture(options = {}) {
           },
         };
         if (result !== undefined && (await reply(result))) return;
+      }
+      const resourceMatch = /^\/(packs|orders|shipments)\/([0-9]+)$/.exec(url.pathname);
+      if (method === "GET" && resourceMatch) {
+        recordCall();
+        const kind = resourceMatch[1];
+        const id = resourceMatch[2];
+        const collection = kind === "packs" ? packs : kind === "orders" ? orders : shipments;
+        const current = collection.get(id);
+        const hook =
+          kind === "packs"
+            ? options.onPack
+            : kind === "orders"
+              ? options.onOrder
+              : options.onShipment;
+        const result =
+          (hook ? await hook({ id, current }, calls.at(-1)) : undefined) ??
+          (current
+            ? { status: 200, body: current }
+            : { status: 404, body: { error: "not_found" } });
+        if (await reply(result)) return;
       }
       const sellerMatch = /^\/users\/([0-9]+)$/.exec(url.pathname);
       if (method === "GET" && sellerMatch) {
@@ -268,6 +310,9 @@ export async function startMercadoLibreFixture(options = {}) {
     calls,
     items,
     stocks,
+    orders,
+    packs,
+    shipments,
     async stop() {
       if (!server.listening) return;
       await new Promise((resolve, reject) => {

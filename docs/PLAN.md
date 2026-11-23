@@ -22,12 +22,12 @@
 
 - `[x]` ✅ **Fases 0–5 (`F0.1`–`F5.3`):** MFA `aal2`/RLS/Bóveda (`ADR-019`..`022`), Catálogo/Media R2/WAC (`ADR-023`..`026`), CMS v3/Legal CO/SEO (`ADR-027`..`029`), Carrito/Checkout/Pagos/Logística/DIAN (`ADR-030`..`033`), Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse `96–100`/k6/`release:verify` (`ADR-034`..`036`), CRM 360° + B2B/Copiloto 0-PII (`ADR-037`..`038`) y Lealtad/Lifecycle/RFM + Salud/Backups GPG R2/DR/Ayuda v2 (`ADR-039`..`041`; Go-Live sujeto a externos).
 - `[x]` ✅ **`F6.1` — OAuth PKCE y `ChannelAccount`:** ML `MCO` PKCE `S256` (`__Secure-`), bóveda aislada, renovación fail-closed, `channels.reauth` y `/admin/canales` MFA + RLS (`ADR-042`).
-- `[x]` ✅ **`F6.2` — User Products ML `MCO`, `x-version`, Full y Precios \$60k:** `ChannelListing`/`ChannelOffer` `BigInt`, `LOCAL_MAIN`/`MELI_FULL`, `ChannelSyncJob`, conciliación y `/admin/canales` MFA + RLS (`ADR-043`; 126 tablas/2.187 casos).
-- `[ ]` **`F6.3` — `ChannelPack`/`ChannelOrder`, `ME2`/Flex y Conciliación (`ChannelLedgerEntry`):** ingestión idempotente de packs/órdenes/`ChannelShipment` (`ME2`/Flex/Full) 0-PII en `DomainOutbox`, reserva/descuento seguro de stock y conciliación `ChannelLedgerEntry` `BigInt` en backoffice MFA + RLS.
+- `[x]` ✅ **`F6.2` — User Products ML `MCO`, `x-version`, Full y Precios \$60k:** `ChannelListing`/`ChannelOffer` `BigInt`, stock local/Full, jobs y conciliación MFA + RLS (`ADR-043`).
+- `[R]` **`F6.3` — Packs/órdenes, ME2/Flex/Full y conciliación:** webhooks HMAC + outbox 0-PII, `ChannelPack`/`ChannelOrder`/`ChannelShipment`, reserva/descuento serializado y `ChannelLedgerEntry` `BigInt` append-only + UI MFA/RLS (`ADR-044`; 130 tablas/2.255 casos).
 - `[ ]` **`F6.4` — Meta Catalog Feed + Conversions API (CAPI):** feed de catálogo validado y despacho server-side CAPI deduplicado (`event_id`), sujeto a `Consent` Ley 1581 vigente, bóveda y cero PII no autorizada.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Implementador (`F6.3`):** partir de `develop` limpio, crear `feat/f6-3-meli-packs-orders-me2-flex-ledger`, construir `ChannelPack`/`ChannelOrder`/`ChannelShipment` (`ME2`/Flex/Full) + reserva/descuento seguro + `ChannelLedgerEntry` `BigInt` 0-PII + UI MFA/RLS, pasar `make check && pnpm test && pnpm build`, registrar ADR, marcar `[R]` y commitear en su rama sin PR.
+- **Siguiente turno — Auditor (`F6.3`):** auditar `feat/f6-3-meli-packs-orders-me2-flex-ledger` contra `ADR-044`, reejecutar `make check && pnpm test && pnpm build`, certificar RLS/concurrencia/0-PII y E2E, marcar `[x]`, actualizar `STATE.md`, subir rama, abrir PR y mergear squash en `develop` con CI verde.

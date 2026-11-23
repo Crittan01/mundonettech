@@ -227,6 +227,10 @@ model ChannelAccount {
   createdBy             AdminUser              @relation("ChannelAccountCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
   oauthAttempts         ChannelOAuthAttempt[]
   listings              ChannelListing[]
+  packs                 ChannelPack[]
+  orders                ChannelOrder[]
+  shipments             ChannelShipment[]
+  ledgerEntries         ChannelLedgerEntry[]
 
   @@unique([provider, siteId, environment, externalAccountId])
   @@index([environment, status, tokenExpiresAt, id])
@@ -335,6 +339,7 @@ model ChannelListing {
   createdBy             AdminUser             @relation("ChannelListingCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
   offers                ChannelOffer[]
   syncJobs              ChannelSyncJob[]
+  channelOrders         ChannelOrder[]
 
   @@unique([accountId, variantId])
   @@index([variantId, status])
@@ -369,6 +374,7 @@ model ChannelOffer {
   updatedAt                DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
   listing                  ChannelListing         @relation(fields: [listingId], references: [id], onDelete: Restrict)
   syncJobs                 ChannelSyncJob[]
+  channelOrders            ChannelOrder[]
 
   @@unique([listingId, listingTypeId, logisticType])
   @@index([status, updatedAt, id])
@@ -404,4 +410,209 @@ model ChannelSyncJob {
   @@index([claimExpiresAt, status])
   @@index([createdByAdminUserId, createdAt])
   @@map("ChannelSyncJob")
+}
+
+
+enum ChannelPackStatus {
+  PENDING
+  RELEASED
+  ERROR
+  PENDING_CANCEL
+  CANCELLED
+}
+
+enum ChannelOrderStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum ChannelStockStatus {
+  NOT_REQUIRED
+  REVIEW_REQUIRED
+  RESERVED
+  FULFILLED
+  RELEASED
+}
+
+enum ChannelReconciliationStatus {
+  PENDING
+  RECONCILED
+  REVIEW_REQUIRED
+}
+
+enum ChannelShipmentLogisticType {
+  ME2
+  FLEX
+  FULL
+}
+
+enum ChannelShipmentStatus {
+  PENDING
+  READY_TO_SHIP
+  SHIPPED
+  DELIVERED
+  NOT_DELIVERED
+  CANCELLED
+}
+
+enum ChannelLedgerEntryType {
+  SALE_EXPECTED
+  PAYMENT_CAPTURE
+  CAPTURE_REVERSAL
+  PAYMENT_REFUND
+  REFUND_REVERSAL
+  MARKETPLACE_FEE
+  FEE_REVERSAL
+  SHIPPING_COST
+  SHIPPING_REVERSAL
+  MANUAL_ADJUSTMENT
+}
+
+enum ChannelLedgerDirection {
+  CREDIT
+  DEBIT
+}
+
+model ChannelPack {
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId          String             @db.Uuid
+  externalPackId     String             @db.VarChar(32)
+  externalShipmentId String?            @db.VarChar(32)
+  externalStatus     ChannelPackStatus
+  sourceHash         Bytes              @db.ByteA
+  externalCreatedAt  DateTime           @db.Timestamptz(6)
+  externalUpdatedAt  DateTime           @db.Timestamptz(6)
+  lastSyncedAt       DateTime           @default(now()) @db.Timestamptz(6)
+  createdAt          DateTime           @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime           @default(now()) @updatedAt @db.Timestamptz(6)
+  account            ChannelAccount     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  orders             ChannelOrder[]
+  shipments          ChannelShipment[]
+  ledgerEntries      ChannelLedgerEntry[]
+
+  @@unique([accountId, externalPackId])
+  @@index([accountId, externalUpdatedAt, id])
+  @@map("ChannelPack")
+}
+
+model ChannelOrder {
+  id                     String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId              String                      @db.Uuid
+  packId                 String?                     @db.Uuid
+  shipmentId             String?                     @db.Uuid
+  listingId              String?                     @db.Uuid
+  offerId                String?                     @db.Uuid
+  variantId              String?                     @db.Uuid
+  stockLocationId        String?                     @db.Uuid
+  externalOrderId        String                      @db.VarChar(32)
+  externalItemId         String                      @db.VarChar(64)
+  externalUserProductId  String?                     @db.VarChar(64)
+  sellerSku              String?                     @db.VarChar(64)
+  remoteStatus           String                      @db.VarChar(40)
+  status                 ChannelOrderStatus          @default(PENDING)
+  stockStatus            ChannelStockStatus          @default(NOT_REQUIRED)
+  reconciliationStatus   ChannelReconciliationStatus @default(PENDING)
+  reconciliationReason   String?                     @db.VarChar(100)
+  stockError             String?                     @db.VarChar(100)
+  quantity               Int
+  currency               String                      @default("COP") @db.Char(3)
+  unitPriceCents         BigInt
+  grossAmountCents       BigInt
+  paidAmountCents        BigInt
+  capturedAmountCents    BigInt                      @default(0)
+  refundedAmountCents    BigInt                      @default(0)
+  expectedFeeCents       BigInt                      @default(0)
+  marketplaceFeeCents    BigInt                      @default(0)
+  shippingChargeCents    BigInt                      @default(0)
+  reservationKey         String?                     @unique @db.VarChar(128)
+  sourceHash             Bytes                       @db.ByteA
+  version                Int                         @default(0)
+  externalCreatedAt      DateTime                    @db.Timestamptz(6)
+  externalUpdatedAt      DateTime                    @db.Timestamptz(6)
+  externalClosedAt       DateTime?                   @db.Timestamptz(6)
+  reservedAt             DateTime?                   @db.Timestamptz(6)
+  fulfilledAt            DateTime?                   @db.Timestamptz(6)
+  releasedAt             DateTime?                   @db.Timestamptz(6)
+  reconciledAt           DateTime?                   @db.Timestamptz(6)
+  lastSyncedAt           DateTime                    @default(now()) @db.Timestamptz(6)
+  createdAt              DateTime                    @default(now()) @db.Timestamptz(6)
+  updatedAt              DateTime                    @default(now()) @updatedAt @db.Timestamptz(6)
+  account                ChannelAccount              @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  pack                   ChannelPack?                @relation(fields: [packId], references: [id], onDelete: Restrict)
+  shipment               ChannelShipment?            @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
+  listing                ChannelListing?             @relation(fields: [listingId], references: [id], onDelete: Restrict)
+  offer                  ChannelOffer?               @relation(fields: [offerId], references: [id], onDelete: Restrict)
+  variant                ProductVariant?             @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  stockLocation          StockLocation?              @relation(fields: [stockLocationId], references: [id], onDelete: Restrict)
+  ledgerEntries          ChannelLedgerEntry[]
+  inventoryLedgerEntries InventoryLedger[]
+  serializedUnits        SerializedUnit[]
+
+  @@unique([accountId, externalOrderId])
+  @@index([accountId, status, stockStatus, externalUpdatedAt, id])
+  @@index([packId, externalOrderId])
+  @@index([shipmentId, stockStatus])
+  @@index([reconciliationStatus, externalUpdatedAt, id])
+  @@index([variantId, stockLocationId, stockStatus])
+  @@map("ChannelOrder")
+}
+
+model ChannelShipment {
+  id                 String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId          String                      @db.Uuid
+  packId             String?                     @db.Uuid
+  externalShipmentId String                      @db.VarChar(32)
+  externalOrderId    String?                     @db.VarChar(32)
+  externalPackId     String?                     @db.VarChar(32)
+  logisticType       ChannelShipmentLogisticType
+  status             ChannelShipmentStatus
+  remoteSubstatus    String?                     @db.VarChar(80)
+  trackingNumber     String?                     @db.VarChar(120)
+  costCents          BigInt                      @default(0)
+  sourceHash         Bytes                       @db.ByteA
+  externalCreatedAt  DateTime                    @db.Timestamptz(6)
+  externalUpdatedAt  DateTime                    @db.Timestamptz(6)
+  shippedAt          DateTime?                   @db.Timestamptz(6)
+  deliveredAt        DateTime?                   @db.Timestamptz(6)
+  lastSyncedAt       DateTime                    @default(now()) @db.Timestamptz(6)
+  createdAt          DateTime                    @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime                    @default(now()) @updatedAt @db.Timestamptz(6)
+  account            ChannelAccount              @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  pack               ChannelPack?                @relation(fields: [packId], references: [id], onDelete: Restrict)
+  orders             ChannelOrder[]
+
+  @@unique([accountId, externalShipmentId])
+  @@index([accountId, status, externalUpdatedAt, id])
+  @@index([packId, status])
+  @@map("ChannelShipment")
+}
+
+model ChannelLedgerEntry {
+  id                 String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId          String                   @db.Uuid
+  packId             String?                  @db.Uuid
+  orderId            String?                  @db.Uuid
+  externalPaymentId  String?                  @db.VarChar(32)
+  entryType          ChannelLedgerEntryType
+  direction          ChannelLedgerDirection
+  amountCents        BigInt
+  currency           String                   @default("COP") @db.Char(3)
+  deduplicationKey   String                   @unique @db.VarChar(255)
+  sourceHash         Bytes                    @db.ByteA
+  evidenceReference  String?                  @db.VarChar(128)
+  reasonCode         String?                  @db.VarChar(80)
+  occurredAt         DateTime                 @db.Timestamptz(6)
+  createdByAdminUserId String?                @db.Uuid
+  createdAt          DateTime                 @default(now()) @db.Timestamptz(6)
+  account            ChannelAccount           @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  pack               ChannelPack?             @relation(fields: [packId], references: [id], onDelete: Restrict)
+  order              ChannelOrder?            @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  createdBy          AdminUser?               @relation("ChannelLedgerEntryCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([accountId, occurredAt, id])
+  @@index([orderId, entryType, occurredAt, id])
+  @@index([packId, entryType, occurredAt, id])
+  @@index([externalPaymentId, entryType])
+  @@map("ChannelLedgerEntry")
 }

@@ -5,7 +5,11 @@ import { OperationsService } from "@mundonettech/db";
 import { z } from "zod";
 
 import { getDatabase } from "@/lib/db";
-import { channelAccountService, channelCatalogService } from "@/lib/integrations";
+import {
+  channelAccountService,
+  channelCatalogService,
+  channelOrderService,
+} from "@/lib/integrations";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const headers = {
@@ -56,10 +60,14 @@ export async function POST(request: Request) {
     userAgentHash: security.userAgentHash,
   };
   const result = await channelAccountService(db).refreshDueAccounts(audit);
+  const ingestion = await channelOrderService(db).processResourceEvents(
+    { ...audit, requestId: randomUUID() },
+    { limit: 10 },
+  );
   const sync = await channelCatalogService(db).processSyncJobs(
     { ...audit, requestId: randomUUID() },
     { limit: 10 },
   );
   await new OperationsService(db).synchronizeNotifications();
-  return Response.json({ ...result, sync }, { headers });
+  return Response.json({ ...result, ingestion, sync }, { headers });
 }

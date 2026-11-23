@@ -9,10 +9,12 @@ import {
   ProcessChannelJobsButton,
 } from "@/components/admin/channel-catalog-forms";
 import { ChannelConnectionForm } from "@/components/admin/channel-connection-form";
+import { ChannelOrderDashboardView } from "@/components/admin/channel-order-dashboard";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import {
   channelAccountService,
   channelCatalogService,
+  channelOrderService,
   getIntegrationEnvironment,
   mercadoLibreOAuthRedirectUri,
 } from "@/lib/integrations";
@@ -120,14 +122,29 @@ export default async function ChannelsPage({
 }) {
   const session = await requireAdminPage("integrations:read");
   const catalog = channelCatalogService();
-  const [accounts, listings, variants, jobs, environment, params] = await Promise.all([
-    channelAccountService().listAccounts(session.profile.id),
-    catalog.listListings(session.profile.id),
-    catalog.listPublishableVariants(session.profile.id),
-    catalog.listSyncJobs(session.profile.id),
-    Promise.resolve(getIntegrationEnvironment()),
-    searchParams,
-  ]);
+  const channelOrders = channelOrderService();
+  const [accounts, listings, variants, jobs, orderDashboard, environment, params] =
+    await Promise.all([
+      channelAccountService().listAccounts(session.profile.id),
+      catalog.listListings(session.profile.id),
+      catalog.listPublishableVariants(session.profile.id),
+      catalog.listSyncJobs(session.profile.id),
+      channelOrders.dashboard(session.profile.id),
+      Promise.resolve(getIntegrationEnvironment()),
+      searchParams,
+    ]);
+  const locationEntries = await Promise.all(
+    orderDashboard.orders
+      .filter((order) => order.stockStatus === "REVIEW_REQUIRED")
+      .map(
+        async (order) =>
+          [
+            order.id,
+            await channelOrders.listStockLocationChoices(session.profile.id, order.id),
+          ] as const,
+      ),
+  );
+  const locations = Object.fromEntries(locationEntries);
   const canWrite = hasAdminPermission(session.profile.role, "integrations:write");
   const activeAccounts = accounts.filter((account) => account.status === "ACTIVE");
   const redirectUri = mercadoLibreOAuthRedirectUri();
@@ -455,6 +472,11 @@ export default async function ChannelsPage({
           </ul>
         )}
       </section>
+      <ChannelOrderDashboardView
+        dashboard={orderDashboard}
+        canWrite={canWrite}
+        locations={locations}
+      />
     </div>
   );
 }

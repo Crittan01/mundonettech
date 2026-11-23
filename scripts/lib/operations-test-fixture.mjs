@@ -14,6 +14,10 @@ export const operationsTables = [
   "ChannelListing",
   "ChannelOffer",
   "ChannelSyncJob",
+  "ChannelPack",
+  "ChannelOrder",
+  "ChannelShipment",
+  "ChannelLedgerEntry",
 ];
 
 export async function seedOperationsFixture(client, { adminId, catalog }) {
@@ -168,6 +172,60 @@ export async function seedOperationsFixture(client, { adminId, catalog }) {
       JSON.stringify({ listingVersion: 0, offerVersion: 0 }),
       adminId,
     ],
+  );
+  const externalItemId = `MCO${Date.now()}`;
+  const channelPackId = randomUUID();
+  const channelShipmentId = randomUUID();
+  const channelOrderId = randomUUID();
+  const externalPackId = String(2_100_000_000_000 + Math.floor(Math.random() * 1_000_000));
+  const externalOrderId = String(2_200_000_000_000 + Math.floor(Math.random() * 1_000_000));
+  const externalShipmentId = String(4_400_000_000_000 + Math.floor(Math.random() * 1_000_000));
+  await client.query(
+    `INSERT INTO "ChannelPack" (
+      "id", "accountId", "externalPackId", "externalShipmentId", "externalStatus", "sourceHash",
+      "externalCreatedAt", "externalUpdatedAt"
+    ) VALUES ($1, $2, $3, $4, 'RELEASED', $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    [channelPackId, channelAccountId, externalPackId, externalShipmentId, randomBytes(32)],
+  );
+  await client.query(
+    `INSERT INTO "ChannelShipment" (
+      "id", "accountId", "packId", "externalShipmentId", "externalOrderId", "externalPackId",
+      "logisticType", "status", "costCents", "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+    ) VALUES ($1, $2, $3, $4, $5, $6, 'ME2', 'READY_TO_SHIP', 0, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    [
+      channelShipmentId,
+      channelAccountId,
+      channelPackId,
+      externalShipmentId,
+      externalOrderId,
+      externalPackId,
+      randomBytes(32),
+    ],
+  );
+  await client.query(
+    `INSERT INTO "ChannelOrder" (
+      "id", "accountId", "packId", "shipmentId", "externalOrderId", "externalItemId", "remoteStatus", "status",
+      "quantity", "unitPriceCents", "grossAmountCents", "paidAmountCents", "capturedAmountCents",
+      "expectedFeeCents", "marketplaceFeeCents", "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6, 'paid', 'PAID', 1, 100000, 100000, 100000, 100000,
+      10000, 10000, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+    )`,
+    [
+      channelOrderId,
+      channelAccountId,
+      channelPackId,
+      channelShipmentId,
+      externalOrderId,
+      externalItemId,
+      randomBytes(32),
+    ],
+  );
+  await client.query(
+    `INSERT INTO "ChannelLedgerEntry" (
+      "accountId", "orderId", "entryType", "direction", "amountCents", "deduplicationKey", "sourceHash", "occurredAt"
+    ) VALUES ($1, $2, 'SALE_EXPECTED', 'CREDIT', 100000, $3, $4, CURRENT_TIMESTAMP)`,
+    [channelAccountId, channelOrderId, `channel-ledger:${channelOrderId}:SALE`, randomBytes(32)],
   );
   return {
     notificationId,
