@@ -44,7 +44,7 @@ function NumberField({
   id: string;
   name: string;
   label: string;
-  value: number | null;
+  value: string | number | null;
   minimum?: number;
 }) {
   return (
@@ -134,13 +134,13 @@ export function SegmentEditorForm({
           id={`${prefix}-min-frequency`}
           name="minFrequency"
           label="Frecuencia mínima"
-          value={values?.minFrequency ? Number(values.minFrequency) : definition.minFrequency}
+          value={values !== undefined ? (values.minFrequency ?? "") : definition.minFrequency}
         />
         <NumberField
           id={`${prefix}-max-frequency`}
           name="maxFrequency"
           label="Frecuencia máxima"
-          value={values?.maxFrequency ? Number(values.maxFrequency) : definition.maxFrequency}
+          value={values !== undefined ? (values.maxFrequency ?? "") : definition.maxFrequency}
         />
       </fieldset>
       <fieldset className="grid gap-4 rounded-lg border border-border p-4 sm:grid-cols-2">
@@ -153,7 +153,11 @@ export function SegmentEditorForm({
             type="number"
             min={0}
             step={1}
-            defaultValue={values?.minNetLtvCop ?? wholeCop(definition.minNetLtvCents)}
+            defaultValue={
+              values !== undefined
+                ? (values.minNetLtvCop ?? "")
+                : wholeCop(definition.minNetLtvCents)
+            }
             placeholder="Sin mínimo"
           />
         </div>
@@ -165,7 +169,11 @@ export function SegmentEditorForm({
             type="number"
             min={0}
             step={1}
-            defaultValue={values?.maxNetLtvCop ?? wholeCop(definition.maxNetLtvCents)}
+            defaultValue={
+              values !== undefined
+                ? (values.maxNetLtvCop ?? "")
+                : wholeCop(definition.maxNetLtvCents)
+            }
             placeholder="Sin máximo"
           />
         </div>
@@ -177,8 +185,8 @@ export function SegmentEditorForm({
           name="lastPurchaseWithinDays"
           label="Compró en los últimos N días"
           value={
-            values?.lastPurchaseWithinDays
-              ? Number(values.lastPurchaseWithinDays)
+            values !== undefined
+              ? (values.lastPurchaseWithinDays ?? "")
               : definition.lastPurchaseWithinDays
           }
           minimum={1}
@@ -188,8 +196,8 @@ export function SegmentEditorForm({
           name="lastPurchaseOlderThanDays"
           label="La última compra supera N días"
           value={
-            values?.lastPurchaseOlderThanDays
-              ? Number(values.lastPurchaseOlderThanDays)
+            values !== undefined
+              ? (values.lastPurchaseOlderThanDays ?? "")
               : definition.lastPurchaseOlderThanDays
           }
         />

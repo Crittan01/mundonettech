@@ -186,9 +186,11 @@ export type { ReferralRejectionReason } from "./growth.js";
 export {
   classifyRfm,
   customerSegmentStatusLabels,
+  lifecycleEnrollmentExitReasonLabels,
   lifecycleEnrollmentStatusLabels,
   lifecycleJourneyStatusLabels,
   lifecycleMessageStatusLabels,
+  lifecycleSingleLineText,
   lifecycleText,
   normalizeCustomerSegmentDefinition,
   normalizeLifecycleSteps,

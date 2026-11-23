@@ -4,6 +4,7 @@ import {
   rfmClasses,
   rfmClassLabels,
 } from "@mundonettech/core";
+import { RfmAnalyticsError } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -46,23 +47,44 @@ export default async function RfmAnalyticsPage({
     cursor: single(raw.cursor) || undefined,
   });
   const service = rfmAnalyticsService();
-  const [summary, report] = await Promise.all([
+  const [summary, reportResult] = await Promise.all([
     service.summary(session.profile.id),
     parsed.success
-      ? service.list(session.profile.id, {
-          ...(parsed.data.cursor ? { cursor: parsed.data.cursor } : {}),
-          filter: {
-            ...(parsed.data.rfmClass ? { rfmClass: parsed.data.rfmClass } : {}),
-            ...(parsed.data.minLtvCop
-              ? { minNetLtvCents: BigInt(parseWholeCopToCents(parsed.data.minLtvCop)) }
-              : {}),
-          },
-        })
-      : Promise.resolve({ items: [], nextCursor: null }),
+      ? (async () => {
+          try {
+            const minNetLtvCents = parsed.data.minLtvCop
+              ? BigInt(parseWholeCopToCents(parsed.data.minLtvCop))
+              : undefined;
+            const list = await service.list(session.profile.id, {
+              ...(parsed.data.cursor ? { cursor: parsed.data.cursor } : {}),
+              filter: {
+                ...(parsed.data.rfmClass ? { rfmClass: parsed.data.rfmClass } : {}),
+                ...(minNetLtvCents !== undefined ? { minNetLtvCents } : {}),
+              },
+            });
+            return { ...list, invalid: false };
+          } catch (error) {
+            if (
+              (error instanceof RfmAnalyticsError && error.code === "VALIDATION") ||
+              error instanceof RangeError ||
+              error instanceof TypeError
+            ) {
+              return { items: [], nextCursor: null, invalid: true };
+            }
+            throw error;
+          }
+        })()
+      : Promise.resolve({ items: [], nextCursor: null, invalid: true }),
   ]);
+  const invalidQuery = reportResult.invalid;
+  const report = reportResult;
   const nextParams = new URLSearchParams();
-  if (parsed.success && parsed.data.rfmClass) nextParams.set("rfmClass", parsed.data.rfmClass);
-  if (parsed.success && parsed.data.minLtvCop) nextParams.set("minLtvCop", parsed.data.minLtvCop);
+  if (!invalidQuery && parsed.success && parsed.data.rfmClass) {
+    nextParams.set("rfmClass", parsed.data.rfmClass);
+  }
+  if (!invalidQuery && parsed.success && parsed.data.minLtvCop) {
+    nextParams.set("minLtvCop", parsed.data.minLtvCop);
+  }
   if (report.nextCursor) nextParams.set("cursor", report.nextCursor);
   return (
     <div className="space-y-10">
@@ -70,7 +92,8 @@ export default async function RfmAnalyticsPage({
         <h1 className="text-3xl font-bold">Analítica RFM y LTV</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Recencia desde la primera captura de cada pedido, frecuencia de pedidos con recaudo y LTV
-          neto de anulaciones y reembolsos completados. Los importes permanecen en centavos BigInt.
+          neto de anulaciones y reembolsos completados. Los importes se calculan con precisión
+          entera en centavos COP.
         </p>
         <Link className="mt-4 inline-flex text-sm underline" href="/admin/finanzas">
           Abrir informe financiero
@@ -132,7 +155,7 @@ export default async function RfmAnalyticsPage({
             Filtrar
           </Button>
         </form>
-        {!parsed.success ? (
+        {invalidQuery ? (
           <p role="alert" className="text-sm text-destructive">
             Los filtros o el cursor no son válidos.
           </p>

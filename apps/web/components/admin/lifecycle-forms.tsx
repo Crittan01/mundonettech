@@ -66,6 +66,9 @@ export function JourneyEditorForm({
   );
   const [steps, setSteps] = useState<LifecycleStepInput[]>(journey?.steps ?? [firstStep]);
   const prefix = journey ? `journey-${journey.id}` : "journey-new";
+  const selectableSegments = segments.filter(
+    (segment) => segment.status !== "ARCHIVED" || segment.id === journey?.segmentId,
+  );
   const update = (index: number, patch: Partial<LifecycleStepInput>) => {
     setSteps((current) =>
       current.map((step, candidate) => (candidate === index ? { ...step, ...patch } : step)),
@@ -104,10 +107,14 @@ export function JourneyEditorForm({
             <option value="" disabled>
               Selecciona un segmento
             </option>
-            {segments.map((segment) => (
-              <option key={segment.id} value={segment.id}>
+            {selectableSegments.map((segment) => (
+              <option key={segment.id} value={segment.id} disabled={segment.status === "ARCHIVED"}>
                 {segment.name}
-                {segment.status === "ACTIVE" ? "" : " (borrador; actívalo antes del journey)"}
+                {segment.status === "ACTIVE"
+                  ? ""
+                  : segment.status === "DRAFT"
+                    ? " (borrador; actívalo antes del journey)"
+                    : " (archivado; selecciona un segmento activo)"}
               </option>
             ))}
           </select>
@@ -147,9 +154,13 @@ export function JourneyEditorForm({
                     step={1}
                     required
                     value={step.offsetMinutes}
-                    onChange={(event) =>
-                      update(index, { offsetMinutes: Number(event.currentTarget.value) })
-                    }
+                    onChange={(event) => {
+                      const raw = event.currentTarget.value;
+                      const parsedOffset = raw === "" ? 0 : Number(raw);
+                      if (Number.isFinite(parsedOffset)) {
+                        update(index, { offsetMinutes: Math.trunc(parsedOffset) });
+                      }
+                    }}
                   />
                 </div>
                 <div className="flex items-end justify-end">
@@ -221,7 +232,12 @@ export function JourneyEditorForm({
           Añadir paso
         </Button>
       </div>
-      <Button type="submit" disabled={pending || segments.length === 0}>
+      <Button
+        type="submit"
+        disabled={
+          pending || selectableSegments.filter((item) => item.status !== "ARCHIVED").length === 0
+        }
+      >
         {pending ? "Guardando…" : journey ? "Actualizar borrador" : "Crear journey"}
       </Button>
       <FormMessage state={state} />

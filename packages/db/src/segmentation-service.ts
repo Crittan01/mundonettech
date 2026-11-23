@@ -250,6 +250,22 @@ export class SegmentationService {
             "Archive or reassign active journeys before archiving their segment.",
           );
         }
+        const activeMembers = await tx.$queryRaw<Array<{ customerId: string }>>`
+          WITH latest AS (
+            SELECT DISTINCT ON (membership."segmentId", membership."customerId")
+              membership."customerId", membership."status"
+            FROM "CustomerSegmentMembership" membership
+            WHERE membership."segmentId" = ${current.id}::uuid
+            ORDER BY membership."segmentId", membership."customerId", membership."sequence" DESC
+          )
+          SELECT "customerId" FROM latest WHERE "status" = 'ENTERED' ORDER BY "customerId"
+        `;
+        if (activeMembers.length > 0) {
+          await acquireOperationLocks(
+            tx,
+            activeMembers.map((row) => `growth-customer:${row.customerId}`),
+          );
+        }
       }
       const now = await databaseNow(tx);
       const segment = await tx.customerSegment.update({
@@ -302,11 +318,39 @@ export class SegmentationService {
     }
     const definition = normalizedSegmentDefinition(segment.definition);
     const ctes = eligibilityCtes(segment, definition);
-    const entered = await tx.$queryRaw<Array<{ id: string; customerId: string }>>(Prisma.sql`
+    const candidates = await tx.$queryRaw<Array<{ customerId: string }>>(Prisma.sql`
       ${customerRfmCte()}, ${ctes},
       latest AS (
         SELECT DISTINCT ON (membership."segmentId", membership."customerId") membership.*
         FROM "CustomerSegmentMembership" membership WHERE membership."segmentId" = ${segment.id}::uuid
+        ORDER BY membership."segmentId", membership."customerId", membership."sequence" DESC
+      )
+      SELECT DISTINCT "customerId" FROM (
+        SELECT eligible."customerId" FROM eligible_members eligible
+        LEFT JOIN latest ON latest."segmentId" = ${segment.id}::uuid AND latest."customerId" = eligible."customerId"
+        WHERE latest."id" IS NULL OR latest."status" = 'EXITED'
+        UNION
+        SELECT latest."customerId" FROM latest WHERE latest."status" = 'ENTERED'
+      ) candidate_ids
+      ORDER BY "customerId"
+    `);
+    const lockedCustomerIds = candidates.map((row) => row.customerId);
+    if (lockedCustomerIds.length > 0) {
+      await acquireOperationLocks(
+        tx,
+        lockedCustomerIds.map((id) => `growth-customer:${id}`),
+      );
+    }
+    const entered =
+      lockedCustomerIds.length === 0
+        ? []
+        : await tx.$queryRaw<Array<{ id: string; customerId: string }>>(Prisma.sql`
+      ${customerRfmCte()}, ${ctes},
+      latest AS (
+        SELECT DISTINCT ON (membership."segmentId", membership."customerId") membership.*
+        FROM "CustomerSegmentMembership" membership
+        WHERE membership."segmentId" = ${segment.id}::uuid
+          AND membership."customerId" = ANY(${lockedCustomerIds}::uuid[])
         ORDER BY membership."segmentId", membership."customerId", membership."sequence" DESC
       ), changes AS (
         INSERT INTO "CustomerSegmentMembership" (
@@ -318,18 +362,24 @@ export class SegmentationService {
           ${metricsSql("eligible")}, ${segment.definitionHash}::bytea
         FROM eligible_members eligible
         LEFT JOIN latest ON latest."segmentId" = ${segment.id}::uuid AND latest."customerId" = eligible."customerId"
-        WHERE latest."id" IS NULL OR latest."status" = 'EXITED'
+        WHERE eligible."customerId" = ANY(${lockedCustomerIds}::uuid[])
+          AND (latest."id" IS NULL OR latest."status" = 'EXITED')
         ORDER BY eligible."customerId"
         RETURNING "id", "customerId"
       ) SELECT "id", "customerId" FROM changes
     `);
-    const exited = await tx.$queryRaw<
-      Array<{ id: string; entryMembershipId: string; customerId: string }>
-    >(Prisma.sql`
+    const exited =
+      lockedCustomerIds.length === 0
+        ? []
+        : await tx.$queryRaw<
+            Array<{ id: string; entryMembershipId: string; customerId: string }>
+          >(Prisma.sql`
       ${customerRfmCte()}, ${ctes},
       latest AS (
         SELECT DISTINCT ON (membership."segmentId", membership."customerId") membership.*
-        FROM "CustomerSegmentMembership" membership WHERE membership."segmentId" = ${segment.id}::uuid
+        FROM "CustomerSegmentMembership" membership
+        WHERE membership."segmentId" = ${segment.id}::uuid
+          AND membership."customerId" = ANY(${lockedCustomerIds}::uuid[])
         ORDER BY membership."segmentId", membership."customerId", membership."sequence" DESC
       ), changes AS (
         INSERT INTO "CustomerSegmentMembership" (
@@ -350,9 +400,11 @@ export class SegmentationService {
         FROM latest
         JOIN "Customer" customer ON customer."id" = latest."customerId"
         JOIN customer_rfm rfm ON rfm."customerId" = latest."customerId"
-        WHERE latest."status" = 'ENTERED' AND NOT EXISTS (
-          SELECT 1 FROM eligible_members eligible WHERE eligible."customerId" = latest."customerId"
-        )
+        WHERE latest."customerId" = ANY(${lockedCustomerIds}::uuid[])
+          AND latest."status" = 'ENTERED'
+          AND NOT EXISTS (
+            SELECT 1 FROM eligible_members eligible WHERE eligible."customerId" = latest."customerId"
+          )
         ORDER BY latest."customerId"
         RETURNING "id", "customerId", (
           SELECT prior."id" FROM "CustomerSegmentMembership" prior

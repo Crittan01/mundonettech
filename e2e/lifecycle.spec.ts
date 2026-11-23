@@ -210,6 +210,26 @@ test("admin creates, activates and executes a consented lifecycle journey end to
   await expect(page.getByText("Sin compra pagada").first()).toBeVisible();
   await expect(page.getByText("Sin compra", { exact: true }).first()).toBeVisible();
   await expectAccessible(page);
+
+  const missingId = "00000000-0000-4000-8000-000000000000";
+  const missingSegmentResponse = await page.goto(`/admin/segmentos?segmento=${missingId}`);
+  expect(missingSegmentResponse?.status()).toBe(200);
+  await expect(
+    page.getByText("El segmento solicitado no existe o ya no está disponible."),
+  ).toBeVisible();
+  await expectAccessible(page);
+
+  const missingJourneyResponse = await page.goto(`/admin/lifecycle?journey=${missingId}`);
+  expect(missingJourneyResponse?.status()).toBe(200);
+  await expect(
+    page.getByText("El journey solicitado no existe o ya no está disponible."),
+  ).toBeVisible();
+  await expectAccessible(page);
+
+  const invalidCursorResponse = await page.goto("/admin/analitica-rfm?cursor=cursor-invalido");
+  expect(invalidCursorResponse?.status()).toBe(200);
+  await expect(page.getByText("Los filtros o el cursor no son válidos.")).toBeVisible();
+  await expectAccessible(page);
 });
 
 test("lifecycle and RFM routes stay closed to roles without their permissions", async ({

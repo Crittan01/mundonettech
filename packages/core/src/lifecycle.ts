@@ -2,6 +2,7 @@ const maximumSignedBigInt = 9_223_372_036_854_775_807n;
 const maximumJourneySteps = 20;
 const maximumJourneyOffsetMinutes = 525_600;
 const controlPattern = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const singleLineControlPattern = /[\u0000-\u001f\u007f]/;
 const tokenPattern = /\{\{([a-zA-Z][a-zA-Z0-9]{0,59})\}\}/g;
 const validTokenPattern = /\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g;
 const lifecycleVariables = [
@@ -182,6 +183,26 @@ export function lifecycleText(
   return value;
 }
 
+export function lifecycleSingleLineText(
+  value: unknown,
+  field: string,
+  minimum: number,
+  maximum: number,
+): string {
+  if (
+    typeof value !== "string" ||
+    value.trim() !== value ||
+    value.length < minimum ||
+    value.length > maximum ||
+    singleLineControlPattern.test(value)
+  ) {
+    throw new TypeError(
+      `${field} must contain ${minimum} to ${maximum} trimmed single-line printable characters.`,
+    );
+  }
+  return value;
+}
+
 function templateTokens(
   step: Pick<LifecycleStepInput, "subject" | "htmlBody" | "textBody">,
 ): string[] {
@@ -224,11 +245,11 @@ export function normalizeLifecycleSteps(value: unknown): LifecycleStepInput[] {
       throw new RangeError("Journey step offsets must be strictly increasing.");
     }
     previousOffset = offsetMinutes;
-    const subject = lifecycleText(input.subject, `steps[${index}].subject`, 1, 200);
+    const subject = lifecycleSingleLineText(input.subject, `steps[${index}].subject`, 1, 200);
     const htmlBody = lifecycleText(input.htmlBody, `steps[${index}].htmlBody`, 1, 50_000);
     const textBody = lifecycleText(input.textBody, `steps[${index}].textBody`, 1, 20_000);
     if (
-      /<\/?(?:script|iframe|object|embed|form|meta|link|base)\b|\son[a-z]+\s*=|javascript\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
+      /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|style)\b|[\s/]on[a-z]+\s*=|(?:javascript|vbscript)\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
         htmlBody,
       )
     ) {
@@ -380,4 +401,16 @@ export const segmentMembershipReasonLabels = {
   CUSTOMER_INACTIVE: "Cuenta inactiva o anonimizada",
   SEGMENT_ARCHIVED: "Segmento archivado",
   ANONYMIZED: "Cuenta anonimizada",
+} as const;
+
+export const lifecycleEnrollmentExitReasonLabels = {
+  CONSENT_REVOKED: "Consentimiento comercial revocado",
+  CUSTOMER_INACTIVE: "Cuenta inactiva o anonimizada",
+  SEGMENT_EXITED: "Salió del segmento de entrada",
+  SEGMENT_ARCHIVED: "Segmento archivado",
+  JOURNEY_ARCHIVED: "Journey archivado",
+  SUPPRESSED: "Baja o rebote de correo",
+  ANONYMIZED: "Cuenta anonimizada",
+  DELIVERY_FAILED: "Fallo definitivo del proveedor de correo",
+  DELIVERY_DISPATCH_FAILED: "Fallo definitivo de despacho",
 } as const;

@@ -142,7 +142,7 @@ export function validateEmailTemplate(input: EmailTemplateDefinition): EmailTemp
     );
   }
   if (
-    /<\/?(?:script|iframe|object|embed|form|meta|link|base)\b|\son[a-z]+\s*=|javascript\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
+    /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|style)\b|[\s/]on[a-z]+\s*=|(?:javascript|vbscript)\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
       input.htmlBody,
     )
   ) {
@@ -167,7 +167,8 @@ export function validateEmailTemplate(input: EmailTemplateDefinition): EmailTemp
   }
   if (
     /\{\{|\}\}/.test(input.subject.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, "")) ||
-    /\{\{|\}\}/.test(input.htmlBody.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, ""))
+    /\{\{|\}\}/.test(input.htmlBody.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, "")) ||
+    /\{\{|\}\}/.test(input.textBody.replaceAll(/\{\{[a-zA-Z][a-zA-Z0-9]{0,59}\}\}/g, ""))
   ) {
     throw new EmailValidationError("Email template contains malformed interpolation tokens.");
   }

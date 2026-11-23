@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   adminNavigation,
   classifyRfm,
+  lifecycleEnrollmentExitReasonLabels,
   normalizeCustomerSegmentDefinition,
   normalizeLifecycleSteps,
   rfmScores,
@@ -105,7 +106,19 @@ describe("F5.2 segment definitions and lifecycle templates", () => {
         { ...step, htmlBody: '<img src="x" onerror="alert(1)">{{unsubscribeUrl}}' },
       ]),
     ).toThrow(TypeError);
+    expect(() =>
+      normalizeLifecycleSteps([{ ...step, htmlBody: "<svg/onload=alert(1)>{{unsubscribeUrl}}" }]),
+    ).toThrow(TypeError);
+    expect(() =>
+      normalizeLifecycleSteps([{ ...step, subject: "Hola\n{{customerFirstName}}" }]),
+    ).toThrow(TypeError);
+    expect(() =>
+      normalizeLifecycleSteps([{ ...step, subject: "Hola\t{{customerFirstName}}" }]),
+    ).toThrow(TypeError);
     expect(() => normalizeLifecycleSteps([{ ...step, subject: "{{unknown}}" }])).toThrow(TypeError);
+    expect(lifecycleEnrollmentExitReasonLabels.CONSENT_REVOKED).toBe(
+      "Consentimiento comercial revocado",
+    );
   });
 });
 

@@ -424,26 +424,46 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
       (await db.emailEvent.findUniqueOrThrow({ where: { id: queued.id } })).status,
       "SENDING",
     );
-    await lifecycle.transitionJourney(
-      { journeyId: journey.id, expectedVersion: 4, action: "RESUME" },
-      audit,
-    );
-    await db.emailEvent.update({
-      where: { id: queued.id },
-      data: { nextAttemptAt: new Date(Date.now() - 1000) },
-    });
-    await db.domainOutbox.updateMany({
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await db.emailEvent.update({
+        where: { id: queued.id },
+        data: { nextAttemptAt: new Date(Date.now() - 1000) },
+      });
+      await db.domainOutbox.updateMany({
+        where: {
+          aggregateType: "EmailEvent",
+          aggregateId: queued.id,
+          eventType: "email.requested.v1",
+        },
+        data: { availableAt: new Date(Date.now() - 1000) },
+      });
+      const deferredCycle = await worker.runBatch(100);
+      assert.equal(deferredCycle.failed, 0);
+      assert.equal(deferredCycle.retries, 1);
+    }
+    const pausedEmail = await db.emailEvent.findUniqueOrThrow({ where: { id: queued.id } });
+    assert.equal(pausedEmail.attemptCount, 0);
+    const pausedOutbox = await db.domainOutbox.findFirstOrThrow({
       where: {
         aggregateType: "EmailEvent",
         aggregateId: queued.id,
         eventType: "email.requested.v1",
       },
-      data: { availableAt: new Date(Date.now() - 1000) },
     });
+    assert.equal(pausedOutbox.failedAt, null);
+    await lifecycle.transitionJourney(
+      { journeyId: journey.id, expectedVersion: 4, action: "RESUME" },
+      audit,
+    );
     await worker.runBatch(100);
     assert.equal(sent.length, 1);
     message = await db.lifecycleMessage.findUniqueOrThrow({ where: { id: message.id } });
     assert.equal(message.status, "QUEUED");
+    assert.equal(
+      (await db.lifecycleEnrollment.findUniqueOrThrow({ where: { id: message.enrollmentId } }))
+        .status,
+      "COMPLETED",
+    );
   });
 
   it("suppresses an already queued message when consent is revoked before provider send", async () => {
@@ -630,5 +650,146 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
       ),
       (error) => error instanceof LifecycleError && error.code === "FORBIDDEN",
     );
+  });
+
+  it("delivers steps that use only a subset of optional variables and blocks global template overrides or archived segments", async () => {
+    await assert.rejects(
+      email.saveTemplate(
+        {
+          templateKey: "lifecycle.campaign",
+          subject: "Override prohibido {{storeName}}",
+          htmlBody: '<p>{{storeName}} <a href="{{unsubscribeUrl}}">Baja</a></p>',
+          textBody: "{{storeName}} {{unsubscribeUrl}}",
+          variables: ["storeName", "unsubscribeUrl"],
+          publish: true,
+        },
+        audit,
+      ),
+    );
+    const archivedDraft = await segments.createSegment(
+      { name: "Segmento archivado prueba", definition },
+      audit,
+    );
+    await segments.transitionSegment(
+      { segmentId: archivedDraft.id, expectedVersion: 0, action: "ARCHIVE" },
+      audit,
+    );
+    await assert.rejects(
+      lifecycle.createJourney(
+        { name: "Journey sobre archivado", segmentId: archivedDraft.id, steps: steps() },
+        audit,
+      ),
+      (error) => error instanceof LifecycleError && error.code === "CONFLICT",
+    );
+    const { customer } = await makeCustomer();
+    const minimalSteps = [
+      {
+        position: 0,
+        offsetMinutes: 0,
+        subject: "Aviso breve de {{storeName}}",
+        htmlBody:
+          '<p>Gracias por elegir {{storeName}}.</p><p><a href="{{unsubscribeUrl}}">Baja</a></p>',
+        textBody: "Gracias por elegir {{storeName}}. Baja: {{unsubscribeUrl}}",
+        variables: ["storeName", "unsubscribeUrl"],
+      },
+    ];
+    const { journey } = await createAutomation("Journey variables parciales", minimalSteps);
+    await lifecycle.runScheduledWork(20);
+    await worker.runBatch(100);
+    await worker.runBatch(100);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].subject, "Aviso breve de Tienda Lifecycle");
+    const enrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+      where: { journeyId_customerId: { journeyId: journey.id, customerId: customer.id } },
+    });
+    assert.equal(enrollment.status, "COMPLETED");
+  });
+
+  it("immediately exits segments, cancels active enrollments and suppresses queued emails on profile consent revocation and topic unsubscribe", async () => {
+    const { customer } = await makeCustomer();
+    const { segment, journey: firstJourney } = await createAutomation(
+      "Journey revocación perfil 1",
+    );
+    const secondDraft = await lifecycle.createJourney(
+      {
+        name: "Journey revocación perfil 2",
+        segmentId: segment.id,
+        steps: [{ ...steps()[0], offsetMinutes: 120 }],
+      },
+      audit,
+    );
+    const secondJourney = await lifecycle.transitionJourney(
+      { journeyId: secondDraft.id, expectedVersion: 0, action: "ACTIVATE" },
+      audit,
+    );
+    await lifecycle.runScheduledWork(20);
+    await worker.runBatch(100);
+    const accounts = new AccountService(db, { privacyPolicyVersion: "2026-01" });
+    await accounts.updateProfile(
+      customer.id,
+      {
+        givenName: "Cliente Lifecycle",
+        familyName: "Revocado",
+        phoneE164: null,
+        marketingEmail: false,
+      },
+      { ipHash: hash(), userAgentHash: hash() },
+    );
+    const latestMembership = await db.customerSegmentMembership.findFirstOrThrow({
+      where: { segmentId: segment.id, customerId: customer.id },
+      orderBy: { sequence: "desc" },
+    });
+    assert.equal(latestMembership.status, "EXITED");
+    assert.equal(latestMembership.reason, "CONSENT_REVOKED");
+    for (const journeyId of [firstJourney.id, secondJourney.id]) {
+      const enrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+        where: { journeyId_customerId: { journeyId, customerId: customer.id } },
+      });
+      assert.equal(enrollment.status, "CANCELLED");
+      assert.equal(enrollment.exitReason, "CONSENT_REVOKED");
+    }
+    const suppressedEmail = await db.emailEvent.findFirstOrThrow({
+      where: { customerId: customer.id, templateKey: "lifecycle.campaign" },
+    });
+    assert.equal(suppressedEmail.status, "SUPPRESSED");
+
+    const secondCustomer = await makeCustomer();
+    await lifecycle.runScheduledWork(20);
+    await worker.runBatch(100);
+    const unsubscribeTarget = await db.emailEvent.findFirstOrThrow({
+      where: { customerId: secondCustomer.customer.id, templateKey: "lifecycle.campaign" },
+    });
+    const token = decodeURIComponent(
+      unsubscribeTarget.variablesSnapshot.unsubscribeUrl.split("/").at(-1),
+    );
+    await email.unsubscribe(token);
+    for (const journeyId of [firstJourney.id, secondJourney.id]) {
+      const enrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+        where: { journeyId_customerId: { journeyId, customerId: secondCustomer.customer.id } },
+      });
+      assert.equal(enrollment.status, "CANCELLED");
+      assert.equal(enrollment.exitReason, "SUPPRESSED");
+    }
+  });
+
+  it("serializes concurrent segment refresh and customer anonymization without sequence collisions", async () => {
+    const { customer } = await makeCustomer();
+    const { segment } = await createAutomation("Journey concurrencia anonimización");
+    await segments.refreshSegment(segment.id, audit);
+    const accounts = new AccountService(db, { privacyPolicyVersion: "2026-01" });
+    await Promise.all([
+      segments.refreshSegment(segment.id, audit),
+      accounts.anonymize(customer.id, "ELIMINAR MI CUENTA", {
+        ipHash: hash(),
+        userAgentHash: hash(),
+      }),
+    ]);
+    const finalCustomer = await db.customer.findUniqueOrThrow({ where: { id: customer.id } });
+    assert.equal(finalCustomer.status, "ANONYMIZED");
+    const history = await db.customerSegmentMembership.findMany({
+      where: { segmentId: segment.id, customerId: customer.id },
+      orderBy: { sequence: "asc" },
+    });
+    assert.equal(history.at(-1)?.status, "EXITED");
   });
 });

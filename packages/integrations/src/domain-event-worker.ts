@@ -61,6 +61,13 @@ class RetryableDomainEventError extends Error {
   }
 }
 
+class PausedDomainEventError extends Error {
+  constructor(readonly availableAt: Date) {
+    super("Domain event is deferred while its lifecycle journey is paused.");
+    this.name = "PausedDomainEventError";
+  }
+}
+
 export interface DomainEventWorkerOptions {
   readonly workerId: string;
   readonly shipping: ShippingService;
@@ -297,7 +304,6 @@ export class DomainEventWorker {
   }
 
   private async queueLifecycleEmail(event: DomainOutbox): Promise<void> {
-    const lifecycle = new LifecycleService(this.db);
     const dispatchVersion = this.payload(event).dispatchVersion;
     if (
       dispatchVersion !== undefined &&
@@ -307,33 +313,13 @@ export class DomainEventWorker {
     ) {
       throw new EmailValidationError("Lifecycle dispatch version is invalid.");
     }
-    const message = await lifecycle.dispatch(
-      this.id(event, "lifecycleMessageId"),
-      dispatchVersion as number | undefined,
-    );
-    if (!message) return;
-    const queued = await this.options.email.queue({
-      customerId: message.customerId,
-      lifecycleMessageId: message.id,
+    await this.options.email.queueLifecycle({
+      lifecycleMessageId: this.id(event, "lifecycleMessageId"),
+      ...(dispatchVersion !== undefined ? { dispatchVersion: dispatchVersion as number } : {}),
       credentialId: await this.emailCredentialId(),
-      templateKey: "lifecycle.campaign",
-      topic: "lifecycle",
-      recipientEmail: message.recipientEmail,
-      idempotencyKey: `domain:lifecycle.campaign:${message.id}`,
-      templateSnapshot: {
-        templateKey: "lifecycle.campaign",
-        subject: message.step.subject,
-        htmlBody: message.step.htmlBody,
-        textBody: message.step.textBody,
-        variables: message.step.variables,
-      },
-      variables: {
-        storeName: this.options.storeName,
-        customerFirstName: message.customerFirstName,
-        accountUrl: `${this.publicSiteUrl}/mi-cuenta`,
-      },
+      storeName: this.options.storeName,
+      accountUrl: `${this.publicSiteUrl}/mi-cuenta`,
     });
-    await lifecycle.markQueued(message.id, queued.id, queued.status);
   }
 
   private statusLabel(status: string): string {
@@ -542,6 +528,8 @@ export class DomainEventWorker {
       }
       case "email.requested.v1": {
         const outcome = await this.options.email.send(this.id(event, "emailEventId"));
+        if (outcome.deferredByPause && outcome.nextAttemptAt)
+          throw new PausedDomainEventError(outcome.nextAttemptAt);
         if (outcome.status === "SENDING" && outcome.nextAttemptAt)
           throw new RetryableDomainEventError(outcome.nextAttemptAt);
         return;
@@ -661,7 +649,23 @@ export class DomainEventWorker {
           throw new Error("Domain outbox claim expired before completion.");
         completed += 1;
       } catch (error) {
-        if (event.attempts >= this.maximumAttempts) {
+        if (error instanceof PausedDomainEventError) {
+          await this.db.$executeRaw`
+            UPDATE "DomainOutbox"
+            SET "availableAt" = ${error.availableAt},
+                "claimedAt" = NULL,
+                "claimedBy" = NULL,
+                "claimExpiresAt" = NULL,
+                "attempts" = GREATEST(0, "attempts" - 1),
+                "lastError" = 'PAUSED'
+            WHERE "id" = ${event.id}::uuid
+              AND "claimedBy" = ${this.options.workerId}
+              AND "claimExpiresAt" > CURRENT_TIMESTAMP
+              AND "processedAt" IS NULL
+              AND "failedAt" IS NULL
+          `;
+          retries += 1;
+        } else if (event.attempts >= this.maximumAttempts) {
           await failDomainOutbox(this.db, {
             id: event.id,
             workerId: this.options.workerId,

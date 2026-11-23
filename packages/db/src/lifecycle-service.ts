@@ -4,6 +4,7 @@ import { maskEmail, normalizeLifecycleSteps, type LifecycleStepInput } from "@mu
 
 import {
   cancelLifecycleEnrollment,
+  suppressCustomerLifecycleTopicInTransaction,
   type LifecycleCancellationReason,
 } from "./lifecycle-cancellation.js";
 import {
@@ -118,6 +119,9 @@ export class LifecycleService {
   private async assertSegment(tx: Prisma.TransactionClient, segmentId: string, active: boolean) {
     const segment = await tx.customerSegment.findUnique({ where: { id: segmentId } });
     if (!segment) throw new LifecycleError("NOT_FOUND", "Customer segment not found.");
+    if (segment.status === "ARCHIVED") {
+      throw new LifecycleError("CONFLICT", "Archived segments cannot be assigned to a journey.");
+    }
     if (active && segment.status !== "ACTIVE") {
       throw new LifecycleError("CONFLICT", "A lifecycle journey requires an active segment.");
     }
@@ -237,6 +241,38 @@ export class LifecycleService {
         },
       });
       let cancelled = 0;
+      if (input.action === "RESUME") {
+        const deferredEmails = await tx.emailEvent.findMany({
+          where: {
+            lifecycleMessage: {
+              enrollment: { journeyId: current.id, status: "ACTIVE" },
+            },
+            status: { in: ["QUEUED", "SENDING"] },
+            lastError: null,
+            nextAttemptAt: { gt: now },
+          },
+          select: { id: true },
+        });
+        if (deferredEmails.length > 0) {
+          const emailIds = deferredEmails.map((item) => item.id);
+          await tx.emailEvent.updateMany({
+            where: { id: { in: emailIds }, status: { in: ["QUEUED", "SENDING"] }, lastError: null },
+            data: { nextAttemptAt: now },
+          });
+          await tx.domainOutbox.updateMany({
+            where: {
+              eventType: "email.requested.v1",
+              aggregateType: "EmailEvent",
+              aggregateId: { in: emailIds },
+              processedAt: null,
+              failedAt: null,
+              claimedBy: null,
+              availableAt: { gt: now },
+            },
+            data: { availableAt: now },
+          });
+        }
+      }
       if (input.action === "ARCHIVE") {
         const enrollments = await tx.lifecycleEnrollment.findMany({
           where: { journeyId: current.id, status: "ACTIVE" },
@@ -340,6 +376,45 @@ export class LifecycleService {
       if (journey.steps.length === 0) {
         throw new LifecycleError("CONFLICT", "An active journey has no steps.");
       }
+      await acquireOperationLocks(tx, [`customer-segment:${journey.segmentId}`]);
+      const segment = await tx.customerSegment.findUnique({
+        where: { id: journey.segmentId },
+        select: { status: true, version: true },
+      });
+      if (!segment || segment.status !== "ACTIVE" || segment.version !== journey.segmentVersion) {
+        return { enrolled: 0 };
+      }
+      const initialCandidates = await tx.$queryRaw<Array<{ customerId: string }>>`
+        WITH latest AS (
+          SELECT DISTINCT ON (membership."segmentId", membership."customerId") membership.*
+          FROM "CustomerSegmentMembership" membership
+          WHERE membership."segmentId" = ${journey.segmentId}::uuid
+          ORDER BY membership."segmentId", membership."customerId", membership."sequence" DESC
+        )
+        SELECT latest."customerId"
+        FROM latest
+        JOIN "Customer" customer ON customer."id" = latest."customerId" AND customer."status" = 'ACTIVE' AND customer."deletedAt" IS NULL
+        JOIN "Consent" consent ON consent."id" = latest."consentId" AND consent."status" = 'GRANTED'
+        WHERE latest."status" = 'ENTERED' AND latest."segmentVersion" = ${journey.segmentVersion}::int
+          AND NOT EXISTS (SELECT 1 FROM "Consent" revocation WHERE revocation."revokesId" = consent."id")
+          AND NOT EXISTS (
+            SELECT 1 FROM "EmailSuppression" suppression
+            WHERE suppression."recipientHash" = digest(customer."email"::text, 'sha256'::text) AND suppression."topic" = 'lifecycle'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM "LifecycleEnrollment" enrollment
+            WHERE enrollment."journeyId" = ${journey.id}::uuid AND enrollment."customerId" = latest."customerId"
+          )
+        ORDER BY latest."customerId" LIMIT ${limit}::int
+      `;
+      const lockedCustomerIds = initialCandidates.map((row) => row.customerId);
+      if (lockedCustomerIds.length === 0) {
+        return { enrolled: 0 };
+      }
+      await acquireOperationLocks(
+        tx,
+        lockedCustomerIds.map((id) => `growth-customer:${id}`),
+      );
       const candidates = await tx.$queryRaw<
         Array<{ membershipId: string; customerId: string; consentId: string }>
       >`
@@ -347,13 +422,15 @@ export class LifecycleService {
           SELECT DISTINCT ON (membership."segmentId", membership."customerId") membership.*
           FROM "CustomerSegmentMembership" membership
           WHERE membership."segmentId" = ${journey.segmentId}::uuid
+            AND membership."customerId" = ANY(${lockedCustomerIds}::uuid[])
           ORDER BY membership."segmentId", membership."customerId", membership."sequence" DESC
         )
         SELECT latest."id" AS "membershipId", latest."customerId", latest."consentId"
         FROM latest
         JOIN "Customer" customer ON customer."id" = latest."customerId" AND customer."status" = 'ACTIVE' AND customer."deletedAt" IS NULL
         JOIN "Consent" consent ON consent."id" = latest."consentId" AND consent."status" = 'GRANTED'
-        WHERE latest."status" = 'ENTERED' AND latest."segmentVersion" = ${journey.segmentVersion}::int
+        WHERE latest."customerId" = ANY(${lockedCustomerIds}::uuid[])
+          AND latest."status" = 'ENTERED' AND latest."segmentVersion" = ${journey.segmentVersion}::int
           AND NOT EXISTS (SELECT 1 FROM "Consent" revocation WHERE revocation."revokesId" = consent."id")
           AND NOT EXISTS (
             SELECT 1 FROM "EmailSuppression" suppression
@@ -612,7 +689,19 @@ export class LifecycleService {
   async markQueued(messageId: string, emailEventId: string, emailStatus: string) {
     assertUuid(messageId, "messageId");
     assertUuid(emailEventId, "emailEventId");
-    if (!["QUEUED", "SUPPRESSED"].includes(emailStatus)) {
+    const validStatuses = new Set([
+      "QUEUED",
+      "SENDING",
+      "SENT",
+      "DELIVERY_DELAYED",
+      "DELIVERED",
+      "SUPPRESSED",
+      "BOUNCED",
+      "COMPLAINED",
+      "CANCELLED",
+      "FAILED",
+    ]);
+    if (!validStatuses.has(emailStatus)) {
       throw new LifecycleError("VALIDATION", "Lifecycle email queue outcome is invalid.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
@@ -623,18 +712,70 @@ export class LifecycleService {
           "Email event does not belong to the lifecycle message.",
         );
       }
+      const effectiveStatus = email.status;
       const now = await databaseNow(tx);
       const message = await tx.lifecycleMessage.findUnique({ where: { id: messageId } });
       if (!message) throw new LifecycleError("NOT_FOUND", "Lifecycle message not found.");
-      if (message.status === "QUEUED" || message.status === "SUPPRESSED") return message.status;
-      if (message.status !== "DISPATCHING") return message.status;
-      await tx.lifecycleMessage.update({
-        where: { id: messageId },
-        data: { status: emailStatus === "QUEUED" ? "QUEUED" : "SUPPRESSED", processedAt: now },
-      });
-      if (emailStatus === "SUPPRESSED") {
-        await cancelLifecycleEnrollment(tx, message.enrollmentId, now, "SUPPRESSED");
+      if (["SUPPRESSED", "BOUNCED", "COMPLAINED"].includes(effectiveStatus)) {
+        if (["DISPATCHING", "QUEUED"].includes(message.status)) {
+          await tx.lifecycleMessage.update({
+            where: { id: messageId },
+            data: { status: "SUPPRESSED", processedAt: now },
+          });
+        }
+        await suppressCustomerLifecycleTopicInTransaction(
+          tx,
+          message.customerId,
+          now,
+          "SUPPRESSED",
+        );
         return "SUPPRESSED" as const;
+      }
+      if (effectiveStatus === "CANCELLED") {
+        if (["SCHEDULED", "DISPATCHING", "QUEUED"].includes(message.status)) {
+          await tx.lifecycleMessage.update({
+            where: { id: messageId },
+            data: { status: "CANCELLED", processedAt: now },
+          });
+        }
+        await cancelLifecycleEnrollment(tx, message.enrollmentId, now, "CUSTOMER_INACTIVE");
+        return "CANCELLED" as const;
+      }
+      if (effectiveStatus === "FAILED") {
+        if (["DISPATCHING", "QUEUED"].includes(message.status)) {
+          await tx.lifecycleMessage.update({
+            where: { id: messageId },
+            data: {
+              status: "FAILED",
+              processedAt: now,
+              lastError: (email.lastError ?? "PROVIDER_FAILURE").slice(0, 500),
+            },
+          });
+          await tx.lifecycleMessage.updateMany({
+            where: {
+              enrollmentId: message.enrollmentId,
+              status: { in: ["SCHEDULED", "DISPATCHING"] },
+            },
+            data: { status: "CANCELLED", processedAt: now },
+          });
+          await tx.lifecycleEnrollment.updateMany({
+            where: { id: message.enrollmentId, status: "ACTIVE" },
+            data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_FAILED" },
+          });
+        }
+        return "FAILED" as const;
+      }
+      if (message.status === "DISPATCHING") {
+        await tx.lifecycleMessage.update({
+          where: { id: messageId },
+          data: { status: "QUEUED", processedAt: now },
+        });
+      }
+      if (
+        ["DISPATCHING", "QUEUED"].includes(message.status) &&
+        ["SENT", "DELIVERY_DELAYED", "DELIVERED"].includes(effectiveStatus)
+      ) {
+        await new LifecycleService(tx).markEmailSent(messageId, email.id);
       }
       return "QUEUED" as const;
     });
@@ -757,6 +898,23 @@ export class LifecycleService {
         });
       }
       await cancelLifecycleEnrollment(tx, message.enrollmentId, now, reason);
+      if (
+        reason === "SUPPRESSED" ||
+        reason === "CONSENT_REVOKED" ||
+        reason === "CUSTOMER_INACTIVE"
+      ) {
+        await suppressCustomerLifecycleTopicInTransaction(tx, message.customerId, now, reason);
+      }
     });
+  }
+
+  async suppressCustomerTopic(
+    customerId: string,
+    reason: "SUPPRESSED" | "CONSENT_REVOKED" | "CUSTOMER_INACTIVE" = "SUPPRESSED",
+  ): Promise<number> {
+    assertUuid(customerId, "customerId");
+    return inInventoryTransaction(this.db, async (tx) =>
+      suppressCustomerLifecycleTopicInTransaction(tx, customerId, await databaseNow(tx), reason),
+    );
   }
 }

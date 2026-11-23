@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   hasAdminPermission,
   isAdminRole,
+  lifecycleSingleLineText,
   lifecycleText,
   normalizeCustomerSegmentDefinition,
   type AdminPermission,
@@ -42,7 +43,7 @@ export function lifecycleVersion(value: number): number {
 
 export function lifecycleName(value: unknown): string {
   try {
-    return lifecycleText(value, "name", 2, 120);
+    return lifecycleSingleLineText(value, "name", 2, 120);
   } catch (error) {
     throw new LifecycleError(
       "VALIDATION",

@@ -1,10 +1,12 @@
 import {
   customerSegmentStatusLabels,
   hasAdminPermission,
+  lifecycleEnrollmentExitReasonLabels,
   lifecycleEnrollmentStatusLabels,
   lifecycleJourneyStatusLabels,
   lifecycleMessageStatusLabels,
 } from "@mundonettech/core";
+import { LifecycleError } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -56,10 +58,20 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
     }),
     segmentationService().listSegments(session.profile.id, { limit: 100 }),
   ]);
-  const detail =
+  const detailResult =
     parsed.success && parsed.data.journey
-      ? await lifecycle.getJourneyDetail(session.profile.id, parsed.data.journey)
+      ? await lifecycle.getJourneyDetail(session.profile.id, parsed.data.journey).then(
+          (record) => ({ record, notFound: false }),
+          (error: unknown) => {
+            if (error instanceof LifecycleError && error.code === "NOT_FOUND") {
+              return { record: null, notFound: true };
+            }
+            throw error;
+          },
+        )
       : null;
+  const detail = detailResult?.record ?? null;
+  const detailNotFound = detailResult?.notFound ?? false;
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
   const nextParams = new URLSearchParams();
   if (parsed.success && parsed.data.journey) nextParams.set("journey", parsed.data.journey);
@@ -100,6 +112,10 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
         {!parsed.success ? (
           <p role="alert" className="text-sm text-destructive">
             El journey o cursor no es válido.
+          </p>
+        ) : detailNotFound ? (
+          <p role="alert" className="text-sm text-destructive">
+            El journey solicitado no existe o ya no está disponible.
           </p>
         ) : null}
         {journeys.items.length === 0 ? (
@@ -151,10 +167,14 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
               {detail.version}
             </p>
           </div>
-          {canWrite ? <JourneyStateButtons journey={detail} /> : null}
+          {canWrite ? <JourneyStateButtons key={`state:${detail.id}`} journey={detail} /> : null}
           {canWrite && detail.status === "DRAFT" ? (
             <div className="rounded-xl border border-border bg-card p-5">
-              <JourneyEditorForm journey={detail} segments={segments.items} />
+              <JourneyEditorForm
+                key={`editor:${detail.id}`}
+                journey={detail}
+                segments={segments.items}
+              />
             </div>
           ) : (
             <div className="space-y-2 rounded-xl border border-border bg-card p-5">
@@ -191,7 +211,13 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
                       Ingresó {dateFormatter.format(enrollment.enteredAt)}
-                      {enrollment.exitReason ? ` · ${enrollment.exitReason}` : ""}
+                      {enrollment.exitReason
+                        ? ` · ${
+                            lifecycleEnrollmentExitReasonLabels[
+                              enrollment.exitReason as keyof typeof lifecycleEnrollmentExitReasonLabels
+                            ] ?? enrollment.exitReason
+                          }`
+                        : ""}
                     </p>
                     <ul className="mt-3 space-y-2 text-sm">
                       {enrollment.messages.map((message) => (

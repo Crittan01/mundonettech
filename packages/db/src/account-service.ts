@@ -6,6 +6,7 @@ import type { Customer, PrismaClient } from "./generated/client.js";
 import { CrmError, suppressCustomerCrmLineageInTransaction } from "./crm-shared.js";
 import { GrowthService, marketingEmailConsentGranted } from "./growth-service.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
+import { revokeCustomerLifecycleConsentInTransaction } from "./lifecycle-cancellation.js";
 
 export type AccountErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION";
 
@@ -156,6 +157,7 @@ export class AccountService {
     customerId: string,
   ): Promise<Customer> {
     assertUuid(customerId, "customerId");
+    await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
     await acquireOperationLocks(tx, [`customer-account:${customerId}`]);
     const rows = await tx.$queryRaw<
       Customer[]
@@ -249,6 +251,7 @@ export class AccountService {
             "lastReminderOutcome" = 'NO_CONSENT'
           WHERE "customerId" = ${customerId}::uuid AND "status" = 'DETECTED'
         `;
+        await revokeCustomerLifecycleConsentInTransaction(tx, customerId, now);
       }
       await tx.$executeRaw`
         INSERT INTO "SecurityEvent" ("customerId", "eventType", "ipHash", "userAgentHash", "metadata", "dedupMinute")

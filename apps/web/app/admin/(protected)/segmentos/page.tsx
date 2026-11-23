@@ -5,6 +5,7 @@ import {
   rfmClassLabels,
   segmentMembershipReasonLabels,
 } from "@mundonettech/core";
+import { LifecycleError } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -41,10 +42,20 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
   const segments = await service.listSegments(session.profile.id, {
     ...(parsed.success && parsed.data.cursor ? { cursor: parsed.data.cursor } : {}),
   });
-  const detail =
+  const detailResult =
     parsed.success && parsed.data.segmento
-      ? await service.getSegmentDetail(session.profile.id, parsed.data.segmento)
+      ? await service.getSegmentDetail(session.profile.id, parsed.data.segmento).then(
+          (record) => ({ record, notFound: false }),
+          (error: unknown) => {
+            if (error instanceof LifecycleError && error.code === "NOT_FOUND") {
+              return { record: null, notFound: true };
+            }
+            throw error;
+          },
+        )
       : null;
+  const detail = detailResult?.record ?? null;
+  const detailNotFound = detailResult?.notFound ?? false;
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
   const nextParams = new URLSearchParams();
   if (parsed.success && parsed.data.segmento) nextParams.set("segmento", parsed.data.segmento);
@@ -92,6 +103,10 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
         {!parsed.success ? (
           <p role="alert" className="text-sm text-destructive">
             El segmento o cursor solicitado no es válido.
+          </p>
+        ) : detailNotFound ? (
+          <p role="alert" className="text-sm text-destructive">
+            El segmento solicitado no existe o ya no está disponible.
           </p>
         ) : null}
         {segments.items.length === 0 ? (
@@ -148,10 +163,12 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
               {detail.segment.version}
             </p>
           </div>
-          {canWrite ? <SegmentStateButtons segment={detail.segment} /> : null}
+          {canWrite ? (
+            <SegmentStateButtons key={`state:${detail.segment.id}`} segment={detail.segment} />
+          ) : null}
           {canWrite && detail.segment.status === "DRAFT" ? (
             <div className="rounded-xl border border-border bg-card p-5">
-              <SegmentEditorForm segment={detail.segment} />
+              <SegmentEditorForm key={`editor:${detail.segment.id}`} segment={detail.segment} />
             </div>
           ) : null}
           <div className="space-y-3">
