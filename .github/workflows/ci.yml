@@ -13,21 +13,22 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CI: "true"
+  EMAIL_SEND_DISABLED: "1"
+  DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54422/postgres
+  TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54422/postgres
+  NEXT_PUBLIC_SITE_URL: http://127.0.0.1:4110
+  NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54421
+  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_test_only_not_a_real_key
+  SUPABASE_SERVICE_ROLE_KEY: sb_secret_ci_test_only_not_a_real_key
+  NEXT_PUBLIC_TURNSTILE_SITE_KEY: 1x00000000000000000000AA
+  TURNSTILE_SECRET_KEY: 1x0000000000000000000000000000000AA
+
 jobs:
-  verify:
+  checks-and-domain:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    env:
-      CI: "true"
-      EMAIL_SEND_DISABLED: "1"
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54422/postgres
-      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54422/postgres
-      NEXT_PUBLIC_SITE_URL: http://127.0.0.1:4110
-      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54421
-      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_ci_test_only_not_a_real_key
-      SUPABASE_SERVICE_ROLE_KEY: sb_secret_ci_test_only_not_a_real_key
-      NEXT_PUBLIC_TURNSTILE_SITE_KEY: 1x00000000000000000000AA
-      TURNSTILE_SECRET_KEY: 1x0000000000000000000000000000000AA
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:17.12-alpine
@@ -63,20 +64,70 @@ jobs:
           echo "RECOVERY_CODE_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
       - name: Validate and migrate PostgreSQL 17
         run: pnpm db:validate && pnpm db:migrate
+      - name: Prebuild workspace packages once
+        run: pnpm turbo run build --filter=!@mundonettech/web
       - name: Static checks and typecheck
         run: make check
       - name: Unit, integration, posture and RLS matrix tests
         run: pnpm test && pnpm --filter @mundonettech/db verify-security-posture && pnpm test:rls
+      - name: Verify clean repository tree
+        run: test -z "$(git status --porcelain)"
+
+  e2e-owasp-k6:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:17.12-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 54422:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate isolated test secrets
+        run: |
+          echo "SESSION_TIMEOUT_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "SECURITY_EVENT_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "RECOVERY_CODE_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - name: Validate and migrate PostgreSQL 17
+        run: pnpm db:validate && pnpm db:migrate
       - name: Production standalone build
         run: pnpm build
+      - name: Cache Playwright Chromium browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install Chromium with system dependencies
-        run: pnpm exec playwright install --with-deps chromium
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            pnpm exec playwright install-deps chromium
+          else
+            pnpm exec playwright install --with-deps chromium
+          fi
       - name: Playwright E2E and WCAG 2.1 AA accessibility
         run: pnpm test:e2e
       - name: OWASP standalone HTTP verification
         run: pnpm test:owasp
-      - name: Lighthouse mobile and desktop budgets
-        run: pnpm test:lighthouse
       - name: Install k6
         uses: grafana/setup-k6-action@c47136d33d365efbeb9ae7266908b5dcf98cdece
         with:
@@ -94,12 +145,85 @@ jobs:
             playwright-report/
             test-results/
           retention-days: 7
-      - name: Upload release quality evidence
+      - name: Upload k6 quality evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-quality-evidence
-          path: |
-            tmp/lighthouse/
-            tmp/k6/
+          name: k6-quality-evidence
+          path: tmp/k6/
           retention-days: 7
+
+  lighthouse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17.12-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 54422:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate isolated test secrets
+        run: |
+          echo "SESSION_TIMEOUT_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "SECURITY_EVENT_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "RECOVERY_CODE_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - name: Cache Playwright Chromium browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install Chromium with system dependencies
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            pnpm exec playwright install-deps chromium
+          else
+            pnpm exec playwright install --with-deps chromium
+          fi
+      - name: Lighthouse mobile and desktop budgets
+        run: pnpm test:lighthouse
+      - name: Verify clean repository tree
+        run: test -z "$(git status --porcelain)"
+      - name: Upload Lighthouse quality evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-quality-evidence
+          path: tmp/lighthouse/
+          retention-days: 7
+
+  verify:
+    needs: [checks-and-domain, e2e-owasp-k6, lighthouse]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all parallel verification planes to succeed
+        run: |
+          if [ "${{ needs.checks-and-domain.result }}" != "success" ] || \
+             [ "${{ needs.e2e-owasp-k6.result }}" != "success" ] || \
+             [ "${{ needs.lighthouse.result }}" != "success" ]; then
+            echo "Verification failed: checks-and-domain=${{ needs.checks-and-domain.result }}, e2e-owasp-k6=${{ needs.e2e-owasp-k6.result }}, lighthouse=${{ needs.lighthouse.result }}"
+            exit 1
+          fi
+          echo "All verification planes succeeded."
