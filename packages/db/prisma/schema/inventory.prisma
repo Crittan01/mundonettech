@@ -52,6 +52,7 @@ model StockLocation {
   orderReservations  OrderItemReservation[]
   clickCollectOrders Order[]
   shipments          Shipment[]
+  channelOrders      ChannelOrder[]
   municipality       DaneMunicipality?      @relation(fields: [municipalityCode], references: [code], onDelete: Restrict)
 
   @@index([type, deletedAt])
@@ -83,6 +84,7 @@ model SerializedUnit {
   locationId          String               @db.Uuid
   purchaseOrderItemId String?              @db.Uuid
   orderId             String?              @db.Uuid
+  channelOrderId      String?              @db.Uuid
   shipmentId          String?              @db.Uuid
   serial              String               @db.VarChar(120)
   imei                String?              @db.VarChar(15)
@@ -95,6 +97,7 @@ model SerializedUnit {
   location            StockLocation        @relation(fields: [locationId], references: [id], onDelete: Restrict)
   purchaseOrderItem   PurchaseOrderItem?   @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
   order               Order?               @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  channelOrder        ChannelOrder?        @relation(fields: [channelOrderId], references: [id], onDelete: Restrict)
   shipment            Shipment?            @relation(fields: [shipmentId], references: [id], onDelete: Restrict)
   returnRequestUnits  ReturnRequestUnit[]
   warrantyClaims      WarrantyClaim[]
@@ -103,6 +106,7 @@ model SerializedUnit {
   @@index([locationId, variantId, status, id])
   @@index([reservationKey, variantId, locationId])
   @@index([orderId])
+  @@index([channelOrderId])
   @@index([shipmentId, variantId, id])
   @@index([purchaseOrderItemId])
   @@map("SerializedUnit")
@@ -113,6 +117,7 @@ model InventoryLedger {
   locationId                String                   @db.Uuid
   variantId                 String                   @db.Uuid
   orderId                   String?                  @db.Uuid
+  channelOrderId            String?                  @db.Uuid
   purchaseOrderItemId       String?                  @db.Uuid
   entryType                 InventoryLedgerEntryType
   quantityDelta             Int
@@ -130,12 +135,14 @@ model InventoryLedger {
   location                  StockLocation            @relation(fields: [locationId], references: [id], onDelete: Restrict)
   variant                   ProductVariant           @relation(fields: [variantId], references: [id], onDelete: Restrict)
   order                     Order?                   @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  channelOrder              ChannelOrder?            @relation(fields: [channelOrderId], references: [id], onDelete: Restrict)
   purchaseOrderItem         PurchaseOrderItem?       @relation(fields: [purchaseOrderItemId], references: [id], onDelete: Restrict)
   stockLevel                StockLevel               @relation(fields: [locationId, variantId], references: [locationId, variantId], onDelete: Restrict)
 
   @@unique([operationKey, operationSequence])
   @@index([variantId, locationId, occurredAt, id])
   @@index([orderId, occurredAt])
+  @@index([channelOrderId, occurredAt])
   @@index([purchaseOrderItemId, occurredAt])
   @@index([referenceKey, entryType])
   @@map("InventoryLedger")

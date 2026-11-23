@@ -76,6 +76,7 @@ model AdminUser {
   createdChannelOAuthAttempts ChannelOAuthAttempt[] @relation("ChannelOAuthAttemptCreator")
   createdChannelListings    ChannelListing[] @relation("ChannelListingCreator")
   createdChannelSyncJobs    ChannelSyncJob[] @relation("ChannelSyncJobCreator")
+  createdChannelLedgerEntries ChannelLedgerEntry[] @relation("ChannelLedgerEntryCreator")
 
   @@index([role, status])
   @@index([createdAt])

@@ -96,6 +96,7 @@ export interface LedgerEntryInput {
   readonly committedDelta: number;
   readonly level: StockLevel;
   readonly orderId?: string;
+  readonly channelOrderId?: string;
   readonly purchaseOrderItemId?: string;
   readonly referenceKey?: string;
   readonly metadata?: Prisma.JsonObject;
@@ -291,6 +292,7 @@ export async function writeLedgerEntries(
       locationId: entry.locationId,
       variantId: entry.variantId,
       orderId: entry.orderId ?? null,
+      channelOrderId: entry.channelOrderId ?? null,
       purchaseOrderItemId: entry.purchaseOrderItemId ?? null,
       entryType: entry.entryType,
       quantityDelta: entry.quantityDelta,

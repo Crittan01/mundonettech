@@ -42,7 +42,8 @@ export interface ReleaseStockOptions extends ReserveStockOptions {
 }
 
 export interface FulfillStockOptions extends ReleaseStockOptions {
-  readonly orderId: string;
+  readonly orderId?: string;
+  readonly channelOrderId?: string;
 }
 
 export interface TransferStockItem {
@@ -202,21 +203,28 @@ export async function reserveStock(
 
 async function settleReservation(
   db: DatabaseExecutor,
-  options: ReleaseStockOptions,
+  options: FulfillStockOptions,
   fulfill: boolean,
-  orderIdValue: string | null,
 ): Promise<InventoryOperationResult> {
   const operationKey = normalizeKey(options.operationKey);
   const reservationKey = normalizeOperationKey(options.reservationKey, "reservationKey");
   const items = normalizeStockMovements(options.items);
-  const orderId = orderIdValue === null ? null : assertUuid(orderIdValue, "orderId");
-  if (fulfill !== (orderId !== null)) {
-    throw new TypeError("orderId is required exactly when fulfilling a reservation.");
+  const orderId = options.orderId === undefined ? null : assertUuid(options.orderId, "orderId");
+  const channelOrderId =
+    options.channelOrderId === undefined
+      ? null
+      : assertUuid(options.channelOrderId, "channelOrderId");
+  const hasExactlyOneOwner = (orderId !== null) !== (channelOrderId !== null);
+  if (fulfill !== hasExactlyOneOwner) {
+    throw new TypeError(
+      "Exactly one orderId or channelOrderId is required when fulfilling a reservation.",
+    );
   }
   const hash = operationHash({
     operation: fulfill ? "FULFILL_STOCK" : "RELEASE_STOCK",
     reservationKey,
     orderId,
+    ...(channelOrderId === null ? {} : { channelOrderId }),
     items,
   });
 
@@ -227,6 +235,15 @@ async function settleReservation(
     if (fulfill && orderId) {
       const order = await tx.order.findUnique({ where: { id: orderId }, select: { id: true } });
       if (!order) throw new InventoryNotFoundError("Order not found for stock fulfillment.");
+    }
+    if (fulfill && channelOrderId) {
+      const order = await tx.channelOrder.findUnique({
+        where: { id: channelOrderId },
+        select: { id: true },
+      });
+      if (!order) {
+        throw new InventoryNotFoundError("Channel order not found for stock fulfillment.");
+      }
     }
     await assertReservationBalance(tx, reservationKey, items);
     const variants = await activeVariants(
@@ -252,7 +269,8 @@ async function settleReservation(
           await tx.$executeRaw`
             UPDATE "SerializedUnit"
             SET "status" = 'SOLD', "reservationKey" = NULL,
-                "orderId" = ${orderId}::uuid, "soldAt" = CURRENT_TIMESTAMP
+                "orderId" = ${orderId}::uuid, "channelOrderId" = ${channelOrderId}::uuid,
+                "soldAt" = CURRENT_TIMESTAMP
             WHERE "id" = ANY(${units.map((unit) => unit.id)}::uuid[])
           `;
         } else {
@@ -275,12 +293,19 @@ async function settleReservation(
         locationId: item.locationId,
         variantId: item.variantId,
         ...(orderId === null ? {} : { orderId }),
+        ...(channelOrderId === null ? {} : { channelOrderId }),
         entryType: fulfill ? "FULFILLMENT" : "RELEASE",
         quantityDelta: fulfill ? -item.quantity : 0,
         committedDelta: -item.quantity,
         level: updated,
         referenceKey: reservationKey,
-        metadata: { source: fulfill ? "ORDER_FULFILLMENT" : "RESERVATION_RELEASE" },
+        metadata: {
+          source: fulfill
+            ? channelOrderId
+              ? "CHANNEL_ORDER_FULFILLMENT"
+              : "ORDER_FULFILLMENT"
+            : "RESERVATION_RELEASE",
+        },
       });
     }
 
@@ -297,14 +322,14 @@ export async function releaseStock(
   db: DatabaseExecutor,
   options: ReleaseStockOptions,
 ): Promise<InventoryOperationResult> {
-  return settleReservation(db, options, false, null);
+  return settleReservation(db, options, false);
 }
 
 export async function fulfillStock(
   db: DatabaseExecutor,
   options: FulfillStockOptions,
 ): Promise<InventoryOperationResult> {
-  return settleReservation(db, options, true, options.orderId);
+  return settleReservation(db, options, true);
 }
 
 interface NormalizedTransferStockItem {

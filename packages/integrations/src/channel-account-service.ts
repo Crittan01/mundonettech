@@ -1188,6 +1188,23 @@ export class ChannelAccountService {
           "Wait for the in-flight channel synchronization before disconnecting.",
         );
       }
+      const processingIngestion = await tx.domainOutbox.findFirst({
+        where: {
+          eventType: "channel.resource.sync.requested.v1",
+          aggregateType: "ChannelAccount",
+          aggregateId: accountId,
+          processedAt: null,
+          failedAt: null,
+          claimExpiresAt: { gt: now },
+        },
+        select: { id: true },
+      });
+      if (processingIngestion) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "Wait for the in-flight channel order ingestion before disconnecting.",
+        );
+      }
       return { kind: "READY" as const, account };
     });
     if (preflight.kind === "ALREADY_DISCONNECTED") {
@@ -1238,6 +1255,23 @@ export class ChannelAccountService {
         select: { id: true },
       });
       if (processingSync) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "The channel changed during disconnection; review it before retrying.",
+        );
+      }
+      const processingIngestion = await tx.domainOutbox.findFirst({
+        where: {
+          eventType: "channel.resource.sync.requested.v1",
+          aggregateType: "ChannelAccount",
+          aggregateId: accountId,
+          processedAt: null,
+          failedAt: null,
+          claimExpiresAt: { gt: now },
+        },
+        select: { id: true },
+      });
+      if (processingIngestion) {
         throw new ChannelAccountError(
           "CONFLICT",
           "The channel changed during disconnection; review it before retrying.",

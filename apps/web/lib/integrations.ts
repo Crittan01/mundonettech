@@ -7,6 +7,7 @@ import {
   BlockedIdentityService,
   ChannelAccountService,
   ChannelCatalogService,
+  ChannelOrderService,
   CodReconciliationService,
   EmailService,
   GuestOrderAccessService,
@@ -164,6 +165,16 @@ export function channelCatalogService(db: PrismaClient = getDatabase()): Channel
   return new ChannelCatalogService(db, {
     ring: loadCredentialKeyRing(environment),
     mediaBaseUrl,
+    ...(apiUrl ? { apiUrl } : {}),
+    allowLoopback: environment === IntegrationEnvironment.LOCAL,
+  });
+}
+
+export function channelOrderService(db: PrismaClient = getDatabase()): ChannelOrderService {
+  const environment = getIntegrationEnvironment();
+  const apiUrl = process.env.MERCADO_LIBRE_API_URL?.trim();
+  return new ChannelOrderService(db, {
+    ring: loadCredentialKeyRing(environment),
     ...(apiUrl ? { apiUrl } : {}),
     allowLoopback: environment === IntegrationEnvironment.LOCAL,
   });

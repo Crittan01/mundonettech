@@ -388,7 +388,7 @@ export class MercadoLibreUserProductsClient {
     this.allowLoopback = options.allowLoopback === true;
   }
 
-  private async request(
+  protected async request(
     credential: MercadoLibreTokenCredential,
     method: "GET" | "POST" | "PUT",
     path: string,

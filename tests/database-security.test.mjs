@@ -171,7 +171,7 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
     const migrations = await admin.query(
       "SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL",
     );
-    assert.equal(migrations.rows.length, 31);
+    assert.equal(migrations.rows.length, 32);
   });
 
   it("forces RLS on every application table and denies rows even with SQL grants", async () => {
@@ -1086,14 +1086,14 @@ describe("F0.3 — persisted integration credential vault", () => {
 });
 
 describe("F0.5 — complete RLS and Data API matrix over persisted fixtures", () => {
-  it("denies all 2187 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
+  it("denies all 2255 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
     const { runRlsMatrix } = await import("../scripts/rls-matrix.mjs");
     const summary = await runRlsMatrix(databaseUrl);
-    assert.equal(summary.tables, 126);
+    assert.equal(summary.tables, 130);
     assert.equal(summary.functions, 15);
-    assert.equal(summary.rlsOperations, 630);
-    assert.equal(summary.dataApiOperations, 1557);
-    assert.equal(summary.operations, 2187);
+    assert.equal(summary.rlsOperations, 650);
+    assert.equal(summary.dataApiOperations, 1605);
+    assert.equal(summary.operations, 2255);
     assert.ok(summary.results.every((result) => result.passed));
   });
 });
