@@ -336,10 +336,14 @@ function parseOrder(
     invalid("A paid order has no approved payment capture.");
   }
   if (status === "PAID" && paidAmountCents === 0n) invalid("A paid order has no paid amount.");
-  const sellerSku =
-    item.seller_sku === null || item.seller_sku === undefined || item.seller_sku === ""
-      ? null
-      : text(item.seller_sku, "seller_sku", 64);
+  const rawSellerSku =
+    item.seller_sku === null || item.seller_sku === undefined
+      ? ""
+      : text(item.seller_sku, "seller_sku", 64).trim().toUpperCase();
+  if (rawSellerSku && !/^[A-Z0-9][A-Z0-9._ -]{0,63}$/.test(rawSellerSku)) {
+    invalid("The order seller_sku is invalid.");
+  }
+  const sellerSku = rawSellerSku || null;
   const stockReferences = !Array.isArray(line.stock)
     ? []
     : line.stock.slice(0, 20).map((entry) => {
@@ -432,13 +436,17 @@ function parseShipment(body: string, expectedId: string): MercadoLibreShipmentSn
   const createdAt = date(root.date_created, "shipment date_created");
   const updatedAt = date(root.last_updated, "shipment last_updated");
   if (updatedAt < createdAt) invalid("The shipment timestamps are inconsistent.");
-  const shippedAt = ["SHIPPED", "DELIVERED", "NOT_DELIVERED"].includes(status)
-    ? (optionalDate(root.date_shipped, "shipment date_shipped") ?? updatedAt)
-    : null;
   const deliveredAt =
     status === "DELIVERED"
       ? (optionalDate(root.date_delivered, "shipment date_delivered") ?? updatedAt)
       : null;
+  const fallbackShippedAt = deliveredAt && deliveredAt < updatedAt ? deliveredAt : updatedAt;
+  const shippedAt = ["SHIPPED", "DELIVERED", "NOT_DELIVERED"].includes(status)
+    ? (optionalDate(root.date_shipped, "shipment date_shipped") ?? fallbackShippedAt)
+    : null;
+  if (deliveredAt && shippedAt && deliveredAt < shippedAt) {
+    invalid("The shipment delivery timestamp precedes dispatch.");
+  }
   return {
     externalId: id,
     externalOrderId: optionalExternalId(root.order_id, "shipment order_id"),
@@ -458,6 +466,7 @@ function parseShipment(body: string, expectedId: string): MercadoLibreShipmentSn
 export function parseMercadoLibreNotification(
   body: string,
   requestId?: string | null,
+  queryDataId?: string | null,
 ): MercadoLibreNotification {
   if (typeof body !== "string" || body.length < 2 || body.length > 16_384) {
     throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification size is invalid.");
@@ -497,10 +506,28 @@ export function parseMercadoLibreNotification(
     if (typeof value === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(value)) return value;
     return null;
   };
-  const signatureId = token(data.id);
-  if (data.id !== undefined && signatureId === null) {
+  const bodySignatureId = token(data.id);
+  if (data.id !== undefined && bodySignatureId === null) {
     throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification data.id is invalid.");
   }
+  const urlSignatureId = queryDataId == null ? null : token(queryDataId);
+  if (queryDataId != null && urlSignatureId === null) {
+    throw new MercadoLibreCatalogError(
+      "INVALID_INPUT",
+      "The notification query data.id is invalid.",
+    );
+  }
+  if (
+    bodySignatureId !== null &&
+    urlSignatureId !== null &&
+    bodySignatureId.toLowerCase() !== urlSignatureId.toLowerCase()
+  ) {
+    throw new MercadoLibreCatalogError(
+      "INVALID_INPUT",
+      "The notification data.id values conflict.",
+    );
+  }
+  const signatureId = urlSignatureId ?? bodySignatureId;
   const persistedId = signatureId ?? token(root._id) ?? token(requestId);
   if (!persistedId) {
     throw new MercadoLibreCatalogError(
@@ -510,7 +537,7 @@ export function parseMercadoLibreNotification(
   }
   return {
     notificationId: persistedId,
-    signatureId: signatureId ?? "",
+    signatureId: signatureId ? signatureId.toLowerCase() : "",
     externalAccountId: externalId(root.user_id, "notification user_id"),
     kind,
     externalId: match[1],
@@ -522,6 +549,7 @@ export function verifyMercadoLibreNotificationSignature(options: {
   readonly requestId: string | null;
   readonly signature: string | null;
   readonly clientSecret: string;
+  readonly nowMs?: number;
 }): void {
   if (!options.requestId || !/^[A-Za-z0-9_-]{8,160}$/.test(options.requestId)) {
     throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification request ID is missing.");
@@ -541,14 +569,23 @@ export function verifyMercadoLibreNotificationSignature(options: {
   const supplied = parts.get("v1");
   if (
     !timestamp ||
-    !/^[0-9]{10,16}$/.test(timestamp) ||
+    !/^(?:[0-9]{10}|[0-9]{13})$/.test(timestamp) ||
     !supplied ||
-    !/^[a-f0-9]{64}$/.test(supplied) ||
-    BigInt(timestamp) > BigInt(Date.now() + 300_000)
+    !/^[a-f0-9]{64}$/.test(supplied)
   ) {
     throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification signature is invalid.");
   }
-  const manifest = `id:${options.notificationId};request-id:${options.requestId};ts:${timestamp};`;
+  const nowMs = options.nowMs ?? Date.now();
+  const timestampMs = timestamp.length === 10 ? Number(timestamp) * 1_000 : Number(timestamp);
+  if (
+    !Number.isSafeInteger(timestampMs) ||
+    timestampMs > nowMs + 300_000 ||
+    timestampMs < nowMs - 900_000
+  ) {
+    throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification signature is invalid.");
+  }
+  const normalizedId = options.notificationId.toLowerCase();
+  const manifest = `id:${normalizedId};request-id:${options.requestId};ts:${timestamp};`;
   const expected = createHmac("sha256", options.clientSecret).update(manifest).digest();
   const actual = Buffer.from(supplied, "hex");
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {

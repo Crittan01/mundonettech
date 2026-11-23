@@ -121,6 +121,17 @@ describe("Mercado Libre order contracts", () => {
     ).rejects.toMatchObject({
       code: "INVALID_RESPONSE",
     });
+    const lowercaseSku = orderPayload();
+    lowercaseSku.order_items[0]!.item.seller_sku = "  sku-unit-lower  ";
+    const normalized = await clientFor(lowercaseSku).getOrder(credential, "2000009713473608");
+    expect(normalized.sellerSku).toBe("SKU-UNIT-LOWER");
+    const malformedSku = orderPayload();
+    malformedSku.order_items[0]!.item.seller_sku = "SKU/INVALID@CHARS";
+    await expect(
+      clientFor(malformedSku).getOrder(credential, "2000009713473608"),
+    ).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
   });
 
   it("validates pack uniqueness and maps ME2, Flex and Full shipments", async () => {
@@ -221,5 +232,63 @@ describe("Mercado Libre signed notifications", () => {
         JSON.stringify({ topic: "orders_v2", resource: "/orders/123", user_id: 8035443 }),
       ),
     ).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+    const fromQuery = parseMercadoLibreNotification(
+      JSON.stringify({ topic: "orders_v2", resource: "/orders/123", user_id: 8035443 }),
+      "request-unit-2",
+      "AbC-987",
+    );
+    expect(fromQuery).toMatchObject({ notificationId: "AbC-987", signatureId: "abc-987" });
+    expect(() =>
+      parseMercadoLibreNotification(
+        JSON.stringify({
+          topic: "orders_v2",
+          resource: "/orders/123",
+          user_id: 8035443,
+          data: { id: "999" },
+        }),
+        "request-unit-2",
+        "123",
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+    const nowMs = 1_760_000_000_000;
+    const futureSec = String(Math.floor((nowMs + 301_000) / 1000));
+    const futureSig = createHmac("sha256", credential.clientSecret)
+      .update(`id:abc-987;request-id:request-unit-2;ts:${futureSec};`)
+      .digest("hex");
+    expect(() =>
+      verifyMercadoLibreNotificationSignature({
+        notificationId: "AbC-987",
+        requestId: "request-unit-2",
+        signature: `ts=${futureSec},v1=${futureSig}`,
+        clientSecret: credential.clientSecret,
+        nowMs,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+    const staleSec = String(Math.floor((nowMs - 901_000) / 1000));
+    const staleSig = createHmac("sha256", credential.clientSecret)
+      .update(`id:abc-987;request-id:request-unit-2;ts:${staleSec};`)
+      .digest("hex");
+    expect(() =>
+      verifyMercadoLibreNotificationSignature({
+        notificationId: "AbC-987",
+        requestId: "request-unit-2",
+        signature: `ts=${staleSec},v1=${staleSig}`,
+        clientSecret: credential.clientSecret,
+        nowMs,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+    const validMs = String(nowMs);
+    const validMsSig = createHmac("sha256", credential.clientSecret)
+      .update(`id:abc-987;request-id:request-unit-2;ts:${validMs};`)
+      .digest("hex");
+    expect(() =>
+      verifyMercadoLibreNotificationSignature({
+        notificationId: "AbC-987",
+        requestId: "request-unit-2",
+        signature: `ts=${validMs},v1=${validMsSig}`,
+        clientSecret: credential.clientSecret,
+        nowMs,
+      }),
+    ).not.toThrow();
   });
 });

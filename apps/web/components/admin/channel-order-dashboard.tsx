@@ -64,14 +64,30 @@ const stockErrorLabels: Record<string, string> = {
   STOCK_ORIGIN_INVALID: "La bodega asignada ya no es válida para la logística de la orden.",
   INSUFFICIENT_STOCK: "No hay disponibilidad suficiente; no se reservó ni descontó inventario.",
 };
+const reconciliationReasonLabels: Record<string, string> = {
+  PAYMENT_TOTAL_DIVERGENCE: "Diferencia entre importe pagado y capturas aprobadas",
+  FEE_TOTAL_DIVERGENCE: "Diferencia entre comisión esperada y comisión aplicada",
+  PAYMENT_STATE_DIVERGENCE: "Pedido pagado sin saldo neto capturado",
+  CANCELLATION_WITHOUT_FULL_REFUND: "Pedido cancelado sin reembolso completo",
+  NET_PROCEEDS_NEGATIVE: "El neto después de cargos resultó negativo",
+  CANCELLED_AFTER_FULFILLMENT: "Pedido cancelado después de descontar inventario",
+  SHIPMENT_CANCELLED_REVIEW: "Envío cancelado con pago vigente",
+  SHIPMENT_NOT_DELIVERED_REVIEW: "Envío no entregado o devuelto tras despacho",
+  SHIPMENT_BEFORE_PAYMENT: "Envío despachado antes de confirmar pago",
+  PROVIDER_SETTLEMENT_MATCH: "Liquidación verificada",
+  PROVIDER_CORRECTION: "Corrección del proveedor",
+  FINANCE_MANUAL_REVIEW: "Revisión financiera documentada",
+};
 
 export function ChannelOrderDashboardView({
   dashboard,
   canWrite,
+  canReconcile,
   locations,
 }: {
   readonly dashboard: ChannelOrderDashboard;
   readonly canWrite: boolean;
+  readonly canReconcile: boolean;
   readonly locations: Readonly<Record<string, readonly ChannelStockLocationChoice[]>>;
 }) {
   const orderReferences = new Map(
@@ -160,7 +176,9 @@ export function ChannelOrderDashboardView({
                     <dt>Conciliación</dt>
                     <dd className="mt-1">
                       {reconciliationLabels[order.reconciliationStatus]}
-                      {order.reconciliationReason ? ` · ${order.reconciliationReason}` : ""}
+                      {order.reconciliationReason
+                        ? ` · ${reconciliationReasonLabels[order.reconciliationReason] ?? order.reconciliationReason}`
+                        : ""}
                     </dd>
                   </div>
                   <div>
@@ -192,7 +210,11 @@ export function ChannelOrderDashboardView({
                   </p>
                 ) : null}
                 {canWrite ? (
-                  <ChannelOrderActions order={order} locations={locations[order.id] ?? []} />
+                  <ChannelOrderActions
+                    order={order}
+                    canReconcile={canReconcile}
+                    locations={locations[order.id] ?? []}
+                  />
                 ) : null}
               </li>
             ))}

@@ -349,7 +349,11 @@ export async function verifyWebSecurity(
     `${oauthCallbackPath}: replay GET must clear OAuth cookie with no-store and noindex.`,
   );
 
-  for (const path of ["/api/webhooks/wompi", "/api/webhooks/resend"]) {
+  for (const path of [
+    "/api/webhooks/wompi",
+    "/api/webhooks/resend",
+    "/api/webhooks/mercado-libre",
+  ]) {
     const getMethod = await request(origin, path);
     requireCondition(
       getMethod.status === 405 && getMethod.headers.get("allow") === "POST",
@@ -365,6 +369,27 @@ export async function verifyWebSecurity(
       `${path}: unsigned webhook was not rejected.`,
     );
   }
+  const mlWrongType = await request(origin, "/api/webhooks/mercado-libre", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: "{}",
+  });
+  requireCondition(
+    mlWrongType.status === 415 &&
+      (mlWrongType.headers.get("cache-control") ?? "").includes("no-store") &&
+      (mlWrongType.headers.get("x-robots-tag") ?? "").includes("noindex"),
+    "/api/webhooks/mercado-libre: non-JSON POST must return 415 with no-store and noindex.",
+  );
+  const mlOversized = await request(origin, "/api/webhooks/mercado-libre", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: `{"topic":"orders_v2","padding":"${"x".repeat(16_384)}"}`,
+  });
+  requireCondition(
+    mlOversized.status === 413 &&
+      (mlOversized.headers.get("cache-control") ?? "").includes("no-store"),
+    "/api/webhooks/mercado-libre: oversized POST must return 413 with no-store.",
+  );
 
   const funnelGet = await request(origin, "/api/metrics/funnel");
   requireCondition(

@@ -693,6 +693,19 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
     assert.equal(level.onHand, 8);
     assert.equal(level.committed, 0);
 
+    await orderService.markReconciled({
+      orderId: order.id,
+      expectedVersion: cancelled.version,
+      evidenceReference: "SETTLEMENT-CANCEL-001",
+      reasonCode: "FINANCE_MANUAL_REVIEW",
+      audit: audit(),
+    });
+    await synchronize("orders", remote.orderId);
+    await synchronize("shipments", remote.shipmentId);
+    const preserved = await db.channelOrder.findUniqueOrThrow({ where: { id: order.id } });
+    assert.equal(preserved.reconciliationStatus, "RECONCILED");
+    assert.equal(preserved.reconciliationReason, "FINANCE_MANUAL_REVIEW");
+
     const foreign = remoteResources(listing);
     foreign.order.seller.id = 999999;
     await assert.rejects(
@@ -700,6 +713,154 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
       (error) => error.code === "INVALID_RESPONSE",
     );
     assert.equal(await db.channelOrder.count({ where: { externalOrderId: foreign.orderId } }), 0);
+  });
+
+  it("flags post-dispatch shipment loss, resolves late listing mapping and protects lifecycles", async () => {
+    const unmappedCatalog = await makeCatalog();
+    const failingCatalog = new ChannelCatalogService(db, {
+      ring,
+      apiUrl: fixture.origin,
+      mediaBaseUrl: "https://cdn.example.test",
+      allowLoopback: true,
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/items") && init?.method === "POST") {
+          throw new TypeError("Simulated drop after remote item creation");
+        }
+        return fetch(url, init);
+      },
+    });
+    const draft = await failingCatalog.createListing({
+      accountId: account.id,
+      variantId: unmappedCatalog.variantId,
+      externalCategoryId: "MCO12345",
+      familyName: "Audífonos Mapeo Tardío",
+      offer: formula(),
+      audit: audit(),
+    });
+    const uncertainPublish = await failingCatalog.processSyncJobs(audit(), {
+      listingId: draft.id,
+      queueDrift: false,
+    });
+    assert.equal(uncertainPublish.uncertain, 1);
+    const lateUserProductId = `MCOU999${++externalSequence}`;
+    const lateItemId = `MCO999${++externalSequence}`;
+    const latePriceCents = BigInt(draft.offers[0].priceCents);
+    fixture.items.set(lateItemId, {
+      id: lateItemId,
+      user_product_id: lateUserProductId,
+      seller_id: Number(account.externalAccountId),
+      status: "active",
+      price: Number(latePriceCents / 100n),
+      available_quantity: 8,
+      seller_sku: unmappedCatalog.sku,
+      shipping: { mode: "me2" },
+    });
+    fixture.stocks.set(lateUserProductId, {
+      id: lateUserProductId,
+      user_id: Number(account.externalAccountId),
+      version: 1,
+      locations: [{ type: "selling_address", quantity: 8 }],
+    });
+    const unmappedDraft = {
+      offers: [{ externalItemId: lateItemId, priceCents: latePriceCents }],
+      externalUserProductId: lateUserProductId,
+      variant: { sku: unmappedCatalog.sku },
+    };
+    const unmappedRemote = remoteResources(unmappedDraft);
+    await synchronize("orders", unmappedRemote.orderId);
+    const unmappedOrder = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: unmappedRemote.orderId },
+    });
+    assert.equal(unmappedOrder.stockStatus, "REVIEW_REQUIRED");
+    assert.equal(unmappedOrder.stockError, "LISTING_NOT_MAPPED");
+    await catalogService.enqueueSync({
+      listingId: draft.id,
+      kind: "RECONCILE_REMOTE",
+      audit: audit(),
+    });
+    const reconciledListing = await catalogService.processSyncJobs(audit(), {
+      listingId: draft.id,
+      queueDrift: false,
+    });
+    assert.equal(reconciledListing.succeeded, 1, JSON.stringify(reconciledListing));
+    await orderService.retryStock(unmappedOrder.id, audit());
+    const resolvedOrder = await db.channelOrder.findUniqueOrThrow({
+      where: { id: unmappedOrder.id },
+    });
+    assert.equal(resolvedOrder.stockStatus, "RESERVED");
+    assert.equal(resolvedOrder.stockError, null);
+
+    const lostCatalog = await makeCatalog();
+    const lostListing = await publish(lostCatalog);
+    const lostRemote = remoteResources(lostListing, { quantity: 1 });
+    await synchronize("orders", lostRemote.orderId);
+    const activeOrder = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: lostRemote.orderId },
+    });
+    await assert.rejects(
+      admin.query(`UPDATE "StockLocation" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+        lostCatalog.inventory.locationId,
+      ]),
+      (error) => error.code === "23514",
+    );
+    await assert.rejects(
+      admin.query(`UPDATE "ProductVariant" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+        lostCatalog.variantId,
+      ]),
+      (error) => error.code === "23514",
+    );
+
+    lostRemote.shipment.status = "shipped";
+    lostRemote.shipment.date_shipped = timestamp();
+    touch(lostRemote.shipment);
+    await synchronize("shipments", lostRemote.shipmentId);
+    lostRemote.shipment.status = "lost";
+    touch(lostRemote.shipment);
+    await synchronize("shipments", lostRemote.shipmentId);
+    const lostOrder = await db.channelOrder.findUniqueOrThrow({ where: { id: activeOrder.id } });
+    assert.equal(lostOrder.stockStatus, "FULFILLED");
+    assert.equal(lostOrder.reconciliationStatus, "REVIEW_REQUIRED");
+    assert.equal(lostOrder.reconciliationReason, "SHIPMENT_NOT_DELIVERED_REVIEW");
+    await orderService.markReconciled({
+      orderId: activeOrder.id,
+      expectedVersion: lostOrder.version,
+      evidenceReference: "CARRIER-CLAIM-001",
+      reasonCode: "PROVIDER_SETTLEMENT_MATCH",
+      audit: audit(),
+    });
+    await synchronize("shipments", lostRemote.shipmentId);
+    const stillReconciled = await db.channelOrder.findUniqueOrThrow({
+      where: { id: activeOrder.id },
+    });
+    assert.equal(stillReconciled.reconciliationStatus, "RECONCILED");
+
+    const depletedCatalog = await makeCatalog({ full: true });
+    await admin.query(
+      `UPDATE "StockLevel" SET "onHand" = 1, "safetyStock" = 0 WHERE "locationId" = $1`,
+      [depletedCatalog.fullLocationId],
+    );
+    const depletedListing = await publish(depletedCatalog, { full: true });
+    const depletedRemote = remoteResources(depletedListing, {
+      logisticType: "fulfillment",
+      quantity: 1,
+    });
+    depletedRemote.shipment.status = "delivered";
+    depletedRemote.shipment.date_shipped = timestamp();
+    depletedRemote.shipment.date_delivered = timestamp();
+    await synchronize("orders", depletedRemote.orderId);
+    await admin.query(
+      `UPDATE "StockLocation" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+      [depletedCatalog.fullLocationId],
+    );
+    depletedRemote.order.payments[0].status = "partially_refunded";
+    depletedRemote.order.payments[0].transaction_amount_refunded = 10;
+    depletedRemote.order.payments[0].date_last_modified = timestamp();
+    touch(depletedRemote.order);
+    await synchronize("orders", depletedRemote.orderId);
+    const refundedArchived = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: depletedRemote.orderId },
+    });
+    assert.equal(refundedArchived.refundedAmountCents, 1_000n);
   });
 
   it("enforces RBAC and database immutability independently of the web layer", async () => {

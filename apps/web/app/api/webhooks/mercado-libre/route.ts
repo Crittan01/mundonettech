@@ -7,7 +7,6 @@ const headers = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
-  "Referrer-Policy": "no-referrer",
 } as const;
 
 async function readBody(request: Request): Promise<string> {
@@ -53,10 +52,12 @@ export async function POST(request: Request): Promise<Response> {
   }
   try {
     const body = await readBody(request);
+    const queryDataId = new URL(request.url).searchParams.get("data.id");
     const result = await channelOrderService().enqueueNotification({
       body,
       requestId: request.headers.get("x-request-id"),
       signature: request.headers.get("x-signature"),
+      queryDataId,
     });
     return Response.json(result, { status: 202, headers });
   } catch (error) {

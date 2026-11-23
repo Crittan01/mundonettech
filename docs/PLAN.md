@@ -23,11 +23,11 @@
 - `[x]` ✅ **Fases 0–5 (`F0.1`–`F5.3`):** MFA `aal2`/RLS/Bóveda (`ADR-019`..`022`), Catálogo/Media R2/WAC (`ADR-023`..`026`), CMS v3/Legal CO/SEO (`ADR-027`..`029`), Carrito/Checkout/Pagos/Logística/DIAN (`ADR-030`..`033`), Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse `96–100`/k6/`release:verify` (`ADR-034`..`036`), CRM 360° + B2B/Copiloto 0-PII (`ADR-037`..`038`) y Lealtad/Lifecycle/RFM + Salud/Backups GPG R2/DR/Ayuda v2 (`ADR-039`..`041`; Go-Live sujeto a externos).
 - `[x]` ✅ **`F6.1` — OAuth PKCE y `ChannelAccount`:** ML `MCO` PKCE `S256` (`__Secure-`), bóveda aislada, renovación fail-closed, `channels.reauth` y `/admin/canales` MFA + RLS (`ADR-042`).
 - `[x]` ✅ **`F6.2` — User Products ML `MCO`, `x-version`, Full y Precios \$60k:** `ChannelListing`/`ChannelOffer` `BigInt`, stock local/Full, jobs y conciliación MFA + RLS (`ADR-043`).
-- `[R]` **`F6.3` — Packs/órdenes, ME2/Flex/Full y conciliación:** webhooks HMAC + outbox 0-PII, `ChannelPack`/`ChannelOrder`/`ChannelShipment`, reserva/descuento serializado y `ChannelLedgerEntry` `BigInt` append-only + UI MFA/RLS (`ADR-044`; 130 tablas/2.255 casos).
+- `[x]` ✅ **`F6.3` — Packs/órdenes, ME2/Flex/Full y conciliación:** webhooks HMAC + outbox 0-PII, `ChannelPack`/`ChannelOrder`/`ChannelShipment`, reserva/descuento serializado y `ChannelLedgerEntry` `BigInt` append-only + UI MFA/RLS (`ADR-044`; 130 tablas/2.255 casos).
 - `[ ]` **`F6.4` — Meta Catalog Feed + Conversions API (CAPI):** feed de catálogo validado y despacho server-side CAPI deduplicado (`event_id`), sujeto a `Consent` Ley 1581 vigente, bóveda y cero PII no autorizada.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Auditor (`F6.3`):** auditar `feat/f6-3-meli-packs-orders-me2-flex-ledger` contra `ADR-044`, reejecutar `make check && pnpm test && pnpm build`, certificar RLS/concurrencia/0-PII y E2E, marcar `[x]`, actualizar `STATE.md`, subir rama, abrir PR y mergear squash en `develop` con CI verde.
+- **Siguiente turno — Implementador (`F6.4`):** partir de `develop` limpio, crear `feat/f6-4-meta-catalog-capi`, implementar Meta Catalog Feed validado y despacho server-side CAPI deduplicado (`event_id`) con `Consent` Ley 1581 vigente, bóveda `AES-256-GCM` y 0-PII, documentar `ADR-045`, pasar `make check && pnpm test && pnpm build`, marcar `[R]` y entregar al Auditor.

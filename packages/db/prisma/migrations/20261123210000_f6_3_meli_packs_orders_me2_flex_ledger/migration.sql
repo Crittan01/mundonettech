@@ -146,6 +146,8 @@ CREATE INDEX "ChannelOrder_shipmentId_stockStatus_idx" ON "ChannelOrder"("shipme
 CREATE INDEX "ChannelOrder_reconciliation_updated_idx" ON "ChannelOrder"("reconciliationStatus", "externalUpdatedAt", "id");
 CREATE INDEX "ChannelOrder_variant_location_stock_idx" ON "ChannelOrder"("variantId", "stockLocationId", "stockStatus");
 CREATE UNIQUE INDEX "ChannelShipment_accountId_externalShipmentId_key" ON "ChannelShipment"("accountId", "externalShipmentId");
+CREATE UNIQUE INDEX "ChannelShipment_packId_key" ON "ChannelShipment"("packId") WHERE "packId" IS NOT NULL;
+CREATE UNIQUE INDEX "ChannelShipment_accountId_externalOrderId_single_key" ON "ChannelShipment"("accountId", "externalOrderId") WHERE "packId" IS NULL AND "externalOrderId" IS NOT NULL;
 CREATE INDEX "ChannelShipment_account_status_updated_idx" ON "ChannelShipment"("accountId", "status", "externalUpdatedAt", "id");
 CREATE INDEX "ChannelShipment_packId_status_idx" ON "ChannelShipment"("packId", "status");
 CREATE UNIQUE INDEX "ChannelLedgerEntry_deduplicationKey_key" ON "ChannelLedgerEntry"("deduplicationKey");
@@ -213,7 +215,7 @@ ALTER TABLE "ChannelShipment"
   ADD CONSTRAINT "ChannelShipment_status_timestamps" CHECK (
     ("status" IN ('PENDING', 'READY_TO_SHIP', 'CANCELLED') AND "shippedAt" IS NULL AND "deliveredAt" IS NULL) OR
     ("status" IN ('SHIPPED', 'NOT_DELIVERED') AND "shippedAt" IS NOT NULL AND "deliveredAt" IS NULL) OR
-    ("status" = 'DELIVERED' AND "shippedAt" IS NOT NULL AND "deliveredAt" IS NOT NULL)
+    ("status" = 'DELIVERED' AND "shippedAt" IS NOT NULL AND "deliveredAt" IS NOT NULL AND "deliveredAt" >= "shippedAt")
   );
 
 ALTER TABLE "ChannelLedgerEntry"
@@ -345,7 +347,11 @@ BEGIN
     END IF;
   END IF;
   IF NEW."packId" IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM "ChannelPack" pack WHERE pack."id" = NEW."packId" AND pack."accountId" = NEW."accountId" AND pack."externalPackId" = NEW."externalPackId"
+    SELECT 1 FROM "ChannelPack" pack
+    WHERE pack."id" = NEW."packId"
+      AND pack."accountId" = NEW."accountId"
+      AND pack."externalPackId" = NEW."externalPackId"
+      AND (pack."externalShipmentId" IS NULL OR pack."externalShipmentId" = NEW."externalShipmentId")
   ) THEN
     RAISE EXCEPTION 'Channel shipment pack ownership is invalid' USING ERRCODE = '23514';
   END IF;
@@ -409,13 +415,119 @@ BEGIN
     SELECT 1 FROM "ChannelOffer" offer WHERE offer."id" = NEW."offerId" AND offer."listingId" = NEW."listingId" AND offer."externalItemId" = NEW."externalItemId"
   ) THEN RAISE EXCEPTION 'Channel order offer ownership is invalid' USING ERRCODE = '23514'; END IF;
   IF NEW."stockLocationId" IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM "StockLocation" location WHERE location."id" = NEW."stockLocationId" AND location."deletedAt" IS NULL AND
+    SELECT 1 FROM "StockLocation" location WHERE location."id" = NEW."stockLocationId" AND
+      ((TG_OP = 'UPDATE' AND NEW."stockLocationId" IS NOT DISTINCT FROM OLD."stockLocationId") OR location."deletedAt" IS NULL) AND
       ((NEW."offerId" IS NULL) OR EXISTS (
         SELECT 1 FROM "ChannelOffer" offer WHERE offer."id" = NEW."offerId" AND
           ((offer."logisticType" = 'FULFILLMENT' AND location."type" = 'MELI_FULL') OR
            (offer."logisticType" = 'CROSS_DOCKING' AND location."type" = 'LOCAL_MAIN'))
       ))
   ) THEN RAISE EXCEPTION 'Channel order stock origin is invalid' USING ERRCODE = '23514'; END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION "validate_stock_location_lifecycle"() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  IF OLD."type" IS DISTINCT FROM NEW."type" AND (
+    EXISTS (SELECT 1 FROM "StockLevel" WHERE "locationId" = NEW."id" AND ("onHand" > 0 OR "committed" > 0)) OR
+    EXISTS (SELECT 1 FROM "SerializedUnit" WHERE "locationId" = NEW."id") OR
+    EXISTS (SELECT 1 FROM "InventoryLedger" WHERE "locationId" = NEW."id") OR
+    EXISTS (SELECT 1 FROM "ChannelOrder" WHERE "stockLocationId" = NEW."id")
+  ) THEN
+    RAISE EXCEPTION 'Stock location type cannot change once inventory history exists' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."deletedAt" IS NULL AND NEW."deletedAt" IS NOT NULL AND (
+    EXISTS (SELECT 1 FROM "StockLevel" WHERE "locationId" = NEW."id" AND ("onHand" > 0 OR "committed" > 0)) OR
+    EXISTS (SELECT 1 FROM "SerializedUnit" WHERE "locationId" = NEW."id" AND "status" IN ('IN_STOCK', 'RESERVED', 'QUARANTINED')) OR
+    EXISTS (SELECT 1 FROM "PurchaseOrder" WHERE "destinationLocationId" = NEW."id" AND "status" IN ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED')) OR
+    EXISTS (
+      SELECT 1 FROM "ChannelOrder"
+      WHERE "stockLocationId" = NEW."id"
+        AND "status" IN ('PENDING', 'PAID')
+        AND "stockStatus" IN ('NOT_REQUIRED', 'REVIEW_REQUIRED', 'RESERVED')
+    )
+  ) THEN
+    RAISE EXCEPTION 'Cannot archive a stock location with active stock, serialized units, or open orders' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION "validate_variant_inventory_lifecycle"() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  IF OLD."deletedAt" IS NULL AND NEW."deletedAt" IS NOT NULL AND (
+    EXISTS (SELECT 1 FROM "StockLevel" WHERE "variantId" = NEW."id" AND ("onHand" > 0 OR "committed" > 0)) OR
+    EXISTS (SELECT 1 FROM "SerializedUnit" WHERE "variantId" = NEW."id" AND "status" IN ('IN_STOCK', 'RESERVED', 'QUARANTINED')) OR
+    EXISTS (
+      SELECT 1 FROM "PurchaseOrderItem" item
+      JOIN "PurchaseOrder" purchase ON purchase."id" = item."purchaseOrderId"
+      WHERE item."variantId" = NEW."id" AND purchase."status" IN ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED')
+    ) OR
+    EXISTS (
+      SELECT 1 FROM "ChannelOrder"
+      WHERE "variantId" = NEW."id"
+        AND "status" IN ('PENDING', 'PAID')
+        AND "stockStatus" IN ('NOT_REQUIRED', 'REVIEW_REQUIRED', 'RESERVED')
+    )
+  ) THEN
+    RAISE EXCEPTION 'Cannot archive a variant with active stock, serialized units, or open orders' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION "validate_product_inventory_lifecycle"() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  IF OLD."trackSerial" IS DISTINCT FROM NEW."trackSerial" AND (
+    EXISTS (
+      SELECT 1 FROM "StockLevel" level
+      JOIN "ProductVariant" variant ON variant."id" = level."variantId"
+      WHERE variant."productId" = NEW."id" AND (level."onHand" > 0 OR level."committed" > 0)
+    ) OR
+    EXISTS (
+      SELECT 1 FROM "SerializedUnit" unit
+      JOIN "ProductVariant" variant ON variant."id" = unit."variantId"
+      WHERE variant."productId" = NEW."id"
+    ) OR
+    EXISTS (
+      SELECT 1 FROM "InventoryLedger" ledger
+      JOIN "ProductVariant" variant ON variant."id" = ledger."variantId"
+      WHERE variant."productId" = NEW."id"
+    )
+  ) THEN
+    RAISE EXCEPTION 'Product serial tracking cannot change once inventory records exist' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."deletedAt" IS NULL AND NEW."deletedAt" IS NOT NULL AND (
+    EXISTS (
+      SELECT 1 FROM "StockLevel" level
+      JOIN "ProductVariant" variant ON variant."id" = level."variantId"
+      WHERE variant."productId" = NEW."id" AND (level."onHand" > 0 OR level."committed" > 0)
+    ) OR
+    EXISTS (
+      SELECT 1 FROM "SerializedUnit" unit
+      JOIN "ProductVariant" variant ON variant."id" = unit."variantId"
+      WHERE variant."productId" = NEW."id" AND unit."status" IN ('IN_STOCK', 'RESERVED', 'QUARANTINED')
+    ) OR
+    EXISTS (
+      SELECT 1 FROM "PurchaseOrderItem" item
+      JOIN "PurchaseOrder" purchase ON purchase."id" = item."purchaseOrderId"
+      JOIN "ProductVariant" variant ON variant."id" = item."variantId"
+      WHERE variant."productId" = NEW."id" AND purchase."status" IN ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED')
+    ) OR
+    EXISTS (
+      SELECT 1 FROM "ChannelOrder" channel_order
+      JOIN "ProductVariant" variant ON variant."id" = channel_order."variantId"
+      WHERE variant."productId" = NEW."id"
+        AND channel_order."status" IN ('PENDING', 'PAID')
+        AND channel_order."stockStatus" IN ('NOT_REQUIRED', 'REVIEW_REQUIRED', 'RESERVED')
+    )
+  ) THEN
+    RAISE EXCEPTION 'Cannot archive a product with active stock, serialized units, or open orders' USING ERRCODE = '23514';
+  END IF;
   RETURN NEW;
 END;
 $$;
@@ -451,6 +563,9 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION "validate_serialized_unit"() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION "validate_stock_location_lifecycle"() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION "validate_variant_inventory_lifecycle"() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION "validate_product_inventory_lifecycle"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "enforce_channel_pack_state"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "enforce_channel_shipment_state"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "enforce_channel_order_state"() FROM PUBLIC, anon, authenticated, service_role;

@@ -523,6 +523,8 @@ const requiredPartialIndexes = [
   "OpportunityProposal_orderId_key",
   "OpportunityProposal_cartId_key",
   "ChannelOAuthAttempt_one_active_per_account_key",
+  "ChannelShipment_packId_key",
+  "ChannelShipment_accountId_externalOrderId_single_key",
 ] as const;
 const requiredTotalUniqueIndexes = [
   "ChannelListing_externalUserProductId_key",

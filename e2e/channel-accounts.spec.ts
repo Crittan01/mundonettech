@@ -523,6 +523,17 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   await expect(page.getByText(/Descontado por despacho/)).toBeVisible();
   await page.getByRole("button", { name: "Sincronizar pedido y envío", exact: true }).click();
   await expect(page.getByText(/Pedido, pack, envío y ledger sincronizados/)).toBeVisible();
+  await page.getByText("Agregar ajuste al ledger", { exact: true }).click();
+  const adjustRegion = page.locator("details").filter({ hasText: "Agregar ajuste al ledger" });
+  await adjustRegion.getByLabel("Valor (COP)").fill("500");
+  await adjustRegion.getByLabel("Referencia de evidencia").fill("SETTLEMENT-E2E-001");
+  await adjustRegion.getByRole("button", { name: "Agregar ajuste auditable" }).click();
+  await expect(page.getByText(/Ajuste financiero agregado al ledger append-only/)).toBeVisible();
+  expect(
+    await db.channelLedgerEntry.count({
+      where: { orderId: channelOrder.id, entryType: "MANUAL_ADJUSTMENT" },
+    }),
+  ).toBe(1);
   const orderAxe = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();

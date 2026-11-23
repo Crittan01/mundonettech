@@ -2,8 +2,8 @@
 
 import { randomUUID } from "node:crypto";
 
-import { parseWholeCopToCents } from "@mundonettech/core";
-import { ChannelLedgerDirection } from "@mundonettech/db";
+import { hasAdminPermission, parseWholeCopToCents } from "@mundonettech/core";
+import { ChannelLedgerDirection, OperationsService } from "@mundonettech/db";
 import { ChannelOrderError } from "@mundonettech/integrations";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -15,6 +15,7 @@ import {
   formString,
   type ActionState,
 } from "@/lib/action-state";
+import { getDatabase } from "@/lib/db";
 import { channelOrderService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
@@ -23,11 +24,14 @@ const idSchema = z.string().uuid();
 const evidenceSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/);
 const reasonSchema = z.string().regex(/^[A-Z][A-Z0-9_]{2,79}$/);
 
-async function authorize() {
+async function authorize(options: { readonly requireFinanceRead?: boolean } = {}) {
   const session = await getAdminSession({
     permission: "integrations:write",
     requireRecentMfa: true,
   });
+  if (options.requireFinanceRead && !hasAdminPermission(session.profile.role, "finance:read")) {
+    throw new AdminAuthorizationError("FORBIDDEN");
+  }
   const context = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
@@ -35,6 +39,12 @@ async function authorize() {
     ipHash: context.ipHash,
     userAgentHash: context.userAgentHash ?? null,
   };
+}
+
+async function refreshChannelSurfaces(): Promise<void> {
+  await new OperationsService(getDatabase()).synchronizeNotifications();
+  revalidatePath("/admin/canales");
+  revalidatePath("/admin/hoy");
 }
 
 function failure(error: unknown, values?: Record<string, string>): ActionState {
@@ -71,7 +81,7 @@ export async function synchronizeChannelOrderAction(
     const audit = await authorize();
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const result = await channelOrderService().synchronizeOrder(orderId, audit);
-    revalidatePath("/admin/canales");
+    await refreshChannelSurfaces();
     return actionSuccess(
       result.stale
         ? "Mercado Libre reportó una versión anterior; el estado local más reciente quedó intacto."
@@ -90,7 +100,7 @@ export async function retryChannelOrderStockAction(
     const audit = await authorize();
     const orderId = idSchema.parse(formString(formData, "orderId"));
     await channelOrderService().retryStock(orderId, audit);
-    revalidatePath("/admin/canales");
+    await refreshChannelSurfaces();
     return actionSuccess("La evaluación de stock terminó; revisa el estado persistido del pedido.");
   } catch (error) {
     return failure(error);
@@ -107,7 +117,7 @@ export async function assignChannelOrderStockAction(
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const locationId = idSchema.parse(formString(formData, "locationId"));
     await channelOrderService().assignStockLocation({ orderId, locationId, audit });
-    revalidatePath("/admin/canales");
+    await refreshChannelSurfaces();
     return actionSuccess("Bodega asignada y evaluación de stock ejecutada con auditoría.");
   } catch (error) {
     return failure(error, values);
@@ -120,7 +130,7 @@ export async function reconcileChannelOrderAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize({ requireFinanceRead: true });
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const expectedVersion = z.coerce
       .number()
@@ -136,7 +146,7 @@ export async function reconcileChannelOrderAction(
       reasonCode,
       audit,
     });
-    revalidatePath("/admin/canales");
+    await refreshChannelSurfaces();
     return actionSuccess("Conciliación financiera confirmada con evidencia y control de versión.");
   } catch (error) {
     return failure(error, values);
@@ -149,7 +159,7 @@ export async function adjustChannelOrderLedgerAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize({ requireFinanceRead: true });
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const amountCop = z
       .string()
@@ -166,7 +176,7 @@ export async function adjustChannelOrderLedgerAction(
       reasonCode,
       audit,
     });
-    revalidatePath("/admin/canales");
+    await refreshChannelSurfaces();
     return actionSuccess(
       "Ajuste financiero agregado al ledger append-only; no altera capturas del proveedor.",
     );

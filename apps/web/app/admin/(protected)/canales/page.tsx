@@ -146,6 +146,7 @@ export default async function ChannelsPage({
   );
   const locations = Object.fromEntries(locationEntries);
   const canWrite = hasAdminPermission(session.profile.role, "integrations:write");
+  const canReconcile = canWrite && hasAdminPermission(session.profile.role, "finance:read");
   const activeAccounts = accounts.filter((account) => account.status === "ACTIVE");
   const redirectUri = mercadoLibreOAuthRedirectUri();
   const outcome = params.oauth ? oauthMessages[params.oauth] : undefined;
@@ -475,6 +476,7 @@ export default async function ChannelsPage({
       <ChannelOrderDashboardView
         dashboard={orderDashboard}
         canWrite={canWrite}
+        canReconcile={canReconcile}
         locations={locations}
       />
     </div>
