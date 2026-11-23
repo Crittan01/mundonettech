@@ -54,34 +54,40 @@ const checkoutScope = "checkout";
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class OrderValidationError extends Error {
+  override readonly name = "OrderValidationError" as const;
+
   constructor(message: string) {
     super(message);
-    this.name = "OrderValidationError";
   }
 }
 
 export class OrderNotFoundError extends Error {
+  override readonly name = "OrderNotFoundError" as const;
+
   constructor(message = "Order not found.") {
     super(message);
-    this.name = "OrderNotFoundError";
   }
 }
 
 export class CheckoutConflictError extends Error {
+  override readonly name = "CheckoutConflictError" as const;
+
   constructor(message: string) {
     super(message);
-    this.name = "CheckoutConflictError";
   }
 }
 
 export class CheckoutAuthenticationRequiredError extends Error {
+  override readonly name = "CheckoutAuthenticationRequiredError" as const;
+
   constructor() {
     super("The email belongs to a registered customer; sign in before checkout.");
-    this.name = "CheckoutAuthenticationRequiredError";
   }
 }
 
 export class CheckoutStockError extends Error {
+  override readonly name = "CheckoutStockError" as const;
+
   constructor(
     readonly variantId: string,
     readonly available: number,
@@ -90,28 +96,33 @@ export class CheckoutStockError extends Error {
     super(
       `Insufficient stock for variant ${variantId}: ${available} available, ${requested} requested.`,
     );
-    this.name = "CheckoutStockError";
   }
 }
 
 export class CheckoutCouponError extends Error {
+  override readonly name = "CheckoutCouponError" as const;
+
   constructor(message: string) {
     super(message);
-    this.name = "CheckoutCouponError";
   }
 }
 
 export class CheckoutReviewRequiredError extends Error {
+  override readonly name = "CheckoutReviewRequiredError" as const;
+
   constructor() {
     super("Pricing, taxes, or delivery terms changed; review the checkout again.");
-    this.name = "CheckoutReviewRequiredError";
   }
 }
 
 export class ReceiptBalanceError extends Error {
-  constructor(message = "Receipt verification failed because its totals do not balance.") {
-    super(message);
-    this.name = "ReceiptBalanceError";
+  override readonly name = "ReceiptBalanceError" as const;
+
+  constructor(
+    message = "Receipt verification failed because its totals do not balance.",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
   }
 }
 
@@ -1635,10 +1646,8 @@ export class OrderService {
         };
       });
     } catch (error) {
-      if (
-        error instanceof ReceiptBalanceError ||
-        (error instanceof RangeError && !(error instanceof OrderValidationError))
-      ) {
+      if (error instanceof OrderValidationError) throw error;
+      if (error instanceof ReceiptBalanceError || error instanceof RangeError) {
         const keyHex = Buffer.from(idempotency.keyHash).toString("hex");
         await this.db.domainOutbox
           .upsert({
@@ -1654,7 +1663,7 @@ export class OrderService {
           })
           .catch(() => undefined);
         if (error instanceof ReceiptBalanceError) throw error;
-        throw new ReceiptBalanceError(error.message);
+        throw new ReceiptBalanceError(error.message, { cause: error });
       }
       if (hasUniqueViolation(error)) {
         throw new CheckoutConflictError(
