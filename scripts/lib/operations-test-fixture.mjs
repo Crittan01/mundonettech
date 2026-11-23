@@ -11,9 +11,12 @@ export const operationsTables = [
   "OperationalHealthSnapshot",
   "ChannelAccount",
   "ChannelOAuthAttempt",
+  "ChannelListing",
+  "ChannelOffer",
+  "ChannelSyncJob",
 ];
 
-export async function seedOperationsFixture(client, { adminId }) {
+export async function seedOperationsFixture(client, { adminId, catalog }) {
   const notificationId = randomUUID();
   await client.query(
     `INSERT INTO "Notification" (
@@ -136,6 +139,35 @@ export async function seedOperationsFixture(client, { adminId }) {
     ) VALUES ($1, $2, 'MERCADO_LIBRE', 'MCO', 'LOCAL', $3, 'Canal RLS', $4,
       CURRENT_TIMESTAMP + INTERVAL '10 minutes', $5)`,
     [channelAttemptId, channelAccountId, pendingCredentialId, randomBytes(32), adminId],
+  );
+  const channelListingId = randomUUID();
+  const channelOfferId = randomUUID();
+  await client.query(
+    `INSERT INTO "ChannelListing" (
+      "id", "accountId", "variantId", "externalCategoryId", "familyName", "sourceHash",
+      "localQuantity", "createdByAdminUserId"
+    ) VALUES ($1, $2, $3, 'MCO12345', 'Canal RLS', $4, 8, $5)`,
+    [channelListingId, channelAccountId, catalog.variantId, randomBytes(32), adminId],
+  );
+  await client.query(
+    `INSERT INTO "ChannelOffer" (
+      "id", "listingId", "listingTypeId", "logisticType", "pricingMode", "manualPriceCents",
+      "commissionBps", "priceCents", "commissionAmountCents", "netProceedsCents", "sourceHash"
+    ) VALUES ($1, $2, 'gold_special', 'CROSS_DOCKING', 'MANUAL', 100000, 1000, 100000, 10000, 90000, $3)`,
+    [channelOfferId, channelListingId, randomBytes(32)],
+  );
+  await client.query(
+    `INSERT INTO "ChannelSyncJob" (
+      "listingId", "offerId", "kind", "deduplicationKey", "requestHash", "payload", "createdByAdminUserId"
+    ) VALUES ($1, $2, 'PUBLISH', $3, $4, $5::jsonb, $6)`,
+    [
+      channelListingId,
+      channelOfferId,
+      `PUBLISH:${randomBytes(32).toString("hex")}`,
+      randomBytes(32),
+      JSON.stringify({ listingVersion: 0, offerVersion: 0 }),
+      adminId,
+    ],
   );
   return {
     notificationId,

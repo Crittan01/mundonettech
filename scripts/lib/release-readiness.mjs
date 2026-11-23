@@ -221,6 +221,7 @@ export function validateReleaseConfiguration(environment) {
     ),
   );
   check("release.mercadoLibreTokenEndpoint", !environment.MERCADO_LIBRE_TOKEN_URL);
+  check("release.mercadoLibreApiEndpoint", !environment.MERCADO_LIBRE_API_URL);
   check(
     "release.turnstileSiteKey",
     Boolean(environment.NEXT_PUBLIC_TURNSTILE_SITE_KEY) &&

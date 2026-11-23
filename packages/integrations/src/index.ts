@@ -199,3 +199,29 @@ export type {
   MercadoLibreTokenCredential,
   MercadoLibreTokenSet,
 } from "./mercado-libre.js";
+
+export { ChannelCatalogError, ChannelCatalogService } from "./channel-catalog-service.js";
+export type {
+  ChannelCatalogErrorCode,
+  ChannelCatalogServiceOptions,
+  ChannelListingView,
+  ChannelOfferView,
+  ChannelSyncBatchResult,
+  ChannelSyncJobView,
+  ChannelVariantChoice,
+} from "./channel-catalog-service.js";
+export type { ChannelOfferConfiguration } from "./channel-catalog-snapshots.js";
+export {
+  MercadoLibreCatalogError,
+  MercadoLibreUserProductsClient,
+  mercadoLibreApiUrl,
+} from "./mercado-libre-catalog.js";
+export type {
+  MercadoLibreAttributeInput,
+  MercadoLibreCatalogClientOptions,
+  MercadoLibreCatalogErrorCode,
+  MercadoLibreCreateItemInput,
+  MercadoLibreItemSnapshot,
+  MercadoLibreStockLocation,
+  MercadoLibreStockSnapshot,
+} from "./mercado-libre-catalog.js";

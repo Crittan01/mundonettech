@@ -2,9 +2,15 @@ import AxeBuilder from "@axe-core/playwright";
 import { randomUUID } from "node:crypto";
 
 import { expect, test, type Page } from "@playwright/test";
+import pg from "pg";
 
 import { createTimeoutToken } from "../packages/core/dist/index.js";
 import { createDatabaseClient } from "../packages/db/dist/index.js";
+import {
+  seedCatalogFixture,
+  type CatalogTestFixture,
+} from "../scripts/lib/catalog-test-fixture.mjs";
+import { seedInventoryFixture } from "../scripts/lib/inventory-test-fixture.mjs";
 import {
   createSupabaseFixtureSession,
   encodeSupabaseFixtureCookie,
@@ -21,6 +27,7 @@ let db: ReturnType<typeof createDatabaseClient>;
 let admin: { id: string; authUserId: string; email: string };
 let reader: { id: string; authUserId: string; email: string };
 let accountId: string;
+let catalog: CatalogTestFixture;
 let authorizationState = "";
 
 async function authenticateAdmin(
@@ -96,6 +103,27 @@ async function interceptAuthorization(page: Page) {
 
 test.beforeAll(async () => {
   db = createDatabaseClient({ databaseUrl, maxConnections: 6 });
+  const sql = new pg.Client({ connectionString: databaseUrl });
+  await sql.connect();
+  try {
+    catalog = await seedCatalogFixture(sql);
+    await seedInventoryFixture(sql, catalog);
+  } finally {
+    await sql.end();
+  }
+  await db.productMedia.create({
+    data: {
+      productId: catalog.productId,
+      variantId: catalog.variantId,
+      mediaType: "IMAGE",
+      status: "READY",
+      storageKey: `e2e/channels/${randomUUID()}/picture.webp`,
+      mimeType: "image/webp",
+      altText: "Producto omnicanal E2E",
+      width: 1200,
+      height: 1200,
+    },
+  });
   admin = await db.adminUser.create({
     data: {
       authUserId: randomUUID(),
@@ -123,7 +151,7 @@ test.afterAll(async () => {
 test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revocation work end to end", async ({
   page,
 }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(180_000);
   await interceptAuthorization(page);
   await authenticateAdmin(page, admin, 900);
   await page.goto("/admin/canales");
@@ -147,7 +175,7 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   await page.getByLabel("Client Secret de la aplicación").fill(clientSecret);
   await page.getByRole("button", { name: "Conectar con Mercado Libre" }).click();
   await page.waitForURL(/\/admin\/canales\?oauth=connected/);
-  await expect(page.getByText(accountLabel, { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: accountLabel, exact: true })).toBeVisible();
   await expect(page.getByText("Activa", { exact: true })).toBeVisible();
   expect(page.url()).not.toContain(clientSecret);
   expect(page.url()).not.toContain("TG-e2e");
@@ -245,6 +273,69 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   ).not.toBeNull();
 
   await page.goto("/admin/canales");
+  await page.getByText("Preparar una publicación", { exact: true }).click();
+  await page.getByLabel("Cuenta vendedora").selectOption(accountId);
+  await page.getByLabel("Variante del catálogo").selectOption(catalog.variantId);
+  await page.getByLabel("Categoría MCO de Mercado Libre").fill("MCO12345");
+  await page.getByLabel("Neto objetivo por unidad (COP)").fill("1000");
+  await page.getByLabel("Comisión (puntos básicos)").fill("1000");
+  await page.getByLabel("Cargo fijo bajo $60.000 (COP)").fill("500");
+  await page.getByLabel("Flete asumido desde $60.000 (COP)").fill("9000");
+  await page.getByRole("button", { name: "Preparar publicación", exact: true }).click();
+  await expect(page.getByText(/El job quedó persistido/)).toBeVisible();
+  const draft = await db.channelListing.findFirstOrThrow({
+    where: { accountId, variantId: catalog.variantId },
+    include: { offers: true, syncJobs: true },
+  });
+  expect(draft.status).toBe("DRAFT");
+  expect(draft.syncJobs).toHaveLength(1);
+  expect(draft.syncJobs[0]?.status).toBe("PENDING");
+  expect(draft.offers[0]?.priceCents).toBe(166700n);
+
+  await page.getByRole("button", { name: "Procesar trabajos pendientes" }).click();
+  await expect(page.getByText(/1 trabajo\(s\) completado/)).toBeVisible();
+  const published = await db.channelListing.findUniqueOrThrow({
+    where: { id: draft.id },
+    include: { offers: true, syncJobs: true },
+  });
+  expect(published.status).toBe("ACTIVE");
+  expect(published.externalUserProductId).toMatch(/^MCOU/);
+  expect(published.offers[0]?.externalItemId).toMatch(/^MCO[0-9]+$/);
+  expect(published.remoteLocalQuantity).toBe(8);
+  expect(published.syncJobs[0]?.status).toBe("SUCCEEDED");
+  const catalogAxe = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  expect(catalogAxe.violations).toEqual([]);
+
+  const editOfferRegion = page.locator("details").filter({ hasText: "Editar precio y tarifas" });
+  await editOfferRegion.locator("summary").click();
+  await editOfferRegion.getByLabel("Neto objetivo por unidad (COP)").fill("54000");
+  await editOfferRegion.getByRole("button", { name: "Guardar y programar precio" }).click();
+  await expect(page.getByText(/Precio y condiciones actualizados/)).toBeVisible();
+  await page.getByRole("button", { name: "Procesar trabajos pendientes" }).click();
+  await expect(page.getByText(/1 trabajo\(s\) completado/)).toBeVisible();
+  expect(
+    (await db.channelOffer.findUniqueOrThrow({ where: { id: published.offers[0]!.id } }))
+      .priceCents,
+  ).toBe(7000000n);
+
+  await db.stockLevel.updateMany({
+    where: { variantId: catalog.variantId },
+    data: { safetyStock: 3 },
+  });
+  const stockScheduled = await page.request.post("/api/jobs/channels", {
+    headers: { authorization: `Bearer ${channelCronSecret}` },
+  });
+  expect(stockScheduled.status()).toBe(200);
+  const stockResult = await stockScheduled.json();
+  expect(stockResult.sync.succeeded).toBe(1);
+  expect(stockResult.sync.failed).toBe(0);
+  const stockSynced = await db.channelListing.findUniqueOrThrow({ where: { id: draft.id } });
+  expect(stockSynced.localQuantity).toBe(7);
+  expect(stockSynced.remoteLocalQuantity).toBe(7);
+
+  await page.goto("/admin/canales");
   await page.getByText(`Desvincular ${accountLabel}`, { exact: true }).click();
   await page.getByLabel("Escribe DESVINCULAR para confirmar").fill("DESVINCULAR");
   await page.getByRole("button", { name: "Desvincular cuenta", exact: true }).click();
@@ -256,6 +347,13 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   expect(disconnected.status).toBe("DISCONNECTED");
   expect(disconnected.credential.revokedAt).not.toBeNull();
   expect(disconnected.tokenExpiresAt).toBeNull();
+  const pausedListing = await db.channelListing.findUniqueOrThrow({
+    where: { id: draft.id },
+    include: { offers: true },
+  });
+  expect(pausedListing.status).toBe("PAUSED");
+  expect(pausedListing.lastProviderError).toBe("ACCOUNT_DISCONNECTED");
+  expect(pausedListing.offers.every((offer) => offer.status === "PAUSED")).toBe(true);
 });
 
 test("finance role can inspect channel descriptors without mutation controls", async ({ page }) => {
@@ -263,6 +361,9 @@ test("finance role can inspect channel descriptors without mutation controls", a
   await page.goto("/admin/canales");
   await expect(page.getByText(/Vista de solo lectura/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Conectar con Mercado Libre" })).toHaveCount(0);
-  await expect(page.getByText(accountLabel, { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: accountLabel, exact: true })).toBeVisible();
   await expect(page.getByText("Desvinculada", { exact: true })).toBeVisible();
+  await expect(page.getByText("Audífonos TÁCTILES Pro", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Preparar una publicación", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Editar precio y tarifas", { exact: true })).toHaveCount(0);
 });

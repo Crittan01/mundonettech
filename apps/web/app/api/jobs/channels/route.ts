@@ -5,7 +5,7 @@ import { OperationsService } from "@mundonettech/db";
 import { z } from "zod";
 
 import { getDatabase } from "@/lib/db";
-import { channelAccountService } from "@/lib/integrations";
+import { channelAccountService, channelCatalogService } from "@/lib/integrations";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const headers = {
@@ -49,12 +49,17 @@ export async function POST(request: Request) {
     return Response.json({ error: "Scheduler actor is not authorized." }, { status: 403, headers });
   }
   const security = await getRequestSecurityContext();
-  const result = await channelAccountService(db).refreshDueAccounts({
+  const audit = {
     actorAdminUserId: actor.id,
     requestId: randomUUID(),
     ipHash: security.ipHash,
     userAgentHash: security.userAgentHash,
-  });
+  };
+  const result = await channelAccountService(db).refreshDueAccounts(audit);
+  const sync = await channelCatalogService(db).processSyncJobs(
+    { ...audit, requestId: randomUUID() },
+    { limit: 10 },
+  );
   await new OperationsService(db).synchronizeNotifications();
-  return Response.json(result, { headers });
+  return Response.json({ ...result, sync }, { headers });
 }

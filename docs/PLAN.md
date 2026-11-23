@@ -22,7 +22,7 @@
 
 - `[x]` ✅ **Fases 0–5 (`F0.1`–`F5.3`):** MFA `aal2`/RLS/Bóveda (`ADR-019`..`022`), Catálogo/Media R2/WAC (`ADR-023`..`026`), CMS v3/Legal CO/SEO (`ADR-027`..`029`), Carrito/Checkout/Pagos/Logística/DIAN (`ADR-030`..`033`), Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse `96–100`/k6/`release:verify` (`ADR-034`..`036`), CRM 360° + B2B/Copiloto 0-PII (`ADR-037`..`038`) y Lealtad/Lifecycle/RFM + Salud/Backups GPG R2/DR/Ayuda v2 (`ADR-039`..`041`; Go-Live sujeto a externos).
 - `[x]` ✅ **`F6.1` — OAuth PKCE y Cuentas Omnicanal (`ChannelAccount`):** conexión ML `MCO` con PKCE `S256` (`__Secure-` callback), bóveda por ambiente, renovación fail-closed, alerta `channels.reauth` y `/admin/canales` MFA + RLS (`ADR-042`; 123 tablas/2.136 casos).
-- `[ ]` **`F6.2` — User Products ML `MCO`, `x-version`, Full y Precios (Zona Muerta \$60k):** `ChannelListing` + `ChannelOffer` (`FORMULA`/`MANUAL` `BigInt`), control `x-version`, stock `LOCAL_MAIN` vs `MELI_FULL`, comisiones/flete/zona muerta \$60k COP y `ChannelSyncJob` idempotente.
+- `[R]` **`F6.2` — User Products ML `MCO`, `x-version`, Full y Precios \$60k:** `ChannelListing`/`ChannelOffer` (`FORMULA`/`MANUAL` `BigInt`), stock `LOCAL_MAIN`/`MELI_FULL`, tarifas/zona muerta, `ChannelSyncJob` idempotente, scheduler, conciliación y `/admin/canales` MFA + RLS (`ADR-043`; 126 tablas/2.187 casos).
 - `[ ]` **`F6.3` — `ChannelPack`/`ChannelOrder`, `ME2`/Flex y Conciliación (`ChannelLedgerEntry`):** ingestión idempotente de packs/órdenes/`ChannelShipment` (`ME2`/Flex/Full) 0-PII en `DomainOutbox`, reserva/descuento seguro de stock y conciliación `ChannelLedgerEntry` `BigInt` en backoffice MFA + RLS.
 - `[ ]` **`F6.4` — Meta Catalog Feed + Conversions API (CAPI):** feed de catálogo validado y despacho server-side CAPI deduplicado (`event_id`), sujeto a `Consent` Ley 1581 vigente, bóveda y cero PII no autorizada.
 
@@ -30,4 +30,4 @@
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Implementador (`F6.2`):** crear rama `feat/f6-2-meli-user-products-xversion-full-pricing` desde `develop` limpio e implementar `ChannelListing` + `ChannelOffer` (`FORMULA`/`MANUAL` `BigInt`), control `x-version`, stock `LOCAL_MAIN` vs `MELI_FULL`, comisiones/flete/zona muerta \$60k COP y `ChannelSyncJob` idempotente sobre `ChannelAccount` certificado en `F6.1` (`ADR-042`). Go-Live cerrado hasta externos.
+- **Siguiente turno — Auditor (`F6.2`):** auditar `git diff develop...HEAD` en `feat/f6-2-meli-user-products-xversion-full-pricing` contra `ADR-043`; reejecutar `make check && pnpm test && pnpm build` y E2E de canales. Certificar `[x]`, actualizar `STATE`, subir rama/abrir PR, validar CI y fusionar squash dejando `develop` limpio. Go-Live cerrado hasta externos.

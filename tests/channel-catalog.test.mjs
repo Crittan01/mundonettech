@@ -1,0 +1,610 @@
+import assert from "node:assert/strict";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { after, before, beforeEach, describe, it } from "node:test";
+
+import pg from "pg";
+
+import {
+  ChannelAccountService,
+  ChannelCatalogError,
+  ChannelCatalogService,
+  createCredentialKeyRing,
+} from "../packages/integrations/dist/index.js";
+import {
+  ChannelSyncJobStatus,
+  createDatabaseClient,
+  IntegrationEnvironment,
+} from "../packages/db/dist/index.js";
+import { seedCatalogFixture } from "../scripts/lib/catalog-test-fixture.mjs";
+import { seedInventoryFixture } from "../scripts/lib/inventory-test-fixture.mjs";
+import { startMercadoLibreFixture } from "../scripts/lib/mercado-libre-fixture.mjs";
+import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
+
+const containerName = "f62-channel-catalog-test_mundonettech";
+const redirectUri = "http://127.0.0.1:4110/api/channels/mercado-libre/oauth/callback";
+let harness;
+let admin;
+let db;
+let fixture;
+let ring;
+let actor;
+let account;
+let service;
+let createBehavior;
+let itemBehavior;
+let stockBehavior;
+let warehouseBehavior;
+let sellerBehavior;
+
+function audit(actorId = actor.id) {
+  return {
+    actorAdminUserId: actorId,
+    requestId: randomUUID(),
+    ipHash: createHash("sha256").update(randomUUID()).digest(),
+    userAgentHash: createHash("sha256").update(randomUUID()).digest(),
+  };
+}
+
+function formula(overrides = {}) {
+  return {
+    mode: "FORMULA",
+    targetNetCents: 100_000n,
+    commissionBps: 1_000,
+    fixedFeeCents: 50_000n,
+    shippingCostCents: 900_000n,
+    listingTypeId: "gold_special",
+    fulfillment: false,
+    ...overrides,
+  };
+}
+
+async function makeCatalog({ local = true, full = false } = {}) {
+  const catalog = await seedCatalogFixture(admin);
+  const inventory = local ? await seedInventoryFixture(admin, catalog) : undefined;
+  await admin.query(
+    `INSERT INTO "ProductMedia" (
+      "productId", "variantId", "mediaType", "status", "storageKey", "mimeType", "altText", "width", "height"
+    ) VALUES ($1, $2, 'IMAGE', 'READY', $3, 'image/jpeg', 'Imagen lista para canal', 1200, 1200)`,
+    [catalog.productId, catalog.variantId, `catalog/${randomUUID()}/channel.jpg`],
+  );
+  if (full) {
+    const locationId = randomUUID();
+    await admin.query(
+      `INSERT INTO "StockLocation" ("id", "code", "name", "type")
+       VALUES ($1, $2, 'Mercado Libre Full', 'MELI_FULL')`,
+      [locationId, `FULL-${randomUUID().slice(0, 8).toUpperCase()}`],
+    );
+    await admin.query(
+      `INSERT INTO "StockLevel" (
+        "locationId", "variantId", "onHand", "committed", "safetyStock", "weightedAvgCostCents"
+      ) VALUES ($1, $2, 5, 1, 1, 60000)`,
+      [locationId, catalog.variantId],
+    );
+  }
+  return { ...catalog, inventory };
+}
+
+async function createListing(catalog, options = {}) {
+  return service.createListing({
+    accountId: account.id,
+    variantId: catalog.variantId,
+    externalCategoryId: "MCO12345",
+    familyName: "Audífonos Acme Pro",
+    offer: formula(options.offer ?? {}),
+    ...(options.warehouse
+      ? { sellerStoreId: "store-bogota", sellerNetworkNodeId: "node-bogota" }
+      : {}),
+    audit: audit(),
+  });
+}
+
+async function publish(catalog, options = {}) {
+  const listing = await createListing(catalog, options);
+  const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+  assert.equal(result.succeeded, 1, JSON.stringify({ result, calls: fixture.calls }));
+  return db.channelListing.findUniqueOrThrow({
+    where: { id: listing.id },
+    include: { offers: true },
+  });
+}
+
+before(
+  async () => {
+    harness = await acquireIsolatedTestDatabase({ containerName, port: 54428 });
+    try {
+      admin = new pg.Client({ connectionString: harness.databaseUrl });
+      await admin.connect();
+      db = createDatabaseClient({ databaseUrl: harness.databaseUrl, maxConnections: 12 });
+      actor = await db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `channel-catalog-${randomUUID()}@example.test`,
+          displayName: "Administrador catálogo omnicanal",
+          role: "SUPERADMIN",
+          status: "ACTIVE",
+        },
+      });
+      ring = createCredentialKeyRing({
+        environment: IntegrationEnvironment.LOCAL,
+        activeVersion: 1,
+        serializedKeys: JSON.stringify({ 1: randomBytes(32).toString("base64") }),
+      });
+      fixture = await startMercadoLibreFixture({
+        onCreateItem: (body, call) => createBehavior?.(body, call),
+        onItem: (input, call) => itemBehavior?.(input, call),
+        onStock: (input, call) => stockBehavior?.(input, call),
+        onWarehouseStock: (input, call) => warehouseBehavior?.(input, call),
+        onSeller: (call) => sellerBehavior?.(call),
+      });
+      const accounts = new ChannelAccountService(db, {
+        ring,
+        tokenUrl: `${fixture.origin}/oauth/token`,
+        allowLoopback: true,
+        timeoutMs: 2_000,
+      });
+      const started = await accounts.startMercadoLibreOAuth({
+        label: "Mercado Libre catálogo F6.2",
+        clientId: "123456789012",
+        clientSecret: "integration-secret-not-production-123456",
+        redirectUri,
+        audit: audit(),
+      });
+      account = await accounts.completeMercadoLibreOAuth({
+        attemptId: started.attemptId,
+        state: started.state,
+        code: `TG-code-${randomUUID()}`,
+        redirectUri,
+        audit: audit(),
+      });
+    } catch (error) {
+      if (db) await db.$disconnect().catch(() => undefined);
+      if (admin) await admin.end().catch(() => undefined);
+      if (fixture) await fixture.stop().catch(() => undefined);
+      await harness.stop();
+      harness = undefined;
+      throw error;
+    }
+  },
+  { timeout: 240_000 },
+);
+
+beforeEach(() => {
+  fixture.calls.length = 0;
+  fixture.items.clear();
+  fixture.stocks.clear();
+  createBehavior = undefined;
+  itemBehavior = undefined;
+  stockBehavior = undefined;
+  warehouseBehavior = undefined;
+  sellerBehavior = undefined;
+  service = new ChannelCatalogService(db, {
+    ring,
+    apiUrl: fixture.origin,
+    mediaBaseUrl: "https://cdn.example.test",
+    allowLoopback: true,
+    timeoutMs: 2_000,
+  });
+});
+
+after(
+  async () => {
+    if (db) await db.$disconnect();
+    if (admin) await admin.end();
+    if (fixture) await fixture.stop();
+    if (harness) await harness.stop();
+  },
+  { timeout: 30_000 },
+);
+
+describe("F6.2 — User Products, offers and prices", () => {
+  it("publishes a catalog variant with immutable jobs and synchronizes formula prices idempotently", async () => {
+    const catalog = await makeCatalog();
+    const listing = await createListing(catalog);
+    assert.equal(listing.status, "DRAFT");
+    assert.equal(listing.localQuantity, 8);
+    assert.equal(listing.offers[0].priceCents, "166700");
+    const pending = await db.channelSyncJob.findFirstOrThrow({
+      where: { listingId: listing.id, kind: "PUBLISH" },
+    });
+    assert.equal(pending.requestHash.length, 32);
+    assert.equal(JSON.stringify(pending.payload).includes("accessToken"), false);
+    assert.equal(JSON.stringify(pending.payload).includes("refreshToken"), false);
+
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.succeeded, 1);
+    const createCall = fixture.calls.find(
+      (call) => call.method === "POST" && call.path === "/items",
+    );
+    assert.ok(createCall);
+    assert.equal(createCall.body.family_name, "Audífonos Acme Pro");
+    assert.equal(createCall.body.price, 1667);
+    assert.equal(createCall.body.available_quantity, 8);
+    assert.equal(createCall.body.currency_id, "COP");
+    assert.equal("variations" in createCall.body, false);
+    assert.ok(createCall.body.attributes.some((attribute) => attribute.id === "SELLER_SKU"));
+    assert.ok(createCall.body.attributes.some((attribute) => attribute.id === "GTIN"));
+    const persisted = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: true },
+    });
+    assert.equal(persisted.status, "ACTIVE");
+    assert.match(persisted.externalUserProductId, /^MCOU/);
+    assert.match(persisted.offers[0].externalItemId, /^MCO[0-9]+$/);
+    assert.equal(persisted.remoteLocalQuantity, 8);
+    assert.equal(persisted.remoteStockVersion, 1n);
+
+    await service.updateOffer({
+      offerId: persisted.offers[0].id,
+      offer: formula({ targetNetCents: 5_400_000n }),
+      audit: audit(),
+    });
+    const priceJob = await db.channelSyncJob.findFirstOrThrow({
+      where: { listingId: listing.id, kind: "SYNC_PRICE", status: "PENDING" },
+    });
+    const version = (await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } }))
+      .version;
+    const duplicate = await service.enqueueSync({
+      listingId: listing.id,
+      offerId: persisted.offers[0].id,
+      kind: "SYNC_PRICE",
+      audit: audit(),
+    });
+    assert.equal(duplicate.id, priceJob.id);
+    assert.equal(
+      (await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } })).version,
+      version,
+    );
+    const synced = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(synced.succeeded, 1);
+    const priceUpdate = fixture.calls.find(
+      (call) =>
+        call.method === "PUT" && call.path.startsWith("/items/") && call.body.price === 70000,
+    );
+    assert.ok(priceUpdate);
+    const updated = await db.channelOffer.findUniqueOrThrow({
+      where: { id: persisted.offers[0].id },
+    });
+    assert.equal(updated.priceCents, 7_000_000n);
+    assert.equal(updated.netProceedsCents, 5_400_000n);
+    assert.equal(updated.shippingAppliedCents, 900_000n);
+    assert.equal(updated.fixedFeeAppliedCents, 0n);
+    assert.equal(updated.status, "ACTIVE");
+    assert.equal(
+      (await db.channelSyncJob.findUniqueOrThrow({ where: { id: priceJob.id } })).status,
+      ChannelSyncJobStatus.SUCCEEDED,
+    );
+  });
+
+  it("rejects manual dead-zone prices before persistence or provider calls", async () => {
+    const catalog = await makeCatalog();
+    await assert.rejects(
+      createListing(catalog, {
+        offer: {
+          mode: "MANUAL",
+          manualPriceCents: 6_000_000n,
+          targetNetCents: null,
+        },
+      }),
+      (error) => error instanceof ChannelCatalogError && error.code === "CONFLICT",
+    );
+    assert.equal(await db.channelListing.count({ where: { variantId: catalog.variantId } }), 0);
+    assert.equal(fixture.calls.length, 0);
+  });
+
+  it("coalesces duplicate stock jobs and writes the latest available LOCAL_MAIN quantity", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const first = await service.enqueueSync({
+      listingId: listing.id,
+      kind: "SYNC_LOCAL_STOCK",
+      audit: audit(),
+    });
+    const second = await service.enqueueSync({
+      listingId: listing.id,
+      kind: "SYNC_LOCAL_STOCK",
+      audit: audit(),
+    });
+    assert.equal(first.id, second.id);
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    await admin.query(
+      `UPDATE "StockLevel" SET "safetyStock" = 3 WHERE "locationId" = $1 AND "variantId" = $2`,
+      [catalog.inventory.locationId, catalog.variantId],
+    );
+    const driftResult = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(driftResult.succeeded, 1, JSON.stringify(driftResult));
+    const update = fixture.calls.find(
+      (call) => call.method === "PUT" && call.body.available_quantity === 7,
+    );
+    assert.ok(update);
+    const current = await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } });
+    assert.equal(current.localQuantity, 7);
+    assert.equal(current.remoteLocalQuantity, 7);
+  });
+
+  it("refreshes x-version after a 409 and confirms seller_warehouse stock without touching Full", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog, { warehouse: true });
+    const stock = fixture.stocks.get(listing.externalUserProductId);
+    stock.locations = stock.locations.filter((location) => location.type === "seller_warehouse");
+    await admin.query(
+      `UPDATE "StockLevel" SET "safetyStock" = 3 WHERE "locationId" = $1 AND "variantId" = $2`,
+      [catalog.inventory.locationId, catalog.variantId],
+    );
+    let conflict = true;
+    warehouseBehavior = ({ method, body, current }) => {
+      if (method !== "PUT") return undefined;
+      if (conflict) {
+        conflict = false;
+        current.version += 1;
+        return { status: 409, body: { error: "version_conflict" } };
+      }
+      const location = current.locations.find((candidate) => candidate.type === "seller_warehouse");
+      location.quantity = body.quantity;
+      current.version += 1;
+      return { status: 200, version: current.version, body: {} };
+    };
+    await service.enqueueSync({ listingId: listing.id, kind: "SYNC_LOCAL_STOCK", audit: audit() });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.succeeded, 1, JSON.stringify(result));
+    const writes = fixture.calls.filter(
+      (call) => call.method === "PUT" && call.path.endsWith("/stock/type/seller_warehouse"),
+    );
+    assert.equal(writes.length, 2);
+    assert.notEqual(writes[0].headers["x-version"], writes[1].headers["x-version"]);
+    assert.equal(stock.locations[0].quantity, 7);
+    assert.equal(
+      fixture.calls.some((call) => call.body.logistic_type === "fulfillment"),
+      false,
+    );
+    assert.equal(
+      (await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } })).remoteFullQuantity,
+      null,
+    );
+  });
+
+  it("reads meli_facility as authoritative Full stock and never writes it", async () => {
+    const catalog = await makeCatalog({ local: false, full: true });
+    stockBehavior = ({ current }) => ({
+      status: 200,
+      version: 7,
+      body: {
+        id: current.id,
+        user_id: current.user_id,
+        locations: [{ type: "meli_facility", quantity: 6 }],
+      },
+    });
+    const listing = await createListing(catalog, { offer: { fulfillment: true } });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.succeeded, 1);
+    const current = await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } });
+    assert.equal(current.status, "RECONCILE_REQUIRED");
+    assert.equal(current.lastProviderError, "FULL_STOCK_DIVERGENCE");
+    assert.equal(current.localQuantity, 3);
+    assert.equal(current.remoteFullQuantity, 6);
+    assert.equal(current.remoteStockVersion, 7n);
+    assert.equal(
+      fixture.calls.some((call) => call.method === "PUT"),
+      false,
+    );
+    assert.equal(
+      fixture.calls.some((call) => call.path.includes("seller_warehouse")),
+      false,
+    );
+  });
+  it("adds a Full offer to the same User Product without writing its stock", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    stockBehavior = ({ current }) => ({
+      status: 200,
+      version: current.version,
+      body: {
+        id: current.id,
+        user_id: current.user_id,
+        locations: [
+          ...current.locations,
+          ...(current.locations.some((location) => location.type === "meli_facility")
+            ? []
+            : [{ type: "meli_facility", quantity: 0 }]),
+        ],
+      },
+    });
+    await service.addOffer({
+      listingId: listing.id,
+      offer: formula({ fulfillment: true, listingTypeId: "gold_pro" }),
+      audit: audit(),
+    });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.succeeded, 1, JSON.stringify(result));
+    const current = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: { orderBy: { createdAt: "asc" } } },
+    });
+    assert.equal(current.offers.length, 2);
+    assert.equal(new Set(current.offers.map((offer) => offer.externalItemId)).size, 2);
+    const createCalls = fixture.calls.filter(
+      (call) => call.method === "POST" && call.path === "/items",
+    );
+    assert.equal(createCalls.length, 2);
+    assert.equal(createCalls[1].body.user_product_id, current.externalUserProductId);
+    assert.equal("available_quantity" in createCalls[1].body, false);
+    const fullOffer = current.offers.find((offer) => offer.logisticType === "FULFILLMENT");
+    await service.enqueueSync({
+      listingId: listing.id,
+      offerId: fullOffer.id,
+      kind: "SYNC_LOCAL_STOCK",
+      audit: audit(),
+    });
+    const writesBefore = fixture.calls.filter((call) => call.method === "PUT").length;
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    assert.equal(fixture.calls.filter((call) => call.method === "PUT").length, writesBefore);
+    assert.equal(current.remoteFullQuantity, 0);
+  });
+});
+
+describe("F6.2 — claims, reconciliation and failure safety", () => {
+  it("allows only one worker to claim a listing under concurrency", async () => {
+    const catalog = await makeCatalog();
+    const listing = await createListing(catalog);
+    const results = await Promise.all([
+      service.processSyncJobs(audit(), { listingId: listing.id }),
+      service.processSyncJobs(audit(), { listingId: listing.id }),
+    ]);
+    assert.equal(
+      results.reduce((sum, result) => sum + result.succeeded, 0),
+      1,
+    );
+    assert.equal(
+      results.reduce((sum, result) => sum + result.claimed, 0),
+      1,
+    );
+    assert.equal(
+      fixture.calls.filter((call) => call.method === "POST" && call.path === "/items").length,
+      1,
+    );
+  });
+
+  it("does not retry an uncertain create and adopts a unique remote item through reconciliation", async () => {
+    const catalog = await makeCatalog();
+    const listing = await createListing(catalog);
+    createBehavior = () => ({ destroy: true });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.uncertain, 1);
+    await assert.rejects(
+      service.enqueueSync({ listingId: listing.id, kind: "PUBLISH", force: true, audit: audit() }),
+      (error) => error.code === "RECONCILE_REQUIRED",
+    );
+    assert.equal(
+      fixture.calls.filter((call) => call.method === "POST" && call.path === "/items").length,
+      1,
+    );
+    const offer = await db.channelOffer.findFirstOrThrow({ where: { listingId: listing.id } });
+    const itemId = "MCO977777777";
+    const userProductId = "MCOU977777777";
+    fixture.items.set(itemId, {
+      id: itemId,
+      user_product_id: userProductId,
+      seller_id: 8035443,
+      status: "active",
+      price: Number(offer.priceCents / 100n),
+      available_quantity: 8,
+      seller_sku: catalog.sku,
+      shipping: {},
+    });
+    fixture.stocks.set(userProductId, {
+      id: userProductId,
+      user_id: 8035443,
+      version: 3,
+      locations: [{ type: "selling_address", quantity: 8 }],
+    });
+    await service.enqueueSync({ listingId: listing.id, kind: "RECONCILE_REMOTE", audit: audit() });
+    const reconciled = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(reconciled.succeeded, 1, JSON.stringify(reconciled));
+    const current = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: true },
+    });
+    assert.equal(current.externalUserProductId, userProductId);
+    assert.equal(current.offers[0].externalItemId, itemId);
+    assert.equal(current.status, "ACTIVE");
+    assert.equal(
+      fixture.calls.filter((call) => call.method === "POST" && call.path === "/items").length,
+      1,
+    );
+  });
+
+  it("recovers expired claims as uncertain instead of reexecuting them", async () => {
+    const catalog = await makeCatalog();
+    const listing = await createListing(catalog);
+    const job = await db.channelSyncJob.findFirstOrThrow({ where: { listingId: listing.id } });
+    const claimId = randomUUID();
+    await db.channelListing.update({
+      where: { id: listing.id },
+      data: {
+        syncClaimId: claimId,
+        syncClaimedAt: new Date(Date.now() - 120_000),
+        syncClaimExpiresAt: new Date(Date.now() - 60_000),
+      },
+    });
+    await db.channelSyncJob.update({
+      where: { id: job.id },
+      data: {
+        status: "PROCESSING",
+        attempts: 1,
+        claimId,
+        claimedBy: "expired-worker",
+        claimedAt: new Date(Date.now() - 120_000),
+        claimExpiresAt: new Date(Date.now() - 60_000),
+      },
+    });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.recoveredExpired, 1);
+    assert.equal(result.claimed, 0);
+    const expired = await db.channelSyncJob.findUniqueOrThrow({ where: { id: job.id } });
+    assert.equal(expired.status, "UNCERTAIN");
+    assert.equal(expired.failureCode, "CLAIM_EXPIRED");
+    assert.equal(
+      fixture.calls.some((call) => call.path === "/items"),
+      false,
+    );
+  });
+
+  it("enforces RBAC, SQL money invariants, immutable identities and append-only jobs", async () => {
+    const reader = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `channel-catalog-reader-${randomUUID()}@example.test`,
+        displayName: "Lector omnicanal",
+        role: "FINANCE_ANALYST",
+        status: "ACTIVE",
+      },
+    });
+    const catalog = await makeCatalog();
+    await assert.rejects(
+      service.createListing({
+        accountId: account.id,
+        variantId: catalog.variantId,
+        externalCategoryId: "MCO12345",
+        familyName: "No autorizado",
+        offer: formula(),
+        audit: audit(reader.id),
+      }),
+      (error) => error.code === "FORBIDDEN",
+    );
+    const listing = await createListing(catalog);
+    const offer = await db.channelOffer.findFirstOrThrow({ where: { listingId: listing.id } });
+    await assert.rejects(
+      admin.query(`UPDATE "ChannelOffer" SET "priceCents" = 100 WHERE "id" = $1`, [offer.id]),
+      (error) => error.code === "23514",
+    );
+    await assert.rejects(
+      admin.query(`UPDATE "ChannelListing" SET "variantId" = $1 WHERE "id" = $2`, [
+        randomUUID(),
+        listing.id,
+      ]),
+      (error) => error.code === "55000",
+    );
+    const job = await db.channelSyncJob.findFirstOrThrow({ where: { listingId: listing.id } });
+    await assert.rejects(admin.query(`DELETE FROM "ChannelSyncJob" WHERE "id" = $1`, [job.id]), {
+      code: "55000",
+    });
+  });
+
+  it("revokes the account on provider authentication failure without retrying", async () => {
+    const catalog = await makeCatalog();
+    const listing = await createListing(catalog);
+    sellerBehavior = () => ({ status: 401, body: { error: "unauthorized" } });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.failed, 1);
+    const current = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      include: { credential: true },
+    });
+    assert.equal(current.status, "REAUTH_REQUIRED");
+    assert.equal(current.lastRefreshError, "CHANNEL_API_UNAUTHORIZED");
+    assert.ok(current.credential.revokedAt);
+    const calls = fixture.calls.length;
+    const repeated = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(repeated.claimed, 0);
+    assert.equal(fixture.calls.length, calls);
+  });
+});

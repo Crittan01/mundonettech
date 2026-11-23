@@ -6,6 +6,7 @@ import {
   B2bCopilotService,
   BlockedIdentityService,
   ChannelAccountService,
+  ChannelCatalogService,
   CodReconciliationService,
   EmailService,
   GuestOrderAccessService,
@@ -20,7 +21,7 @@ import {
 } from "@mundonettech/integrations";
 
 import { getDatabase } from "@/lib/db";
-import { getSessionHmacSecret } from "@/lib/env";
+import { getPublicMediaOrigin, getSessionHmacSecret } from "@/lib/env";
 
 const state = globalThis as typeof globalThis & {
   __integrationCredentialVault?: IntegrationCredentialVault;
@@ -151,4 +152,19 @@ export function channelAccountService(db: PrismaClient = getDatabase()): Channel
 
 export function mercadoLibreOAuthRedirectUri(): string {
   return `${getPublicSiteUrl()}/api/channels/mercado-libre/oauth/callback`;
+}
+
+export function channelCatalogService(db: PrismaClient = getDatabase()): ChannelCatalogService {
+  const environment = getIntegrationEnvironment();
+  const apiUrl = process.env.MERCADO_LIBRE_API_URL?.trim();
+  const mediaBaseUrl = getPublicMediaOrigin();
+  if (!mediaBaseUrl) {
+    throw new Error("MEDIA_BASE_URL is required for Mercado Libre product pictures.");
+  }
+  return new ChannelCatalogService(db, {
+    ring: loadCredentialKeyRing(environment),
+    mediaBaseUrl,
+    ...(apiUrl ? { apiUrl } : {}),
+    allowLoopback: environment === IntegrationEnvironment.LOCAL,
+  });
 }

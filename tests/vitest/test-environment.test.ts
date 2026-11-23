@@ -95,6 +95,7 @@ describe("F0.5 — production database, Supabase endpoint, and outbound email gu
       assertSafeTestEnvironment({
         ...safeEnvironment,
         MERCADO_LIBRE_TOKEN_URL: "https://api.mercadolibre.com/oauth/token",
+        MERCADO_LIBRE_API_URL: "https://api.mercadolibre.com",
       }),
     ).toThrow();
     expect(
@@ -102,6 +103,7 @@ describe("F0.5 — production database, Supabase endpoint, and outbound email gu
         ...safeEnvironment,
         R2_ENDPOINT: "http://127.0.0.1:4555",
         R2_BUCKET: "media-test",
+        MERCADO_LIBRE_API_URL: "http://127.0.0.1:54420",
       }).database,
     ).toBe("postgres");
   });

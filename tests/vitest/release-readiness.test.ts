@@ -186,6 +186,7 @@ describe("release configuration gate", () => {
         CHANNEL_CRON_SECRET: undefined,
         CHANNEL_JOB_ACTOR_ID: "not-a-uuid",
         MERCADO_LIBRE_TOKEN_URL: "http://127.0.0.1:54420/oauth/token",
+        MERCADO_LIBRE_API_URL: "http://127.0.0.1:54420",
       }),
     );
     expect(checks.filter((check) => !check.passed).map((check) => check.name)).toEqual(
@@ -193,6 +194,7 @@ describe("release configuration gate", () => {
         "release.CHANNEL_CRON_SECRET",
         "release.channelJobActor",
         "release.mercadoLibreTokenEndpoint",
+        "release.mercadoLibreApiEndpoint",
       ]),
     );
   });

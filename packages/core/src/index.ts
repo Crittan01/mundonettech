@@ -206,3 +206,15 @@ export type {
   RfmMetrics,
   RfmScores,
 } from "./lifecycle.js";
+export {
+  ChannelPricingError,
+  calculateMercadoLibreOfferPrice,
+  mercadoLibreCopDeadZoneEndCents,
+  mercadoLibreCopFreeShippingThresholdCents,
+} from "./channel-pricing.js";
+export type {
+  ChannelOfferPricingModeValue,
+  ChannelPricingErrorCode,
+  ChannelPricingInput,
+  ChannelPricingResult,
+} from "./channel-pricing.js";
