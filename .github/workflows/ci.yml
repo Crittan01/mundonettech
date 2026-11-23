@@ -107,6 +107,8 @@ jobs:
           echo "SESSION_TIMEOUT_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
           echo "SECURITY_EVENT_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
           echo "RECOVERY_CODE_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - name: Validate and migrate PostgreSQL 17
+        run: pnpm db:validate && pnpm db:migrate
       - name: Production standalone build
         run: pnpm build
       - name: Cache Playwright Chromium browser
