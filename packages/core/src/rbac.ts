@@ -279,6 +279,7 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/pedidos"
     | "/admin/posventa"
     | "/admin/crm"
+    | "/admin/fidelizacion"
     | "/admin/b2b"
     | "/admin/resenas"
     | "/admin/finanzas"
@@ -308,7 +309,10 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       ? [{ href: "/admin/posventa" as const, label: "Posventa" }]
       : []),
     ...(hasAdminPermission(role, "crm:read")
-      ? [{ href: "/admin/crm" as const, label: "CRM 360" }]
+      ? [
+          { href: "/admin/crm" as const, label: "CRM 360" },
+          { href: "/admin/fidelizacion" as const, label: "Fidelización" },
+        ]
       : []),
     ...(hasAdminPermission(role, "b2b:read")
       ? [{ href: "/admin/b2b" as const, label: "Canal B2B" }]

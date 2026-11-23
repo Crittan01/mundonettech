@@ -330,8 +330,9 @@ export function AnonymizeAccountForm() {
         />
       </div>
       <p className="text-sm text-muted-foreground">
-        Se cerrará tu sesión, se anonimizarán tus datos personales y se cancelarán tus preferencias.
-        El historial financiero exigido por ley se conservará sin identificadores directos.
+        Se cerrará tu sesión, se anonimizarán tus datos personales, se cancelarán tus preferencias y
+        renunciarás a tus puntos disponibles. El historial financiero exigido por ley se conservará
+        sin identificadores directos.
       </p>
       <Button type="submit" variant="destructive" disabled={pending}>
         {pending ? "Anonimizando…" : "Anonimizar mi cuenta definitivamente"}

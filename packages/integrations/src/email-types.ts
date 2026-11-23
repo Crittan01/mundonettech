@@ -82,6 +82,8 @@ export interface EmailTemplateInput {
 
 export interface EmailQueueInput {
   readonly orderId?: string;
+  readonly customerId?: string;
+  readonly abandonedCartId?: string;
   readonly credentialId: string;
   readonly templateKey: string;
   readonly topic: string;

@@ -28,9 +28,9 @@ export default async function AccountPage() {
           <dt className="text-sm text-muted-foreground">Pedidos</dt>
           <dd className="mt-2 font-medium">Consultar historial y posventa →</dd>
         </Link>
-        <Link href="/mi-cuenta/privacidad" className="rounded-xl border border-border bg-card p-5">
+        <Link href="/mi-cuenta/beneficios" className="rounded-xl border border-border bg-card p-5">
           <dt className="text-sm text-muted-foreground">Puntos disponibles</dt>
-          <dd className="mt-2 font-medium">{account.loyaltyPoints}</dd>
+          <dd className="mt-2 font-medium">{account.loyaltyPoints} · Ver beneficios →</dd>
         </Link>
       </dl>
       <section aria-labelledby="profile-title" className="space-y-4">

@@ -10,6 +10,7 @@ import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixt
 import { cmsTables, seedCmsFixture } from "./lib/cms-test-fixture.mjs";
 import { crmTables, seedCrmFixture } from "./lib/crm-test-fixture.mjs";
 import { b2bTables, seedB2bFixture } from "./lib/b2b-test-fixture.mjs";
+import { growthTables, seedGrowthFixture } from "./lib/growth-test-fixture.mjs";
 import { operationsTables, seedOperationsFixture } from "./lib/operations-test-fixture.mjs";
 import { postsaleTables, seedPostSaleFixture } from "./lib/postsale-test-fixture.mjs";
 import { pricingTables, seedPricingFixture } from "./lib/pricing-test-fixture.mjs";
@@ -43,6 +44,7 @@ const expectedTables = [
   ...postsaleTables,
   ...crmTables,
   ...b2bTables,
+  ...growthTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -219,6 +221,7 @@ async function ensureMatrixFixtures(client) {
   await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
   const crm = await seedCrmFixture(client, { adminId });
   await seedB2bFixture(client, { adminId, catalog, crm });
+  await seedGrowthFixture(client, { checkout, catalog });
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {
@@ -235,7 +238,11 @@ async function ensureMatrixFixtures(client) {
                 AND level."safetyStock" = t."safetyStockAfter"
                 AND level."weightedAvgCostCents" = t."weightedAvgCostAfterCents"
             )`
-            : "";
+            : table === "Referral"
+              ? `AND t."status" = 'ATTRIBUTED'`
+              : table === "LoyaltyTxn"
+                ? `AND EXISTS (SELECT 1 FROM public."Customer" customer WHERE customer."id" = t."customerId" AND customer."loyaltyPoints" = t."balanceAfter")`
+                : "";
     const freshRow = await client.query(
       `SELECT t."id"
        FROM public."${table}" t

@@ -1,5 +1,6 @@
 import {
   acquireOperationLocks,
+  GrowthService,
   hasUniqueViolation,
   inInventoryTransaction,
   PaymentProvider,
@@ -132,6 +133,9 @@ export class PaymentRefundService {
       ) {
         await tx.orderRefund.update({ where: { id: refund.id }, data: { status: "FAILED" } });
         status = "FAILED";
+      }
+      if (status === "COMPLETED") {
+        await new GrowthService(tx).reverseCompletedRefundInTransaction(tx, refund.id);
       }
       await refreshOrderPaymentStatus(tx, refund.orderId);
       return {

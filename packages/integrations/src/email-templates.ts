@@ -81,6 +81,14 @@ const definitions = {
       "unsubscribeUrl",
     ],
   },
+  "cart.recovery": {
+    subject: "Tu carrito de {{storeName}} sigue disponible",
+    htmlBody:
+      '<p>Guardamos tu carrito en {{storeName}} con {{itemCount}} unidades por {{totalCop}}.</p><p><a href="{{cartUrl}}">Volver a mi carrito</a></p><p>Si ya no quieres recibir recordatorios de carritos, <a href="{{unsubscribeUrl}}">puedes darte de baja aquí</a>.</p>',
+    textBody:
+      "Guardamos tu carrito en {{storeName}} con {{itemCount}} unidades por {{totalCop}}. Volver al carrito: {{cartUrl}}. Baja de recordatorios: {{unsubscribeUrl}}",
+    variables: ["storeName", "itemCount", "totalCop", "cartUrl", "unsubscribeUrl"],
+  },
   "support.ticket": {
     subject: "Actualización de tu PQR {{ticketNumber}}",
     htmlBody:

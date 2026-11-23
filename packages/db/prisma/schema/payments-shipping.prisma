@@ -335,6 +335,7 @@ model OrderRefund {
   creditNote             CreditNote?
   returnRequest          ReturnRequest?
   warrantyClaim          WarrantyClaim?
+  loyaltyTxns            LoyaltyTxn[]
 
   @@index([orderId, status, createdAt])
   @@index([requestedByAdminUserId, createdAt])

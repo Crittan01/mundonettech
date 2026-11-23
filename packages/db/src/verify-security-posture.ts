@@ -111,6 +111,9 @@ const requiredTables = [
   "OpportunityProposal",
   "OpportunityProposalItem",
   "OpportunityCopilotRun",
+  "ReferralCode",
+  "Referral",
+  "LoyaltyTxn",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -332,6 +335,17 @@ const requiredConstraints = [
   "OpportunityProposalItem_total_balanced",
   "OpportunityCopilotRun_completion_consistent",
   "Cart_b2b_consistent",
+  "ReferralCode_identity_valid",
+  "ReferralCode_disablement_valid",
+  "Referral_parties_distinct",
+  "Referral_rejection_reason_valid",
+  "Referral_status_consistent",
+  "LoyaltyTxn_points_nonzero",
+  "LoyaltyTxn_balance_nonnegative",
+  "LoyaltyTxn_operation_key_valid",
+  "LoyaltyTxn_references_consistent",
+  "AbandonedCart_reminders_valid",
+  "EmailEvent_growth_relation_valid",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -503,6 +517,11 @@ const requiredSecurityTriggers = [
   "OpportunityProposalItem_immutable_update",
   "OpportunityProposalItem_immutable_delete",
   "OpportunityCopilotRun_enforce_state",
+  "ReferralCode_enforce_state",
+  "Referral_enforce_state",
+  "LoyaltyTxn_validate",
+  "LoyaltyTxn_append_only",
+  "EmailEvent_validate_growth_relation",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

@@ -3,6 +3,7 @@ import {
   claimDomainOutboxEvents,
   completeDomainOutbox,
   failDomainOutbox,
+  GrowthService,
   retryDomainOutbox,
   type DomainOutbox,
 } from "@mundonettech/db";
@@ -24,6 +25,7 @@ import { ShippingService } from "./shipping-service.js";
 import { EmailProviderError, EmailValidationError } from "./email-types.js";
 
 const supportedEvents = [
+  "cart.abandoned.v1",
   "order.confirmed.v1",
   "order.payment.paid.v1",
   "order.refund.completed.v1",
@@ -217,6 +219,80 @@ export class DomainEventWorker {
     });
   }
 
+  private async queueCartRecoveryEmail(event: DomainOutbox): Promise<void> {
+    const cartId = this.id(event, "cartId");
+    const activityValue = this.payload(event).lastActivityAt;
+    if (typeof activityValue !== "string") {
+      throw new EmailValidationError("Cart abandonment activity timestamp is missing.");
+    }
+    const activityAt = new Date(activityValue);
+    if (Number.isNaN(activityAt.getTime()) || activityAt.toISOString() !== activityValue) {
+      throw new EmailValidationError("Cart abandonment activity timestamp is invalid.");
+    }
+    const abandoned = await this.db.abandonedCart.findUnique({
+      where: { cartId },
+      include: {
+        customer: true,
+        cart: {
+          select: {
+            status: true,
+            kind: true,
+            itemCount: true,
+            totalCents: true,
+            order: { select: { id: true } },
+          },
+        },
+      },
+    });
+    const growth = new GrowthService(this.db);
+    if (!abandoned) return;
+    const record = (outcome: "QUEUED" | "NO_CONTACT" | "NO_CONSENT" | "SUPPRESSED" | "STALE") =>
+      growth.recordCartReminderOutcome({
+        abandonedCartId: abandoned.id,
+        lastActivityAt: abandoned.lastActivityAt,
+        outcome,
+      });
+    if (
+      abandoned.status !== "DETECTED" ||
+      abandoned.lastActivityAt.toISOString() !== activityValue ||
+      abandoned.cart.status !== "ACTIVE" ||
+      abandoned.cart.kind === "B2B" ||
+      abandoned.cart.order !== null
+    ) {
+      await record("STALE");
+      return;
+    }
+    if (
+      !abandoned.customer ||
+      abandoned.customer.status !== "ACTIVE" ||
+      abandoned.customer.deletedAt !== null ||
+      abandoned.contactEmail !== abandoned.customer.email
+    ) {
+      await record("NO_CONTACT");
+      return;
+    }
+    if (!(await growth.marketingEmailGranted(abandoned.customer.id))) {
+      await record("NO_CONSENT");
+      return;
+    }
+    const queued = await this.options.email.queue({
+      customerId: abandoned.customer.id,
+      abandonedCartId: abandoned.id,
+      credentialId: await this.emailCredentialId(),
+      templateKey: "cart.recovery",
+      topic: "cart-recovery",
+      recipientEmail: abandoned.customer.email,
+      idempotencyKey: `domain:cart.recovery:${abandoned.id}:${activityValue}`,
+      variables: {
+        storeName: this.options.storeName,
+        itemCount: String(abandoned.cart.itemCount),
+        totalCop: formatCopCents(abandoned.cart.totalCents),
+        cartUrl: `${this.publicSiteUrl}/carrito`,
+      },
+    });
+    await record(queued.status === "SUPPRESSED" ? "SUPPRESSED" : "QUEUED");
+  }
+
   private statusLabel(status: string): string {
     const labels: Record<string, string> = {
       REQUESTED: "Solicitud recibida",
@@ -337,6 +413,9 @@ export class DomainEventWorker {
 
   private async handle(event: DomainOutbox): Promise<void> {
     switch (event.eventType) {
+      case "cart.abandoned.v1":
+        await this.queueCartRecoveryEmail(event);
+        return;
       case "order.confirmed.v1":
         await this.queueOrderEmail({
           orderId: this.id(event, "orderId"),

@@ -1,8 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import {
+  acquireOperationLocks,
   compareStrings,
   fulfillStock,
+  GrowthService,
   PaymentProvider,
   PaymentStatus,
   Prisma,
@@ -255,6 +257,12 @@ export async function appendStoreCreditEntry(
     });
     return { account, replayed: true };
   }
+  const reference = await tx.storeCreditAccount.findUnique({
+    where: { id: options.accountId },
+    select: { customerId: true },
+  });
+  if (!reference) throw new PaymentNotFoundError("Store credit account not found.");
+  await acquireOperationLocks(tx, [`store-credit:${reference.customerId}`]);
   const rows = await tx.$queryRaw<StoreCreditAccount[]>`
     SELECT * FROM "StoreCreditAccount" WHERE "id" = ${options.accountId}::uuid FOR UPDATE
   `;
@@ -410,6 +418,7 @@ export async function refreshOrderPaymentStatus(
     },
   });
   if (status === PaymentStatus.PAID) {
+    await new GrowthService(tx).accruePaidOrderInTransaction(tx, order.id);
     await recordDailyFunnelCounters(tx, { ordersPaid: 1n });
     await writePaymentOutbox(tx, {
       eventType: "order.payment.paid.v1",

@@ -457,3 +457,8 @@ export type {
   PriceList,
   PriceListItem,
 } from "./generated/client.js";
+
+export { GrowthError, GrowthService, marketingEmailConsentGranted } from "./growth-service.js";
+export type { CartReminderOutcome, GrowthErrorCode } from "./growth-service.js";
+export { LoyaltyTxnType, ReferralStatus } from "./generated/client.js";
+export type { LoyaltyTxn, Referral, ReferralCode } from "./generated/client.js";
