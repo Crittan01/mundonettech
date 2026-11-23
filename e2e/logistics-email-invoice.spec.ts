@@ -119,7 +119,7 @@ test("operational vault, communications and fiscal views stay accessible with MF
     .getByLabel(/Secreto HMAC de baja/)
     .fill(Buffer.from("unsubscribe-secret-e2e-with-32bytes").toString("base64"));
   await page
-    .getByRole("region", { name: "Conectar logística, correo o facturación" })
+    .getByRole("region", { name: "Conectar logística, correo, facturación o Gemini" })
     .getByRole("button", { name: "Cifrar y guardar credencial" })
     .click();
   await expect(page.getByText(new RegExp(`Credencial ${resendAccount} cifrada`))).toBeVisible();

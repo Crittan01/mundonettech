@@ -244,6 +244,18 @@ export class CrmService {
           "Reassign active contacts before archiving the organization.",
         );
       }
+      const activeOpportunities = await tx.opportunity.count({
+        where: {
+          organizationId: current.id,
+          status: { in: ["NEW", "QUALIFYING", "PROPOSAL_SENT"] },
+        },
+      });
+      if (activeOpportunities > 0) {
+        throw new CrmError(
+          "CONFLICT",
+          "Close active B2B opportunities before archiving the organization.",
+        );
+      }
       const now = await crmNow(tx);
       const organization = await tx.organization.update({
         where: { id: current.id },
@@ -303,6 +315,7 @@ export class CrmService {
   async syncCustomerContactInTransaction(
     tx: Prisma.TransactionClient,
     customerId: string,
+    options: { readonly preferredContactId?: string } = {},
   ): Promise<Contact> {
     assertUuid(customerId, "customerId");
     await acquireOperationLocks(tx, [`crm-customer:${customerId}`]);
@@ -325,10 +338,26 @@ export class CrmService {
     ]);
     const normalizedEmail = normalizeEmail(customer.email);
     const emailVerifiedAt = customer.authUserId && customer.status === "ACTIVE" ? now : null;
-    const existing = await tx.contact.findFirst({
+    let existing = await tx.contact.findFirst({
       where: { customerId, deletedAt: null },
       include: { identities: true },
     });
+    if (!existing && options.preferredContactId) {
+      assertUuid(options.preferredContactId, "preferredContactId");
+      const preferred = await tx.contact.findFirst({
+        where: {
+          id: options.preferredContactId,
+          status: "ACTIVE",
+          deletedAt: null,
+          email: normalizedEmail,
+        },
+        include: { identities: true },
+      });
+      if (!preferred || (preferred.customerId !== null && preferred.customerId !== customerId)) {
+        throw new CrmError("CONFLICT", "The B2B contact cannot be linked to this customer.");
+      }
+      existing = preferred;
+    }
     const effectivePhone = customer.phoneE164
       ? normalizeContactPhone(customer.phoneE164)
       : (existing?.phoneE164 ?? null);
@@ -370,6 +399,7 @@ export class CrmService {
     return tx.contact.update({
       where: { id: existing.id },
       data: {
+        customerId,
         givenName: customer.givenName,
         familyName: customer.familyName,
         email: normalizedEmail,
@@ -626,6 +656,11 @@ export class CrmService {
           orderBy: [{ status: "asc" }, { dueAt: "asc" }, { id: "asc" }],
           take: 200,
         },
+        opportunities: {
+          select: { id: true, status: true, currentVersion: true, createdAt: true },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: 50,
+        },
         customer: {
           select: {
             id: true,
@@ -676,6 +711,7 @@ export class CrmService {
       identities: contact.identities.map(maskCrmIdentity),
       activities: contact.activities,
       tasks: contact.tasks,
+      opportunities: contact.opportunities,
       customer: contact.customer,
     };
   }

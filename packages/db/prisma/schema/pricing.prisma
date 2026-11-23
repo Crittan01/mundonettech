@@ -122,3 +122,47 @@ model CouponUsage {
   @@index([orderId, status])
   @@map("CouponUsage")
 }
+
+
+enum PriceListStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model PriceList {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code        String          @db.VarChar(40)
+  name        String          @db.VarChar(160)
+  description String?         @db.VarChar(500)
+  currency    String          @default("COP") @db.Char(3)
+  status      PriceListStatus @default(DRAFT)
+  validFrom   DateTime?       @db.Timestamptz(6)
+  validTo     DateTime?       @db.Timestamptz(6)
+  version     Int             @default(0)
+  createdAt   DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt   DateTime        @default(now()) @updatedAt @db.Timestamptz(6)
+  deletedAt   DateTime?       @db.Timestamptz(6)
+  items       PriceListItem[]
+  organizations Organization[]
+  proposals   OpportunityProposal[]
+
+  @@index([status, validFrom, validTo, deletedAt])
+  @@index([deletedAt])
+  @@map("PriceList")
+}
+
+model PriceListItem {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  priceListId    String         @db.Uuid
+  variantId      String         @db.Uuid
+  unitPriceCents BigInt
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime       @default(now()) @updatedAt @db.Timestamptz(6)
+  priceList      PriceList      @relation(fields: [priceListId], references: [id], onDelete: Cascade)
+  variant        ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  @@unique([priceListId, variantId])
+  @@index([variantId, priceListId])
+  @@map("PriceListItem")
+}

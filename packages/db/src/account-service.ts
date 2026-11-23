@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { normalizeEmail } from "@mundonettech/core";
 
 import type { Customer, PrismaClient } from "./generated/client.js";
-import { suppressCustomerCrmLineageInTransaction } from "./crm-shared.js";
+import { CrmError, suppressCustomerCrmLineageInTransaction } from "./crm-shared.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 
 export type AccountErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION";
@@ -502,7 +502,14 @@ export class AccountService {
     const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]!.now;
     if (!options.skipCrmCascade) {
-      await suppressCustomerCrmLineageInTransaction(tx, customerId, now);
+      try {
+        await suppressCustomerCrmLineageInTransaction(tx, customerId, now);
+      } catch (error) {
+        if (error instanceof CrmError && error.code === "CONFLICT") {
+          throw new AccountError("CONFLICT", error.message);
+        }
+        throw error;
+      }
     }
     const previousEmail = customer.email;
     const anonymizedEmail = `anon-${customerId.replaceAll("-", "")}@anonymized.invalid`;

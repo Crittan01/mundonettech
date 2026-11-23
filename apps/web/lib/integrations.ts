@@ -3,6 +3,7 @@ import "server-only";
 import { storeConfig } from "@mundonettech/config/store";
 import { IntegrationEnvironment, type PrismaClient } from "@mundonettech/db";
 import {
+  B2bCopilotService,
   BlockedIdentityService,
   CodReconciliationService,
   EmailService,
@@ -123,6 +124,10 @@ export function invoiceService(db: PrismaClient = getDatabase()): InvoiceService
     vault: getIntegrationCredentialVault(),
     environment: getIntegrationEnvironment(),
   });
+}
+
+export function b2bCopilotService(db: PrismaClient = getDatabase()): B2bCopilotService {
+  return new B2bCopilotService(db, { vault: getIntegrationCredentialVault() });
 }
 
 export function guestOrderAccessService(db: PrismaClient = getDatabase()): GuestOrderAccessService {

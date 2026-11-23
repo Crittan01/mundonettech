@@ -81,7 +81,7 @@ export default async function IntegrationsPage() {
             className="rounded-xl border border-border bg-card p-5"
           >
             <h2 id="operational-wizard" className="text-xl font-semibold">
-              Conectar logística, correo o facturación
+              Conectar logística, correo, facturación o Gemini
             </h2>
             <p className="mt-2 mb-5 text-sm text-muted-foreground">
               Cada contrato se valida antes de cifrar. El proveedor DIAN debe firmar y transmitir el
@@ -157,7 +157,8 @@ export default async function IntegrationsPage() {
                           <CredentialRotationForm credential={credential} />
                         ) : credential.provider === "aveonline" ||
                           credential.provider === "resend" ||
-                          credential.provider === "dian" ? (
+                          credential.provider === "dian" ||
+                          credential.provider === "gemini" ? (
                           <OperationalCredentialForm
                             environment={environment}
                             credential={{

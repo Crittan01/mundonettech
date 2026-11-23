@@ -28,6 +28,7 @@ import {
 } from "./inventory-shared.js";
 import type { PricingMutationAudit } from "./pricing-types.js";
 import type { CartReference, CartSnapshot } from "./cart-types.js";
+import { assertProposalIntegrity } from "./b2b-shared.js";
 
 const blockingIssueCodes = new Set([
   "CART_EMPTY",
@@ -420,9 +421,15 @@ async function storedSnapshot(tx: Prisma.TransactionClient, cartId: string): Pro
         id: item.id,
         variantId: item.variantId,
         productId: item.variant.productId,
-        productName: item.variant.product.name || item.productNameSnapshot,
-        productSlug: item.variant.product.slug || item.productSlugSnapshot,
-        sku: item.variant.sku || item.skuSnapshot,
+        productName:
+          cart.kind === "B2B"
+            ? item.productNameSnapshot
+            : item.variant.product.name || item.productNameSnapshot,
+        productSlug:
+          cart.kind === "B2B"
+            ? item.productSlugSnapshot
+            : item.variant.product.slug || item.productSlugSnapshot,
+        sku: cart.kind === "B2B" ? item.skuSnapshot : item.variant.sku || item.skuSnapshot,
         quantity: item.quantity,
         available: availability.get(item.variantId) ?? 0,
         unitPriceCents: item.unitPriceCents.toString(),
@@ -484,6 +491,70 @@ function repricedQuantityData(
     couponDiscountCents: 0n,
     lineTotalCents: assertMoney(item.unitPriceCents * BigInt(quantity), "lineTotalCents"),
   };
+}
+
+async function revalidateB2bCart(
+  tx: Prisma.TransactionClient,
+  cart: CartWithItems,
+  now: Date,
+  issues: CartPricingIssue[],
+): Promise<CartSnapshot> {
+  const proposal = await tx.opportunityProposal.findUnique({
+    where: { cartId: cart.id },
+    include: { opportunity: true, items: true },
+  });
+  if (!proposal) throw new CartStateError("B2B cart is not linked to a proposal.");
+  assertProposalIntegrity(proposal);
+  if (
+    proposal.status !== "SENT" ||
+    proposal.opportunity.currentVersion !== proposal.version ||
+    proposal.expiresAt <= now ||
+    proposal.cartId !== cart.id ||
+    proposal.expiresAt.getTime() !== cart.expiresAt.getTime() ||
+    cart.couponId !== null ||
+    cart.items.some((item) => item.bundleId !== null || item.bundleQuantity !== null)
+  ) {
+    throw new CartStateError("B2B proposal is no longer current or its cart is inconsistent.");
+  }
+  if (proposal.items.length !== cart.items.length) {
+    throw new CartStateError("B2B proposal and cart item counts diverge.");
+  }
+  const proposalByVariant = new Map(proposal.items.map((item) => [item.variantId, item]));
+  for (const item of cart.items) {
+    const expected = proposalByVariant.get(item.variantId);
+    if (
+      !expected ||
+      expected.quantity !== item.quantity ||
+      expected.titleSnapshot !== item.productNameSnapshot ||
+      expected.productSlugSnapshot !== item.productSlugSnapshot ||
+      expected.skuSnapshot !== item.skuSnapshot ||
+      expected.catalogUnitPriceCents !== item.unitPriceCents ||
+      expected.discountCents !== item.wholesaleDiscountCents ||
+      expected.lineTotalCents !== item.lineTotalCents ||
+      item.bundleDiscountCents !== 0n ||
+      item.couponDiscountCents !== 0n
+    ) {
+      throw new CartStateError("B2B proposal and cart snapshots diverge.");
+    }
+  }
+  if (
+    cart.subtotalCents !== proposal.subtotalCents ||
+    cart.wholesaleDiscountCents !== proposal.discountCents ||
+    cart.bundleDiscountCents !== 0n ||
+    cart.couponDiscountCents !== 0n ||
+    cart.totalCents !== proposal.subtotalCents - proposal.discountCents
+  ) {
+    throw new CartStateError("B2B proposal and cart totals diverge.");
+  }
+  await tx.cart.update({
+    where: { id: cart.id },
+    data: {
+      itemCount: cart.items.length,
+      pricingIssues: serializeIssues(issues),
+      priceRevalidatedAt: now,
+    },
+  });
+  return storedSnapshot(tx, cart.id);
 }
 
 export class CartService {
@@ -570,6 +641,8 @@ export class CartService {
         issues.push({ code: "STOCK_INSUFFICIENT", variantId, available, requested });
       }
     }
+
+    if (cart.kind === "B2B") return revalidateB2bCart(tx, cart, now, issues);
 
     const bundleGroups = new Map<string, CartItemWithVariant[]>();
     for (const item of cart.items) {
@@ -733,6 +806,9 @@ export class CartService {
       const { cart, now } = await lockCart(tx, reference);
       assertActiveCart(cart, now);
       assertAdminMutable(cart, audit);
+      if (cart.kind === "B2B") {
+        throw new CartStateError("B2B carts are mutable only through proposal versioning.");
+      }
       await callback(tx, cart, now);
       await writeCartAudit(tx, audit, action, cart.id);
       const snapshot = await this.revalidateLocked(tx, cart.id, now);
@@ -818,6 +894,11 @@ export class CartService {
       if (peek?.couponId) await acquireOperationLocks(tx, [`coupon-redemption:${peek.couponId}`]);
       const { cart, now } = await lockCart(tx, reference);
       assertActiveCart(cart, now);
+      if (cart.kind === "B2B") {
+        throw new CartStateError(
+          "B2B customer assignment is managed only during proposal checkout.",
+        );
+      }
       if (cart.customerId && cart.customerId !== customerId) {
         throw new CartStateError("Cart already belongs to another customer.");
       }

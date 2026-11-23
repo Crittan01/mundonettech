@@ -153,9 +153,11 @@ test("CRM 360 works end to end with MFA, reversible merge, retention and accessi
   await authenticateAdmin(page, admin, 900);
   await page.goto("/admin/crm");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("CRM 360°");
-  const staleOrgs = page.locator("details").filter({ hasText: "Organizaciones" }).first();
-  await staleOrgs.locator("summary").click();
-  await staleOrgs.getByLabel("Razón social", { exact: true }).fill("Intento MFA Vencido");
+  const staleOrgs = page
+    .locator("details")
+    .filter({ has: page.getByText("Organizaciones", { exact: true }) });
+  await staleOrgs.locator(":scope > summary").click();
+  await staleOrgs.locator("#org-legal").fill("Intento MFA Vencido");
   await staleOrgs.getByRole("button", { name: "Crear organización" }).click();
   await expect(
     page.getByText("Confirma tu autenticador antes de ejecutar esta operación."),
@@ -166,10 +168,12 @@ test("CRM 360 works end to end with MFA, reversible merge, retention and accessi
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("CRM 360°");
   await expectAccessible(page);
 
-  const organizations = page.locator("details").filter({ hasText: "Organizaciones" }).first();
-  await organizations.locator("summary").click();
-  await organizations.getByLabel("Razón social", { exact: true }).fill("Comercializadora CRM E2E");
-  await organizations.getByLabel("NIT o identificador").fill("901.888.777-6");
+  const organizations = page
+    .locator("details")
+    .filter({ has: page.getByText("Organizaciones", { exact: true }) });
+  await organizations.locator(":scope > summary").click();
+  await organizations.locator("#org-legal").fill("Comercializadora CRM E2E");
+  await organizations.locator("#org-tax").fill("901.888.777-6");
   await organizations.getByRole("button", { name: "Crear organización" }).click();
   await expect(page.getByText("Organización creada con auditoría.")).toBeVisible();
 

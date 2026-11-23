@@ -72,6 +72,7 @@ export class OrderLifecycleService {
             )
           )
         )
+          AND cart."kind" <> 'B2B'
           AND EXISTS (SELECT 1 FROM "CartItem" item WHERE item."cartId" = cart."id")
         ORDER BY cart."updatedAt", cart."id"
         FOR UPDATE OF cart SKIP LOCKED

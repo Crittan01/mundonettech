@@ -8,11 +8,13 @@ import {
   CredentialNotFoundError,
   CredentialRevokedError,
   EmailProviderError,
+  GeminiProviderError,
   InvoiceProviderError,
   ShippingProviderError,
   parseAveonlineCredentials,
   parseDianCredentials,
   parseEmailCredentials,
+  parseGeminiCredentials,
 } from "@mundonettech/integrations";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -28,7 +30,7 @@ import { getIntegrationCredentialVault, getIntegrationEnvironment } from "@/lib/
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-const providerSchema = z.enum(["aveonline", "resend", "dian"]);
+const providerSchema = z.enum(["aveonline", "resend", "dian", "gemini"]);
 type OperationalProvider = z.infer<typeof providerSchema>;
 const secretFields = new Set([
   "password",
@@ -83,6 +85,13 @@ function credentialPayload(
       replyTo: required(formData, "replyTo") || null,
       svixSecret: required(formData, "svixSecret"),
       unsubscribeSecret: required(formData, "unsubscribeSecret"),
+      apiUrl: required(formData, "apiUrl"),
+    };
+  }
+  if (provider === "gemini") {
+    return {
+      apiKey: required(formData, "apiKey"),
+      model: required(formData, "model"),
       apiUrl: required(formData, "apiUrl"),
     };
   }
@@ -145,6 +154,7 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
     error instanceof ShippingProviderError ||
     error instanceof EmailProviderError ||
     error instanceof InvoiceProviderError ||
+    error instanceof GeminiProviderError ||
     error instanceof z.ZodError ||
     error instanceof TypeError ||
     error instanceof RangeError
@@ -179,6 +189,7 @@ async function persist(formData: FormData, rotate: boolean): Promise<ActionState
     const environment = getIntegrationEnvironment();
     if (provider === "aveonline") parseAveonlineCredentials(sealed);
     else if (provider === "resend") parseEmailCredentials(sealed);
+    else if (provider === "gemini") parseGeminiCredentials(sealed);
     else parseDianCredentials(sealed, environment);
     const vault = getIntegrationCredentialVault();
     if (rotate) {

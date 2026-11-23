@@ -9,6 +9,7 @@ import { catalogTables, seedCatalogFixture } from "./lib/catalog-test-fixture.mj
 import { inventoryTables, seedInventoryFixture } from "./lib/inventory-test-fixture.mjs";
 import { cmsTables, seedCmsFixture } from "./lib/cms-test-fixture.mjs";
 import { crmTables, seedCrmFixture } from "./lib/crm-test-fixture.mjs";
+import { b2bTables, seedB2bFixture } from "./lib/b2b-test-fixture.mjs";
 import { operationsTables, seedOperationsFixture } from "./lib/operations-test-fixture.mjs";
 import { postsaleTables, seedPostSaleFixture } from "./lib/postsale-test-fixture.mjs";
 import { pricingTables, seedPricingFixture } from "./lib/pricing-test-fixture.mjs";
@@ -41,6 +42,7 @@ const expectedTables = [
   ...operationsTables,
   ...postsaleTables,
   ...crmTables,
+  ...b2bTables,
 ];
 
 const dataApiRoles = ["anon", "authenticated", "service_role"];
@@ -215,7 +217,8 @@ async function ensureMatrixFixtures(client) {
   await seedLogisticsFixture(client, { checkout, payments, adminId });
   await seedOperationsFixture(client, { adminId });
   await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
-  await seedCrmFixture(client, { adminId });
+  const crm = await seedCrmFixture(client, { adminId });
+  await seedB2bFixture(client, { adminId, catalog, crm });
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {

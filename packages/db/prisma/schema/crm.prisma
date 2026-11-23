@@ -55,7 +55,9 @@ model Organization {
   createdAt      DateTime  @default(now()) @db.Timestamptz(6)
   updatedAt      DateTime  @default(now()) @updatedAt @db.Timestamptz(6)
   deletedAt      DateTime? @db.Timestamptz(6)
+  priceList      PriceList? @relation(fields: [priceListId], references: [id], onDelete: Restrict)
   contacts       Contact[]
+  opportunities  Opportunity[]
 
   @@index([legalName])
   @@index([priceListId])
@@ -91,6 +93,7 @@ model Contact {
   identities             ContactIdentity[]
   activities             ContactActivity[]
   tasks                  Task[]
+  opportunities          Opportunity[]
   sourceMergeCandidates  IdentityMergeCandidate[] @relation("IdentityMergeSource")
   targetMergeCandidates  IdentityMergeCandidate[] @relation("IdentityMergeTarget")
 
@@ -134,6 +137,7 @@ model IdentityMergeCandidate {
   retiredIdentityIds    Json                @default("[]") @db.JsonB
   movedActivityIds      Json                @default("[]") @db.JsonB
   movedTaskIds          Json                @default("[]") @db.JsonB
+  movedOpportunityIds   Json                @default("[]") @db.JsonB
   mergedTargetVersion   Int?
   mergedSourceVersion   Int?
   resolutionNote        String?             @db.VarChar(500)

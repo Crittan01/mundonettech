@@ -120,6 +120,7 @@ export async function verifyWebSecurity(
 
   for (const routePath of [
     "/",
+    "/empresas",
     "/ingresar",
     "/ingresar?reason=timeout",
     "/registro",
@@ -170,6 +171,8 @@ export async function verifyWebSecurity(
   for (const [routePath, expected] of [
     ["/admin", "/admin/login"],
     ["/admin/crm", "/admin/login"],
+    ["/admin/b2b", "/admin/login"],
+    ["/admin/b2b?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios.svg", "/admin/login"],
@@ -195,6 +198,7 @@ export async function verifyWebSecurity(
     "/checkout",
     "/pagar/token-invalido",
     "/pedido/token-invalido",
+    "/propuesta/token-invalido",
     "/recibo/token-invalido",
   ]) {
     const response = await request(origin, transactionalPath);
@@ -203,6 +207,12 @@ export async function verifyWebSecurity(
       (response.headers.get("x-robots-tag") ?? "").includes("noindex") || html.includes("noindex"),
       `${transactionalPath}: transactional surface must carry noindex.`,
     );
+    if (transactionalPath.startsWith("/propuesta/")) {
+      requireCondition(
+        (response.headers.get("cache-control") ?? "").includes("no-store"),
+        `${transactionalPath}: B2B proposal surface must carry no-store.`,
+      );
+    }
   }
 
   for (const receiptAssetPath of [

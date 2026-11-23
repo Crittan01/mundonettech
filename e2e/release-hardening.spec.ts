@@ -106,6 +106,8 @@ test("every administrative and customer surface redirects anonymous requests wit
     "/admin/pedidos",
     "/admin/finanzas",
     "/admin/posventa",
+    "/admin/crm",
+    "/admin/b2b",
     "/admin/resenas",
     "/admin/catalogo",
     "/admin/precios",
@@ -220,7 +222,7 @@ test("admin export/document endpoints enforce RBAC 403/401/404 and persisted red
       status: "ACTIVE",
     },
   });
-  const forgedRedirectIds = [randomUUID(), randomUUID(), randomUUID()];
+  const forgedRedirectIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
   let variantTestProductId: string | null = null;
 
   function cookieHeader(
@@ -306,12 +308,16 @@ test("admin export/document endpoints enforce RBAC 403/401/404 and persisted red
       VALUES
         (${forgedRedirectIds[0]}::uuid, '/carrito', '/productos', 308, true),
         (${forgedRedirectIds[1]}::uuid, '/recibo/token-protegido', '/productos', 308, true),
-        (${forgedRedirectIds[2]}::uuid, '/email/baja/token-protegido', '/productos', 308, true)
+        (${forgedRedirectIds[2]}::uuid, '/email/baja/token-protegido', '/productos', 308, true),
+        (${forgedRedirectIds[3]}::uuid, '/propuesta/token-protegido', '/productos', 308, true),
+        (${forgedRedirectIds[4]}::uuid, '/empresas', '/productos', 308, true)
     `;
     for (const protectedPath of [
       "/carrito",
       "/recibo/token-protegido",
       "/email/baja/token-protegido",
+      "/propuesta/token-protegido",
+      "/empresas",
     ]) {
       const response = await request.get(protectedPath, { maxRedirects: 0 });
       expect([301, 302, 307, 308]).not.toContain(response.status());

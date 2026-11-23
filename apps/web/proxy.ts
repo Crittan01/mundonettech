@@ -182,9 +182,11 @@ export async function proxy(request: NextRequest) {
     user &&
     !isPrefetch &&
     (pathname === "/carrito" ||
+      pathname === "/empresas" ||
       pathname.startsWith("/checkout") ||
       pathname.startsWith("/pagar/") ||
       pathname.startsWith("/pedido/") ||
+      pathname.startsWith("/propuesta/") ||
       pathname.startsWith("/recibo/"))
   ) {
     const customerToken = request.cookies.get(customerActivityCookie)?.value;
@@ -215,6 +217,10 @@ export async function proxy(request: NextRequest) {
     response = redirectResponse;
   }
   applyHeaders(response, csp, isDevelopment);
+  if (pathname.startsWith("/propuesta/")) {
+    response.headers.set("Cache-Control", "private, no-store, max-age=0");
+    response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
   return response;
 }
 

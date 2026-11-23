@@ -20,6 +20,8 @@ export type AdminPermission =
   | "crm:write"
   | "crm:merge"
   | "crm:suppress"
+  | "b2b:read"
+  | "b2b:write"
   | "reviews:read"
   | "reviews:write"
   | "finance:read"
@@ -206,6 +208,8 @@ const permissions: Readonly<Record<AdminPermission, readonly AdminRoleValue[]>> 
   "crm:write": crmWriters,
   "crm:merge": crmSensitiveWriters,
   "crm:suppress": crmSensitiveWriters,
+  "b2b:read": crmReaders,
+  "b2b:write": pricingWriters,
   "reviews:read": reviewReaders,
   "reviews:write": reviewWriters,
   "finance:read": integrationReaders,
@@ -275,6 +279,7 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/pedidos"
     | "/admin/posventa"
     | "/admin/crm"
+    | "/admin/b2b"
     | "/admin/resenas"
     | "/admin/finanzas"
     | "/admin/catalogo"
@@ -304,6 +309,9 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       : []),
     ...(hasAdminPermission(role, "crm:read")
       ? [{ href: "/admin/crm" as const, label: "CRM 360" }]
+      : []),
+    ...(hasAdminPermission(role, "b2b:read")
+      ? [{ href: "/admin/b2b" as const, label: "Canal B2B" }]
       : []),
     ...(hasAdminPermission(role, "reviews:read")
       ? [{ href: "/admin/resenas" as const, label: "Reseñas" }]
