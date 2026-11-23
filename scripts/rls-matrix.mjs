@@ -221,7 +221,7 @@ async function ensureMatrixFixtures(client) {
   await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
   const crm = await seedCrmFixture(client, { adminId });
   await seedB2bFixture(client, { adminId, catalog, crm });
-  await seedGrowthFixture(client, { checkout, catalog });
+  await seedGrowthFixture(client, { checkout, catalog, adminId });
 
   const fixtureIds = new Map();
   for (const table of expectedTables) {
@@ -242,7 +242,11 @@ async function ensureMatrixFixtures(client) {
               ? `AND t."status" = 'ATTRIBUTED'`
               : table === "LoyaltyTxn"
                 ? `AND EXISTS (SELECT 1 FROM public."Customer" customer WHERE customer."id" = t."customerId" AND customer."loyaltyPoints" = t."balanceAfter")`
-                : "";
+                : table === "LifecycleStep"
+                  ? `AND EXISTS (SELECT 1 FROM public."LifecycleJourney" journey WHERE journey."id" = t."journeyId" AND journey."status" = 'DRAFT')`
+                  : ["CustomerSegment", "LifecycleJourney"].includes(table)
+                    ? `AND t."status" = 'DRAFT'`
+                    : "";
     const freshRow = await client.query(
       `SELECT t."id"
        FROM public."${table}" t
@@ -341,7 +345,7 @@ export async function runRlsMatrix(databaseUrl) {
 
         await inSavepoint({ role: grantedRole, table, operation: "INSERT" }, async () => {
           await client.query(
-            `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS SELECT * FROM public."${table}" WHERE "id" = $1::uuid`,
+            `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS ${table === "CustomerSegmentMembership" ? `SELECT "id", "segmentId", "customerId", "consentId", "sequence" + 1 AS "sequence", "segmentVersion", 'EXITED'::"SegmentMembershipStatus" AS "status", 'FILTER_CHANGED' AS "reason", "metrics", "definitionHash", "occurredAt" FROM public."${table}" WHERE "id" = $1::uuid` : `SELECT * FROM public."${table}" WHERE "id" = $1::uuid`}`,
             [fixtureId],
           );
           await client.query(`GRANT SELECT ON pg_temp.matrix_source TO ${grantedRole}`);
@@ -370,7 +374,7 @@ export async function runRlsMatrix(databaseUrl) {
             await inSavepoint({ role: apiRole, table, operation }, async () => {
               if (operation === "INSERT") {
                 await client.query(
-                  `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS SELECT * FROM public."${table}" WHERE "id" = $1::uuid`,
+                  `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS ${table === "CustomerSegmentMembership" ? `SELECT "id", "segmentId", "customerId", "consentId", "sequence" + 1 AS "sequence", "segmentVersion", 'EXITED'::"SegmentMembershipStatus" AS "status", 'FILTER_CHANGED' AS "reason", "metrics", "definitionHash", "occurredAt" FROM public."${table}" WHERE "id" = $1::uuid` : `SELECT * FROM public."${table}" WHERE "id" = $1::uuid`}`,
                   [fixtureId],
                 );
                 await client.query(`GRANT SELECT ON pg_temp.matrix_source TO ${apiRole}`);

@@ -22,6 +22,7 @@ import {
   inInventoryTransaction,
 } from "./inventory-shared.js";
 import type { DatabaseExecutor } from "./primitives.js";
+import { suppressLifecycleCustomerInTransaction } from "./lifecycle-cancellation.js";
 
 export type GrowthErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN";
 
@@ -776,5 +777,6 @@ export class GrowthService {
         nextAttemptAt: null,
       },
     });
+    await suppressLifecycleCustomerInTransaction(tx, customerId, now);
   }
 }

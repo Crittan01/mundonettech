@@ -114,6 +114,12 @@ const requiredTables = [
   "ReferralCode",
   "Referral",
   "LoyaltyTxn",
+  "CustomerSegment",
+  "CustomerSegmentMembership",
+  "LifecycleJourney",
+  "LifecycleStep",
+  "LifecycleEnrollment",
+  "LifecycleMessage",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -346,6 +352,20 @@ const requiredConstraints = [
   "LoyaltyTxn_references_consistent",
   "AbandonedCart_reminders_valid",
   "EmailEvent_growth_relation_valid",
+  "CustomerSegment_definitionHash_length",
+  "CustomerSegment_status_consistent",
+  "CustomerSegmentMembership_sequence_positive",
+  "CustomerSegmentMembership_definitionHash_length",
+  "CustomerSegmentMembership_metrics_object",
+  "CustomerSegmentMembership_reason_valid",
+  "LifecycleJourney_version_nonnegative",
+  "LifecycleJourney_status_consistent",
+  "LifecycleStep_position_valid",
+  "LifecycleStep_offset_valid",
+  "LifecycleStep_variables_array",
+  "LifecycleEnrollment_status_consistent",
+  "LifecycleMessage_dispatch_version_nonnegative",
+  "LifecycleMessage_status_consistent",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -522,6 +542,12 @@ const requiredSecurityTriggers = [
   "LoyaltyTxn_validate",
   "LoyaltyTxn_append_only",
   "EmailEvent_validate_growth_relation",
+  "CustomerSegment_enforce_state",
+  "CustomerSegmentMembership_append_only",
+  "LifecycleJourney_enforce_state",
+  "LifecycleStep_enforce_state",
+  "LifecycleEnrollment_enforce_state",
+  "LifecycleMessage_enforce_state",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

@@ -84,12 +84,14 @@ export interface EmailQueueInput {
   readonly orderId?: string;
   readonly customerId?: string;
   readonly abandonedCartId?: string;
+  readonly lifecycleMessageId?: string;
   readonly credentialId: string;
   readonly templateKey: string;
   readonly topic: string;
   readonly recipientEmail: string;
   readonly idempotencyKey: string;
   readonly variables: Readonly<Record<string, string>>;
+  readonly templateSnapshot?: import("./email-templates.js").EmailTemplateDefinition;
 }
 
 export interface EmailServiceOptions {

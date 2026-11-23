@@ -146,6 +146,7 @@ model EmailEvent {
   orderId              String?               @db.Uuid
   customerId           String?               @db.Uuid
   abandonedCartId      String?               @db.Uuid
+  lifecycleMessageId   String?               @unique @db.Uuid
   credentialId         String                @db.Uuid
   templateKey          String                @db.VarChar(80)
   locale               String                @default("es-CO") @db.VarChar(10)
@@ -174,6 +175,7 @@ model EmailEvent {
   order                Order?                @relation(fields: [orderId], references: [id], onDelete: Restrict)
   customer             Customer?             @relation(fields: [customerId], references: [id], onDelete: Restrict)
   abandonedCart        AbandonedCart?        @relation(fields: [abandonedCartId], references: [id], onDelete: Restrict)
+  lifecycleMessage     LifecycleMessage?     @relation(fields: [lifecycleMessageId], references: [id], onDelete: Restrict)
   credential           IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
   webhookEvents        EmailWebhookEvent[]
   suppressions         EmailSuppression[]
@@ -184,6 +186,7 @@ model EmailEvent {
   @@index([orderId, createdAt])
   @@index([customerId, templateKey, createdAt])
   @@index([abandonedCartId, createdAt])
+  @@index([lifecycleMessageId])
   @@map("EmailEvent")
 }
 
@@ -318,4 +321,181 @@ model LoyaltyTxn {
   @@index([paymentTransactionId, type])
   @@index([referralId, type])
   @@map("LoyaltyTxn")
+}
+
+enum CustomerSegmentStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum SegmentMembershipStatus {
+  ENTERED
+  EXITED
+}
+
+enum LifecycleJourneyStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum LifecycleEnrollmentStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum LifecycleMessageStatus {
+  SCHEDULED
+  DISPATCHING
+  QUEUED
+  SUPPRESSED
+  CANCELLED
+  FAILED
+}
+
+model CustomerSegment {
+  id                   String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name                 String                      @db.VarChar(120)
+  description          String?                     @db.VarChar(500)
+  status               CustomerSegmentStatus       @default(DRAFT)
+  definition           Json                        @db.JsonB
+  definitionHash       Bytes                       @db.ByteA
+  version              Int                         @default(0)
+  lastRefreshedAt      DateTime?                   @db.Timestamptz(6)
+  activatedAt          DateTime?                   @db.Timestamptz(6)
+  archivedAt           DateTime?                   @db.Timestamptz(6)
+  createdByAdminUserId String                      @db.Uuid
+  updatedByAdminUserId String                      @db.Uuid
+  createdAt            DateTime                    @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime                    @default(now()) @updatedAt @db.Timestamptz(6)
+  createdBy            AdminUser                   @relation("CustomerSegmentCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  updatedBy            AdminUser                   @relation("CustomerSegmentUpdater", fields: [updatedByAdminUserId], references: [id], onDelete: Restrict)
+  memberships          CustomerSegmentMembership[]
+  journeys             LifecycleJourney[]
+
+  @@index([status, id])
+  @@index([lastRefreshedAt])
+  @@map("CustomerSegment")
+}
+
+model CustomerSegmentMembership {
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  segmentId      String                 @db.Uuid
+  customerId     String                 @db.Uuid
+  consentId      String                 @db.Uuid
+  sequence       Int
+  segmentVersion Int
+  status         SegmentMembershipStatus
+  reason         String                 @db.VarChar(80)
+  metrics        Json                   @db.JsonB
+  definitionHash Bytes                  @db.ByteA
+  occurredAt     DateTime               @default(now()) @db.Timestamptz(6)
+  segment        CustomerSegment        @relation(fields: [segmentId], references: [id], onDelete: Restrict)
+  customer       Customer               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  consent        Consent                @relation(fields: [consentId], references: [id], onDelete: Restrict)
+  enrollments    LifecycleEnrollment[]
+
+  @@unique([segmentId, customerId, sequence])
+  @@index([segmentId, status, occurredAt])
+  @@index([customerId, segmentId, sequence])
+  @@index([consentId])
+  @@map("CustomerSegmentMembership")
+}
+
+model LifecycleJourney {
+  id                   String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  segmentId            String                 @db.Uuid
+  segmentVersion       Int?
+  name                 String                 @db.VarChar(120)
+  description          String?                @db.VarChar(500)
+  status               LifecycleJourneyStatus @default(DRAFT)
+  version              Int                    @default(0)
+  activatedAt          DateTime?              @db.Timestamptz(6)
+  archivedAt           DateTime?              @db.Timestamptz(6)
+  createdByAdminUserId String                 @db.Uuid
+  updatedByAdminUserId String                 @db.Uuid
+  createdAt            DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  segment              CustomerSegment        @relation(fields: [segmentId], references: [id], onDelete: Restrict)
+  createdBy            AdminUser              @relation("LifecycleJourneyCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  updatedBy            AdminUser              @relation("LifecycleJourneyUpdater", fields: [updatedByAdminUserId], references: [id], onDelete: Restrict)
+  steps                LifecycleStep[]
+  enrollments          LifecycleEnrollment[]
+
+  @@index([status, id])
+  @@index([segmentId, status])
+  @@map("LifecycleJourney")
+}
+
+model LifecycleStep {
+  id            String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId     String           @db.Uuid
+  position      Int
+  offsetMinutes Int
+  subject       String           @db.VarChar(200)
+  htmlBody      String           @db.Text
+  textBody      String           @db.Text
+  variables     Json             @db.JsonB
+  createdAt     DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime         @default(now()) @updatedAt @db.Timestamptz(6)
+  journey       LifecycleJourney @relation(fields: [journeyId], references: [id], onDelete: Restrict)
+  messages      LifecycleMessage[]
+
+  @@unique([journeyId, position])
+  @@unique([journeyId, offsetMinutes])
+  @@map("LifecycleStep")
+}
+
+model LifecycleEnrollment {
+  id                String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  journeyId         String                    @db.Uuid
+  customerId        String                    @db.Uuid
+  entryMembershipId String                    @db.Uuid
+  consentId         String                    @db.Uuid
+  status            LifecycleEnrollmentStatus @default(ACTIVE)
+  exitReason        String?                   @db.VarChar(80)
+  enteredAt         DateTime                  @default(now()) @db.Timestamptz(6)
+  completedAt       DateTime?                 @db.Timestamptz(6)
+  cancelledAt       DateTime?                 @db.Timestamptz(6)
+  failedAt          DateTime?                 @db.Timestamptz(6)
+  createdAt         DateTime                  @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime                  @default(now()) @updatedAt @db.Timestamptz(6)
+  journey           LifecycleJourney          @relation(fields: [journeyId], references: [id], onDelete: Restrict)
+  customer          Customer                  @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  entryMembership   CustomerSegmentMembership @relation(fields: [entryMembershipId], references: [id], onDelete: Restrict)
+  consent           Consent                   @relation(fields: [consentId], references: [id], onDelete: Restrict)
+  messages          LifecycleMessage[]
+
+  @@unique([journeyId, customerId])
+  @@index([customerId, status])
+  @@index([entryMembershipId, status])
+  @@index([status, enteredAt])
+  @@map("LifecycleEnrollment")
+}
+
+model LifecycleMessage {
+  id           String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  enrollmentId String                 @db.Uuid
+  stepId       String                 @db.Uuid
+  customerId   String                 @db.Uuid
+  status          LifecycleMessageStatus @default(SCHEDULED)
+  dispatchVersion Int                    @default(0)
+  scheduledAt     DateTime               @db.Timestamptz(6)
+  processedAt  DateTime?              @db.Timestamptz(6)
+  lastError    String?                @db.VarChar(500)
+  createdAt    DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  enrollment   LifecycleEnrollment    @relation(fields: [enrollmentId], references: [id], onDelete: Restrict)
+  step         LifecycleStep          @relation(fields: [stepId], references: [id], onDelete: Restrict)
+  customer     Customer               @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  emailEvent   EmailEvent?
+
+  @@unique([enrollmentId, stepId])
+  @@index([status, scheduledAt, id])
+  @@index([customerId, status])
+  @@map("LifecycleMessage")
 }

@@ -89,6 +89,14 @@ const definitions = {
       "Guardamos tu carrito en {{storeName}} con {{itemCount}} unidades por {{totalCop}}. Volver al carrito: {{cartUrl}}. Baja de recordatorios: {{unsubscribeUrl}}",
     variables: ["storeName", "itemCount", "totalCop", "cartUrl", "unsubscribeUrl"],
   },
+  "lifecycle.campaign": {
+    subject: "Novedades de {{storeName}}",
+    htmlBody:
+      '<p>Hola {{customerFirstName}}. Tenemos novedades para ti en {{storeName}}.</p><p><a href="{{accountUrl}}">Visitar mi cuenta</a></p><p><a href="{{unsubscribeUrl}}">Dejar de recibir comunicaciones comerciales</a></p>',
+    textBody:
+      "Hola {{customerFirstName}}. Tenemos novedades para ti en {{storeName}}. Cuenta: {{accountUrl}}. Baja: {{unsubscribeUrl}}",
+    variables: ["storeName", "customerFirstName", "accountUrl", "unsubscribeUrl"],
+  },
   "support.ticket": {
     subject: "Actualización de tu PQR {{ticketNumber}}",
     htmlBody:

@@ -8,6 +8,7 @@ import { b2bService } from "@/lib/b2b";
 import { crmPrivacyPolicyVersion, crmRetentionService } from "@/lib/crm";
 import { getDatabase } from "@/lib/db";
 import { financeService } from "@/lib/finance";
+import { lifecycleService } from "@/lib/lifecycle";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const noStoreHeaders = {
@@ -58,6 +59,7 @@ export async function POST(request: Request) {
   const partialPaymentReviews = await service.flagExpiredPartialPaymentReviews();
   const fiscalWatch = await financeService().refreshFiscalWatch();
   const expiredProposals = await b2bService(db).expireDueProposals();
+  const lifecycle = await lifecycleService(db).runScheduledWork(100);
   const security = await getRequestSecurityContext();
   const crmRetention = await crmRetentionService(db).runDue(
     { privacyPolicyVersion: crmPrivacyPolicyVersion! },
@@ -74,6 +76,7 @@ export async function POST(request: Request) {
       expiredReservations: reservations,
       partialPaymentReviews,
       expiredProposals,
+      lifecycle,
       crmRetention: {
         scanned: crmRetention.scanned,
         suppressed: crmRetention.suppressed.length,

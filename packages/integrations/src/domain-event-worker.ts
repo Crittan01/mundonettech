@@ -4,6 +4,7 @@ import {
   completeDomainOutbox,
   failDomainOutbox,
   GrowthService,
+  LifecycleService,
   retryDomainOutbox,
   type DomainOutbox,
 } from "@mundonettech/db";
@@ -26,6 +27,8 @@ import { EmailProviderError, EmailValidationError } from "./email-types.js";
 
 const supportedEvents = [
   "cart.abandoned.v1",
+  "lifecycle.enrollment.started.v1",
+  "lifecycle.message.dispatch.v1",
   "order.confirmed.v1",
   "order.payment.paid.v1",
   "order.refund.completed.v1",
@@ -293,6 +296,46 @@ export class DomainEventWorker {
     await record(queued.status === "SUPPRESSED" ? "SUPPRESSED" : "QUEUED");
   }
 
+  private async queueLifecycleEmail(event: DomainOutbox): Promise<void> {
+    const lifecycle = new LifecycleService(this.db);
+    const dispatchVersion = this.payload(event).dispatchVersion;
+    if (
+      dispatchVersion !== undefined &&
+      (typeof dispatchVersion !== "number" ||
+        !Number.isInteger(dispatchVersion) ||
+        dispatchVersion < 1)
+    ) {
+      throw new EmailValidationError("Lifecycle dispatch version is invalid.");
+    }
+    const message = await lifecycle.dispatch(
+      this.id(event, "lifecycleMessageId"),
+      dispatchVersion as number | undefined,
+    );
+    if (!message) return;
+    const queued = await this.options.email.queue({
+      customerId: message.customerId,
+      lifecycleMessageId: message.id,
+      credentialId: await this.emailCredentialId(),
+      templateKey: "lifecycle.campaign",
+      topic: "lifecycle",
+      recipientEmail: message.recipientEmail,
+      idempotencyKey: `domain:lifecycle.campaign:${message.id}`,
+      templateSnapshot: {
+        templateKey: "lifecycle.campaign",
+        subject: message.step.subject,
+        htmlBody: message.step.htmlBody,
+        textBody: message.step.textBody,
+        variables: message.step.variables,
+      },
+      variables: {
+        storeName: this.options.storeName,
+        customerFirstName: message.customerFirstName,
+        accountUrl: `${this.publicSiteUrl}/mi-cuenta`,
+      },
+    });
+    await lifecycle.markQueued(message.id, queued.id, queued.status);
+  }
+
   private statusLabel(status: string): string {
     const labels: Record<string, string> = {
       REQUESTED: "Solicitud recibida",
@@ -415,6 +458,11 @@ export class DomainEventWorker {
     switch (event.eventType) {
       case "cart.abandoned.v1":
         await this.queueCartRecoveryEmail(event);
+        return;
+      case "lifecycle.enrollment.started.v1":
+        return;
+      case "lifecycle.message.dispatch.v1":
+        await this.queueLifecycleEmail(event);
         return;
       case "order.confirmed.v1":
         await this.queueOrderEmail({
@@ -619,6 +667,15 @@ export class DomainEventWorker {
             workerId: this.options.workerId,
             error: this.errorText(error),
           });
+          if (event.eventType === "lifecycle.message.dispatch.v1") {
+            const messageId = recordValue(event.payload)?.lifecycleMessageId;
+            if (typeof messageId === "string") {
+              await new LifecycleService(this.db).markDispatchFailed(
+                messageId,
+                this.errorText(error),
+              );
+            }
+          }
           failed += 1;
         } else {
           const availableAt =

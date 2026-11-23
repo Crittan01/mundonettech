@@ -183,3 +183,24 @@ export {
   referralStatusLabels,
 } from "./growth.js";
 export type { ReferralRejectionReason } from "./growth.js";
+export {
+  classifyRfm,
+  customerSegmentStatusLabels,
+  lifecycleEnrollmentStatusLabels,
+  lifecycleJourneyStatusLabels,
+  lifecycleMessageStatusLabels,
+  lifecycleText,
+  normalizeCustomerSegmentDefinition,
+  normalizeLifecycleSteps,
+  rfmClasses,
+  rfmClassLabels,
+  rfmScores,
+  segmentMembershipReasonLabels,
+} from "./lifecycle.js";
+export type {
+  CustomerSegmentDefinition,
+  LifecycleStepInput,
+  RfmClass,
+  RfmMetrics,
+  RfmScores,
+} from "./lifecycle.js";

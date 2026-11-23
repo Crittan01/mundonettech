@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 
 import { normalizeEmail } from "@mundonettech/core";
 import {
+  LifecycleService,
   marketingEmailConsentGranted,
   type EmailEvent,
   type EmailEventStatus,
@@ -185,16 +186,32 @@ export class EmailService {
     if (input.customerId !== undefined) assertIntegrationUuid(input.customerId, "customerId");
     if (input.abandonedCartId !== undefined)
       assertIntegrationUuid(input.abandonedCartId, "abandonedCartId");
+    if (input.lifecycleMessageId !== undefined) {
+      assertIntegrationUuid(input.lifecycleMessageId, "lifecycleMessageId");
+    }
     if (
       (key === "cart.recovery" &&
         (topic !== "cart-recovery" ||
           input.orderId !== undefined ||
           input.customerId === undefined ||
-          input.abandonedCartId === undefined)) ||
-      (key !== "cart.recovery" && input.abandonedCartId !== undefined)
+          input.abandonedCartId === undefined ||
+          input.lifecycleMessageId !== undefined)) ||
+      (key === "lifecycle.campaign" &&
+        (topic !== "lifecycle" ||
+          input.orderId !== undefined ||
+          input.abandonedCartId !== undefined ||
+          input.customerId === undefined ||
+          input.lifecycleMessageId === undefined ||
+          input.templateSnapshot === undefined)) ||
+      (!["cart.recovery", "lifecycle.campaign"].includes(key) &&
+        (input.abandonedCartId !== undefined || input.lifecycleMessageId !== undefined)) ||
+      (key !== "lifecycle.campaign" && input.templateSnapshot !== undefined)
     ) {
-      throw new EmailValidationError("Cart recovery email relations are inconsistent.");
+      throw new EmailValidationError("Email relations or template snapshot are inconsistent.");
     }
+    const snapshot = input.templateSnapshot
+      ? validateEmailTemplate({ ...input.templateSnapshot, templateKey: key })
+      : null;
     let recipientEmail: string;
     try {
       recipientEmail = normalizeEmail(input.recipientEmail);
@@ -206,6 +223,25 @@ export class EmailService {
       where: { idempotencyKey: input.idempotencyKey },
     });
     if (existing) {
+      let sameSnapshot = true;
+      if (snapshot) {
+        const unsubscribeUrl = (existing.variablesSnapshot as Record<string, unknown>)
+          .unsubscribeUrl;
+        if (typeof unsubscribeUrl !== "string") {
+          throw new EmailConflictError(
+            "Stored lifecycle email is missing its unsubscribe URL.",
+            "IDEMPOTENCY_CONFLICT",
+          );
+        }
+        const rendered = renderEmailTemplate(snapshot, {
+          ...input.variables,
+          unsubscribeUrl,
+        });
+        sameSnapshot =
+          existing.subjectSnapshot === rendered.subject &&
+          existing.htmlBodySnapshot === rendered.htmlBody &&
+          existing.textBodySnapshot === rendered.textBody;
+      }
       const same =
         existing.templateKey === key &&
         existing.topic === topic &&
@@ -214,6 +250,8 @@ export class EmailService {
         (existing.orderId ?? null) === (input.orderId ?? null) &&
         (existing.customerId ?? null) === (input.customerId ?? null) &&
         (existing.abandonedCartId ?? null) === (input.abandonedCartId ?? null) &&
+        (existing.lifecycleMessageId ?? null) === (input.lifecycleMessageId ?? null) &&
+        sameSnapshot &&
         Object.entries(input.variables).every(
           ([name, value]) =>
             (existing.variablesSnapshot as Record<string, unknown>)[name] === value,
@@ -226,9 +264,11 @@ export class EmailService {
       return { id: existing.id, status: existing.status };
     }
     const credentials = await this.credentials(input.credentialId);
-    const override = await this.db.emailTemplateOverride.findFirst({
-      where: { templateKey: key, locale: "es-CO", status: "PUBLISHED" },
-    });
+    const override = snapshot
+      ? null
+      : await this.db.emailTemplateOverride.findFirst({
+          where: { templateKey: key, locale: "es-CO", status: "PUBLISHED" },
+        });
     let variables: readonly string[];
     if (override) {
       if (
@@ -238,17 +278,19 @@ export class EmailService {
         throw new EmailValidationError("Stored email template variables are invalid.");
       variables = override.variables as string[];
     } else {
-      variables = defaultEmailTemplate(key).variables;
+      variables = snapshot?.variables ?? defaultEmailTemplate(key).variables;
     }
-    const baseTemplate = override
-      ? {
-          templateKey: key,
-          subject: override.subject,
-          htmlBody: override.htmlBody,
-          textBody: override.textBody,
-          variables,
-        }
-      : defaultEmailTemplate(key);
+    const baseTemplate = snapshot
+      ? snapshot
+      : override
+        ? {
+            templateKey: key,
+            subject: override.subject,
+            htmlBody: override.htmlBody,
+            textBody: override.textBody,
+            variables,
+          }
+        : defaultEmailTemplate(key);
     const eventId = randomUUID();
     const token = this.unsubscribeToken(
       credentials.unsubscribeSecret,
@@ -272,6 +314,7 @@ export class EmailService {
           orderId: input.orderId ?? null,
           customerId: input.customerId ?? null,
           abandonedCartId: input.abandonedCartId ?? null,
+          lifecycleMessageId: input.lifecycleMessageId ?? null,
           credentialId: input.credentialId,
           templateKey: key,
           topic,
@@ -298,6 +341,7 @@ export class EmailService {
             payload: {
               emailEventId: created.id,
               ...(input.orderId ? { orderId: input.orderId } : {}),
+              ...(input.lifecycleMessageId ? { lifecycleMessageId: input.lifecycleMessageId } : {}),
             },
           },
         });
@@ -316,6 +360,43 @@ export class EmailService {
     let outcome: "SUPPRESSED" | "NO_CONSENT" | "STALE" | null = suppression ? "SUPPRESSED" : null;
     let abandonedCartId: string | null = null;
     let lastActivityAt: Date | null = null;
+    let lifecycleReason:
+      | "CONSENT_REVOKED"
+      | "CUSTOMER_INACTIVE"
+      | "SEGMENT_EXITED"
+      | "JOURNEY_ARCHIVED"
+      | "SUPPRESSED"
+      | null = null;
+    const lifecycle = new LifecycleService(this.db);
+    if (!outcome && claimed.templateKey === "lifecycle.campaign" && claimed.lifecycleMessageId) {
+      const pausedUntil = await lifecycle.deferEmailIfPaused(claimed.lifecycleMessageId);
+      if (pausedUntil) {
+        const deferred = await this.db.emailEvent.update({
+          where: { id: claimed.id },
+          data: { status: "SENDING", nextAttemptAt: pausedUntil },
+        });
+        return {
+          id: deferred.id,
+          status: deferred.status,
+          providerMessageId: deferred.providerMessageId,
+          nextAttemptAt: deferred.nextAttemptAt,
+        };
+      }
+      const eligibility = await lifecycle.messageEligibility(claimed.lifecycleMessageId);
+      if (eligibility.reason !== "ELIGIBLE") {
+        outcome = "SUPPRESSED";
+        lifecycleReason =
+          eligibility.reason === "CUSTOMER_INACTIVE"
+            ? "CUSTOMER_INACTIVE"
+            : eligibility.reason === "SEGMENT_EXITED"
+              ? "SEGMENT_EXITED"
+              : eligibility.reason === "JOURNEY_ARCHIVED"
+                ? "JOURNEY_ARCHIVED"
+                : eligibility.reason === "SUPPRESSED"
+                  ? "SUPPRESSED"
+                  : "CONSENT_REVOKED";
+      }
+    }
     if (!outcome && claimed.templateKey === "cart.recovery") {
       const abandoned = claimed.abandonedCartId
         ? await this.db.abandonedCart.findUnique({
@@ -371,12 +452,34 @@ export class EmailService {
       }
       return tx.emailEvent.findUniqueOrThrow({ where: { id: claimed.id } });
     });
+    if (claimed.templateKey === "lifecycle.campaign" && claimed.lifecycleMessageId) {
+      await lifecycle.markEmailSuppressed(
+        claimed.lifecycleMessageId,
+        lifecycleReason ?? "SUPPRESSED",
+      );
+    }
     return {
       id: current.id,
       status: current.status,
       providerMessageId: current.providerMessageId,
       nextAttemptAt: current.nextAttemptAt,
     };
+  }
+
+  private async reconcileLifecycleTerminal(claimed: EmailEvent): Promise<void> {
+    if (!claimed.lifecycleMessageId) return;
+    const lifecycle = new LifecycleService(this.db);
+    if (["SENT", "DELIVERY_DELAYED", "DELIVERED"].includes(claimed.status)) {
+      await lifecycle.markEmailSent(claimed.lifecycleMessageId, claimed.id);
+    } else if (claimed.status === "FAILED") {
+      await lifecycle.markEmailFailed(
+        claimed.lifecycleMessageId,
+        claimed.id,
+        claimed.lastError ?? "PROVIDER_FAILURE",
+      );
+    } else if (["BOUNCED", "COMPLAINED", "SUPPRESSED"].includes(claimed.status)) {
+      await lifecycle.markEmailSuppressed(claimed.lifecycleMessageId, "SUPPRESSED");
+    }
   }
 
   async send(emailEventId: string): Promise<EmailSendOutcome> {
@@ -410,6 +513,7 @@ export class EmailService {
       claimed.status !== "SENDING" ||
       (claimed.nextAttemptAt && claimed.nextAttemptAt > new Date())
     ) {
+      await this.reconcileLifecycleTerminal(claimed);
       return {
         id: claimed.id,
         status: claimed.status,
@@ -443,6 +547,9 @@ export class EmailService {
           lastError: null,
         },
       });
+      if (sent.lifecycleMessageId) {
+        await new LifecycleService(this.db).markEmailSent(sent.lifecycleMessageId, sent.id);
+      }
       return {
         id: sent.id,
         status: sent.status,
@@ -482,6 +589,13 @@ export class EmailService {
           nextAttemptAt: null,
         },
       });
+      if (failed.lifecycleMessageId) {
+        await new LifecycleService(this.db).markEmailFailed(
+          failed.lifecycleMessageId,
+          failed.id,
+          code,
+        );
+      }
       return {
         id: failed.id,
         status: failed.status,
@@ -533,6 +647,9 @@ export class EmailService {
             "lastReminderOutcome" = 'SUPPRESSED'
           WHERE "id" = ${event.abandonedCartId}::uuid
         `;
+      }
+      if (event.lifecycleMessageId) {
+        await new LifecycleService(tx).markEmailSuppressed(event.lifecycleMessageId, "SUPPRESSED");
       }
       return { eventId: event.id, topic: event.topic, replayed: inserted.length === 0 };
     });
@@ -649,6 +766,14 @@ export class EmailService {
             VALUES (${email.recipientHash}, ${email.topic}, ${targetStatus === "BOUNCED" ? "BOUNCE" : "COMPLAINT"}::"EmailSuppressionReason", ${email.id}::uuid)
             ON CONFLICT ("recipientHash", "topic") DO NOTHING
           `;
+        }
+        if (email.lifecycleMessageId) {
+          const lifecycle = new LifecycleService(tx);
+          if (["SENT", "DELIVERY_DELAYED", "DELIVERED"].includes(targetStatus)) {
+            await lifecycle.markEmailSent(email.lifecycleMessageId, email.id);
+          } else {
+            await lifecycle.markEmailSuppressed(email.lifecycleMessageId, "SUPPRESSED");
+          }
         }
         return { eventId: email.id, status: targetStatus, replayed: false };
       });
