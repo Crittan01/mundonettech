@@ -1,3 +1,5 @@
+import { resolveMercadoLibreOAuthCookiePolicy } from "@mundonettech/integrations";
+
 export const adminIdleSeconds = 30 * 60;
 export const adminAbsoluteSeconds = 12 * 60 * 60;
 export const customerIdleSeconds = 30 * 24 * 60 * 60;
@@ -17,12 +19,11 @@ export const guestOrderCookie =
   process.env.NODE_ENV === "production" ? "__Host-guest_order" : "guest_order";
 export const referralCookie =
   process.env.NODE_ENV === "production" ? "__Host-mnt_referral" : "mnt_referral";
-export const channelOAuthCookieSecure =
-  process.env.NODE_ENV === "production" && process.env.INTEGRATION_ENVIRONMENT !== "LOCAL";
-export const channelOAuthCookie = channelOAuthCookieSecure
-  ? "__Host-mnt_channel_oauth"
-  : "mnt_channel_oauth";
-export const channelOAuthCookiePath = "/api/channels/mercado-libre/oauth/callback";
+
+const channelOAuthCookiePolicy = resolveMercadoLibreOAuthCookiePolicy(process.env);
+export const channelOAuthCookieSecure = channelOAuthCookiePolicy.secure;
+export const channelOAuthCookie = channelOAuthCookiePolicy.name;
+export const channelOAuthCookiePath = channelOAuthCookiePolicy.path;
 
 export const sessionCookieOptions = {
   httpOnly: true,

@@ -5,6 +5,27 @@ import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./inte
 export const mercadoLibreAuthorizationUrl = "https://auth.mercadolibre.com.co/authorization";
 export const mercadoLibreTokenUrl = "https://api.mercadolibre.com/oauth/token";
 export const mercadoLibreScopes = ["offline_access", "read", "write"] as const;
+export const mercadoLibreCallbackPath = "/api/channels/mercado-libre/oauth/callback";
+
+export function resolveMercadoLibreOAuthCookiePolicy(env: {
+  readonly NODE_ENV?: string | undefined;
+  readonly INTEGRATION_ENVIRONMENT?: string | undefined;
+}): {
+  readonly name: "__Secure-mnt_channel_oauth" | "mnt_channel_oauth";
+  readonly secure: boolean;
+  readonly path: typeof mercadoLibreCallbackPath;
+  readonly httpOnly: true;
+  readonly sameSite: "lax";
+} {
+  const secure = env.NODE_ENV === "production" && env.INTEGRATION_ENVIRONMENT !== "LOCAL";
+  return {
+    name: secure ? "__Secure-mnt_channel_oauth" : "mnt_channel_oauth",
+    secure,
+    path: mercadoLibreCallbackPath,
+    httpOnly: true,
+    sameSite: "lax",
+  };
+}
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -233,19 +254,27 @@ function externalAccountId(value: unknown): string {
   return normalized;
 }
 
+const granularScopePattern = /^urn:ml:[a-z0-9_-]+(?::[a-z0-9_-]+){1,4}$/;
+
 function scopes(value: unknown): readonly string[] {
-  if (typeof value !== "string" || value.length > 200) throw new Error("Invalid scope.");
+  if (typeof value !== "string" || value.length > 2048) throw new Error("Invalid scope.");
   const granted = value.split(/\s+/).filter(Boolean);
   if (
+    granted.length > 32 ||
     new Set(granted).size !== granted.length ||
     granted.some(
-      (scope) => !mercadoLibreScopes.includes(scope as (typeof mercadoLibreScopes)[number]),
+      (scope) =>
+        !mercadoLibreScopes.includes(scope as (typeof mercadoLibreScopes)[number]) &&
+        !granularScopePattern.test(scope),
     ) ||
     !mercadoLibreScopes.every((scope) => granted.includes(scope))
   ) {
     throw new Error("Required Mercado Libre scopes were not granted.");
   }
-  return mercadoLibreScopes.filter((scope) => granted.includes(scope));
+  const extra = granted
+    .filter((scope) => !mercadoLibreScopes.includes(scope as (typeof mercadoLibreScopes)[number]))
+    .sort();
+  return [...mercadoLibreScopes, ...extra];
 }
 
 function tokenSetFromJson(value: Record<string, unknown>): MercadoLibreTokenSet {

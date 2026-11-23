@@ -177,6 +177,11 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
     .analyze();
   expect(populatedAxe.violations).toEqual([]);
 
+  const headCallback = await page.request.head(
+    `/api/channels/mercado-libre/oauth/callback?code=TG-e2e-head&state=${authorizationState}`,
+  );
+  expect(headCallback.status()).toBe(405);
+  expect(headCallback.headers()["allow"]).toBe("GET");
   const replay = await page.request.get(
     `/api/channels/mercado-libre/oauth/callback?code=TG-e2e-replay&state=${authorizationState}`,
   );

@@ -1,4 +1,5 @@
 import { hasAdminPermission } from "@mundonettech/core";
+import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { OperationalCredentialForm } from "@/components/admin/operational-credential-form";
@@ -175,14 +176,25 @@ export default async function IntegrationsPage() {
                         )}
                       </div>
                     </details>
-                    <details>
-                      <summary className="cursor-pointer text-sm font-medium text-destructive">
-                        Revocar acceso
-                      </summary>
-                      <div className="mt-4 max-w-sm">
-                        <RevokeCredentialForm credentialId={credential.id} />
-                      </div>
-                    </details>
+                    {credential.provider === "mercado-libre" ? (
+                      <p className="text-sm text-muted-foreground">
+                        Para desvincular o reconectar Mercado Libre de forma segura, administra la
+                        cuenta en{" "}
+                        <Link className="underline" href="/admin/canales">
+                          Canales de venta
+                        </Link>
+                        .
+                      </p>
+                    ) : (
+                      <details>
+                        <summary className="cursor-pointer text-sm font-medium text-destructive">
+                          Revocar acceso
+                        </summary>
+                        <div className="mt-4 max-w-sm">
+                          <RevokeCredentialForm credentialId={credential.id} />
+                        </div>
+                      </details>
+                    )}
                   </div>
                 ) : null}
               </li>

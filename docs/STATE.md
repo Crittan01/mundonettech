@@ -4,15 +4,15 @@
 
 ## Fotografía ejecutiva
 
-- **Estado:** **Fases 0–5 ✅ (`Hito 1` técnico certificado; Go-Live pendiente de externos) · `F6.1` siguiente**.
+- **Estado:** **Fases 0–5 ✅ (`Hito 1` técnico certificado; Go-Live pendiente de externos) · `F6.1` ✅ · `F6.2` siguiente**.
 - **Operación:** `mundonettech.co` · `MNT-YYYY-NNNN` · Retail/mayorista tech CO · **`NO_RESPONSABLE_IVA`** (`3.500 UVT`, `ADR-009`).
-- **Base activa (`F0`–`F5.3`):** Next 16 standalone (`'use cache'`/`<Suspense>`), PG 17 (`121` tablas RLS, `2.102` casos), bóveda `AES-256-GCM`, MFA `aal2` + RBAC 8 roles, `@mundonettech/{core,db,integrations,media,cms,legal-co}`, DIVIPOLA, `OrderReceipt` SHA-256, SEO/XML, `3.500 UVT`, RMA/PQR/reseñas, CRM 360 + B2B/Copiloto 0-PII, lealtad/lifecycle/RFM-LTV, salud/backups GPG R2/DR/Ayuda v2 y OWASP/`66` E2E+axe/Lighthouse ≥ 96/k6/`release:verify`.
+- **Base activa (`F0`–`F6.1`):** Next 16 standalone (`'use cache'`/`<Suspense>`), PG 17 (`123` tablas RLS, `2.136` casos), bóveda `AES-256-GCM`, MFA `aal2` + RBAC 8 roles, `@mundonettech/{core,db,integrations,media,cms,legal-co}`, DIVIPOLA, `OrderReceipt` SHA-256, SEO/XML, `3.500 UVT`, RMA/PQR/reseñas, CRM 360 + B2B/Copiloto 0-PII, lealtad/lifecycle/RFM-LTV, salud/backups GPG R2/DR/Ayuda v2, OAuth PKCE ML `MCO` (`ChannelAccount`) y OWASP/`68` E2E+axe/Lighthouse ≥ 96/k6/`release:verify`.
 
 ## Topología de ambientes
 
 | Ambiente | URL / Puertos | Estado |
 | --- | --- | --- |
-| **LOCAL** | Next `:4010` (`:4110` E2E) · API `:54421` · PG 17 `:54422` (`:54428` tests) · Studio `:54423` · Mailpit `:54424` | Operativo (`F0.1`–`F5.3` ✅) |
+| **LOCAL** | Next `:4010` (`:4110` E2E) · API `:54421` · PG 17 `:54422` (`:54428` tests) · Studio `:54423` · Mailpit `:54424` | Operativo (`F0.1`–`F6.1` ✅) |
 | **STG** | Rama `develop` → Preview + Supabase STG dedicado (secretos aislados de PRD) | Pendiente aprovisionamiento externo |
 | **PRD** | Rama `production` → `https://mundonettech.co` + Supabase PRD + Cloudflare R2 | Bloqueado *fail-closed* (`release:verify`) hasta externos + aprobación humana |
 
@@ -22,6 +22,7 @@
 - **Fase 4A (`F4A.1`–`F4A.3` ✅):** `/admin/{hoy,dashboard,pedidos,finanzas,posventa,resenas}` RBAC/PII, `3.500 UVT`, `/mi-cuenta/*` Ley 1581, `/pedido/[token]` OTP, RMA `SerializedUnit` + `OrderRefund`, PQR SLA, reseñas y gates OWASP/E2E+axe/Lighthouse `96–100`/k6/`release:verify` (`ADR-034`..`036`).
 - **Fase 4B (`F4B.1`–`F4B.2` ✅):** `Organization` + `PriceList` `BigInt`, `Contact` 360°, fusiones MFA reversibles, `Task` + `/admin/hoy`, Hábeas Data bidireccional, `/empresas` → `/propuesta/[token]` → `Order` B2B y Copiloto 0-PII (`ADR-037`..`038`).
 - **Fase 5 (`F5.1`–`F5.3` ✅):** lealtad/referidos/abandonados (`ADR-039`); segmentos Ley 1581, journeys 0-PII y RFM/LTV neto `BigInt` (`ADR-040`); `/admin/salud` + alertas sin RUM/PII, backups GPG (`--passphrase-fd 3`) multipart 8 MiB a R2, DR mensual aislado (`public`/`auth` + 100 % buckets) y `/ayuda` v2 (`ADR-041`).
+- **Fase 6 (`F6.1` ✅):** OAuth PKCE `S256` ML `MCO` (`ChannelAccount`/`ChannelOAuthAttempt`, cookie `__Secure-` RFC 6265bis, scopes `urn:ml:*`), bóveda aislada, renovación fail-closed, alerta `channels.reauth` y `/admin/canales` MFA + RLS (`ADR-042`).
 
 ## Pendientes externos de negocio (bloquean Go-Live real, no `F6.1`)
 

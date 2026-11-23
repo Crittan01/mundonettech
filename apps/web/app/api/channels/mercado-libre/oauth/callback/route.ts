@@ -26,6 +26,8 @@ const headers = {
 const outcomes = {
   connected: "La cuenta quedó conectada. Estamos volviendo a Canales.",
   denied: "Mercado Libre no autorizó la conexión. Estamos volviendo a Canales.",
+  forbidden:
+    "La sesión administradora que inició la conexión ya no está autorizada. Estamos volviendo a Canales.",
   expired: "La autorización expiró. Estamos volviendo a Canales.",
   replay: "El estado OAuth no es válido o ya fue utilizado. Estamos volviendo a Canales.",
   conflict: "La cuenta cambió durante la conexión. Estamos volviendo a Canales.",
@@ -34,8 +36,16 @@ const outcomes = {
 
 type Outcome = keyof typeof outcomes;
 
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 function callbackResponse(outcome: Outcome): Response {
-  const destination = `${getPublicSiteUrl()}/admin/canales?oauth=${outcome}`;
+  const destination = escapeHtmlAttribute(`${getPublicSiteUrl()}/admin/canales?oauth=${outcome}`);
   const response = new NextResponse(
     `<!doctype html><html lang="es-CO"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="0;url=${destination}"><title>Finalizar conexión</title></head><body><main><h1>${outcomes[outcome]}</h1><p>Si no ocurre automáticamente, <a href="${destination}">continúa a Canales</a>.</p></main></body></html>`,
     { status: 200, headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } },
@@ -50,11 +60,31 @@ function callbackResponse(outcome: Outcome): Response {
   return response;
 }
 
-export async function POST() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...headers, Allow: "GET" } },
   );
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "GET" } });
+}
+
+export async function POST() {
+  return methodNotAllowed();
+}
+
+export async function PUT() {
+  return methodNotAllowed();
+}
+
+export async function PATCH() {
+  return methodNotAllowed();
+}
+
+export async function DELETE() {
+  return methodNotAllowed();
 }
 
 export async function GET(request: Request) {
@@ -88,6 +118,7 @@ export async function GET(request: Request) {
       if (error.code === "OAUTH_EXPIRED") outcome = "expired";
       else if (error.code === "OAUTH_REPLAY") outcome = "replay";
       else if (error.code === "OAUTH_REJECTED") outcome = "denied";
+      else if (error.code === "FORBIDDEN") outcome = "forbidden";
       else if (error.code === "CONFLICT") outcome = "conflict";
     }
   }

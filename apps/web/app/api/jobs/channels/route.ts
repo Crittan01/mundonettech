@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { hasAdminPermission } from "@mundonettech/core";
+import { OperationsService } from "@mundonettech/db";
 import { z } from "zod";
 
 import { getDatabase } from "@/lib/db";
@@ -40,18 +41,20 @@ export async function POST(request: Request) {
   if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers });
   }
-  const actor = await getDatabase().adminUser.findFirst({
+  const db = getDatabase();
+  const actor = await db.adminUser.findFirst({
     where: { id: actorId, status: "ACTIVE", deletedAt: null },
   });
   if (!actor || !hasAdminPermission(actor.role, "integrations:write")) {
     return Response.json({ error: "Scheduler actor is not authorized." }, { status: 403, headers });
   }
   const security = await getRequestSecurityContext();
-  const result = await channelAccountService().refreshDueAccounts({
+  const result = await channelAccountService(db).refreshDueAccounts({
     actorAdminUserId: actor.id,
     requestId: randomUUID(),
     ipHash: security.ipHash,
     userAgentHash: security.userAgentHash,
   });
+  await new OperationsService(db).synchronizeNotifications();
   return Response.json(result, { headers });
 }

@@ -215,8 +215,10 @@ function failureCode(error: unknown, operation: "OAUTH" | "REFRESH"): string {
     if (error.code === "INVALID_RESPONSE") return `${operation}_INVALID_RESPONSE`;
     if (error.code === "PROVIDER_REJECTED") return `${operation}_REJECTED`;
   }
-  if (error instanceof ChannelAccountError && error.code === "CONFLICT")
-    return `${operation}_CONFLICT`;
+  if (error instanceof ChannelAccountError) {
+    if (error.code === "CONFLICT") return `${operation}_CONFLICT`;
+    if (error.code === "FORBIDDEN") return `${operation}_FORBIDDEN`;
+  }
   return `${operation}_UNCERTAIN`;
 }
 
@@ -536,7 +538,37 @@ export class ChannelAccountService {
       if (!attempt || !stateMatches(options.state, attempt.stateHash))
         return { kind: "REPLAY" as const };
       if (attempt.status !== "PENDING") return { kind: "REPLAY" as const };
-      await this.actor(tx, attempt.createdByAdminUserId, "integrations:write");
+      try {
+        await this.actor(tx, attempt.createdByAdminUserId, "integrations:write");
+      } catch (error) {
+        if (error instanceof ChannelAccountError && error.code === "FORBIDDEN") {
+          await tx.channelOAuthAttempt.update({
+            where: { id: attempt.id },
+            data: {
+              status: "FAILED",
+              completedAt: now,
+              failureCode: "OAUTH_ACTOR_INACTIVE",
+              updatedAt: now,
+            },
+          });
+          await tx.integrationCredential.updateMany({
+            where: { id: attempt.credentialId, revokedAt: null },
+            data: { revokedAt: now, updatedAt: now },
+          });
+          await this.audit(tx, {
+            actorAdminUserId: attempt.createdByAdminUserId,
+            action: "CHANNEL_OAUTH_FAILED",
+            targetType: "ChannelOAuthAttempt",
+            targetId: attempt.id,
+            ...validateAudit(options.audit),
+            accountId: attempt.accountId,
+            attemptId: attempt.id,
+            outcome: "OAUTH_ACTOR_INACTIVE",
+          });
+          return { kind: "FORBIDDEN" as const };
+        }
+        throw error;
+      }
       if (attempt.expiresAt <= now) {
         await tx.channelOAuthAttempt.update({
           where: { id: attempt.id },
@@ -573,6 +605,9 @@ export class ChannelAccountService {
         attempt: { ...attempt, status: ChannelOAuthAttemptStatus.PROCESSING, claimedAt: now },
       };
     });
+    if (claimed.kind === "FORBIDDEN") {
+      throw new ChannelAccountError("FORBIDDEN", "The administrator cannot manage channels.");
+    }
     if (claimed.kind === "EXPIRED") {
       throw new ChannelAccountError("OAUTH_EXPIRED", "The OAuth authorization attempt expired.");
     }
@@ -852,6 +887,7 @@ export class ChannelAccountService {
     await this.actor(this.db, audit.actorAdminUserId, "integrations:write");
     const claimId = randomUUID();
     const claim = await this.db.$transaction(async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await this.lockAccount(tx, accountId);
       const now = await this.now(tx);
       const account = await tx.channelAccount.findUnique({ where: { id: accountId } });
@@ -1111,16 +1147,43 @@ export class ChannelAccountService {
     audit: ChannelAuditContext,
   ): Promise<ChannelDisconnectResult> {
     assertUuid(accountId, "accountId");
+    const normalizedAudit = validateAudit(audit);
     await this.actor(this.db, audit.actorAdminUserId, "integrations:write");
-    const account = await this.db.channelAccount.findUnique({
-      where: { id: accountId },
-      include: { credential: true },
+    const preflight = await this.db.$transaction(async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
+      await this.lockAccount(tx, accountId);
+      const now = await this.now(tx);
+      const account = await tx.channelAccount.findUnique({
+        where: { id: accountId },
+        include: { credential: true },
+      });
+      if (!account) throw new ChannelAccountError("NOT_FOUND", "Channel account was not found.");
+      this.assertEnvironment(account.environment);
+      if (account.status === "DISCONNECTED") {
+        return { kind: "ALREADY_DISCONNECTED" as const };
+      }
+      if (account.refreshClaimExpiresAt && account.refreshClaimExpiresAt > now) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "Wait for the active token refresh before disconnecting.",
+        );
+      }
+      const processingAttempt = await tx.channelOAuthAttempt.findFirst({
+        where: { accountId, status: "PROCESSING" },
+        select: { id: true },
+      });
+      if (processingAttempt) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "Wait for the in-flight OAuth authorization before disconnecting.",
+        );
+      }
+      return { kind: "READY" as const, account };
     });
-    if (!account) throw new ChannelAccountError("NOT_FOUND", "Channel account was not found.");
-    this.assertEnvironment(account.environment);
-    if (account.status === "DISCONNECTED") {
+    if (preflight.kind === "ALREADY_DISCONNECTED") {
       return { accountId, alreadyDisconnected: true, remoteRevoked: false };
     }
+    const { account } = preflight;
     let remoteRevoked = false;
     let plaintext: Uint8Array | undefined;
     try {
@@ -1135,8 +1198,60 @@ export class ChannelAccountService {
       plaintext?.fill(0);
     }
     await this.db.$transaction(async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await this.lockAccount(tx, accountId);
       const now = await this.now(tx);
+      const current = await tx.channelAccount.findUnique({ where: { id: accountId } });
+      if (
+        !current ||
+        current.version !== account.version ||
+        current.status === "DISCONNECTED" ||
+        (current.refreshClaimExpiresAt && current.refreshClaimExpiresAt > now)
+      ) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "The channel changed during disconnection; review it before retrying.",
+        );
+      }
+      const processingAttempt = await tx.channelOAuthAttempt.findFirst({
+        where: { accountId, status: "PROCESSING" },
+        select: { id: true },
+      });
+      if (processingAttempt) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "The channel changed during disconnection; review it before retrying.",
+        );
+      }
+      const pendingAttempts = await tx.channelOAuthAttempt.findMany({
+        where: { accountId, status: "PENDING" },
+        select: { id: true, credentialId: true },
+      });
+      for (const pending of pendingAttempts) {
+        await tx.channelOAuthAttempt.update({
+          where: { id: pending.id },
+          data: {
+            status: "FAILED",
+            completedAt: now,
+            failureCode: "OAUTH_CANCELLED",
+            updatedAt: now,
+          },
+        });
+        await tx.integrationCredential.updateMany({
+          where: { id: pending.credentialId, revokedAt: null },
+          data: { revokedAt: now, updatedAt: now },
+        });
+        await this.audit(tx, {
+          actorAdminUserId: audit.actorAdminUserId,
+          action: "CHANNEL_OAUTH_FAILED",
+          targetType: "ChannelOAuthAttempt",
+          targetId: pending.id,
+          ...normalizedAudit,
+          accountId,
+          attemptId: pending.id,
+          outcome: "OAUTH_CANCELLED",
+        });
+      }
       await tx.integrationCredential.updateMany({
         where: { id: account.credentialId, revokedAt: null },
         data: { revokedAt: now, updatedAt: now },
@@ -1166,7 +1281,7 @@ export class ChannelAccountService {
         action: "CHANNEL_ACCOUNT_DISCONNECTED",
         targetType: "ChannelAccount",
         targetId: accountId,
-        ...validateAudit(audit),
+        ...normalizedAudit,
         accountId,
         outcome: remoteRevoked ? "REMOTE_REVOKED" : "REMOTE_REVOCATION_UNCERTAIN",
       });

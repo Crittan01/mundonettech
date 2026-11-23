@@ -590,6 +590,8 @@ const requiredSecurityTriggers = [
   "ChannelOAuthAttempt_credential_binding",
   "ChannelAccount_enforce_state",
   "ChannelOAuthAttempt_enforce_state",
+  "IntegrationCredential_channel_binding",
+  "ChannelOAuthAttempt_credential_revocation",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

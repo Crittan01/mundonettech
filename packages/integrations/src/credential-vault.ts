@@ -242,6 +242,19 @@ export class IntegrationCredentialVault {
         throw new CredentialNotFoundError();
       }
       if (existing.revokedAt) throw new CredentialRevokedError();
+      if (existing.provider === "mercado-libre") {
+        const [activeAccount, activeAttempt] = await Promise.all([
+          tx.channelAccount.findFirst({
+            where: { credentialId: existing.id, status: "ACTIVE" },
+            select: { id: true },
+          }),
+          tx.channelOAuthAttempt.findFirst({
+            where: { credentialId: existing.id, status: { in: ["PENDING", "PROCESSING"] } },
+            select: { id: true },
+          }),
+        ]);
+        if (activeAccount || activeAttempt) throw new CredentialConflictError();
+      }
 
       const sealed = encryptIntegrationCredential({
         credentialId: existing.id,
@@ -338,6 +351,19 @@ export class IntegrationCredentialVault {
         throw new CredentialNotFoundError();
       }
       if (existing.revokedAt) throw new CredentialRevokedError();
+      if (existing.provider === "mercado-libre") {
+        const [activeAccount, activeAttempt] = await Promise.all([
+          tx.channelAccount.findFirst({
+            where: { credentialId: existing.id, status: "ACTIVE" },
+            select: { id: true },
+          }),
+          tx.channelOAuthAttempt.findFirst({
+            where: { credentialId: existing.id, status: { in: ["PENDING", "PROCESSING"] } },
+            select: { id: true },
+          }),
+        ]);
+        if (activeAccount || activeAttempt) throw new CredentialConflictError();
+      }
 
       const result = await tx.integrationCredential.updateMany({
         where: { id: existing.id, nonce: existing.nonce, revokedAt: null },

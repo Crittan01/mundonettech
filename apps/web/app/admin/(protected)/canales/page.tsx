@@ -31,6 +31,11 @@ const oauthMessages: Record<string, { message: string; error: boolean }> = {
     message: "Mercado Libre no autorizó la conexión. Puedes iniciar una nueva autorización.",
     error: true,
   },
+  forbidden: {
+    message:
+      "La cuenta administradora que inició la autorización ya no tiene permisos activos en este ambiente.",
+    error: true,
+  },
   expired: {
     message: "La autorización expiró. Inicia una nueva conexión con MFA reciente.",
     error: true,

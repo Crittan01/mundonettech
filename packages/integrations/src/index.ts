@@ -181,11 +181,13 @@ export {
   createMercadoLibreAuthorizationUrl,
   createMercadoLibrePkce,
   mercadoLibreAuthorizationUrl,
+  mercadoLibreCallbackPath,
   mercadoLibreScopes,
   mercadoLibreTokenUrl,
   parseMercadoLibreClientCredentials,
   parseMercadoLibrePendingCredential,
   parseMercadoLibreTokenCredential,
+  resolveMercadoLibreOAuthCookiePolicy,
   serializeMercadoLibrePendingCredential,
   serializeMercadoLibreTokenCredential,
 } from "./mercado-libre.js";

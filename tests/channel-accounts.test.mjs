@@ -8,12 +8,15 @@ import {
   ChannelProvider,
   createDatabaseClient,
   IntegrationEnvironment,
+  OperationsService,
 } from "../packages/db/dist/index.js";
 import {
   ChannelAccountError,
   ChannelAccountService,
+  CredentialConflictError,
   createCredentialKeyRing,
   decryptIntegrationCredential,
+  IntegrationCredentialVault,
   parseMercadoLibrePendingCredential,
   parseMercadoLibreTokenCredential,
 } from "../packages/integrations/dist/index.js";
@@ -563,6 +566,176 @@ describe("F6.1 — disconnection, reconnection and PostgreSQL invariants", () =>
     await assert.rejects(
       admin.query(`DELETE FROM "ChannelOAuthAttempt" WHERE "id" = $1`, [started.attemptId]),
       (error) => error.code === "55000",
+    );
+    const persisted = await db.channelAccount.findUniqueOrThrow({ where: { id: account.id } });
+    await assert.rejects(
+      admin.query(
+        `UPDATE "IntegrationCredential" SET "revokedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [persisted.credentialId],
+      ),
+      (error) => error.code === "55000",
+    );
+    await assert.rejects(
+      admin.query(
+        `UPDATE "ChannelAccount" SET "status" = 'REAUTH_REQUIRED', "tokenExpiresAt" = NULL, "lastRefreshError" = 'REFRESH_UNCERTAIN' WHERE "id" = $1`,
+        [account.id],
+      ),
+      (error) => error.code === "55000",
+    );
+    const vault = new IntegrationCredentialVault(db, ring);
+    await assert.rejects(
+      vault.revoke(persisted.credentialId, actor.id),
+      (error) => error instanceof CredentialConflictError,
+    );
+  });
+
+  it("blocks disconnection during active refresh claims and cancels pending reconnect attempts", async () => {
+    const { account } = await connect();
+    await db.channelAccount.update({
+      where: { id: account.id },
+      data: {
+        refreshClaimId: randomUUID(),
+        refreshClaimedAt: new Date(),
+        refreshClaimExpiresAt: new Date(Date.now() + 25_000),
+      },
+    });
+    await assert.rejects(
+      service.disconnectAccount(account.id, audit()),
+      (error) => error instanceof ChannelAccountError && error.code === "CONFLICT",
+    );
+    await db.channelAccount.update({
+      where: { id: account.id },
+      data: {
+        refreshClaimId: null,
+        refreshClaimedAt: null,
+        refreshClaimExpiresAt: null,
+      },
+    });
+
+    const pendingReconnect = await start("Reconexión abierta", account.id);
+    const disconnected = await service.disconnectAccount(account.id, audit());
+    assert.equal(disconnected.alreadyDisconnected, false);
+    const cancelledAttempt = await db.channelOAuthAttempt.findUniqueOrThrow({
+      where: { id: pendingReconnect.attemptId },
+      include: { credential: true },
+    });
+    assert.equal(cancelledAttempt.status, "FAILED");
+    assert.equal(cancelledAttempt.failureCode, "OAUTH_CANCELLED");
+    assert.ok(cancelledAttempt.credential.revokedAt);
+    await assert.rejects(
+      service.completeMercadoLibreOAuth({
+        attemptId: pendingReconnect.attemptId,
+        state: pendingReconnect.state,
+        code: `TG-code-${randomUUID()}`,
+        redirectUri,
+        audit: callbackAudit(),
+      }),
+      (error) => error instanceof ChannelAccountError && error.code === "OAUTH_REPLAY",
+    );
+    const stillDisconnected = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+    });
+    assert.equal(stillDisconnected.status, "DISCONNECTED");
+  });
+
+  it("revokes pending OAuth credentials fail-closed if the initiating admin is suspended before callback", async () => {
+    const temporaryAdmin = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `channels-suspended-${randomUUID()}@example.test`,
+        displayName: "Operador temporal canales",
+        role: "OPERATIONS_MANAGER",
+        status: "ACTIVE",
+      },
+    });
+    const started = await service.startMercadoLibreOAuth({
+      label: "Intento de operador suspendido",
+      clientId,
+      clientSecret,
+      redirectUri,
+      audit: { ...audit(), actorAdminUserId: temporaryAdmin.id },
+    });
+    await db.adminUser.update({
+      where: { id: temporaryAdmin.id },
+      data: { status: "SUSPENDED" },
+    });
+    const callsBefore = fixture.calls.length;
+    await assert.rejects(
+      service.completeMercadoLibreOAuth({
+        attemptId: started.attemptId,
+        state: started.state,
+        code: `TG-code-${randomUUID()}`,
+        redirectUri,
+        audit: callbackAudit(),
+      }),
+      (error) => error instanceof ChannelAccountError && error.code === "FORBIDDEN",
+    );
+    assert.equal(fixture.calls.length, callsBefore);
+    const failedAttempt = await db.channelOAuthAttempt.findUniqueOrThrow({
+      where: { id: started.attemptId },
+      include: { credential: true },
+    });
+    assert.equal(failedAttempt.status, "FAILED");
+    assert.equal(failedAttempt.failureCode, "OAUTH_ACTOR_INACTIVE");
+    assert.ok(failedAttempt.credential.revokedAt);
+  });
+
+  it("surfaces channels.reauth alerts for integrations readers and resolves them on reconnection", async () => {
+    const { account } = await connect({
+      label: "Canal alerta operativa",
+      tokenOverrides: {
+        scope: "offline_access read write urn:ml:mktp:orders:read-write",
+      },
+    });
+    assert.deepEqual(account.scopes, [
+      "offline_access",
+      "read",
+      "write",
+      "urn:ml:mktp:orders:read-write",
+    ]);
+    tokenBehavior = async () => ({ status: 400, body: { error: "invalid_grant" } });
+    await assert.rejects(
+      service.refreshAccount(account.id, audit(), { force: true }),
+      (error) => error.code === "REAUTH_REQUIRED",
+    );
+
+    const operations = new OperationsService(db);
+    const fulfillmentOperator = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `channels-fulfillment-${randomUUID()}@example.test`,
+        displayName: "Operador alistamiento",
+        role: "FULFILLMENT",
+        status: "ACTIVE",
+      },
+    });
+    const adminSnapshot = await operations.snapshot(actor.id);
+    const fulfillmentSnapshot = await operations.snapshot(fulfillmentOperator.id);
+    assert.ok(
+      adminSnapshot.notifications.some(
+        (item) => item.category === "channels.reauth" && item.entityId === account.id,
+      ),
+    );
+    assert.equal(
+      fulfillmentSnapshot.notifications.some((item) => item.category === "channels.reauth"),
+      false,
+    );
+
+    tokenBehavior = async () => ({ status: 200, body: grant(account.externalAccountId) });
+    const reconnectAttempt = await start("Canal alerta operativa", account.id);
+    await service.completeMercadoLibreOAuth({
+      attemptId: reconnectAttempt.attemptId,
+      state: reconnectAttempt.state,
+      code: `TG-code-${randomUUID()}`,
+      redirectUri,
+      audit: callbackAudit(),
+    });
+    const resolvedSnapshot = await operations.snapshot(actor.id);
+    assert.equal(
+      resolvedSnapshot.notifications.some(
+        (item) => item.category === "channels.reauth" && item.entityId === account.id,
+      ),
+      false,
     );
   });
 

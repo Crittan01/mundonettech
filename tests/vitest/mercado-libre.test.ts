@@ -8,9 +8,11 @@ import {
   createMercadoLibreAuthorizationUrl,
   createMercadoLibrePkce,
   mercadoLibreAuthorizationUrl,
+  mercadoLibreCallbackPath,
   parseMercadoLibreClientCredentials,
   parseMercadoLibrePendingCredential,
   parseMercadoLibreTokenCredential,
+  resolveMercadoLibreOAuthCookiePolicy,
   serializeMercadoLibrePendingCredential,
   serializeMercadoLibreTokenCredential,
   type MercadoLibreTokenCredential,
@@ -144,6 +146,58 @@ describe("F6.1 — Mercado Libre PKCE and credential contracts", () => {
     expect(() =>
       parseMercadoLibreClientCredentials({ clientId: "app", clientSecret: "12345678" }),
     ).toThrow(MercadoLibreProviderError);
+  });
+
+  it("accepts canonical Mercado Libre granular URN scopes alongside core scopes", () => {
+    const granular = {
+      ...tokenCredential,
+      scopes: [
+        "offline_access",
+        "read",
+        "write",
+        "urn:ml:mktp:orders:read-write",
+        "urn:ml:mktp:publish-sync:read-write",
+      ],
+    };
+    const serialized = serializeMercadoLibreTokenCredential(granular);
+    expect(parseMercadoLibreTokenCredential(serialized).scopes).toEqual([
+      "offline_access",
+      "read",
+      "write",
+      "urn:ml:mktp:orders:read-write",
+      "urn:ml:mktp:publish-sync:read-write",
+    ]);
+    serialized.fill(0);
+  });
+
+  it("enforces RFC 6265bis __Secure- cookie prefix when path-scoped to OAuth callback in STG/PRD", () => {
+    const localDev = resolveMercadoLibreOAuthCookiePolicy({
+      NODE_ENV: "development",
+      INTEGRATION_ENVIRONMENT: "LOCAL",
+    });
+    expect(localDev).toEqual({
+      name: "mnt_channel_oauth",
+      secure: false,
+      path: mercadoLibreCallbackPath,
+      httpOnly: true,
+      sameSite: "lax",
+    });
+    const localStandalone = resolveMercadoLibreOAuthCookiePolicy({
+      NODE_ENV: "production",
+      INTEGRATION_ENVIRONMENT: "LOCAL",
+    });
+    expect(localStandalone.name).toBe("mnt_channel_oauth");
+    expect(localStandalone.secure).toBe(false);
+    for (const integrationEnv of ["STG", "PRD"]) {
+      const policy = resolveMercadoLibreOAuthCookiePolicy({
+        NODE_ENV: "production",
+        INTEGRATION_ENVIRONMENT: integrationEnv,
+      });
+      expect(policy.name).toBe("__Secure-mnt_channel_oauth");
+      expect(policy.secure).toBe(true);
+      expect(policy.path).toBe(mercadoLibreCallbackPath);
+      expect(policy.name.startsWith("__Host-") && String(policy.path) !== "/").toBe(false);
+    }
   });
 });
 
