@@ -142,7 +142,12 @@ test("schedulers, webhooks and public metrics reject unauthenticated or cross-si
   request,
   baseURL,
 }) => {
-  for (const path of ["/api/jobs/orders", "/api/jobs/cms-publish", "/api/jobs/domain-events"]) {
+  for (const path of [
+    "/api/jobs/orders",
+    "/api/jobs/cms-publish",
+    "/api/jobs/domain-events",
+    "/api/jobs/health",
+  ]) {
     const anonymous = await request.post(path);
     expectProductionHeaders(anonymous);
     expect(anonymous.status()).toBe(401);

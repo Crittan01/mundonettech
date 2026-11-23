@@ -1,3 +1,4 @@
+import { helpArticles } from "@mundonettech/config/help";
 import { refreshTimeoutToken } from "@mundonettech/core";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
@@ -13,6 +14,8 @@ import {
   customerIdleSeconds,
   sessionCookieOptions,
 } from "@/lib/security/session-policy";
+
+const helpArticlePaths = new Set(helpArticles.map((article) => `/ayuda/${article.slug}`));
 
 function securityPolicy(
   supabaseUrl: string,
@@ -77,6 +80,17 @@ export async function proxy(request: NextRequest) {
   const mediaOrigin = getPublicMediaOrigin();
   const csp = securityPolicy(config.url, mediaOrigin, isDevelopment);
   const isSafeNavigationMethod = request.method === "GET" || request.method === "HEAD";
+  const helpPath = request.nextUrl.pathname.replace(/\/+$/, "");
+  if (isSafeNavigationMethod && helpPath.startsWith("/ayuda/") && !helpArticlePaths.has(helpPath)) {
+    const notFoundUrl = request.nextUrl.clone();
+    notFoundUrl.pathname = "/_not-found";
+    notFoundUrl.search = "";
+    const notFound = NextResponse.rewrite(notFoundUrl, { status: 404 });
+    notFound.headers.set("Cache-Control", "no-store");
+    notFound.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+    applyHeaders(notFound, csp, isDevelopment);
+    return notFound;
+  }
   const isLiveEditRequest =
     request.nextUrl.pathname.startsWith("/pagina/") &&
     request.nextUrl.searchParams.getAll("liveEdit").includes("1");

@@ -38,8 +38,14 @@
     "test:unit": "NODE_ENV=test EMAIL_SEND_DISABLED=1 vitest run",
     "typecheck": "turbo run typecheck && tsc -p tsconfig.json --noEmit",
     "audit:dependencies": "pnpm audit --prod --audit-level=high",
+    "backup:create": "node scripts/backup-r2.mjs",
+    "dr:drill": "node scripts/dr-drill.mjs",
     "release:verify": "node scripts/verify-release-readiness.mjs",
     "web:verify": "node scripts/verify-web-security.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1174.0",
+    "pg": "8.23.1"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
@@ -53,7 +59,6 @@
     "eslint-config-prettier": "^10.1.1",
     "globals": "^16.4.0",
     "lighthouse": "13.6.0",
-    "pg": "8.23.1",
     "prettier": "3.10.1",
     "prettier-plugin-tailwindcss": "0.8.1",
     "react": "19.3.1",

@@ -48,6 +48,7 @@ function environment(
     CMS_CRON_SECRET: key,
     ORDER_CRON_SECRET: key,
     DOMAIN_WORKER_CRON_SECRET: key,
+    HEALTH_CRON_SECRET: key,
     CMS_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
     CRM_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
     NEXT_PUBLIC_TURNSTILE_SITE_KEY: "0x4-real-site-key",
@@ -58,6 +59,13 @@ function environment(
     R2_BUCKET: "shop-media",
     R2_ACCESS_KEY_ID: "r2-access-key",
     R2_SECRET_ACCESS_KEY: "r2-secret-key",
+    R2_BACKUP_ENDPOINT: "https://r2.example.test",
+    R2_BACKUP_BUCKET: "shop-backups",
+    R2_BACKUP_ACCESS_KEY_ID: "backup-access-key",
+    R2_BACKUP_SECRET_ACCESS_KEY: "backup-secret-key",
+    R2_RECOVERY_BUCKETS: "shop-backups,shop-media",
+    BACKUP_GPG_PASSPHRASE: "release-test-passphrase-with-more-than-32-bytes",
+    DR_DATABASE_URL: "postgresql://dr.example.test/postgres",
     NEXT_PUBLIC_MEDIA_BASE_URL: "https://media.example.test",
     ...Object.fromEntries(approvals.map((name) => [name, "YES"])),
     ...overrides,
@@ -150,6 +158,7 @@ describe("release configuration gate", () => {
       "release.database",
       "release.supabaseUrl",
       "release.r2Bucket",
+      "release.r2RecoveryBuckets",
     ]);
   });
 
@@ -176,6 +185,28 @@ describe("release configuration gate", () => {
       }),
     );
     expect(checks.find((check) => check.name === "release.credentialKeyRing")?.passed).toBe(false);
+  });
+
+  it("rejects shared backup credentials, incomplete buckets, missing GPG and a non-isolated DR target", () => {
+    const checks = validateReleaseConfiguration(
+      environment({
+        R2_BACKUP_BUCKET: "shop-media",
+        R2_BACKUP_ACCESS_KEY_ID: "r2-access-key",
+        R2_BACKUP_SECRET_ACCESS_KEY: "r2-secret-key",
+        R2_RECOVERY_BUCKETS: "shop-media",
+        BACKUP_GPG_PASSPHRASE: undefined,
+        DR_DATABASE_URL: "postgresql://postgres.example.test/store",
+      }),
+    );
+    expect(checks.filter((check) => !check.passed).map((check) => check.name)).toEqual(
+      expect.arrayContaining([
+        "release.r2BackupBucket",
+        "release.r2BackupCredentialSeparation",
+        "release.r2RecoveryBuckets",
+        "release.backupGpgPassphrase",
+        "release.drIsolation",
+      ]),
+    );
   });
 });
 
@@ -211,7 +242,7 @@ describe("release HTTP gate", () => {
       return new Response("ok", { status: 200, headers });
     }) as typeof fetch;
     const checks = await verifyReleaseHttp("https://shop.example.test", fetchImplementation);
-    expect(checks).toHaveLength(14);
+    expect(checks).toHaveLength(15);
     expect(checks.every((check) => check.passed)).toBe(true);
   });
 

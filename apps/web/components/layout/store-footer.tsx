@@ -18,9 +18,12 @@ export async function StoreFooter() {
           <p>Comercio electrónico de tecnología en Colombia</p>
         </div>
         <nav
-          aria-label="Legal y protección al consumidor"
+          aria-label="Ayuda, legal y protección al consumidor"
           className="flex flex-wrap gap-x-5 gap-y-2 border-t border-border pt-4"
         >
+          <Link href="/ayuda" className="underline-offset-4 hover:underline">
+            Centro de ayuda
+          </Link>
           <Link href="/legal" className="underline-offset-4 hover:underline">
             Legal y privacidad
           </Link>

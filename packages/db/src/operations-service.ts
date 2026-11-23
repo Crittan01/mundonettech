@@ -48,7 +48,7 @@ export function canReadNotificationCategory(role: AdminRoleValue, category: stri
   if (category.startsWith("fiscal.")) {
     return hasAdminPermission(role, "finance:read");
   }
-  if (category.startsWith("outbox.")) {
+  if (category.startsWith("outbox.") || category.startsWith("health.")) {
     return hasAdminPermission(role, "audit:read");
   }
   return hasAdminPermission(role, "dashboard:read");
@@ -81,7 +81,7 @@ export function notificationWhereForRole(role: AdminRoleValue): Prisma.Notificat
     excludedPrefixes.push("fiscal.");
   }
   if (!hasAdminPermission(role, "audit:read")) {
-    excludedPrefixes.push("outbox.");
+    excludedPrefixes.push("outbox.", "health.");
   }
   const exclusions: Prisma.NotificationWhereInput[] = [
     ...excludedPrefixes.map((prefix) => ({ category: { startsWith: prefix } })),

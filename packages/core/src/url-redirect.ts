@@ -104,6 +104,7 @@ export const reservedRedirectSourcePrefixes = [
   "/recuperar",
   "/verificar-correo",
   "/legal",
+  "/ayuda",
   "/robots.txt",
   "/sitemap.xml",
   "/sitemaps",

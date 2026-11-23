@@ -28,6 +28,10 @@
     "./legal": {
       "types": "./dist/legal.config.d.ts",
       "import": "./dist/legal.config.js"
+    },
+    "./help": {
+      "types": "./dist/help-center.config.d.ts",
+      "import": "./dist/help-center.config.js"
     }
   },
   "scripts": {

@@ -21,6 +21,8 @@ export {
   PurchaseOrderStatus,
   SerializedUnitStatus,
   StockLocationType,
+  RecoveryRunStatus,
+  OperationalHealthStatus,
   Prisma,
   PrismaClient,
 } from "./generated/client.js";
@@ -315,6 +317,17 @@ export type {
   LocalDeliveryZoneInput,
 } from "./local-delivery-service.js";
 export { verifySecurityPosture } from "./verify-security-posture.js";
+export { OperationalHealthService } from "./health-service.js";
+export type {
+  BackupRunView,
+  DisasterRecoveryDrillView,
+  HealthCaptureResult,
+  HealthDashboard,
+  OperationalHealthSnapshotView,
+  OperationalHealthStatusValue,
+  RecoveryBucketCheckView,
+  RecoveryRunStatusValue,
+} from "./health-types.js";
 export { FunnelService, recordDailyFunnelCounters } from "./funnel-service.js";
 export type { FunnelCounters } from "./funnel-service.js";
 export { FinanceService, bogotaDayStart, currentYearRange } from "./finance-service.js";

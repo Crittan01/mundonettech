@@ -192,7 +192,12 @@ export function validateReleaseConfiguration(environment) {
   for (const name of ["SESSION_TIMEOUT_SECRET", "SECURITY_EVENT_PEPPER", "RECOVERY_CODE_PEPPER"]) {
     check(`release.${name}`, validBase64Key(environment[name]));
   }
-  for (const name of ["CMS_CRON_SECRET", "ORDER_CRON_SECRET", "DOMAIN_WORKER_CRON_SECRET"]) {
+  for (const name of [
+    "CMS_CRON_SECRET",
+    "ORDER_CRON_SECRET",
+    "DOMAIN_WORKER_CRON_SECRET",
+    "HEALTH_CRON_SECRET",
+  ]) {
     check(`release.${name}`, validBase64Key(environment[name]));
   }
   check(
@@ -246,6 +251,60 @@ export function validateReleaseConfiguration(environment) {
   );
   check("release.r2AccessKey", Boolean(environment.R2_ACCESS_KEY_ID?.trim()));
   check("release.r2SecretKey", Boolean(environment.R2_SECRET_ACCESS_KEY?.trim()));
+  check(
+    "release.r2BackupEndpoint",
+    validHttpsOrigin(environment.R2_BACKUP_ENDPOINT, targetEnvironment),
+  );
+  const backupBucket = environment.R2_BACKUP_BUCKET?.trim() ?? "";
+  check(
+    "release.r2BackupBucket",
+    /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(backupBucket) &&
+      backupBucket !== r2Bucket &&
+      (targetEnvironment !== "STG" || !productionMarkerPattern.test(backupBucket)) &&
+      (targetEnvironment !== "PRD" || !nonProductionMarkerPattern.test(backupBucket)),
+  );
+  check("release.r2BackupAccessKey", Boolean(environment.R2_BACKUP_ACCESS_KEY_ID?.trim()));
+  check("release.r2BackupSecretKey", Boolean(environment.R2_BACKUP_SECRET_ACCESS_KEY?.trim()));
+  check(
+    "release.r2BackupCredentialSeparation",
+    environment.R2_BACKUP_ACCESS_KEY_ID !== environment.R2_ACCESS_KEY_ID &&
+      environment.R2_BACKUP_SECRET_ACCESS_KEY !== environment.R2_SECRET_ACCESS_KEY,
+  );
+  const recoveryBuckets = new Set(
+    (environment.R2_RECOVERY_BUCKETS ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+  check(
+    "release.r2RecoveryBuckets",
+    recoveryBuckets.size >= 2 &&
+      recoveryBuckets.size <= 32 &&
+      recoveryBuckets.has(r2Bucket) &&
+      recoveryBuckets.has(backupBucket) &&
+      [...recoveryBuckets].every(
+        (name) =>
+          /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(name) &&
+          (targetEnvironment !== "STG" || !productionMarkerPattern.test(name)) &&
+          (targetEnvironment !== "PRD" || !nonProductionMarkerPattern.test(name)),
+      ),
+  );
+  const passphraseEnvironment = environment.BACKUP_GPG_PASSPHRASE;
+  const passphraseFile = environment.BACKUP_GPG_PASSPHRASE_FILE?.trim();
+  check(
+    "release.backupGpgPassphrase",
+    Boolean(passphraseEnvironment) !== Boolean(passphraseFile) &&
+      (passphraseFile ? true : Buffer.byteLength(passphraseEnvironment ?? "", "utf8") >= 32),
+  );
+  check("release.drDatabase", validPostgresqlUrl(environment.DR_DATABASE_URL, targetEnvironment));
+  let drIsolated = false;
+  try {
+    drIsolated =
+      new URL(environment.DR_DATABASE_URL).hostname !== new URL(environment.DATABASE_URL).hostname;
+  } catch {
+    drIsolated = false;
+  }
+  check("release.drIsolation", drIsolated);
   check(
     "release.mediaOrigin",
     validHttpsOrigin(environment.NEXT_PUBLIC_MEDIA_BASE_URL, targetEnvironment),
@@ -323,6 +382,7 @@ export async function verifyReleaseHttp(target, fetchImplementation = fetch) {
     "/api/jobs/orders",
     "/api/jobs/cms-publish",
     "/api/jobs/domain-events",
+    "/api/jobs/health",
   ]) {
     try {
       const response = await fetchImplementation(`${origin}${schedulerPath}`, {

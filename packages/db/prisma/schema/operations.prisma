@@ -93,3 +93,93 @@ model FiscalWatchSnapshot {
   @@index([status, snapshotDate])
   @@map("FiscalWatchSnapshot")
 }
+
+enum RecoveryRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum OperationalHealthStatus {
+  HEALTHY
+  DEGRADED
+  CRITICAL
+}
+
+model BackupRun {
+  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  environment         IntegrationEnvironment
+  status              RecoveryRunStatus     @default(RUNNING)
+  startedAt           DateTime              @default(now()) @db.Timestamptz(6)
+  completedAt         DateTime?             @db.Timestamptz(6)
+  storageKey          String?               @unique @db.VarChar(512)
+  manifestKey         String?               @unique @db.VarChar(512)
+  byteSize            BigInt?
+  encryptedSha256     Bytes?                @db.ByteA
+  authSchemaVerified  Boolean               @default(false)
+  failureCode         String?               @db.VarChar(120)
+  bucketChecks        RecoveryBucketCheck[]
+  disasterRecoveryRuns DisasterRecoveryDrill[]
+
+  @@index([environment, status, startedAt])
+  @@index([startedAt])
+  @@map("BackupRun")
+}
+
+model DisasterRecoveryDrill {
+  id                    String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  backupRunId           String                @db.Uuid
+  environment           IntegrationEnvironment
+  status                RecoveryRunStatus     @default(RUNNING)
+  startedAt             DateTime              @default(now()) @db.Timestamptz(6)
+  completedAt           DateTime?             @db.Timestamptz(6)
+  authSchemaVerified    Boolean               @default(false)
+  verifiedRelationCount Int                   @default(0)
+  nextDueAt             DateTime?             @db.Timestamptz(6)
+  failureCode           String?               @db.VarChar(120)
+  backupRun             BackupRun             @relation(fields: [backupRunId], references: [id], onDelete: Restrict)
+  bucketChecks          RecoveryBucketCheck[]
+
+  @@index([environment, status, startedAt])
+  @@index([startedAt])
+  @@map("DisasterRecoveryDrill")
+}
+
+model RecoveryBucketCheck {
+  id                      String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  backupRunId             String?                @db.Uuid
+  disasterRecoveryDrillId String?                @db.Uuid
+  bucketName              String                 @db.VarChar(63)
+  accessible              Boolean
+  readVerified            Boolean                @default(false)
+  objectCount             BigInt?
+  checkedAt               DateTime               @default(now()) @db.Timestamptz(6)
+  backupRun               BackupRun?             @relation(fields: [backupRunId], references: [id], onDelete: Restrict)
+  disasterRecoveryDrill   DisasterRecoveryDrill? @relation(fields: [disasterRecoveryDrillId], references: [id], onDelete: Restrict)
+
+  @@unique([backupRunId, bucketName])
+  @@unique([disasterRecoveryDrillId, bucketName])
+  @@index([backupRunId])
+  @@index([disasterRecoveryDrillId])
+  @@map("RecoveryBucketCheck")
+}
+
+model OperationalHealthSnapshot {
+  id                       String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  environment              IntegrationEnvironment
+  captureKey               String                 @db.VarChar(15)
+  capturedAt               DateTime               @default(now()) @db.Timestamptz(6)
+  status                   OperationalHealthStatus
+  databaseReady            Boolean
+  databaseLatencyMs        Int
+  pendingOutbox            Int                    @default(0)
+  failedOutbox             Int                    @default(0)
+  oldestPendingOutboxAt    DateTime?              @db.Timestamptz(6)
+  latestSuccessfulBackupAt DateTime?              @db.Timestamptz(6)
+  latestSuccessfulDrillAt  DateTime?              @db.Timestamptz(6)
+
+  @@unique([environment, captureKey])
+  @@index([environment, capturedAt])
+  @@index([status, capturedAt])
+  @@map("OperationalHealthSnapshot")
+}

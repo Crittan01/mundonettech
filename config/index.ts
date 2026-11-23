@@ -8,3 +8,13 @@ export { catalogSeed } from "./catalog-seed.js";
 export type { CatalogSeed } from "./catalog-seed.js";
 export { legalConfig } from "./legal.config.js";
 export type { LegalConfig } from "./legal.config.js";
+export {
+  getHelpArticle,
+  helpArticles,
+  helpCategories,
+  helpFaqs,
+  isHelpCategory,
+  normalizeHelpText,
+  searchHelpArticles,
+} from "./help-center.config.js";
+export type { HelpArticle, HelpCategoryId, HelpLink, HelpSection } from "./help-center.config.js";
