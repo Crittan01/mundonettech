@@ -290,6 +290,7 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/precios"
     | "/admin/venta-asistida"
     | "/admin/integraciones"
+    | "/admin/canales"
     | "/admin/pagos"
     | "/admin/logistica"
     | "/admin/comunicaciones"
@@ -342,7 +343,10 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       ? [{ href: "/admin/venta-asistida" as const, label: "Venta asistida" }]
       : []),
     ...(hasAdminPermission(role, "integrations:read")
-      ? [{ href: "/admin/integraciones" as const, label: "Integraciones" }]
+      ? [
+          { href: "/admin/integraciones" as const, label: "Integraciones" },
+          { href: "/admin/canales" as const, label: "Canales" },
+        ]
       : []),
     ...(hasAdminPermission(role, "payments:read")
       ? [{ href: "/admin/pagos" as const, label: "Pagos" }]

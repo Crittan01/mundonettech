@@ -9,6 +9,8 @@ export const operationsTables = [
   "DisasterRecoveryDrill",
   "RecoveryBucketCheck",
   "OperationalHealthSnapshot",
+  "ChannelAccount",
+  "ChannelOAuthAttempt",
 ];
 
 export async function seedOperationsFixture(client, { adminId }) {
@@ -101,5 +103,47 @@ export async function seedOperationsFixture(client, { adminId }) {
      VALUES ($1, $2, 'LOCAL')`,
     [matrixDrillId, backupRunId],
   );
-  return { notificationId, backupRunId, drillId, matrixBackupRunId, matrixDrillId };
+  const channelAccountId = randomUUID();
+  const channelAttemptId = randomUUID();
+  const channelCredentialId = randomUUID();
+  const pendingCredentialId = randomUUID();
+  for (const credentialId of [channelCredentialId, pendingCredentialId]) {
+    await client.query(
+      `INSERT INTO "IntegrationCredential" (
+        "id", "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+      ) VALUES ($1, 'mercado-libre', 'LOCAL', $2, 1, $3, $4, $5, $6)`,
+      [credentialId, randomUUID(), randomBytes(12), randomBytes(32), randomBytes(16), adminId],
+    );
+  }
+  await client.query(
+    `INSERT INTO "ChannelAccount" (
+      "id", "provider", "siteId", "environment", "credentialId", "externalAccountId", "label",
+      "scopes", "tokenExpiresAt", "lastRefreshedAt", "createdByAdminUserId"
+    ) VALUES ($1, 'MERCADO_LIBRE', 'MCO', 'LOCAL', $2, $3, 'Canal RLS',
+      ARRAY['offline_access', 'read', 'write']::text[], CURRENT_TIMESTAMP + INTERVAL '1 hour',
+      CURRENT_TIMESTAMP, $4)`,
+    [
+      channelAccountId,
+      channelCredentialId,
+      String(8_000_000_000 + randomBytes(4).readUInt32BE(0)),
+      adminId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO "ChannelOAuthAttempt" (
+      "id", "accountId", "provider", "siteId", "environment", "credentialId", "label", "stateHash",
+      "expiresAt", "createdByAdminUserId"
+    ) VALUES ($1, $2, 'MERCADO_LIBRE', 'MCO', 'LOCAL', $3, 'Canal RLS', $4,
+      CURRENT_TIMESTAMP + INTERVAL '10 minutes', $5)`,
+    [channelAttemptId, channelAccountId, pendingCredentialId, randomBytes(32), adminId],
+  );
+  return {
+    notificationId,
+    backupRunId,
+    drillId,
+    matrixBackupRunId,
+    matrixDrillId,
+    channelAccountId,
+    channelAttemptId,
+  };
 }

@@ -41,6 +41,10 @@ const webServerEnv: Record<string, string> = {
   DOMAIN_WORKER_CRON_SECRET:
     process.env.DOMAIN_WORKER_CRON_SECRET ?? "e2e-domain-worker-scheduler-secret-32-chars",
   HEALTH_CRON_SECRET: process.env.HEALTH_CRON_SECRET ?? "e2e-health-scheduler-secret-32-chars",
+  CHANNEL_CRON_SECRET: process.env.CHANNEL_CRON_SECRET ?? "e2e-channel-scheduler-secret-32-chars",
+  CHANNEL_JOB_ACTOR_ID: process.env.CHANNEL_JOB_ACTOR_ID ?? "00000000-0000-4000-8000-00000000c202",
+  MERCADO_LIBRE_TOKEN_URL:
+    process.env.MERCADO_LIBRE_TOKEN_URL ?? "http://127.0.0.1:54420/oauth/token",
   BANK_TRANSFER_INSTRUCTIONS:
     process.env.BANK_TRANSFER_INSTRUCTIONS ??
     "Cuenta de ahorros 001-00234567-89, banco de pruebas E2E. Usa la referencia del pedido.",

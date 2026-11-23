@@ -5,6 +5,7 @@ import { IntegrationEnvironment, type PrismaClient } from "@mundonettech/db";
 import {
   B2bCopilotService,
   BlockedIdentityService,
+  ChannelAccountService,
   CodReconciliationService,
   EmailService,
   GuestOrderAccessService,
@@ -136,4 +137,18 @@ export function guestOrderAccessService(db: PrismaClient = getDatabase()): Guest
     storeName: storeConfig.name,
     vault: getIntegrationCredentialVault(),
   });
+}
+
+export function channelAccountService(db: PrismaClient = getDatabase()): ChannelAccountService {
+  const environment = getIntegrationEnvironment();
+  const tokenUrl = process.env.MERCADO_LIBRE_TOKEN_URL?.trim();
+  return new ChannelAccountService(db, {
+    ring: loadCredentialKeyRing(environment),
+    ...(tokenUrl ? { tokenUrl } : {}),
+    allowLoopback: environment === IntegrationEnvironment.LOCAL,
+  });
+}
+
+export function mercadoLibreOAuthRedirectUri(): string {
+  return `${getPublicSiteUrl()}/api/channels/mercado-libre/oauth/callback`;
 }

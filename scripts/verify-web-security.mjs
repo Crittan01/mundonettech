@@ -11,7 +11,14 @@ function cspDirective(csp, name) {
     .find((directive) => directive.startsWith(`${name} `));
 }
 
-function verifySecurityHeaders(response, label, { allowIsolatedNonePolicy = false } = {}) {
+function verifySecurityHeaders(
+  response,
+  label,
+  {
+    allowIsolatedNonePolicy = false,
+    expectedReferrerPolicy = "strict-origin-when-cross-origin",
+  } = {},
+) {
   const csp = response.headers.get("content-security-policy") ?? "";
   const isIsolatedNone = allowIsolatedNonePolicy && csp.includes("default-src 'none'");
   for (const required of [
@@ -51,7 +58,7 @@ function verifySecurityHeaders(response, label, { allowIsolatedNonePolicy = fals
     `${label}: missing frame denial.`,
   );
   requireCondition(
-    response.headers.get("referrer-policy") === "strict-origin-when-cross-origin",
+    response.headers.get("referrer-policy") === expectedReferrerPolicy,
     `${label}: invalid referrer policy.`,
   );
   requireCondition(
@@ -178,6 +185,7 @@ export async function verifyWebSecurity(
     ["/admin/lifecycle", "/admin/login"],
     ["/admin/analitica-rfm", "/admin/login"],
     ["/admin/salud", "/admin/login"],
+    ["/admin/canales", "/admin/login"],
     ["/admin/b2b", "/admin/login"],
     ["/admin/b2b?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
@@ -292,6 +300,7 @@ export async function verifyWebSecurity(
     "/api/jobs/cms-publish",
     "/api/jobs/domain-events",
     "/api/jobs/health",
+    "/api/jobs/channels",
   ]) {
     const getMethod = await request(origin, path);
     requireCondition(
@@ -310,6 +319,35 @@ export async function verifyWebSecurity(
     });
     requireCondition(forged.status === 401, `${path}: forged scheduler bearer was accepted.`);
   }
+
+  const oauthCallbackPath = "/api/channels/mercado-libre/oauth/callback";
+  for (const method of ["POST", "HEAD"]) {
+    const methodResponse = await request(
+      origin,
+      oauthCallbackPath,
+      { method },
+      { expectedReferrerPolicy: "no-referrer" },
+    );
+    requireCondition(
+      methodResponse.status === 405 &&
+        methodResponse.headers.get("allow") === "GET" &&
+        (methodResponse.headers.get("cache-control") ?? "").includes("no-store"),
+      `${oauthCallbackPath}: ${method} must return 405 with Allow: GET and no-store.`,
+    );
+  }
+  const oauthReplay = await request(
+    origin,
+    `${oauthCallbackPath}?code=TG-invalid&state=invalid`,
+    {},
+    { expectedReferrerPolicy: "no-referrer" },
+  );
+  requireCondition(
+    oauthReplay.status === 200 &&
+      (oauthReplay.headers.get("cache-control") ?? "").includes("no-store") &&
+      (oauthReplay.headers.get("x-robots-tag") ?? "").includes("noindex") &&
+      (oauthReplay.headers.get("set-cookie") ?? "").includes("Max-Age=0"),
+    `${oauthCallbackPath}: replay GET must clear OAuth cookie with no-store and noindex.`,
+  );
 
   for (const path of ["/api/webhooks/wompi", "/api/webhooks/resend"]) {
     const getMethod = await request(origin, path);

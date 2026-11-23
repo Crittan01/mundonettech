@@ -20,6 +20,7 @@ const managedCategories = [
   "crm.tasks",
   "crm.merges",
   "b2b.opportunities",
+  "channels.reauth",
   "outbox.failed",
 ] as const;
 
@@ -41,6 +42,9 @@ export function canReadNotificationCategory(role: AdminRoleValue, category: stri
   }
   if (category.startsWith("b2b.")) {
     return hasAdminPermission(role, "b2b:read");
+  }
+  if (category.startsWith("channels.")) {
+    return hasAdminPermission(role, "integrations:read");
   }
   if (category.startsWith("payments.") || category.startsWith("refunds.")) {
     return hasAdminPermission(role, "payments:read");
@@ -73,6 +77,9 @@ export function notificationWhereForRole(role: AdminRoleValue): Prisma.Notificat
   }
   if (!hasAdminPermission(role, "b2b:read")) {
     excludedPrefixes.push("b2b.");
+  }
+  if (!hasAdminPermission(role, "integrations:read")) {
+    excludedPrefixes.push("channels.");
   }
   if (!hasAdminPermission(role, "payments:read")) {
     excludedPrefixes.push("payments.", "refunds.");
@@ -231,6 +238,13 @@ export class OperationsService {
           '/admin/b2b/' || opportunities."id", 'Opportunity', opportunities."id"::text
         FROM "Opportunity" opportunities
         WHERE opportunities."status" = 'NEW'
+        UNION ALL
+        SELECT 'channel-reauth:' || channels."id", 'channels.reauth', 'CRITICAL',
+          btrim('Canal requiere reconexión: ' || left(channels."label", 110)),
+          'La renovación del token de Mercado Libre se detuvo de forma segura. Autoriza de nuevo la cuenta en Canales.',
+          '/admin/canales', 'ChannelAccount', channels."id"::text
+        FROM "ChannelAccount" channels
+        WHERE channels."status" = 'REAUTH_REQUIRED'
         UNION ALL
         SELECT 'outbox-failed:' || outbox."id", 'outbox.failed', 'CRITICAL',
           'Evento de integración fallido',

@@ -163,3 +163,39 @@ export type {
 } from "./gemini.js";
 export { B2bCopilotError, B2bCopilotService } from "./b2b-copilot-service.js";
 export type { B2bCopilotAudit, B2bCopilotRunResult } from "./b2b-copilot-service.js";
+export { ChannelAccountError, ChannelAccountService } from "./channel-account-service.js";
+export type {
+  ChannelAccountErrorCode,
+  ChannelAccountServiceOptions,
+  ChannelAccountView,
+  ChannelAuditContext,
+  ChannelCallbackAudit,
+  ChannelDisconnectResult,
+  ChannelOAuthStartResult,
+  ChannelRefreshResult,
+  ChannelScheduledRefreshResult,
+} from "./channel-account-service.js";
+export {
+  MercadoLibreOAuthClient,
+  MercadoLibreProviderError,
+  createMercadoLibreAuthorizationUrl,
+  createMercadoLibrePkce,
+  mercadoLibreAuthorizationUrl,
+  mercadoLibreCallbackPath,
+  mercadoLibreScopes,
+  mercadoLibreTokenUrl,
+  parseMercadoLibreClientCredentials,
+  parseMercadoLibrePendingCredential,
+  parseMercadoLibreTokenCredential,
+  resolveMercadoLibreOAuthCookiePolicy,
+  serializeMercadoLibrePendingCredential,
+  serializeMercadoLibreTokenCredential,
+} from "./mercado-libre.js";
+export type {
+  MercadoLibreClientCredentials,
+  MercadoLibreClientOptions,
+  MercadoLibrePendingCredential,
+  MercadoLibreProviderErrorCode,
+  MercadoLibreTokenCredential,
+  MercadoLibreTokenSet,
+} from "./mercado-libre.js";

@@ -80,6 +80,7 @@ export function assertSafeTestEnvironment(
   for (const [name, value] of [
     ["R2_ENDPOINT", env.R2_ENDPOINT],
     ["R2_BACKUP_ENDPOINT", env.R2_BACKUP_ENDPOINT],
+    ["MERCADO_LIBRE_TOKEN_URL", env.MERCADO_LIBRE_TOKEN_URL],
   ]) {
     if (!value?.trim()) continue;
     let r2Url;

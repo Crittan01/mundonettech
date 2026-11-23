@@ -15,6 +15,7 @@ const approvals = [
   "RELEASE_EMAIL_PROVIDER_VERIFIED",
   "RELEASE_DIAN_PROVIDER_VERIFIED",
   "RELEASE_MERCHANT_CENTER_VERIFIED",
+  "RELEASE_MERCADO_LIBRE_VERIFIED",
   "RELEASE_BACKUP_RESTORE_VERIFIED",
   "RELEASE_SCHEDULERS_VERIFIED",
   "RELEASE_ROLLBACK_APPROVED",
@@ -49,8 +50,10 @@ function environment(
     ORDER_CRON_SECRET: key,
     DOMAIN_WORKER_CRON_SECRET: key,
     HEALTH_CRON_SECRET: key,
+    CHANNEL_CRON_SECRET: key,
     CMS_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
     CRM_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
+    CHANNEL_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
     NEXT_PUBLIC_TURNSTILE_SITE_KEY: "0x4-real-site-key",
     TURNSTILE_SECRET_KEY: "0x4-real-secret-key",
     INTEGRATION_CREDENTIAL_KEYS_PRD: JSON.stringify({ 1: key }),
@@ -177,6 +180,23 @@ describe("release configuration gate", () => {
     ]);
   });
 
+  it("requires an authenticated channel scheduler and official OAuth endpoints", () => {
+    const checks = validateReleaseConfiguration(
+      environment({
+        CHANNEL_CRON_SECRET: undefined,
+        CHANNEL_JOB_ACTOR_ID: "not-a-uuid",
+        MERCADO_LIBRE_TOKEN_URL: "http://127.0.0.1:54420/oauth/token",
+      }),
+    );
+    expect(checks.filter((check) => !check.passed).map((check) => check.name)).toEqual(
+      expect.arrayContaining([
+        "release.CHANNEL_CRON_SECRET",
+        "release.channelJobActor",
+        "release.mercadoLibreTokenEndpoint",
+      ]),
+    );
+  });
+
   it("rejects a malformed key ring and inactive encryption version", () => {
     const checks = validateReleaseConfiguration(
       environment({
@@ -250,7 +270,7 @@ describe("release HTTP gate", () => {
       return new Response("ok", { status: 200, headers });
     }) as typeof fetch;
     const checks = await verifyReleaseHttp("https://shop.example.test", fetchImplementation);
-    expect(checks).toHaveLength(15);
+    expect(checks).toHaveLength(16);
     expect(checks.every((check) => check.passed)).toBe(true);
   });
 
