@@ -128,6 +128,7 @@ test("protected account, MFA, and admin routes enforce unauthenticated redirects
     "/admin/contenido/medios",
     "/admin/configuracion",
     "/admin/integraciones",
+    "/admin/canales",
     "/admin/pagos",
     "/admin/logistica",
     "/admin/comunicaciones",

@@ -51,6 +51,14 @@ La credencial `dian` incluye token, endpoint del proveedor autorizado, identidad
 
 La credencial `gemini` contiene API key, modelo y base oficial `https://generativelanguage.googleapis.com/v1beta/models`, cifrados en la bóveda por ambiente y administrados desde `/admin/integraciones`. `B2bCopilotService` exige `b2b:write`, registra ejecuciones idempotentes en `OpportunityCopilotRun`, escribe auditoría y conserva solo hashes de entrada/prompt y la salida enumerada; errores HTTP/transporte se clasifican sin reintentos ciegos ni respuestas crudas. `/admin/b2b/[id]` ejecuta y presenta resultados con MFA reciente.
 
+## Mercado Libre OAuth PKCE y cuentas de canal
+
+`MercadoLibreOAuthClient` implementa el flujo Authorization Code con PKCE `S256` para `MCO`, formularios server-side acotados y validación estricta de tokens, alcance `offline_access read write`, vendedor y expiración. `ChannelAccountService` conserva solo el hash del estado OAuth y cifra `client_secret`, verifier y access/refresh tokens en `IntegrationCredential` con AAD por ambiente; callbacks son de un solo uso y toda repetición se rechaza antes de llamar al proveedor.
+
+La renovación usa un reclamo UUID persistente, no mantiene transacciones durante HTTP y guarda el nuevo `refresh_token` con control optimista de nonce. Un timeout, respuesta inválida, grant rechazado o reclamo vencido revoca el acceso y exige nueva autorización, nunca reintenta ciegamente un token de un solo uso. Reconectar valida el mismo vendedor y reemplaza la credencial en una transacción; desvincular siempre bloquea localmente y distingue revocación remota confirmada de incierta.
+
+`/admin/canales` aplica `integrations:*` + MFA reciente y auditoría sin secretos. `POST /api/jobs/channels` exige `CHANNEL_CRON_SECRET` y `CHANNEL_JOB_ACTOR_ID` con `integrations:write`, expira intentos y renueva únicamente cuentas próximas a vencer. `MERCADO_LIBRE_TOKEN_URL` solo admite fixtures loopback en `LOCAL`; los endpoints productivos son fijos y oficiales.
+
 ## Worker de dominio
 
 `DomainEventWorker` usa `claim_domain_outbox_events` para no consumir eventos ajenos, ejecuta efectos idempotentes y aplica backoff acotado antes de `fail_domain_outbox`. Los payloads llevan UUIDs y referencias, nunca correos, direcciones, teléfonos, documentos ni tokens; el enlace del recibo se deriva en servidor desde su UUID de envío. Para `cart.abandoned.v1` recupera el estado real del carrito, valida contacto/consentimiento, genera una clave por actividad y registra `QUEUED`, `NO_CONTACT`, `NO_CONSENT`, `SUPPRESSED` o `STALE`. Para `lifecycle.message.dispatch.v1` valida `dispatchVersion`, sella el contenido del paso y completa la inscripción únicamente cuando todos los correos fueron aceptados; un fallo terminal cancela los pasos futuros. `POST /api/jobs/domain-events` exige `DOMAIN_WORKER_CRON_SECRET` y procesa hasta cuatro lotes por invocación.

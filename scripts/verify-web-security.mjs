@@ -178,6 +178,7 @@ export async function verifyWebSecurity(
     ["/admin/lifecycle", "/admin/login"],
     ["/admin/analitica-rfm", "/admin/login"],
     ["/admin/salud", "/admin/login"],
+    ["/admin/canales", "/admin/login"],
     ["/admin/b2b", "/admin/login"],
     ["/admin/b2b?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
@@ -292,6 +293,7 @@ export async function verifyWebSecurity(
     "/api/jobs/cms-publish",
     "/api/jobs/domain-events",
     "/api/jobs/health",
+    "/api/jobs/channels",
   ]) {
     const getMethod = await request(origin, path);
     requireCondition(

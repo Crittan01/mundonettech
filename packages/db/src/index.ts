@@ -23,10 +23,15 @@ export {
   StockLocationType,
   RecoveryRunStatus,
   OperationalHealthStatus,
+  ChannelProvider,
+  ChannelAccountStatus,
+  ChannelOAuthAttemptStatus,
   Prisma,
   PrismaClient,
 } from "./generated/client.js";
 export type {
+  ChannelAccount,
+  ChannelOAuthAttempt,
   AdminActionLog,
   AdminRecoveryCode,
   AdminUser,

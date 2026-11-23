@@ -11,6 +11,7 @@ const commonApprovals = [
   "RELEASE_EMAIL_PROVIDER_VERIFIED",
   "RELEASE_DIAN_PROVIDER_VERIFIED",
   "RELEASE_MERCHANT_CENTER_VERIFIED",
+  "RELEASE_MERCADO_LIBRE_VERIFIED",
   "RELEASE_BACKUP_RESTORE_VERIFIED",
   "RELEASE_SCHEDULERS_VERIFIED",
   "RELEASE_ROLLBACK_APPROVED",
@@ -197,6 +198,7 @@ export function validateReleaseConfiguration(environment) {
     "ORDER_CRON_SECRET",
     "DOMAIN_WORKER_CRON_SECRET",
     "HEALTH_CRON_SECRET",
+    "CHANNEL_CRON_SECRET",
   ]) {
     check(`release.${name}`, validBase64Key(environment[name]));
   }
@@ -212,6 +214,13 @@ export function validateReleaseConfiguration(environment) {
       environment.CRM_JOB_ACTOR_ID ?? "",
     ),
   );
+  check(
+    "release.channelJobActor",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      environment.CHANNEL_JOB_ACTOR_ID ?? "",
+    ),
+  );
+  check("release.mercadoLibreTokenEndpoint", !environment.MERCADO_LIBRE_TOKEN_URL);
   check(
     "release.turnstileSiteKey",
     Boolean(environment.NEXT_PUBLIC_TURNSTILE_SITE_KEY) &&
@@ -390,6 +399,7 @@ export async function verifyReleaseHttp(target, fetchImplementation = fetch) {
     "/api/jobs/cms-publish",
     "/api/jobs/domain-events",
     "/api/jobs/health",
+    "/api/jobs/channels",
   ]) {
     try {
       const response = await fetchImplementation(`${origin}${schedulerPath}`, {

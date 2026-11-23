@@ -72,6 +72,8 @@ model AdminUser {
   updatedCustomerSegments   CustomerSegment[] @relation("CustomerSegmentUpdater")
   createdLifecycleJourneys  LifecycleJourney[] @relation("LifecycleJourneyCreator")
   updatedLifecycleJourneys  LifecycleJourney[] @relation("LifecycleJourneyUpdater")
+  createdChannelAccounts    ChannelAccount[] @relation("ChannelAccountCreator")
+  createdChannelOAuthAttempts ChannelOAuthAttempt[] @relation("ChannelOAuthAttemptCreator")
 
   @@index([role, status])
   @@index([createdAt])
@@ -159,6 +161,8 @@ model IntegrationCredential {
   taxInvoices              TaxInvoice[]
   creditNotes              CreditNote[]
   b2bCopilotRuns           OpportunityCopilotRun[]
+  channelAccount           ChannelAccount?
+  channelOAuthAttempt      ChannelOAuthAttempt?
 
   @@index([environment, revokedAt])
   @@index([environment, createdAt, id])

@@ -91,6 +91,12 @@ describe("F0.5 — production database, Supabase endpoint, and outbound email gu
         R2_BUCKET: "media-production",
       }),
     ).toThrow();
+    expect(() =>
+      assertSafeTestEnvironment({
+        ...safeEnvironment,
+        MERCADO_LIBRE_TOKEN_URL: "https://api.mercadolibre.com/oauth/token",
+      }),
+    ).toThrow();
     expect(
       assertSafeTestEnvironment({
         ...safeEnvironment,

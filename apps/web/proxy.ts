@@ -232,6 +232,11 @@ export async function proxy(request: NextRequest) {
     response = redirectResponse;
   }
   applyHeaders(response, csp, isDevelopment);
+  if (pathname === "/api/channels/mercado-libre/oauth/callback") {
+    response.headers.set("Cache-Control", "no-store");
+    response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+    response.headers.set("Referrer-Policy", "no-referrer");
+  }
   if (pathname.startsWith("/propuesta/")) {
     response.headers.set("Cache-Control", "private, no-store, max-age=0");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");

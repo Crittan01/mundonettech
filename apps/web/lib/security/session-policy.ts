@@ -17,6 +17,12 @@ export const guestOrderCookie =
   process.env.NODE_ENV === "production" ? "__Host-guest_order" : "guest_order";
 export const referralCookie =
   process.env.NODE_ENV === "production" ? "__Host-mnt_referral" : "mnt_referral";
+export const channelOAuthCookieSecure =
+  process.env.NODE_ENV === "production" && process.env.INTEGRATION_ENVIRONMENT !== "LOCAL";
+export const channelOAuthCookie = channelOAuthCookieSecure
+  ? "__Host-mnt_channel_oauth"
+  : "mnt_channel_oauth";
+export const channelOAuthCookiePath = "/api/channels/mercado-libre/oauth/callback";
 
 export const sessionCookieOptions = {
   httpOnly: true,

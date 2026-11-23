@@ -183,3 +183,79 @@ model OperationalHealthSnapshot {
   @@index([status, capturedAt])
   @@map("OperationalHealthSnapshot")
 }
+
+enum ChannelProvider {
+  MERCADO_LIBRE
+}
+
+enum ChannelAccountStatus {
+  ACTIVE
+  REAUTH_REQUIRED
+  DISCONNECTED
+}
+
+enum ChannelOAuthAttemptStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+model ChannelAccount {
+  id                    String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider              ChannelProvider
+  siteId                String                 @db.VarChar(3)
+  environment           IntegrationEnvironment
+  credentialId          String                 @unique @db.Uuid
+  externalAccountId     String                 @db.VarChar(64)
+  label                 String                 @db.VarChar(120)
+  status                ChannelAccountStatus   @default(ACTIVE)
+  scopes                String[]
+  tokenExpiresAt        DateTime?              @db.Timestamptz(6)
+  lastRefreshedAt       DateTime?              @db.Timestamptz(6)
+  lastRefreshError      String?                @db.VarChar(100)
+  refreshClaimId        String?                @db.Uuid
+  refreshClaimedAt      DateTime?              @db.Timestamptz(6)
+  refreshClaimExpiresAt DateTime?              @db.Timestamptz(6)
+  version               Int                    @default(0)
+  connectedAt           DateTime               @default(now()) @db.Timestamptz(6)
+  disconnectedAt        DateTime?              @db.Timestamptz(6)
+  createdByAdminUserId  String                 @db.Uuid
+  createdAt             DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  credential            IntegrationCredential  @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  createdBy             AdminUser              @relation("ChannelAccountCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  oauthAttempts         ChannelOAuthAttempt[]
+
+  @@unique([provider, siteId, environment, externalAccountId])
+  @@index([environment, status, tokenExpiresAt, id])
+  @@index([createdByAdminUserId, createdAt])
+  @@map("ChannelAccount")
+}
+
+model ChannelOAuthAttempt {
+  id                    String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId             String?                 @db.Uuid
+  provider              ChannelProvider
+  siteId                String                  @db.VarChar(3)
+  environment           IntegrationEnvironment
+  credentialId          String                  @unique @db.Uuid
+  label                 String                  @db.VarChar(120)
+  stateHash             Bytes                   @unique @db.ByteA
+  status                ChannelOAuthAttemptStatus @default(PENDING)
+  expiresAt             DateTime                @db.Timestamptz(6)
+  claimedAt             DateTime?               @db.Timestamptz(6)
+  completedAt           DateTime?               @db.Timestamptz(6)
+  failureCode           String?                 @db.VarChar(100)
+  createdByAdminUserId  String                  @db.Uuid
+  createdAt             DateTime                @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime                @default(now()) @updatedAt @db.Timestamptz(6)
+  account               ChannelAccount?         @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  credential            IntegrationCredential   @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  createdBy             AdminUser               @relation("ChannelOAuthAttemptCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([environment, status, expiresAt])
+  @@index([accountId, createdAt])
+  @@index([createdByAdminUserId, createdAt])
+  @@map("ChannelOAuthAttempt")
+}
