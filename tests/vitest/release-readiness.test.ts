@@ -207,6 +207,14 @@ describe("release configuration gate", () => {
         "release.drIsolation",
       ]),
     );
+    const multilinePassphrase = validateReleaseConfiguration(
+      environment({
+        BACKUP_GPG_PASSPHRASE: "release-test-passphrase-with-newline\ninjected",
+      }),
+    );
+    expect(
+      multilinePassphrase.find((check) => check.name === "release.backupGpgPassphrase")?.passed,
+    ).toBe(false);
   });
 });
 

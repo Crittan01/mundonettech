@@ -246,6 +246,7 @@ export async function runDisasterRecoveryDrill(options = {}) {
         ],
         {
           runner: config.postgresRunner,
+          ci: config.ci,
           env: {
             ...commonEnvironment,
             ...postgresProcessEnvironment(restoredUrl.toString(), "mundonettech-dr-restore"),

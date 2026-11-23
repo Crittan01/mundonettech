@@ -22,17 +22,45 @@ const statusLabels = {
   FAILED: "Fallida",
 } as const;
 const failureLabels: Record<string, string> = {
-  BACKUP_STALE_RUN: "La ejecución superó su tiempo máximo.",
-  BACKUP_NOT_FRESH: "El respaldo superó la ventana de 36 horas.",
-  BACKUP_HASH_MISMATCH: "El hash del objeto cifrado no coincide.",
-  BACKUP_MANIFEST_MISMATCH: "El manifiesto no coincide con la evidencia.",
-  DR_SCHEMA_MISMATCH: "La restauración no reproduce el esquema esperado.",
-  DR_BUCKET_COVERAGE_INCOMPLETE: "La cobertura o lectura de buckets es incompleta.",
-  GPG_ENCRYPTION_FAILED: "GPG no completó el cifrado.",
+  AUTH_SCHEMA_MISSING: "La base de origen no contiene el esquema auth o la tabla auth.users.",
+  BACKUP_EVIDENCE_FAILED: "No fue posible sellar la evidencia final del respaldo.",
+  BACKUP_HASH_MISMATCH: "El hash del objeto cifrado no coincide con el manifiesto.",
+  BACKUP_MANIFEST_EMPTY: "El manifiesto del respaldo está vacío.",
+  BACKUP_MANIFEST_INVALID: "El manifiesto del respaldo no tiene un formato JSON/UTF-8 válido.",
+  BACKUP_MANIFEST_MISMATCH: "El manifiesto no coincide con la evidencia persistida.",
+  BACKUP_MANIFEST_TOO_LARGE: "El manifiesto del respaldo supera el tamaño máximo permitido.",
+  BACKUP_NOT_FOUND: "No existe un respaldo cifrado exitoso disponible.",
+  BACKUP_NOT_FRESH: "El respaldo superó la ventana de vigencia de 36 horas.",
+  BACKUP_OBJECT_EMPTY: "El objeto cifrado descargado desde R2 está vacío.",
+  BACKUP_SIZE_MISMATCH: "El tamaño del objeto cifrado no coincide con el manifiesto.",
+  BACKUP_STALE_RUN: "La ejecución de respaldo superó su tiempo máximo permitido.",
+  DATABASE_CONFIGURATION_INVALID: "La configuración de conexión PostgreSQL es inválida.",
+  DATABASE_SCHEMA_EMPTY: "El esquema de la base de datos de origen está incompleto.",
+  DATABASE_VERSION_UNSUPPORTED: "El respaldo exige PostgreSQL 17 o superior.",
+  DR_BUCKET_COVERAGE_INCOMPLETE: "La cobertura, inventario o lectura de buckets es incompleta.",
+  DR_DATABASE_VERSION_UNSUPPORTED: "El servidor aislado de DR exige PostgreSQL 17 o superior.",
+  DR_EVIDENCE_FAILED: "No fue posible sellar la evidencia final del simulacro DR.",
+  DR_MIGRATIONS_INVALID: "El historial de migraciones restaurado está incompleto.",
+  DR_SCHEMA_MISMATCH: "La restauración no reproduce exactamente las relaciones public y auth.",
+  DR_STALE_RUN: "El simulacro DR superó su tiempo máximo permitido.",
+  DR_TARGET_NOT_ISOLATED: "El destino de DR no está aislado de la base de datos de origen.",
   GPG_DECRYPTION_FAILED: "GPG no pudo descifrar con la credencial configurada.",
+  GPG_ENCRYPTION_FAILED: "GPG no completó el cifrado del flujo.",
+  GPG_PASSPHRASE_CONFIGURATION_INVALID: "La configuración de la passphrase GPG es inválida.",
   PG_DUMP_FAILED: "PostgreSQL no completó el volcado.",
-  PG_RESTORE_FAILED: "PostgreSQL no completó la restauración.",
-  R2_BUCKET_ACCESS_FAILED: "Al menos un bucket no está accesible.",
+  PG_RESTORE_FAILED: "PostgreSQL no completó la restauración transaccional.",
+  POSTGRES_RUNNER_INVALID: "El ejecutor de herramientas PostgreSQL configurado no es válido.",
+  R2_BUCKET_ACCESS_FAILED: "Al menos un bucket configurado no está accesible.",
+  R2_BUCKET_COVERAGE_MISMATCH: "Los buckets configurados no coinciden con los descubiertos en R2.",
+  R2_BUCKET_DISCOVERY_FAILED: "No fue posible descubrir los buckets visibles en R2.",
+  R2_BUCKET_OBJECT_INVALID: "R2 devolvió un objeto sin clave verificable.",
+  R2_BUCKET_PAGINATION_INVALID: "R2 devolvió un cursor de paginación inválido.",
+  R2_BUCKET_READ_FAILED: "No fue posible verificar la lectura de objetos en R2.",
+  R2_CONFIGURATION_INVALID: "La configuración o separación de credenciales R2 es inválida.",
+  R2_MULTIPART_UPLOAD_FAILED: "La carga multipart cifrada hacia R2 falló y fue abortada.",
+  RECOVERY_ENVIRONMENT_INVALID: "Los parámetros de entorno de recuperación son inválidos.",
+  RECOVERY_STREAM_FAILED: "Un flujo de respaldo o restauración se cerró de forma inesperada.",
+  RECOVERY_UNEXPECTED_FAILURE: "Se produjo un fallo inesperado durante el procedimiento.",
 };
 
 function date(value: string | null): string {
@@ -74,8 +102,9 @@ export default async function HealthPage() {
       </div>
       <section
         role={snapshot.status === "HEALTHY" ? "status" : "alert"}
-        className="rounded-xl border border-border bg-card p-5 aria-[current=true]:border-destructive"
-        aria-current={snapshot.status !== "HEALTHY"}
+        className={`rounded-xl border bg-card p-5 ${
+          snapshot.status === "HEALTHY" ? "border-border" : "border-destructive"
+        }`}
       >
         <h2 className="text-xl font-semibold">Estado: {statusLabels[snapshot.status]}</h2>
         <p className="mt-2 text-sm text-muted-foreground">
@@ -168,13 +197,22 @@ export default async function HealthPage() {
                     {failureLabels[backup.failureCode] ?? `Fallo registrado: ${backup.failureCode}`}
                   </p>
                 ) : null}
-                <ul aria-label="Cobertura de buckets" className="mt-4 flex flex-wrap gap-2 text-xs">
-                  {backup.buckets.map((bucket) => (
-                    <li key={bucket.bucketName} className="rounded-md bg-secondary px-3 py-2">
-                      {bucket.bucketName}: {bucket.accessible ? "accesible" : "sin acceso"}
-                    </li>
-                  ))}
-                </ul>
+                {backup.buckets.length > 0 ? (
+                  <ul
+                    aria-label="Cobertura de buckets"
+                    className="mt-4 flex flex-wrap gap-2 text-xs"
+                  >
+                    {backup.buckets.map((bucket) => (
+                      <li key={bucket.bucketName} className="rounded-md bg-secondary px-3 py-2">
+                        {bucket.bucketName}: {bucket.accessible ? "accesible" : "sin acceso"}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-4 text-xs text-muted-foreground">
+                    Sin verificación de buckets registrada en esta corrida.
+                  </p>
+                )}
               </article>
             ))}
           </div>
@@ -212,49 +250,55 @@ export default async function HealthPage() {
                     {failureLabels[drill.failureCode] ?? `Fallo registrado: ${drill.failureCode}`}
                   </p>
                 ) : null}
-                <div className="mt-4 overflow-x-auto">
-                  <table className="w-full min-w-[560px] text-left text-sm">
-                    <caption className="sr-only">Verificación del 100 % de los buckets</caption>
-                    <thead className="bg-secondary">
-                      <tr>
-                        <th scope="col" className="p-3">
-                          Bucket
-                        </th>
-                        <th scope="col" className="p-3">
-                          Acceso
-                        </th>
-                        <th scope="col" className="p-3">
-                          Objetos
-                        </th>
-                        <th scope="col" className="p-3">
-                          Lectura
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {drill.buckets.map((bucket) => (
-                        <tr key={bucket.bucketName} className="border-t border-border">
-                          <th scope="row" className="p-3">
-                            {bucket.bucketName}
+                {drill.buckets.length > 0 ? (
+                  <div className="mt-4 overflow-x-auto">
+                    <table className="w-full min-w-[560px] text-left text-sm">
+                      <caption className="sr-only">Verificación del 100 % de los buckets</caption>
+                      <thead className="bg-secondary">
+                        <tr>
+                          <th scope="col" className="p-3">
+                            Bucket
                           </th>
-                          <td className="p-3">{bucket.accessible ? "Verificado" : "Fallido"}</td>
-                          <td className="p-3">
-                            {bucket.objectCount
-                              ? numberFormatter.format(BigInt(bucket.objectCount))
-                              : "—"}
-                          </td>
-                          <td className="p-3">
-                            {bucket.objectCount === "0"
-                              ? "Vacío; no aplica"
-                              : bucket.readVerified
-                                ? "Verificada"
-                                : "No verificada"}
-                          </td>
+                          <th scope="col" className="p-3">
+                            Acceso
+                          </th>
+                          <th scope="col" className="p-3">
+                            Objetos
+                          </th>
+                          <th scope="col" className="p-3">
+                            Lectura
+                          </th>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody>
+                        {drill.buckets.map((bucket) => (
+                          <tr key={bucket.bucketName} className="border-t border-border">
+                            <th scope="row" className="p-3">
+                              {bucket.bucketName}
+                            </th>
+                            <td className="p-3">{bucket.accessible ? "Verificado" : "Fallido"}</td>
+                            <td className="p-3">
+                              {bucket.objectCount
+                                ? numberFormatter.format(BigInt(bucket.objectCount))
+                                : "—"}
+                            </td>
+                            <td className="p-3">
+                              {bucket.objectCount === "0"
+                                ? "Vacío; no aplica"
+                                : bucket.readVerified
+                                  ? "Verificada"
+                                  : "No verificada"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="mt-4 text-xs text-muted-foreground">
+                    La corrida finalizó antes de inventariar los buckets.
+                  </p>
+                )}
               </article>
             ))}
           </div>

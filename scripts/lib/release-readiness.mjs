@@ -291,10 +291,17 @@ export function validateReleaseConfiguration(environment) {
   );
   const passphraseEnvironment = environment.BACKUP_GPG_PASSPHRASE;
   const passphraseFile = environment.BACKUP_GPG_PASSPHRASE_FILE?.trim();
+  const passphraseBytes = Buffer.byteLength(passphraseEnvironment ?? "", "utf8");
+  const passphraseHasControlCharacters = [...(passphraseEnvironment ?? "")].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < 32 || codePoint === 127;
+  });
   check(
     "release.backupGpgPassphrase",
     Boolean(passphraseEnvironment) !== Boolean(passphraseFile) &&
-      (passphraseFile ? true : Buffer.byteLength(passphraseEnvironment ?? "", "utf8") >= 32),
+      (passphraseFile
+        ? true
+        : passphraseBytes >= 32 && passphraseBytes <= 1024 && !passphraseHasControlCharacters),
   );
   check("release.drDatabase", validPostgresqlUrl(environment.DR_DATABASE_URL, targetEnvironment));
   let drIsolated = false;

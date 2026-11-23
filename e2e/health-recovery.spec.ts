@@ -99,6 +99,22 @@ test.beforeAll(async () => {
   ]);
   backupId = randomUUID();
   drillId = randomUUID();
+  const priorFailedBackupId = randomUUID();
+  await db.backupRun.create({
+    data: {
+      id: priorFailedBackupId,
+      environment: "LOCAL",
+      startedAt: new Date(Date.now() - 120_000),
+    },
+  });
+  await db.backupRun.update({
+    where: { id: priorFailedBackupId },
+    data: {
+      status: "FAILED",
+      completedAt: new Date(Date.now() - 110_000),
+      failureCode: "AUTH_SCHEMA_MISSING",
+    },
+  });
   const objectId = randomUUID();
   storageKey = `database/LOCAL/2026/11/23/${objectId}.dump.gpg`;
   await db.backupRun.create({ data: { id: backupId, environment: "LOCAL" } });
@@ -192,10 +208,16 @@ test("health dashboard shows sealed backup and DR evidence without leaking objec
     "Salud operativa y recuperación",
   );
   await expect(page.getByRole("link", { name: "Salud y recuperación" })).toBeVisible();
-  await expect(page.getByText("Bytes cifrados")).toBeVisible();
+  await expect(page.getByText("Bytes cifrados").first()).toBeVisible();
   await expect(page.getByText("122 relaciones verificadas", { exact: false })).toBeVisible();
   await expect(page.getByText("e2e-private-backups").first()).toBeVisible();
   await expect(page.getByText("Vacío; no aplica")).toBeVisible();
+  await expect(
+    page.getByText("La base de origen no contiene el esquema auth o la tabla auth.users."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Sin verificación de buckets registrada en esta corrida."),
+  ).toBeVisible();
   await expect(page.locator("body")).not.toContainText(storageKey);
   await expect(page.locator("body")).not.toContainText("postgresql://");
   await expectAccessible(page);

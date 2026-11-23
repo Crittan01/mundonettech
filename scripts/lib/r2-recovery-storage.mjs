@@ -172,13 +172,18 @@ export class R2RecoveryStorage {
     if (objectCount > 0n) {
       if (!firstKey)
         throw new RecoveryError("R2_BUCKET_OBJECT_INVALID", "R2 returned an object without a key.");
-      const response = await this.client.send(
-        new GetObjectCommand({ Bucket: bucketName, Key: firstKey, Range: "bytes=0-0" }),
-      );
-      if (!response.Body)
-        throw new RecoveryError("R2_BUCKET_READ_FAILED", "R2 returned an empty object response.");
-      for await (const chunk of response.Body) void chunk;
-      readVerified = true;
+      try {
+        const response = await this.client.send(
+          new GetObjectCommand({ Bucket: bucketName, Key: firstKey, Range: "bytes=0-0" }),
+        );
+        if (!response.Body) {
+          throw new RecoveryError("R2_BUCKET_READ_FAILED", "R2 returned an empty object response.");
+        }
+        for await (const chunk of response.Body) void chunk;
+        readVerified = true;
+      } catch {
+        readVerified = false;
+      }
     }
     return { bucketName, accessible: true, readVerified, objectCount };
   }
@@ -231,20 +236,34 @@ export class R2RecoveryStorage {
 
   async getManifest(key) {
     const response = await this.client.send(
-      new GetObjectCommand({ Bucket: this.backupBucket, Key: key, Range: "bytes=0-65535" }),
+      new GetObjectCommand({ Bucket: this.backupBucket, Key: key, Range: "bytes=0-65536" }),
     );
     if (!response.Body)
       throw new RecoveryError("BACKUP_MANIFEST_EMPTY", "The backup manifest is empty.");
-    const chunks = [];
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let text = "";
     let size = 0;
     for await (const chunk of response.Body) {
-      size += chunk.length;
-      if (size > 65_536)
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.byteLength;
+      if (size > 65_536) {
+        response.Body.destroy?.();
         throw new RecoveryError("BACKUP_MANIFEST_TOO_LARGE", "The backup manifest is too large.");
-      chunks.push(chunk);
+      }
+      try {
+        text += decoder.decode(bytes, { stream: true });
+      } catch (error) {
+        response.Body.destroy?.();
+        throw new RecoveryError(
+          "BACKUP_MANIFEST_INVALID",
+          "The backup manifest is not valid UTF-8.",
+          { cause: error },
+        );
+      }
     }
     try {
-      return JSON.parse(Buffer.from(chunks.join("")).toString("utf8"));
+      text += decoder.decode();
+      return JSON.parse(text);
     } catch (error) {
       throw new RecoveryError("BACKUP_MANIFEST_INVALID", "The backup manifest is not valid JSON.", {
         cause: error,

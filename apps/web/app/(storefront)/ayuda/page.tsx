@@ -8,8 +8,8 @@ import {
 import { storeConfig } from "@mundonettech/config/store";
 import { buildBreadcrumbJsonLd, buildFaqJsonLd } from "@mundonettech/core";
 import type { Metadata } from "next";
-import { connection } from "next/server";
 import Link from "next/link";
+import { Suspense } from "react";
 
 import { JsonLd } from "@/components/seo/json-ld";
 
@@ -33,8 +33,11 @@ function first(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-export default async function HelpCenterPage({ searchParams }: PageProps<"/ayuda">) {
-  await connection();
+async function HelpExplorer({
+  searchParams,
+}: {
+  searchParams: PageProps<"/ayuda">["searchParams"];
+}) {
   const queryParams = await searchParams;
   const rawQuery = first(queryParams.q)?.trim() ?? "";
   const rawCategory = first(queryParams.categoria)?.trim() ?? "";
@@ -44,21 +47,8 @@ export default async function HelpCenterPage({ searchParams }: PageProps<"/ayuda
   const category = isHelpCategory(rawCategory) ? rawCategory : undefined;
   const results = searchHelpArticles({ query, ...(category ? { category } : {}) });
   const hasFilters = query.length > 0 || category !== undefined;
-  const breadcrumbs = buildBreadcrumbJsonLd([
-    { name: "Inicio", url: storeConfig.url },
-    { name: "Centro de ayuda", url: canonicalUrl },
-  ]);
   return (
-    <div className="space-y-12">
-      <JsonLd data={[breadcrumbs, buildFaqJsonLd(helpFaqs)]} />
-      <header className="max-w-3xl space-y-4">
-        <p className="text-sm font-semibold text-primary">Centro de ayuda</p>
-        <h1 className="text-4xl font-bold tracking-tight">¿Cómo podemos ayudarte?</h1>
-        <p className="text-lg leading-8 text-muted-foreground">
-          Consulta guías prácticas y procedimientos vigentes. Cuando necesites atención personal,
-          encontrarás el canal adecuado sin compartir contraseñas ni códigos de verificación.
-        </p>
-      </header>
+    <>
       <section
         aria-labelledby="help-search-title"
         className="rounded-2xl border border-border bg-card p-6"
@@ -197,6 +187,38 @@ export default async function HelpCenterPage({ searchParams }: PageProps<"/ayuda
           </div>
         )}
       </section>
+    </>
+  );
+}
+
+export default function HelpCenterPage({ searchParams }: PageProps<"/ayuda">) {
+  const breadcrumbs = buildBreadcrumbJsonLd([
+    { name: "Inicio", url: storeConfig.url },
+    { name: "Centro de ayuda", url: canonicalUrl },
+  ]);
+  return (
+    <div className="space-y-12">
+      <JsonLd data={[breadcrumbs, buildFaqJsonLd(helpFaqs)]} />
+      <header className="max-w-3xl space-y-4">
+        <p className="text-sm font-semibold text-primary">Centro de ayuda</p>
+        <h1 className="text-4xl font-bold tracking-tight">¿Cómo podemos ayudarte?</h1>
+        <p className="text-lg leading-8 text-muted-foreground">
+          Consulta guías prácticas y procedimientos vigentes. Cuando necesites atención personal,
+          encontrarás el canal adecuado sin compartir contraseñas ni códigos de verificación.
+        </p>
+      </header>
+      <Suspense
+        fallback={
+          <p
+            role="status"
+            className="rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground"
+          >
+            Cargando buscador y guías de ayuda…
+          </p>
+        }
+      >
+        <HelpExplorer searchParams={searchParams} />
+      </Suspense>
       <section aria-labelledby="help-faq-title" className="space-y-5">
         <h2 id="help-faq-title" className="text-2xl font-semibold">
           Preguntas frecuentes

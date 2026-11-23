@@ -120,6 +120,8 @@ export async function verifyWebSecurity(
 
   for (const routePath of [
     "/",
+    "/ayuda",
+    "/ayuda/comprar-y-pagar",
     "/empresas",
     "/ingresar",
     "/ingresar?reason=timeout",
@@ -175,6 +177,7 @@ export async function verifyWebSecurity(
     ["/admin/segmentos", "/admin/login"],
     ["/admin/lifecycle", "/admin/login"],
     ["/admin/analitica-rfm", "/admin/login"],
+    ["/admin/salud", "/admin/login"],
     ["/admin/b2b", "/admin/login"],
     ["/admin/b2b?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
@@ -197,6 +200,13 @@ export async function verifyWebSecurity(
     const notFound = await request(origin, unknownPath);
     requireCondition(notFound.status === 404, `${unknownPath}: unknown routes must return 404.`);
   }
+  const unknownHelp = await request(origin, "/ayuda/guia-inexistente-owasp");
+  requireCondition(unknownHelp.status === 404, "/ayuda/guia-inexistente-owasp: must return 404.");
+  requireCondition(
+    (unknownHelp.headers.get("cache-control") ?? "").includes("no-store") &&
+      (unknownHelp.headers.get("x-robots-tag") ?? "").includes("noindex"),
+    "/ayuda/guia-inexistente-owasp: unknown help guide must be no-store/noindex.",
+  );
 
   for (const transactionalPath of [
     "/carrito",
@@ -277,7 +287,12 @@ export async function verifyWebSecurity(
     "Oversized unsubscribe POST must return 413.",
   );
 
-  for (const path of ["/api/jobs/orders", "/api/jobs/cms-publish", "/api/jobs/domain-events"]) {
+  for (const path of [
+    "/api/jobs/orders",
+    "/api/jobs/cms-publish",
+    "/api/jobs/domain-events",
+    "/api/jobs/health",
+  ]) {
     const getMethod = await request(origin, path);
     requireCondition(
       getMethod.status === 405 && getMethod.headers.get("allow") === "POST",

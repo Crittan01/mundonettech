@@ -45,13 +45,14 @@ export async function runBackup(options = {}) {
   let temporaryGpgHome;
   let uploadStarted = false;
   let sealed = false;
-  const keys = newBackupKeys(config.environment);
+  let keys;
   try {
     await client.connect();
     unlock = await acquireRecoveryLock(client, `database-backup:${config.environment}`);
     await expireStaleRun(client, "backup", config.environment, config.backupTimeoutMinutes);
     const run = await insertBackupRun(client, config.environment);
     runId = run.id;
+    keys = newBackupKeys(config.environment, run.startedAt);
     try {
       const schema = await sourceSchemaEvidence(client);
       await storage.assertExactBucketCoverage(config.bucketNames);
@@ -87,6 +88,7 @@ export async function runBackup(options = {}) {
         ["--format=custom", "--compress=6", "--no-owner", "--no-privileges"],
         {
           runner: config.postgresRunner,
+          ci: config.ci,
           env: {
             ...processEnvironment,
             ...postgresProcessEnvironment(config.databaseUrl, "mundonettech-backup"),
@@ -185,7 +187,7 @@ export async function runBackup(options = {}) {
       throw error;
     }
   } finally {
-    if (uploadStarted && !sealed) {
+    if (uploadStarted && !sealed && keys) {
       await Promise.allSettled([
         storage.deleteBackupObject(keys.storageKey),
         storage.deleteBackupObject(keys.manifestKey),

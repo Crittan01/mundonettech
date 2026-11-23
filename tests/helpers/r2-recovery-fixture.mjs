@@ -16,9 +16,11 @@ export async function createR2RecoveryFixture(bucketNames) {
   let nextUploadId = 1;
   const state = {
     failBucket: null,
+    failObjectGetBucket: null,
     omitBucketFromDiscovery: null,
     tamperNextDownload: false,
     failPartNumber: null,
+    chunkByteLimit: null,
   };
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -147,6 +149,10 @@ export async function createR2RecoveryFixture(bucketNames) {
       return;
     }
     if (request.method === "GET") {
+      if (state.failObjectGetBucket === bucket) {
+        sendXml(500, "<Error><Code>IntentionalObjectReadFailure</Code></Error>");
+        return;
+      }
       let bytes = stored.bytes;
       let status = 200;
       const range = request.headers.range;
@@ -164,13 +170,19 @@ export async function createR2RecoveryFixture(bucketNames) {
         bytes[Math.floor(bytes.length / 2)] ^= 0xff;
         state.tamperNextDownload = false;
       }
-      response
-        .writeHead(status, {
-          "Content-Length": bytes.length,
-          "Last-Modified": stored.lastModified.toUTCString(),
-          ETag: '"stored-etag"',
-        })
-        .end(bytes);
+      response.writeHead(status, {
+        "Content-Length": bytes.length,
+        "Last-Modified": stored.lastModified.toUTCString(),
+        ETag: '"stored-etag"',
+      });
+      if (state.chunkByteLimit && state.chunkByteLimit > 0) {
+        for (let offset = 0; offset < bytes.length; offset += state.chunkByteLimit) {
+          response.write(bytes.subarray(offset, offset + state.chunkByteLimit));
+        }
+        response.end();
+      } else {
+        response.end(bytes);
+      }
       return;
     }
     sendXml(400, "<Error><Code>UnsupportedFixtureRequest</Code></Error>");

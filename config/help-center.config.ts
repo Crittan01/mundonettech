@@ -324,6 +324,15 @@ export const helpFaqs = [
   },
 ] as const;
 
+function isCleanCopy(value: string): boolean {
+  if (!value.trim()) return false;
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 32 || code === 127 || character === "<" || character === ">") return false;
+  }
+  return true;
+}
+
 function assertHelpContent(): void {
   const slugs = new Set<string>();
   const categories = new Set<string>(helpCategories.map((category) => category.id));
@@ -332,15 +341,48 @@ function assertHelpContent(): void {
       throw new TypeError("Help article slugs must be unique and URL-safe.");
     }
     slugs.add(article.slug);
-    if (!categories.has(article.category) || article.sections.length === 0) {
+    if (
+      !categories.has(article.category) ||
+      !isCleanCopy(article.title) ||
+      !isCleanCopy(article.summary) ||
+      article.keywords.length === 0 ||
+      article.keywords.some((keyword) => !isCleanCopy(keyword)) ||
+      article.sections.length === 0
+    ) {
       throw new TypeError("Help articles require a valid category and visible content.");
     }
     for (const section of article.sections) {
+      if (
+        !isCleanCopy(section.heading) ||
+        section.paragraphs.length === 0 ||
+        section.paragraphs.some((paragraph) => !isCleanCopy(paragraph)) ||
+        (section.bullets ?? []).some((bullet) => !isCleanCopy(bullet))
+      ) {
+        throw new TypeError("Help article sections require clean non-empty text.");
+      }
       for (const link of section.links ?? []) {
-        if (!/^\/(?!\/)[A-Za-z0-9/_?=&%.:-]+$/.test(link.href) || link.href.includes("..")) {
+        if (
+          !isCleanCopy(link.label) ||
+          !/^\/(?!\/)[A-Za-z0-9/_?=&%.:-]+$/.test(link.href) ||
+          link.href.includes("..")
+        ) {
           throw new TypeError("Help article links must be safe local paths.");
         }
       }
+    }
+  }
+  for (const article of helpArticles) {
+    for (const section of article.sections) {
+      for (const link of section.links ?? []) {
+        if (link.href.startsWith("/ayuda/") && !slugs.has(link.href.slice("/ayuda/".length))) {
+          throw new TypeError("Help article internal links must target existing guides.");
+        }
+      }
+    }
+  }
+  for (const faq of helpFaqs) {
+    if (!isCleanCopy(faq.question) || !isCleanCopy(faq.answer)) {
+      throw new TypeError("Help FAQs require clean non-empty questions and answers.");
     }
   }
 }

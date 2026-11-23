@@ -65,6 +65,23 @@ function snapshotView(
   flags?: { backupFresh: boolean; drillCurrent: boolean },
 ): OperationalHealthSnapshotView {
   const capturedAt = record.capturedAt.getTime();
+  const computedBackupFresh =
+    record.latestSuccessfulBackupAt !== null &&
+    capturedAt - record.latestSuccessfulBackupAt.getTime() <= backupFreshnessMs &&
+    record.latestSuccessfulBackupAt.getTime() <= capturedAt + 300_000;
+  const oldestOutboxAgeMs = record.oldestPendingOutboxAt
+    ? capturedAt - record.oldestPendingOutboxAt.getTime()
+    : null;
+  const outboxHealthy =
+    record.failedOutbox === 0 &&
+    record.pendingOutbox <= outboxWarningCount &&
+    (oldestOutboxAgeMs === null || oldestOutboxAgeMs <= outboxWarningAgeMs);
+  const computedDrillCurrent =
+    record.latestSuccessfulDrillAt !== null &&
+    capturedAt - record.latestSuccessfulDrillAt.getTime() <= drillMaximumAgeMs &&
+    record.latestSuccessfulDrillAt.getTime() <= capturedAt + 300_000 &&
+    (record.status === "HEALTHY" ||
+      !(record.databaseReady && computedBackupFresh && outboxHealthy));
   return {
     id: record.id,
     capturedAt: record.capturedAt.toISOString(),
@@ -76,14 +93,8 @@ function snapshotView(
     oldestPendingOutboxAt: record.oldestPendingOutboxAt?.toISOString() ?? null,
     latestSuccessfulBackupAt: record.latestSuccessfulBackupAt?.toISOString() ?? null,
     latestSuccessfulDrillAt: record.latestSuccessfulDrillAt?.toISOString() ?? null,
-    backupFresh:
-      flags?.backupFresh ??
-      (record.latestSuccessfulBackupAt !== null &&
-        capturedAt - record.latestSuccessfulBackupAt.getTime() <= backupFreshnessMs),
-    drillCurrent:
-      flags?.drillCurrent ??
-      (record.latestSuccessfulDrillAt !== null &&
-        capturedAt - record.latestSuccessfulDrillAt.getTime() <= drillMaximumAgeMs),
+    backupFresh: flags?.backupFresh ?? computedBackupFresh,
+    drillCurrent: flags?.drillCurrent ?? computedDrillCurrent,
   };
 }
 
@@ -204,9 +215,9 @@ export class OperationalHealthService {
           (SELECT min("availableAt") FROM "DomainOutbox" WHERE "processedAt" IS NULL AND "failedAt" IS NULL) AS "oldestPendingOutboxAt",
           (SELECT max("completedAt") FROM "BackupRun" WHERE "environment" = ${environment}::"IntegrationEnvironment" AND "status" = 'SUCCEEDED') AS "latestSuccessfulBackupAt",
           (SELECT max("completedAt") FROM "DisasterRecoveryDrill" WHERE "environment" = ${environment}::"IntegrationEnvironment" AND "status" = 'SUCCEEDED') AS "latestSuccessfulDrillAt",
-          (SELECT "status"::text FROM "BackupRun" WHERE "environment" = ${environment}::"IntegrationEnvironment" ORDER BY "startedAt" DESC LIMIT 1) AS "latestBackupStatus",
-          (SELECT "status"::text FROM "DisasterRecoveryDrill" WHERE "environment" = ${environment}::"IntegrationEnvironment" ORDER BY "startedAt" DESC LIMIT 1) AS "latestDrillStatus",
-          (SELECT "nextDueAt" FROM "DisasterRecoveryDrill" WHERE "environment" = ${environment}::"IntegrationEnvironment" AND "status" = 'SUCCEEDED' ORDER BY "completedAt" DESC LIMIT 1) AS "nextDrillDueAt"
+          (SELECT "status"::text FROM "BackupRun" WHERE "environment" = ${environment}::"IntegrationEnvironment" ORDER BY "startedAt" DESC, "id" DESC LIMIT 1) AS "latestBackupStatus",
+          (SELECT "status"::text FROM "DisasterRecoveryDrill" WHERE "environment" = ${environment}::"IntegrationEnvironment" ORDER BY "startedAt" DESC, "id" DESC LIMIT 1) AS "latestDrillStatus",
+          (SELECT "nextDueAt" FROM "DisasterRecoveryDrill" WHERE "environment" = ${environment}::"IntegrationEnvironment" AND "status" = 'SUCCEEDED' ORDER BY "completedAt" DESC, "id" DESC LIMIT 1) AS "nextDrillDueAt"
       `;
       const health = rows[0];
       if (!health) throw new Error("Operational health query returned no result.");
@@ -390,7 +401,9 @@ export class OperationalHealthService {
     ]);
     return {
       snapshot,
-      recentSnapshots: recentSnapshots.map((record) => snapshotView(record)),
+      recentSnapshots: recentSnapshots.map((record) =>
+        record.id === snapshot.id ? snapshot : snapshotView(record),
+      ),
       backups: backups.map(backupView),
       drills: drills.map(drillView),
     };

@@ -25,10 +25,8 @@ export function spawnRecoveryProcess(command, args, options = {}) {
 
 export function spawnPostgresRecoveryProcess(command, args, options) {
   if (options.runner === "local") return spawnRecoveryProcess(command, args, options);
-  if (
-    !new Set(["podman", "docker"]).has(options.runner) ||
-    (options.runner === "docker" && process.env.CI !== "true")
-  ) {
+  const ci = options.ci ?? process.env.CI === "true";
+  if (!new Set(["podman", "docker"]).has(options.runner) || (options.runner === "docker" && !ci)) {
     throw new RecoveryError(
       "POSTGRES_RUNNER_INVALID",
       "RECOVERY_POSTGRES_RUNNER must be local, podman, or docker only in CI.",

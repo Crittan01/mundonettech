@@ -179,16 +179,27 @@ export async function loadRecoveryConfig(environment = process.env, options = {}
       "Recovery tests may only use a loopback R2 endpoint.",
     );
   }
-  const accessKeyId = environment.R2_BACKUP_ACCESS_KEY_ID ?? environment.R2_ACCESS_KEY_ID;
-  const secretAccessKey =
-    environment.R2_BACKUP_SECRET_ACCESS_KEY ?? environment.R2_SECRET_ACCESS_KEY;
+  const accessKeyId = environment.R2_BACKUP_ACCESS_KEY_ID?.trim() ?? "";
+  const secretAccessKey = environment.R2_BACKUP_SECRET_ACCESS_KEY?.trim() ?? "";
+  const mediaAccessKeyId = environment.R2_ACCESS_KEY_ID?.trim() ?? "";
+  const mediaSecretAccessKey = environment.R2_SECRET_ACCESS_KEY?.trim() ?? "";
   if (!accessKeyId || !secretAccessKey) {
     throw new RecoveryError("R2_CONFIGURATION_INVALID", "R2 backup credentials are required.");
   }
+  if (
+    (mediaAccessKeyId && accessKeyId === mediaAccessKeyId) ||
+    (mediaSecretAccessKey && secretAccessKey === mediaSecretAccessKey)
+  ) {
+    throw new RecoveryError(
+      "R2_CONFIGURATION_INVALID",
+      "R2 backup credentials must be independent from public media credentials.",
+    );
+  }
+  const ci = environment.CI === "true";
   const postgresRunner = environment.RECOVERY_POSTGRES_RUNNER ?? "local";
   if (
     !new Set(["local", "podman", "docker"]).has(postgresRunner) ||
-    (postgresRunner === "docker" && environment.CI !== "true")
+    (postgresRunner === "docker" && !ci)
   ) {
     throw new RecoveryError(
       "POSTGRES_RUNNER_INVALID",
@@ -197,6 +208,7 @@ export async function loadRecoveryConfig(environment = process.env, options = {}
   }
   const config = {
     environment: integrationEnvironment,
+    ci,
     postgresRunner,
     databaseUrl,
     drDatabaseUrl: options.drDatabaseUrl ?? environment.DR_DATABASE_URL,

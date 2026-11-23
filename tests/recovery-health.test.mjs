@@ -70,6 +70,8 @@ before(
       R2_BACKUP_BUCKET: backupBucket,
       R2_ACCESS_KEY_ID: "recovery-test-access",
       R2_SECRET_ACCESS_KEY: "recovery-test-secret",
+      R2_BACKUP_ACCESS_KEY_ID: "recovery-backup-access",
+      R2_BACKUP_SECRET_ACCESS_KEY: "recovery-backup-secret",
       R2_RECOVERY_BUCKETS: `${backupBucket},${mediaBucket}`,
       BACKUP_GPG_PASSPHRASE: passphrase,
     };
@@ -136,10 +138,56 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
             request.query.uploadId,
         ),
       );
+
+      const utf8ManifestKey = "chunked-utf8.manifest.json";
+      await storage.putManifest(utf8ManifestKey, { note: "recuperación-áéíóú-ñ-🔒" });
+      fixture.state.chunkByteLimit = 1;
+      const decodedManifest = await storage.getManifest(utf8ManifestKey);
+      fixture.state.chunkByteLimit = null;
+      assert.equal(decodedManifest.note, "recuperación-áéíóú-ñ-🔒");
+
+      const oversizedKey = "oversized.manifest.json";
+      fixture.objects.set(`${backupBucket}/${oversizedKey}`, {
+        bytes: Buffer.from(`{"pad":"${"a".repeat(65_536)}"}`),
+        lastModified: new Date(),
+      });
+      await assert.rejects(
+        storage.getManifest(oversizedKey),
+        (error) => error.code === "BACKUP_MANIFEST_TOO_LARGE",
+      );
+
+      const invalidUtf8Key = "invalid-utf8.manifest.json";
+      fixture.objects.set(`${backupBucket}/${invalidUtf8Key}`, {
+        bytes: Buffer.from([0x7b, 0x22, 0xff, 0xfe, 0x22, 0x7d]),
+        lastModified: new Date(),
+      });
+      await assert.rejects(
+        storage.getManifest(invalidUtf8Key),
+        (error) => error.code === "BACKUP_MANIFEST_INVALID",
+      );
     } finally {
+      fixture.state.chunkByteLimit = null;
       fixture.state.failPartNumber = null;
       storage.destroy();
     }
+  });
+
+  it("rejects missing or shared R2 backup credentials before touching PostgreSQL", async () => {
+    await assert.rejects(
+      runBackup({
+        env: { ...environment, R2_BACKUP_ACCESS_KEY_ID: "", R2_BACKUP_SECRET_ACCESS_KEY: "" },
+      }),
+      (error) => error.code === "R2_CONFIGURATION_INVALID",
+    );
+    await assert.rejects(
+      runBackup({
+        env: {
+          ...environment,
+          R2_BACKUP_ACCESS_KEY_ID: environment.R2_ACCESS_KEY_ID,
+        },
+      }),
+      (error) => error.code === "R2_CONFIGURATION_INVALID",
+    );
   });
 
   it(
@@ -157,6 +205,15 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
       });
       backup = await runBackup({ env: environment });
       assert.equal(backup.status, "SUCCEEDED");
+      const degradedBeforeDrill = await health.capture("LOCAL");
+      assert.equal(degradedBeforeDrill.snapshot.status, "DEGRADED");
+      assert.equal(degradedBeforeDrill.snapshot.backupFresh, true);
+      assert.equal(degradedBeforeDrill.snapshot.drillCurrent, false);
+      const pendingDrillAlert = await db.notification.findUniqueOrThrow({
+        where: { deduplicationKey: "health-dr" },
+      });
+      assert.equal(pendingDrillAlert.severity, "CRITICAL");
+      assert.equal(pendingDrillAlert.resolvedAt, null);
       assert.ok(BigInt(backup.byteSize) > 0n);
       const storedBackup = fixture.objects.get(`${backupBucket}/${backup.storageKey}`);
       assert.ok(storedBackup);
@@ -238,6 +295,14 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
       });
       assert.equal(latest.status, "FAILED");
       assert.equal(latest.failureCode, "GPG_DECRYPTION_FAILED");
+      const failedDrillHealth = await health.capture("LOCAL");
+      assert.equal(failedDrillHealth.snapshot.status, "CRITICAL");
+      assert.equal(failedDrillHealth.snapshot.drillCurrent, false);
+      const reopenedAlert = await db.notification.findUniqueOrThrow({
+        where: { deduplicationKey: "health-dr" },
+      });
+      assert.equal(reopenedAlert.severity, "CRITICAL");
+      assert.equal(reopenedAlert.resolvedAt, null);
       const current = await runDisasterRecoveryDrill({ env: environment });
       assert.equal(current.status, "SUCCEEDED");
     },
@@ -262,15 +327,29 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
         runDisasterRecoveryDrill({ env: environment, force: true }),
         (error) => error.code === "BACKUP_MANIFEST_MISMATCH",
       );
+      manifestObject.bytes = originalManifest;
+      fixture.state.failObjectGetBucket = mediaBucket;
+      await assert.rejects(
+        runDisasterRecoveryDrill({ env: environment, force: true }),
+        (error) => error.code === "DR_BUCKET_COVERAGE_INCOMPLETE",
+      );
     } finally {
+      fixture.state.failObjectGetBucket = null;
       encryptedObject.lastModified = originalModified;
       manifestObject.bytes = originalManifest;
     }
     const latest = await db.disasterRecoveryDrill.findFirstOrThrow({
       orderBy: { startedAt: "desc" },
+      include: { bucketChecks: true },
     });
     assert.equal(latest.status, "FAILED");
-    assert.equal(latest.failureCode, "BACKUP_MANIFEST_MISMATCH");
+    assert.equal(latest.failureCode, "DR_BUCKET_COVERAGE_INCOMPLETE");
+    const unreadableMedia = latest.bucketChecks.find((item) => item.bucketName === mediaBucket);
+    assert.equal(unreadableMedia.accessible, true);
+    assert.equal(unreadableMedia.readVerified, false);
+    assert.equal(unreadableMedia.objectCount, 1n);
+    const restoredCurrent = await runDisasterRecoveryDrill({ env: environment, force: true });
+    assert.equal(restoredCurrent.status, "SUCCEEDED");
   });
 
   it(
@@ -311,6 +390,24 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
     );
     await assert.rejects(
       sql.query('DELETE FROM "RecoveryBucketCheck" WHERE "backupRunId" = $1', [backup.runId]),
+    );
+    await assert.rejects(
+      sql.query(
+        'INSERT INTO "DisasterRecoveryDrill" ("environment", "backupRunId") VALUES (\'STG\', $1)',
+        [backup.runId],
+      ),
+      /succeeded backup from the same environment/,
+    );
+    const failedBackup = await db.backupRun.findFirstOrThrow({
+      where: { status: "FAILED" },
+      orderBy: { startedAt: "desc" },
+    });
+    await assert.rejects(
+      sql.query(
+        'INSERT INTO "DisasterRecoveryDrill" ("environment", "backupRunId") VALUES (\'LOCAL\', $1)',
+        [failedBackup.id],
+      ),
+      /succeeded backup from the same environment/,
     );
     await db.domainOutbox.create({
       data: {
