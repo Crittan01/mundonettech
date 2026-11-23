@@ -23,7 +23,6 @@ const harness = await acquireIsolatedTestDatabase({
 });
 let authFixture;
 let runtime;
-let activeChrome;
 const summary = [];
 
 const chromeFlags = [
@@ -36,41 +35,31 @@ const chromeFlags = [
   "--no-default-browser-check",
 ];
 
-async function ensureChrome() {
-  if (activeChrome) return activeChrome;
-  activeChrome = await launch({
-    chromePath: process.env.CHROME_PATH ?? chromium.executablePath(),
-    startingUrl: "about:blank",
-    chromeFlags,
-  });
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  return activeChrome;
-}
-
-async function resetChrome() {
-  if (!activeChrome) return;
-  const current = activeChrome;
-  activeChrome = undefined;
-  await current.kill().catch(() => undefined);
-}
-
 async function runAudit(url, profile) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const chrome = await ensureChrome();
-    const result = await lighthouse(
-      url,
-      {
-        port: chrome.port,
-        onlyCategories: categories,
-        logLevel: "error",
-        output: "json",
-      },
-      profile === "desktop" ? desktopConfig : undefined,
-    );
-    if (result && (!result.lhr.runtimeError || attempt === 2)) {
-      return result;
+    const chrome = await launch({
+      chromePath: process.env.CHROME_PATH ?? chromium.executablePath(),
+      startingUrl: "about:blank",
+      chromeFlags,
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const result = await lighthouse(
+        url,
+        {
+          port: chrome.port,
+          onlyCategories: categories,
+          logLevel: "error",
+          output: "json",
+        },
+        profile === "desktop" ? desktopConfig : undefined,
+      );
+      if (result && (!result.lhr.runtimeError || attempt === 2)) {
+        return result;
+      }
+    } finally {
+      await chrome.kill();
     }
-    await resetChrome();
   }
   throw new Error(`Lighthouse returned no result for ${profile} ${url}.`);
 }
@@ -148,7 +137,6 @@ try {
     ),
   );
 } finally {
-  await resetChrome();
   if (runtime) await runtime.stop();
   if (authFixture) await authFixture.stop();
   await harness.stop();
