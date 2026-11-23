@@ -656,6 +656,11 @@ export class CrmService {
           orderBy: [{ status: "asc" }, { dueAt: "asc" }, { id: "asc" }],
           take: 200,
         },
+        opportunities: {
+          select: { id: true, status: true, currentVersion: true, createdAt: true },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: 50,
+        },
         customer: {
           select: {
             id: true,
@@ -706,6 +711,7 @@ export class CrmService {
       identities: contact.identities.map(maskCrmIdentity),
       activities: contact.activities,
       tasks: contact.tasks,
+      opportunities: contact.opportunities,
       customer: contact.customer,
     };
   }

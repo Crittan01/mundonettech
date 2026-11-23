@@ -162,6 +162,7 @@ export type { ContactIdentityKindValue, ContactVerificationLevelValue } from "./
 export {
   assertB2bExpiry,
   copilotActionLabels,
+  copilotPriorityLabels,
   copilotReasonLabels,
   normalizePriceListCode,
   opportunityProposalStatusLabels,

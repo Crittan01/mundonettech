@@ -19,7 +19,6 @@ export function ProposalAcceptanceForm({
   token,
   reviewFingerprint,
   submissionId,
-  contactName,
   departments,
   municipalities,
 }: {
@@ -27,7 +26,6 @@ export function ProposalAcceptanceForm({
   readonly token: string;
   readonly reviewFingerprint: string;
   readonly submissionId: string;
-  readonly contactName: string;
   readonly departments: readonly { code: string; name: string }[];
   readonly municipalities: readonly { code: string; departmentCode: string; name: string }[];
 }) {
@@ -53,7 +51,7 @@ export function ProposalAcceptanceForm({
             <Input
               id="proposal-recipient"
               name="recipientName"
-              defaultValue={values?.recipientName ?? contactName}
+              defaultValue={values?.recipientName}
               minLength={2}
               maxLength={200}
               autoComplete="name"
@@ -65,7 +63,7 @@ export function ProposalAcceptanceForm({
             <Input
               id="proposal-signer"
               name="signerName"
-              defaultValue={values?.signerName ?? contactName}
+              defaultValue={values?.signerName}
               minLength={2}
               maxLength={200}
               required

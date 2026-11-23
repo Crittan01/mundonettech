@@ -19,6 +19,7 @@ const managedCategories = [
   "reviews.moderation",
   "crm.tasks",
   "crm.merges",
+  "b2b.opportunities",
   "outbox.failed",
 ] as const;
 
@@ -37,6 +38,9 @@ export function canReadNotificationCategory(role: AdminRoleValue, category: stri
   }
   if (category.startsWith("crm.")) {
     return hasAdminPermission(role, "crm:read");
+  }
+  if (category.startsWith("b2b.")) {
+    return hasAdminPermission(role, "b2b:read");
   }
   if (category.startsWith("payments.") || category.startsWith("refunds.")) {
     return hasAdminPermission(role, "payments:read");
@@ -66,6 +70,9 @@ export function notificationWhereForRole(role: AdminRoleValue): Prisma.Notificat
     excludedPrefixes.push("crm.");
   } else if (!hasAdminPermission(role, "crm:merge")) {
     excludedCategories.push("crm.merges");
+  }
+  if (!hasAdminPermission(role, "b2b:read")) {
+    excludedPrefixes.push("b2b.");
   }
   if (!hasAdminPermission(role, "payments:read")) {
     excludedPrefixes.push("payments.", "refunds.");
@@ -217,6 +224,13 @@ export class OperationsService {
           '/admin/crm', 'IdentityMergeCandidate', candidates."id"::text
         FROM "IdentityMergeCandidate" candidates
         WHERE candidates."status" = 'PENDING'
+        UNION ALL
+        SELECT 'b2b-opportunity-new:' || opportunities."id", 'b2b.opportunities', 'INFO',
+          'Nueva oportunidad B2B recibida',
+          'Una solicitud empresarial espera calificación o propuesta en el canal B2B.',
+          '/admin/b2b/' || opportunities."id", 'Opportunity', opportunities."id"::text
+        FROM "Opportunity" opportunities
+        WHERE opportunities."status" = 'NEW'
         UNION ALL
         SELECT 'outbox-failed:' || outbox."id", 'outbox.failed', 'CRITICAL',
           'Evento de integración fallido',

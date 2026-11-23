@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   copilotActionLabels,
+  copilotPriorityLabels,
   copilotReasonLabels,
   formatCopCents,
   hasAdminPermission,
@@ -11,6 +12,7 @@ import {
 import { B2bError } from "@mundonettech/db";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { z } from "zod";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import {
@@ -55,6 +57,10 @@ function defaultExpiry(): string {
 function copilotOutput(value: unknown) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const root = value as Record<string, unknown>;
+  const priority =
+    typeof root.priority === "string" && root.priority in copilotPriorityLabels
+      ? copilotPriorityLabels[root.priority as keyof typeof copilotPriorityLabels]
+      : null;
   const action =
     typeof root.nextAction === "string" && root.nextAction in copilotActionLabels
       ? copilotActionLabels[root.nextAction as keyof typeof copilotActionLabels]
@@ -71,12 +77,15 @@ function copilotOutput(value: unknown) {
         )
         .map((reason) => copilotReasonLabels[reason])
     : [];
-  return action && confidence !== null ? { action, confidence, reasons } : null;
+  return priority && action && confidence !== null
+    ? { priority, action, confidence, reasons }
+    : null;
 }
 
 export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b2b/[id]">) {
   const session = await requireAdminPage("b2b:read");
   const { id } = await params;
+  if (!z.string().uuid().safeParse(id).success) notFound();
   let opportunity;
   try {
     opportunity = await b2bService(getDatabase()).getOpportunity(id);
@@ -85,6 +94,8 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
     throw error;
   }
   const canWrite = hasAdminPermission(session.profile.role, "b2b:write");
+  const canReadCrm = hasAdminPermission(session.profile.role, "crm:read");
+  const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
   const active = !["WON", "LOST", "CANCELLED"].includes(opportunity.status);
   const credentials = canWrite
     ? (await getIntegrationCredentialVault().list({ limit: 100 })).items
@@ -106,8 +117,16 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
           </span>
         </div>
         <p className="mt-2 text-sm text-muted-foreground">
-          {opportunity.contact.givenName} {opportunity.contact.familyName} ·{" "}
-          {opportunity.contact.email} · {opportunity.contact.phoneE164} · NIT{" "}
+          {canReadCrm ? (
+            <Link href={`/admin/crm/${opportunity.contact.id}`} className="underline">
+              {opportunity.contact.givenName} {opportunity.contact.familyName}
+            </Link>
+          ) : (
+            <>
+              {opportunity.contact.givenName} {opportunity.contact.familyName}
+            </>
+          )}{" "}
+          · {opportunity.contact.email} · {opportunity.contact.phoneE164} · NIT{" "}
           {opportunity.organization?.taxId ?? "No informado"}
         </p>
         <p className="mt-1 text-xs text-muted-foreground">
@@ -230,7 +249,7 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
                   Aceptada {proposal.acceptedAt ? dateFormatter.format(proposal.acceptedAt) : ""}{" "}
                   por {proposal.signerName ?? "identidad anonimizada"}.
                 </p>
-                {proposal.orderId ? (
+                {proposal.orderId && canReadOrders ? (
                   <Link
                     href={`/admin/pedidos/${proposal.orderId}`}
                     className="mt-2 inline-flex font-medium text-primary underline"
@@ -310,8 +329,8 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
                   </p>
                   {output ? (
                     <p className="mt-2">
-                      Siguiente acción: <strong>{output.action}</strong> · confianza{" "}
-                      {output.confidence / 100}%
+                      Prioridad <strong>{output.priority}</strong> · Siguiente acción:{" "}
+                      <strong>{output.action}</strong> · confianza {output.confidence / 100}%
                     </p>
                   ) : null}
                   {output && output.reasons.length > 0 ? (

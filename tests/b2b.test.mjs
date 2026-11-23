@@ -5,12 +5,16 @@ import { after, before, describe, it } from "node:test";
 import pg from "pg";
 
 import {
+  AccountError,
+  AccountService,
   B2bError,
   B2bService,
   CrmMergeService,
   CrmRetentionService,
   CrmService,
   IntegrationEnvironment,
+  OperationsService,
+  OrderLifecycleService,
   OrderService,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
@@ -587,6 +591,232 @@ describe("F4B.2 production B2B flow", () => {
         (await db.opportunityCopilotRun.findUniqueOrThrow({ where: { id: failedId } })).output,
         null,
       );
+    },
+    { timeout: 120_000 },
+  );
+
+  it(
+    "isolates B2B carts from abandoned cart sweeps, preserves active proposals on old cancellations, enforces catalog ceilings, RBAC and self-service Habeas Data erasure",
+    async () => {
+      const supportId = randomUUID();
+      const cmsId = randomUUID();
+      await db.adminUser.createMany({
+        data: [
+          {
+            id: supportId,
+            authUserId: randomUUID(),
+            email: `b2b-support-${randomUUID()}@example.test`,
+            displayName: "Soporte B2B",
+            role: "CUSTOMER_SUPPORT",
+            status: "ACTIVE",
+          },
+          {
+            id: cmsId,
+            authUserId: randomUUID(),
+            email: `b2b-cms-${randomUUID()}@example.test`,
+            displayName: "Editor CMS",
+            role: "CMS_EDITOR",
+            status: "ACTIVE",
+          },
+        ],
+      });
+      const supportAudit = { ...audit, actorAdminUserId: supportId, requestId: randomUUID() };
+      await assert.rejects(
+        service.createPriceList({ code: "B2B-FORBIDDEN", name: "No autorizada" }, supportAudit),
+        (error) => error instanceof B2bError && error.code === "FORBIDDEN",
+      );
+
+      const ceilingLead = await captureLead();
+      const operations = new OperationsService(db);
+      const adminOps = await operations.snapshot(adminId);
+      assert.equal(
+        adminOps.notifications.some(
+          (item) =>
+            item.category === "b2b.opportunities" && item.entityId === ceilingLead.opportunityId,
+        ),
+        true,
+      );
+      const cmsOps = await operations.snapshot(cmsId);
+      assert.equal(
+        cmsOps.notifications.some((item) => item.category === "b2b.opportunities"),
+        false,
+      );
+
+      priceListSequence += 1;
+      const ceilingList = await service.createPriceList(
+        { code: `B2B-CEIL-${priceListSequence}`, name: "Lista techo catálogo" },
+        audit,
+      );
+      await service.upsertPriceListItem(
+        ceilingList.id,
+        ceilingList.version,
+        { sku: catalog.sku, unitPriceCents: "95000" },
+        audit,
+      );
+      const originalVariant = await db.productVariant.findUniqueOrThrow({
+        where: { id: catalog.variantId },
+      });
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: 80_000n },
+      });
+      try {
+        const currentList = await service.getPriceList(ceilingList.id);
+        await assert.rejects(
+          service.activatePriceList(ceilingList.id, currentList.version, audit),
+          (error) => error instanceof B2bError && error.code === "CONFLICT",
+        );
+      } finally {
+        await db.productVariant.update({
+          where: { id: catalog.variantId },
+          data: { priceCents: originalVariant.priceCents },
+        });
+      }
+
+      const issuedFirst = await issueForLead(ceilingLead.opportunityId, 1);
+      await sql.query(
+        `UPDATE "Cart" SET "updatedAt" = CURRENT_TIMESTAMP - INTERVAL '2 hours' WHERE "id" = $1`,
+        [issuedFirst.issued.proposal.cartId],
+      );
+      const lifecycle = new OrderLifecycleService(db);
+      await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.equal(
+        await db.abandonedCart.count({ where: { cartId: issuedFirst.issued.proposal.cartId } }),
+        0,
+      );
+      assert.equal(
+        (await db.cart.findUniqueOrThrow({ where: { id: issuedFirst.issued.proposal.cartId } }))
+          .status,
+        "ACTIVE",
+      );
+
+      const oldExpiredId = randomUUID();
+      await sql.query(
+        `INSERT INTO "OpportunityProposal" (
+           "id", "opportunityId", "version", "status", "contentHash", "subtotalCents", "discountCents",
+           "taxCents", "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
+           "reservationMinutes", "expiresAt", "createdByAdminUserId"
+         ) VALUES ($1, $2, 98, 'EXPIRED', $3, 100000, 0, 0, 1000000, 1100000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
+           CURRENT_TIMESTAMP - INTERVAL '2 hours', $4)`,
+        [oldExpiredId, ceilingLead.opportunityId, randomBytes(32), adminId],
+      );
+      const beforeCancelOld = await service.getOpportunity(ceilingLead.opportunityId);
+      assert.equal(beforeCancelOld.status, "PROPOSAL_SENT");
+      await service.cancelProposal(oldExpiredId, beforeCancelOld.version, audit);
+      const afterCancelOld = await service.getOpportunity(ceilingLead.opportunityId);
+      assert.equal(afterCancelOld.status, "PROPOSAL_SENT");
+      assert.equal(afterCancelOld.currentVersion, issuedFirst.issued.proposal.version);
+
+      const selfServiceLead = await captureLead();
+      const selfIssued = await issueForLead(selfServiceLead.opportunityId, 1);
+      const selfPublic = await service.getPublicProposal(
+        Uint8Array.from(
+          (await import("node:crypto"))
+            .createHash("sha256")
+            .update(selfIssued.issued.token)
+            .digest(),
+        ),
+      );
+      const selfPreview = await orders.preview({ cartId: selfPublic.cartId });
+      const selfOrder = await orders.checkout(checkoutInput(selfPublic, selfPreview));
+      const orderRow = await db.order.findUniqueOrThrow({ where: { id: selfOrder.orderId } });
+      await sql.query(
+        `UPDATE "Order" SET "reservationExpiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE "id" = $1`,
+        [selfOrder.orderId],
+      );
+      const released = await lifecycle.releaseExpiredOrderReservations();
+      assert.equal(released.orderIds.includes(selfOrder.orderId), true);
+      await db.customer.update({
+        where: { id: orderRow.customerId },
+        data: { status: "ACTIVE", authUserId: randomUUID() },
+      });
+
+      const primaryContact = await db.contact.findFirstOrThrow({
+        where: { customerId: orderRow.customerId, deletedAt: null },
+      });
+      const contact360 = await crm.getContact360(primaryContact.id);
+      assert.equal(
+        contact360.opportunities.some((item) => item.id === selfServiceLead.opportunityId),
+        true,
+      );
+
+      const secondaryContact = await crm.createContact(
+        {
+          organizationId: primaryContact.organizationId,
+          givenName: "Laura",
+          familyName: "Rodríguez",
+          email: selfServiceLead.input.email,
+          phoneE164: "+573128887766",
+          source: "admin-crm",
+        },
+        audit,
+      );
+      const openOpp = await db.opportunity.create({
+        data: {
+          organizationId: primaryContact.organizationId,
+          contactId: secondaryContact.id,
+          source: "storefront-b2b",
+          requirements: "Segunda solicitud corporativa que debe fusionarse y redactarse.",
+          privacyPolicyVersion: "2026-01",
+          acceptanceProofHash: bytes(),
+          acceptedAt: new Date(),
+        },
+      });
+      await crm.detectDuplicates({ contactId: primaryContact.id }, audit);
+      const mergeCandidate = await db.identityMergeCandidate.findFirstOrThrow({
+        where: {
+          status: "PENDING",
+          OR: [
+            { sourceContactId: primaryContact.id, targetContactId: secondaryContact.id },
+            { sourceContactId: secondaryContact.id, targetContactId: primaryContact.id },
+          ],
+        },
+        include: { sourceContact: true, targetContact: true },
+      });
+      await merges.merge(
+        {
+          candidateId: mergeCandidate.id,
+          expectedVersion: mergeCandidate.version,
+          expectedSourceVersion: mergeCandidate.sourceContact.version,
+          expectedTargetVersion: mergeCandidate.targetContact.version,
+          note: "Fusión B2B previa a baja self-service.",
+        },
+        audit,
+      );
+
+      const accounts = new AccountService(db, { privacyPolicyVersion: "2026-01" });
+      await assert.rejects(
+        accounts.anonymize(orderRow.customerId, "ELIMINAR MI CUENTA", {
+          ipHash: bytes(),
+          userAgentHash: bytes(),
+        }),
+        (error) => error instanceof AccountError && error.code === "CONFLICT",
+      );
+
+      const openOppState = await service.getOpportunity(openOpp.id);
+      await service.closeOpportunity(openOpp.id, openOppState.version, "CANCELLED", audit);
+
+      await accounts.anonymize(orderRow.customerId, "ELIMINAR MI CUENTA", {
+        ipHash: bytes(),
+        userAgentHash: bytes(),
+      });
+
+      const redactedSelfOpp = await db.opportunity.findUniqueOrThrow({
+        where: { id: selfServiceLead.opportunityId },
+      });
+      assert.equal(redactedSelfOpp.requirements, "[contenido suprimido por retención]");
+      assert.ok(redactedSelfOpp.anonymizedAt);
+      const redactedConvertedProposal = await db.opportunityProposal.findUniqueOrThrow({
+        where: { id: selfIssued.proposal.id },
+      });
+      assert.equal(redactedConvertedProposal.signerName, null);
+      assert.equal(redactedConvertedProposal.signerDocumentNumber, null);
+      assert.equal(redactedConvertedProposal.commercialNotes, null);
+      assert.ok(redactedConvertedProposal.anonymizedAt);
+      const redactedMergeCandidate = await db.identityMergeCandidate.findUniqueOrThrow({
+        where: { id: mergeCandidate.id },
+      });
+      assert.deepEqual(redactedMergeCandidate.movedOpportunityIds, []);
     },
     { timeout: 120_000 },
   );

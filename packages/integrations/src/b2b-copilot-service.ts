@@ -8,7 +8,11 @@ import {
   type PrismaClient,
 } from "@mundonettech/db";
 
-import type { IntegrationCredentialVault } from "./credential-vault.js";
+import {
+  CredentialNotFoundError,
+  CredentialRevokedError,
+  type IntegrationCredentialVault,
+} from "./credential-vault.js";
 import {
   copilotReasons,
   createGeminiRequest,
@@ -72,11 +76,16 @@ function aggregateInput(
   const seconds = proposal
     ? Math.trunc((proposal.expiresAt.getTime() - now.getTime()) / 1000)
     : null;
+  const effectiveProposalStatus = proposal
+    ? proposal.status === "SENT" && proposal.expiresAt <= now
+      ? "EXPIRED"
+      : proposal.status
+    : "NONE";
   return {
     opportunityStatus: opportunity.status,
-    proposalStatus: proposal?.status ?? "NONE",
+    proposalStatus: effectiveProposalStatus,
     proposalVersion: proposal?.version ?? 0,
-    previousProposalCount: opportunity._count.proposals,
+    previousProposalCount: Math.max(0, opportunity._count.proposals - (proposal ? 1 : 0)),
     itemCount: proposal?.items.length ?? 0,
     totalUnits: proposal?.items.reduce((sum, item) => sum + item.quantity, 0) ?? 0,
     subtotalCents: (proposal?.subtotalCents ?? 0n).toString(),
@@ -143,11 +152,6 @@ export class B2bCopilotService {
   ) {}
 
   private async credential(id: string): Promise<IntegrationCredential> {
-    const descriptors = await this.options.vault.list({ limit: 100 });
-    const descriptor = descriptors.items.find(
-      (item) => item.id === id && item.provider === "gemini" && !item.revokedAt,
-    );
-    if (!descriptor) throw new B2bCopilotError("NOT_FOUND", "Active Gemini credential not found.");
     const record = await this.db.integrationCredential.findFirst({
       where: { id, provider: "gemini", revokedAt: null },
     });
@@ -239,6 +243,7 @@ export class B2bCopilotService {
       if (
         existing.status === "SUCCEEDED" &&
         existing.opportunityId === input.opportunityId &&
+        existing.credentialId === credential.id &&
         existing.output
       ) {
         return {
@@ -342,6 +347,9 @@ export class B2bCopilotService {
           status: "FAILED",
           failureCode,
         }).catch(() => undefined);
+      }
+      if (error instanceof CredentialNotFoundError || error instanceof CredentialRevokedError) {
+        throw new B2bCopilotError("NOT_FOUND", "Active Gemini credential not found.");
       }
       if (hasUniqueViolation(error)) {
         throw new B2bCopilotError("CONFLICT", "This Copilot request already exists.");

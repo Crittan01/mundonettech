@@ -4,6 +4,7 @@ import {
   assertB2bExpiry,
   calculateOrderTaxes,
   maskIdentifier,
+  maskName,
   normalizePriceListCode,
   normalizeSku,
   type StoreTaxRegimeValue,
@@ -411,7 +412,7 @@ export class B2bService {
       contact: maskCrmContact(record.contact),
       proposals: record.proposals.map((proposal) => ({
         ...proposal,
-        signerName: proposal.signerName ? maskIdentifier(proposal.signerName) : null,
+        signerName: proposal.signerName ? maskName(proposal.signerName) : null,
         signerDocumentNumber: maskIdentifier(proposal.signerDocumentNumber),
       })),
       copilotRuns: record.copilotRuns,
@@ -523,7 +524,15 @@ export class B2bService {
       await acquireOperationLocks(tx, [`b2b-price-list:${id}`]);
       const current = await tx.priceList.findUnique({
         where: { id },
-        include: { items: { include: { variant: { include: { product: true } } } } },
+        include: {
+          items: {
+            include: {
+              variant: {
+                include: { product: { include: { brand: true, category: true, taxGroup: true } } },
+              },
+            },
+          },
+        },
       });
       if (!current || current.deletedAt) throw new B2bError("NOT_FOUND", "Price list not found.");
       if (current.version !== version || current.status !== "DRAFT") {
@@ -537,9 +546,16 @@ export class B2bService {
         throw new B2bError("VALIDATION", "Add at least one item before activating the price list.");
       }
       if (
-        current.items.some((item) => item.variant.status !== "ACTIVE" || item.variant.deletedAt)
+        current.items.some(
+          (item) =>
+            !sellable(item.variant as VariantForProposal) ||
+            item.unitPriceCents > item.variant.priceCents,
+        )
       ) {
-        throw new B2bError("CONFLICT", "Every price list variant must remain active.");
+        throw new B2bError(
+          "CONFLICT",
+          "Every price list variant must remain active and not exceed its catalog price.",
+        );
       }
       const record = await tx.priceList.update({
         where: { id },
@@ -600,15 +616,18 @@ export class B2bService {
       if (priceList.version !== version || priceList.status !== "DRAFT") {
         throw new B2bError("CONFLICT", "Price list items are editable only in an unchanged draft.");
       }
-      const variant = await tx.productVariant.findFirst({
+      const variant = (await tx.productVariant.findFirst({
         where: {
           sku,
           status: "ACTIVE",
           deletedAt: null,
           product: { status: "ACTIVE", deletedAt: null },
         },
-      });
-      if (!variant) throw new B2bError("NOT_FOUND", "Active variant not found for this SKU.");
+        include: { product: { include: { brand: true, category: true, taxGroup: true } } },
+      })) as VariantForProposal | null;
+      if (!variant || !sellable(variant)) {
+        throw new B2bError("NOT_FOUND", "Active variant not found for this SKU.");
+      }
       if (unitPriceCents > variant.priceCents) {
         throw new B2bError("VALIDATION", "A B2B unit price cannot exceed the catalog unit price.");
       }
@@ -1025,7 +1044,7 @@ export class B2bService {
       if (proposal.expiresAt <= now)
         throw new B2bError("EXPIRED", "Create a new version with a future expiry.");
       const previous = await tx.opportunityProposal.findMany({
-        where: { opportunityId: proposal.opportunityId, status: "SENT" },
+        where: { opportunityId: proposal.opportunityId, status: { in: ["SENT", "EXPIRED"] } },
         select: { id: true, cartId: true },
       });
       for (const old of previous) {
@@ -1105,7 +1124,12 @@ export class B2bService {
       const initial = await tx.opportunityProposal.findUnique({ where: { id: proposalId } });
       if (!initial) throw new B2bError("NOT_FOUND", "Proposal not found.");
       await acquireOperationLocks(tx, [`b2b-opportunity:${initial.opportunityId}`]);
-      const opportunity = await tx.opportunity.findUnique({ where: { id: initial.opportunityId } });
+      const opportunities = await tx.$queryRaw<
+        Array<{ id: string; version: number; status: string; currentVersion: number }>
+      >`
+        SELECT "id", "version", "status", "currentVersion" FROM "Opportunity" WHERE "id" = ${initial.opportunityId}::uuid FOR UPDATE
+      `;
+      const opportunity = opportunities[0];
       if (
         !opportunity ||
         opportunity.version !== expectedVersion ||
@@ -1113,21 +1137,30 @@ export class B2bService {
       ) {
         throw new B2bError("CONFLICT", "The opportunity changed or is closed.");
       }
-      if (!["DRAFT", "SENT", "EXPIRED"].includes(initial.status)) {
+      const proposal = await tx.opportunityProposal.findUniqueOrThrow({
+        where: { id: proposalId },
+      });
+      if (!["DRAFT", "SENT", "EXPIRED"].includes(proposal.status)) {
         throw new B2bError("CONFLICT", "This proposal cannot be cancelled.");
       }
-      if (initial.cartId)
+      if (proposal.cartId)
         await tx.cart.updateMany({
-          where: { id: initial.cartId, status: "ACTIVE" },
+          where: { id: proposal.cartId, status: "ACTIVE" },
           data: { status: "CANCELLED" },
         });
       await tx.opportunityProposal.update({
         where: { id: proposalId },
         data: { status: "CANCELLED" },
       });
+      const nextStatus =
+        opportunity.status === "PROPOSAL_SENT" &&
+        proposal.status === "SENT" &&
+        opportunity.currentVersion === proposal.version
+          ? "QUALIFYING"
+          : (opportunity.status as "NEW" | "QUALIFYING" | "PROPOSAL_SENT");
       await tx.opportunity.update({
         where: { id: opportunity.id },
-        data: { status: "QUALIFYING", version: { increment: 1 } },
+        data: { status: nextStatus, version: { increment: 1 } },
       });
       await b2bLog(tx, audit, "B2B_PROPOSAL_CANCELLED", "OpportunityProposal", proposalId);
     });
@@ -1144,7 +1177,12 @@ export class B2bService {
     return inInventoryTransaction(this.db, async (tx) => {
       await b2bActor(tx, audit, "b2b:write");
       await acquireOperationLocks(tx, [`b2b-opportunity:${opportunityId}`]);
-      const opportunity = await tx.opportunity.findUnique({ where: { id: opportunityId } });
+      const opportunities = await tx.$queryRaw<
+        Array<{ id: string; version: number; status: string }>
+      >`
+        SELECT "id", "version", "status" FROM "Opportunity" WHERE "id" = ${opportunityId}::uuid FOR UPDATE
+      `;
+      const opportunity = opportunities[0];
       if (!opportunity) throw new B2bError("NOT_FOUND", "Opportunity not found.");
       if (
         opportunity.version !== version ||
@@ -1253,13 +1291,17 @@ export class B2bService {
     }
     const candidates = await this.db.opportunityProposal.findMany({
       where: { status: "SENT", expiresAt: { lte: await b2bNow(this.db) } },
-      select: { id: true },
+      select: { id: true, opportunityId: true },
       orderBy: [{ expiresAt: "asc" }, { id: "asc" }],
       take: limit,
     });
     let expired = 0;
     for (const candidate of candidates) {
       const changed = await inInventoryTransaction(this.db, async (tx) => {
+        await acquireOperationLocks(tx, [`b2b-opportunity:${candidate.opportunityId}`]);
+        await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "Opportunity" WHERE "id" = ${candidate.opportunityId}::uuid FOR UPDATE
+        `;
         const rows = await tx.$queryRaw<
           Array<{ id: string; opportunityId: string; cartId: string | null; version: number }>
         >`

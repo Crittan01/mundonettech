@@ -956,13 +956,27 @@ export class OrderService {
           "cartId" in reference
             ? await tx.cart.findUnique({
                 where: { id: reference.cartId },
-                select: { couponId: true },
+                select: {
+                  couponId: true,
+                  kind: true,
+                  sourceProposal: { select: { opportunityId: true } },
+                },
               })
             : await tx.cart.findUnique({
                 where: { accessTokenHash: referenceHash(reference)! },
-                select: { couponId: true },
+                select: {
+                  couponId: true,
+                  kind: true,
+                  sourceProposal: { select: { opportunityId: true } },
+                },
               });
-        if (peek?.couponId) await acquireOperationLocks(tx, [`coupon-redemption:${peek.couponId}`]);
+        const initialLocks = [
+          ...(peek?.couponId ? [`coupon-redemption:${peek.couponId}`] : []),
+          ...(peek?.kind === "B2B" && peek.sourceProposal?.opportunityId
+            ? [`b2b-opportunity:${peek.sourceProposal.opportunityId}`]
+            : []),
+        ];
+        if (initialLocks.length > 0) await acquireOperationLocks(tx, initialLocks);
         const rows =
           "cartId" in reference
             ? await tx.$queryRaw<

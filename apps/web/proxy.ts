@@ -182,9 +182,11 @@ export async function proxy(request: NextRequest) {
     user &&
     !isPrefetch &&
     (pathname === "/carrito" ||
+      pathname === "/empresas" ||
       pathname.startsWith("/checkout") ||
       pathname.startsWith("/pagar/") ||
       pathname.startsWith("/pedido/") ||
+      pathname.startsWith("/propuesta/") ||
       pathname.startsWith("/recibo/"))
   ) {
     const customerToken = request.cookies.get(customerActivityCookie)?.value;

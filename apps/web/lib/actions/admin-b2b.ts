@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   copilotActionLabels,
+  copilotPriorityLabels,
   parseWholeCopToCents,
   type AdminPermission,
 } from "@mundonettech/core";
@@ -21,11 +22,7 @@ import {
 } from "@/lib/action-state";
 import { b2bService } from "@/lib/b2b";
 import { getDatabase } from "@/lib/db";
-import {
-  b2bCopilotService,
-  getIntegrationCredentialVault,
-  getPublicSiteUrl,
-} from "@/lib/integrations";
+import { b2bCopilotService, getPublicSiteUrl } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
@@ -320,25 +317,18 @@ export async function closeB2bOpportunityAction(_previous: ActionState, formData
 export async function runB2bCopilotAction(_previous: ActionState, formData: FormData) {
   const values = formSnapshot(formData);
   try {
+    const auditContext = await audit();
     const opportunityId = id(formData, "opportunityId");
     const credentialId = id(formData, "credentialId");
-    const descriptors = await getIntegrationCredentialVault().list({ limit: 100 });
-    if (
-      !descriptors.items.some(
-        (item) => item.id === credentialId && item.provider === "gemini" && !item.revokedAt,
-      )
-    ) {
-      return actionError("Selecciona una credencial Gemini activa.", values);
-    }
     const result = await b2bCopilotService(getDatabase()).run({
       opportunityId,
       credentialId,
       requestId: id(formData, "requestId"),
-      audit: await audit(),
+      audit: auditContext,
     });
     revalidate(opportunityId);
     return actionSuccess(
-      `${result.replayed ? "Resultado recuperado" : "Clasificación completada"}: ${copilotActionLabels[result.suggestion.nextAction]} con ${result.suggestion.confidenceBps / 100}% de confianza.`,
+      `${result.replayed ? "Resultado recuperado" : "Clasificación completada"}: prioridad ${copilotPriorityLabels[result.suggestion.priority].toLowerCase()}, ${copilotActionLabels[result.suggestion.nextAction]} (${result.suggestion.confidenceBps / 100}% de confianza).`,
     );
   } catch (error) {
     return failure(error, { ...values, requestId: randomUUID() });

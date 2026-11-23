@@ -195,6 +195,11 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
   await assignment.getByLabel("Lista asignada").selectOption({ label: `${listCode} · Lista E2E` });
   await assignment.getByRole("button", { name: "Asignar" }).click();
   await expect(page.getByText("Lista asignada a la organización.")).toBeVisible();
+  const invalidAdminOpportunity = await page.goto("/admin/b2b/not-a-uuid");
+  expect(invalidAdminOpportunity?.headers()["x-robots-tag"] ?? (await page.content())).toContain(
+    "noindex",
+  );
+  await page.goto("/admin/b2b");
   await page.getByRole("link", { name: legalName }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(legalName);
   await page.getByLabel("SKU 1", { exact: true }).fill(variant.sku);
@@ -218,6 +223,9 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
   expect(proposalResponse?.headers()["cache-control"]).toContain("no-store");
   expect(proposalResponse?.headers()["x-robots-tag"]).toContain("noindex");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(legalName);
+  const proposalHtml = await page.content();
+  expect(proposalHtml).not.toContain(email);
+  expect(proposalHtml).not.toContain(`901${runSuffix}`);
   await expectAccessible(page);
   await page.getByLabel("Quien acepta y firma").fill("Laura Rodríguez");
   await page.getByLabel("Número de documento").fill("1020304050");

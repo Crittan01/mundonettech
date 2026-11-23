@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   adminNavigation,
   assertB2bExpiry,
+  copilotPriorityLabels,
   hasAdminPermission,
   isReservedRedirectSource,
   normalizePriceListCode,
@@ -65,6 +66,12 @@ describe("B2B validation and authorization", () => {
     expect(adminNavigation("STORE_MANAGER").some((item) => item.href === "/admin/b2b")).toBe(true);
     expect(isReservedRedirectSource("/empresas")).toBe(true);
     expect(isReservedRedirectSource("/propuesta/token-privado")).toBe(true);
+    expect(copilotPriorityLabels).toEqual({
+      LOW: "Baja",
+      NORMAL: "Normal",
+      HIGH: "Alta",
+      URGENT: "Urgente",
+    });
   });
 });
 

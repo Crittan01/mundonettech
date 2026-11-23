@@ -22,6 +22,13 @@ export const priceListStatusLabels = {
   ARCHIVED: "Archivada",
 } as const;
 
+export const copilotPriorityLabels = {
+  LOW: "Baja",
+  NORMAL: "Normal",
+  HIGH: "Alta",
+  URGENT: "Urgente",
+} as const;
+
 export const copilotActionLabels = {
   CONTACT_CUSTOMER: "Contactar al cliente",
   REVISE_PRICING: "Revisar condiciones comerciales",

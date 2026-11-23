@@ -300,6 +300,19 @@ export async function suppressCustomerCrmLineageInTransaction(
   const contacts = await tx.$queryRaw<
     Contact[]
   >`SELECT * FROM "Contact" WHERE "id" IN (SELECT * FROM unnest(${lineageIds}::uuid[])) ORDER BY "id" FOR UPDATE`;
+  const openOpportunity = await tx.opportunity.findFirst({
+    where: {
+      contactId: { in: lineageIds },
+      status: { in: ["NEW", "QUALIFYING", "PROPOSAL_SENT"] },
+    },
+    select: { id: true },
+  });
+  if (openOpportunity) {
+    throw new CrmError(
+      "CONFLICT",
+      "Close active B2B opportunities and proposals before suppressing this lineage.",
+    );
+  }
   await tx.contactActivity.updateMany({
     where: { contactId: { in: lineageIds }, redactedAt: null },
     data: {
@@ -344,6 +357,7 @@ export async function suppressCustomerCrmLineageInTransaction(
         retiredIdentityIds: [],
         movedActivityIds: [],
         movedTaskIds: [],
+        movedOpportunityIds: [],
         resolutionNote: "[contenido suprimido por retención]",
         version: { increment: 1 },
       },
@@ -359,6 +373,34 @@ export async function suppressCustomerCrmLineageInTransaction(
       version: { increment: 1 },
     },
   });
+  const opportunities = await tx.opportunity.findMany({
+    where: { contactId: { in: lineageIds }, anonymizedAt: null },
+    select: { id: true },
+  });
+  const opportunityIds = opportunities.map((opportunity) => opportunity.id);
+  if (opportunityIds.length > 0) {
+    await tx.opportunity.updateMany({
+      where: { id: { in: opportunityIds } },
+      data: {
+        requirements: "[contenido suprimido por retención]",
+        acceptanceIpHash: null,
+        acceptanceUserAgentHash: null,
+        anonymizedAt: now,
+      },
+    });
+    await tx.opportunityProposal.updateMany({
+      where: { opportunityId: { in: opportunityIds }, anonymizedAt: null },
+      data: {
+        commercialNotes: null,
+        signerName: null,
+        signerDocumentType: null,
+        signerDocumentNumber: null,
+        acceptanceIpHash: null,
+        acceptanceUserAgentHash: null,
+        anonymizedAt: now,
+      },
+    });
+  }
   for (const contact of contacts) {
     if (contact.status === "ANONYMIZED") continue;
     await tx.contact.update({

@@ -8,6 +8,7 @@ import {
   crmVerificationLevelLabels,
   formatCopCents,
   hasAdminPermission,
+  opportunityStatusLabels,
 } from "@mundonettech/core";
 import { CrmError } from "@mundonettech/db";
 import Link from "next/link";
@@ -52,6 +53,7 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
   const canSuppress = hasAdminPermission(session.profile.role, "crm:suppress");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
+  const canReadB2b = hasAdminPermission(session.profile.role, "b2b:read");
   const active = contact.status === "ACTIVE";
   return (
     <div className="space-y-10">
@@ -252,6 +254,31 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
         <h2 id="contact-commerce" className="text-2xl font-semibold">
           Visión comercial y posventa
         </h2>
+        {contact.opportunities.length > 0 ? (
+          <div className="space-y-2">
+            <h3 className="text-base font-semibold">
+              Oportunidades B2B ({contact.opportunities.length})
+            </h3>
+            <ul className="space-y-2">
+              {contact.opportunities.map((opportunity) => (
+                <li
+                  key={opportunity.id}
+                  className="rounded-lg border border-border bg-card p-3 text-sm"
+                >
+                  {canReadB2b ? (
+                    <Link className="font-medium underline" href={`/admin/b2b/${opportunity.id}`}>
+                      Oportunidad B2B
+                    </Link>
+                  ) : (
+                    <span className="font-medium">Oportunidad B2B</span>
+                  )}{" "}
+                  · {opportunityStatusLabels[opportunity.status]} · versión comercial{" "}
+                  {opportunity.currentVersion} · {dateFormatter.format(opportunity.createdAt)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {!contact.customer ? (
           <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
             Contacto sin cuenta de comprador vinculada.

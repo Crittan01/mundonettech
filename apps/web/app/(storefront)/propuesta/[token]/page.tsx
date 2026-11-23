@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 
-import { formatCopCents, opportunityProposalStatusLabels } from "@mundonettech/core";
+import {
+  formatCopCents,
+  maskEmail,
+  maskIdentifier,
+  maskName,
+  maskPhone,
+  opportunityProposalStatusLabels,
+} from "@mundonettech/core";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
@@ -38,7 +45,10 @@ export default async function ProposalPage({ params }: PageProps<"/propuesta/[to
   if (preview && preview.homeDelivery.totalCents !== proposal.totalCents) {
     throw new Error("Proposal and checkout totals diverge.");
   }
-  const contactName = `${proposal.contact.givenName} ${proposal.contact.familyName}`.trim();
+  const maskedContactName = `${maskName(proposal.contact.givenName)} ${maskName(proposal.contact.familyName)}`;
+  const maskedEmail = maskEmail(proposal.contact.email);
+  const maskedPhone = maskPhone(proposal.contact.phoneE164);
+  const maskedTaxId = maskIdentifier(proposal.contact.documentNumber);
   return (
     <div className="mx-auto max-w-5xl space-y-8">
       <div>
@@ -128,7 +138,8 @@ export default async function ProposalPage({ params }: PageProps<"/propuesta/[to
         <section className="rounded-xl border border-success bg-card p-6">
           <h2 className="text-xl font-semibold">Propuesta convertida en pedido</h2>
           <p className="mt-2 text-muted-foreground">
-            La aceptación quedó registrada y el pedido está pendiente de pago.
+            La aceptación quedó registrada. Consulta el estado actual y el comprobante del pedido en
+            tu recibo.
           </p>
           <Link
             href={`/recibo/${receiptTokenForProposal(token)}`}
@@ -156,19 +167,15 @@ export default async function ProposalPage({ params }: PageProps<"/propuesta/[to
         <section className="rounded-xl border border-border bg-card p-6 sm:p-8">
           <div className="mb-6 text-sm text-muted-foreground">
             <p>
-              Contacto registrado: {contactName} · {proposal.contact.email} ·{" "}
-              {proposal.contact.phoneE164}
+              Contacto registrado: {maskedContactName} · {maskedEmail} · {maskedPhone}
             </p>
-            <p className="mt-1">
-              Documento fiscal de la empresa: {proposal.contact.documentNumber}
-            </p>
+            <p className="mt-1">Documento fiscal de la empresa: {maskedTaxId}</p>
           </div>
           <ProposalAcceptanceForm
             proposalId={proposal.id}
             token={token}
             reviewFingerprint={preview.homeDelivery.reviewFingerprint}
             submissionId={randomUUID()}
-            contactName={contactName}
             departments={preview.departments}
             municipalities={preview.municipalities}
           />
