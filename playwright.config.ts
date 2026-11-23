@@ -45,6 +45,7 @@ const webServerEnv: Record<string, string> = {
   CHANNEL_JOB_ACTOR_ID: process.env.CHANNEL_JOB_ACTOR_ID ?? "00000000-0000-4000-8000-00000000c202",
   MERCADO_LIBRE_TOKEN_URL:
     process.env.MERCADO_LIBRE_TOKEN_URL ?? "http://127.0.0.1:54420/oauth/token",
+  MERCADO_LIBRE_API_URL: process.env.MERCADO_LIBRE_API_URL ?? "http://127.0.0.1:54420",
   BANK_TRANSFER_INSTRUCTIONS:
     process.env.BANK_TRANSFER_INSTRUCTIONS ??
     "Cuenta de ahorros 001-00234567-89, banco de pruebas E2E. Usa la referencia del pedido.",

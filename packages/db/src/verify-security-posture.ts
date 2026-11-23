@@ -17,6 +17,9 @@ const requiredTables = [
   "OperationalHealthSnapshot",
   "ChannelAccount",
   "ChannelOAuthAttempt",
+  "ChannelListing",
+  "ChannelOffer",
+  "ChannelSyncJob",
   "Customer",
   "Consent",
   "Organization",
@@ -327,6 +330,36 @@ const requiredConstraints = [
   "ChannelOAuthAttempt_status_consistent",
   "ChannelOAuthAttempt_completion_valid",
   "ChannelOAuthAttempt_failure_code_valid",
+  "ChannelListing_external_ids_valid",
+  "ChannelListing_category_valid",
+  "ChannelListing_family_name_valid",
+  "ChannelListing_warehouse_consistent",
+  "ChannelListing_source_hash_length",
+  "ChannelListing_version_nonnegative",
+  "ChannelListing_quantities_nonnegative",
+  "ChannelListing_stock_version_nonnegative",
+  "ChannelListing_claim_consistent",
+  "ChannelListing_status_consistent",
+  "ChannelListing_provider_error_valid",
+  "ChannelOffer_external_item_valid",
+  "ChannelOffer_listing_type_valid",
+  "ChannelOffer_money_nonnegative",
+  "ChannelOffer_commission_valid",
+  "ChannelOffer_whole_cop_price",
+  "ChannelOffer_pricing_mode_consistent",
+  "ChannelOffer_fee_thresholds",
+  "ChannelOffer_money_balanced",
+  "ChannelOffer_stock_quantity_nonnegative",
+  "ChannelOffer_source_hash_length",
+  "ChannelOffer_version_nonnegative",
+  "ChannelOffer_status_consistent",
+  "ChannelSyncJob_deduplication_valid",
+  "ChannelSyncJob_request_hash_length",
+  "ChannelSyncJob_payload_object",
+  "ChannelSyncJob_attempts_valid",
+  "ChannelSyncJob_claim_consistent",
+  "ChannelSyncJob_status_consistent",
+  "ChannelSyncJob_failure_code_valid",
   "Address_identity_valid",
   "GuestOrderChallenge_hashes_length",
   "GuestOrderChallenge_attempts_valid",
@@ -458,6 +491,13 @@ const requiredPartialIndexes = [
   "OpportunityProposal_orderId_key",
   "OpportunityProposal_cartId_key",
   "ChannelOAuthAttempt_one_active_per_account_key",
+] as const;
+const requiredTotalUniqueIndexes = [
+  "ChannelListing_externalUserProductId_key",
+  "ChannelListing_accountId_variantId_key",
+  "ChannelOffer_externalItemId_key",
+  "ChannelOffer_listingId_listingTypeId_logisticType_key",
+  "ChannelSyncJob_deduplicationKey_key",
 ] as const;
 const requiredCatalogIndexes = [
   "Product_searchVector_idx",
@@ -592,6 +632,9 @@ const requiredSecurityTriggers = [
   "ChannelOAuthAttempt_enforce_state",
   "IntegrationCredential_channel_binding",
   "ChannelOAuthAttempt_credential_revocation",
+  "ChannelListing_enforce_state",
+  "ChannelOffer_enforce_state",
+  "ChannelSyncJob_enforce_state",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",
@@ -840,7 +883,7 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
        FROM pg_indexes
        WHERE schemaname = 'public'
          AND indexname = ANY($1::text[])`,
-      [[...requiredPartialIndexes, ...requiredCatalogIndexes]],
+      [[...requiredPartialIndexes, ...requiredTotalUniqueIndexes, ...requiredCatalogIndexes]],
     );
     for (const required of requiredPartialIndexes) {
       const index = indexes.rows.find((row) => row.index_name === required);
@@ -850,6 +893,12 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
         !index.index_definition.includes(" WHERE ")
       ) {
         errors.push(`Missing partial unique index ${required}.`);
+      }
+    }
+    for (const required of requiredTotalUniqueIndexes) {
+      const index = indexes.rows.find((row) => row.index_name === required);
+      if (!index || !index.index_definition.startsWith("CREATE UNIQUE INDEX")) {
+        errors.push(`Missing unique index ${required}.`);
       }
     }
     for (const required of requiredCatalogIndexes) {

@@ -8,6 +8,7 @@ export class IntegrationTransportError extends Error {
 export interface LimitedHttpResponse {
   readonly status: number;
   readonly body: string;
+  readonly headers: Headers;
 }
 
 export async function fetchWithLimit(options: {
@@ -39,7 +40,7 @@ export async function fetchWithLimit(options: {
         "Provider response exceeds the configured resource limit.",
       );
     }
-    if (!response.body) return { status: response.status, body: "" };
+    if (!response.body) return { status: response.status, body: "", headers: response.headers };
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
@@ -64,6 +65,7 @@ export async function fetchWithLimit(options: {
     return {
       status: response.status,
       body: new TextDecoder("utf-8", { fatal: true }).decode(merged),
+      headers: response.headers,
     };
   } catch (error) {
     if (error instanceof IntegrationTransportError) throw error;

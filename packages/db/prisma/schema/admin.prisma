@@ -74,6 +74,8 @@ model AdminUser {
   updatedLifecycleJourneys  LifecycleJourney[] @relation("LifecycleJourneyUpdater")
   createdChannelAccounts    ChannelAccount[] @relation("ChannelAccountCreator")
   createdChannelOAuthAttempts ChannelOAuthAttempt[] @relation("ChannelOAuthAttemptCreator")
+  createdChannelListings    ChannelListing[] @relation("ChannelListingCreator")
+  createdChannelSyncJobs    ChannelSyncJob[] @relation("ChannelSyncJobCreator")
 
   @@index([role, status])
   @@index([createdAt])

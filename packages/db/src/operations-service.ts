@@ -21,6 +21,7 @@ const managedCategories = [
   "crm.merges",
   "b2b.opportunities",
   "channels.reauth",
+  "channels.sync",
   "outbox.failed",
 ] as const;
 
@@ -245,6 +246,17 @@ export class OperationsService {
           '/admin/canales', 'ChannelAccount', channels."id"::text
         FROM "ChannelAccount" channels
         WHERE channels."status" = 'REAUTH_REQUIRED'
+        UNION ALL
+        SELECT 'channel-sync:' || listings."id", 'channels.sync',
+          CASE WHEN listings."lastProviderError" IN ('PROVIDER_UNCERTAIN', 'SYNC_UNCERTAIN', 'CLAIM_EXPIRED', 'PERSISTENCE_CONFLICT')
+            THEN 'CRITICAL' ELSE 'WARNING' END,
+          'Publicación de canal requiere revisión',
+          left('La sincronización se detuvo (' || listings."lastProviderError" || '). Revisa el job y concilia antes de reintentar.', 500),
+          '/admin/canales', 'ChannelListing', listings."id"::text
+        FROM "ChannelListing" listings
+        WHERE listings."lastProviderError" IS NOT NULL AND
+          (listings."status" = 'RECONCILE_REQUIRED' OR
+           (listings."status" = 'DRAFT' AND listings."lastProviderError" <> 'ACCOUNT_DISCONNECTED'))
         UNION ALL
         SELECT 'outbox-failed:' || outbox."id", 'outbox.failed', 'CRITICAL',
           'Evento de integración fallido',

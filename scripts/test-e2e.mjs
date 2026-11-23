@@ -57,6 +57,7 @@ try {
       NEXT_PUBLIC_SUPABASE_URL: authFixture.origin,
       MEDIA_BASE_URL: "http://127.0.0.1:4110",
       MERCADO_LIBRE_TOKEN_URL: `${mercadoLibreFixture.origin}/oauth/token`,
+      MERCADO_LIBRE_API_URL: mercadoLibreFixture.origin,
       SESSION_TIMEOUT_SECRET:
         process.env.SESSION_TIMEOUT_SECRET ?? randomBytes(32).toString("base64"),
       SECURITY_EVENT_PEPPER:

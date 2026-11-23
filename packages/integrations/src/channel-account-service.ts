@@ -1178,6 +1178,16 @@ export class ChannelAccountService {
           "Wait for the in-flight OAuth authorization before disconnecting.",
         );
       }
+      const processingSync = await tx.channelSyncJob.findFirst({
+        where: { listing: { accountId }, status: "PROCESSING" },
+        select: { id: true },
+      });
+      if (processingSync) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "Wait for the in-flight channel synchronization before disconnecting.",
+        );
+      }
       return { kind: "READY" as const, account };
     });
     if (preflight.kind === "ALREADY_DISCONNECTED") {
@@ -1223,6 +1233,16 @@ export class ChannelAccountService {
           "The channel changed during disconnection; review it before retrying.",
         );
       }
+      const processingSync = await tx.channelSyncJob.findFirst({
+        where: { listing: { accountId }, status: "PROCESSING" },
+        select: { id: true },
+      });
+      if (processingSync) {
+        throw new ChannelAccountError(
+          "CONFLICT",
+          "The channel changed during disconnection; review it before retrying.",
+        );
+      }
       const pendingAttempts = await tx.channelOAuthAttempt.findMany({
         where: { accountId, status: "PENDING" },
         select: { id: true, credentialId: true },
@@ -1252,6 +1272,38 @@ export class ChannelAccountService {
           outcome: "OAUTH_CANCELLED",
         });
       }
+      await tx.channelSyncJob.updateMany({
+        where: {
+          listing: { accountId },
+          status: { in: ["PENDING", "RETRY_SCHEDULED"] },
+        },
+        data: {
+          status: "FAILED",
+          completedAt: now,
+          failureCode: "ACCOUNT_DISCONNECTED",
+          claimId: null,
+          claimedBy: null,
+          claimedAt: null,
+          claimExpiresAt: null,
+          updatedAt: now,
+        },
+      });
+      await tx.channelListing.updateMany({
+        where: { accountId, externalUserProductId: { not: null }, status: { not: "CLOSED" } },
+        data: { status: "PAUSED", lastProviderError: "ACCOUNT_DISCONNECTED", updatedAt: now },
+      });
+      await tx.channelListing.updateMany({
+        where: { accountId, externalUserProductId: null },
+        data: { lastProviderError: "ACCOUNT_DISCONNECTED", updatedAt: now },
+      });
+      await tx.channelOffer.updateMany({
+        where: {
+          listing: { accountId },
+          externalItemId: { not: null },
+          status: { not: "CLOSED" },
+        },
+        data: { status: "PAUSED", updatedAt: now },
+      });
       await tx.integrationCredential.updateMany({
         where: { id: account.credentialId, revokedAt: null },
         data: { revokedAt: now, updatedAt: now },

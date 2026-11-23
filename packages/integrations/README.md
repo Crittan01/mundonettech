@@ -59,6 +59,14 @@ La renovación usa un reclamo UUID persistente, no mantiene transacciones durant
 
 `/admin/canales` aplica `integrations:*` + MFA reciente y auditoría sin secretos. `POST /api/jobs/channels` exige `CHANNEL_CRON_SECRET` y `CHANNEL_JOB_ACTOR_ID` con `integrations:write`, expira intentos y renueva únicamente cuentas próximas a vencer. `MERCADO_LIBRE_TOKEN_URL` solo admite fixtures loopback en `LOCAL`; los endpoints productivos son fijos y oficiales.
 
+## User Products, ofertas, Full y precios
+
+`MercadoLibreUserProductsClient` usa endpoints oficiales (loopback solo en pruebas) para validar `user_product_seller`, subir imágenes, crear y actualizar ítems, consultar stock y buscar por SKU. Toda respuesta se valida en esquema, vendedor, dinero COP entero, cantidades, logística y `x-version`; los errores separan rechazo, recurso ausente, conflicto e incertidumbre.
+
+`ChannelCatalogService` persiste `ChannelListing`, `ChannelOffer` y `ChannelSyncJob` con snapshots inmutables, request hash, versiones y un claim por listing. Admite múltiples condiciones de venta sobre el mismo User Product, `FORMULA`/`MANUAL`, tarifas explícitas y neto `BigInt`. El scheduler detecta drift por oferta: `LOCAL_MAIN` actualiza `available_quantity` o `seller_warehouse` según la configuración multi-origen; `MELI_FULL` solo lee `meli_facility`. Un `409` obliga a releer `x-version` antes del único reintento inmediato y toda escritura se confirma con otra lectura.
+
+Una respuesta incierta no se repite: publicación queda pendiente de conciliación por SKU y las escrituras se comparan con el estado remoto. `/admin/canales` exige MFA reciente para crear/editar/procesar, y `/api/jobs/channels` renueva tokens y procesa drift/jobs con actor autorizado. Desvincular bloquea jobs en vuelo, cancela pendientes y pausa publicaciones; `channels.sync` alerta divergencias y errores sin PII ni secretos.
+
 ## Worker de dominio
 
 `DomainEventWorker` usa `claim_domain_outbox_events` para no consumir eventos ajenos, ejecuta efectos idempotentes y aplica backoff acotado antes de `fail_domain_outbox`. Los payloads llevan UUIDs y referencias, nunca correos, direcciones, teléfonos, documentos ni tokens; el enlace del recibo se deriva en servidor desde su UUID de envío. Para `cart.abandoned.v1` recupera el estado real del carrito, valida contacto/consentimiento, genera una clave por actividad y registra `QUEUED`, `NO_CONTACT`, `NO_CONSENT`, `SUPPRESSED` o `STALE`. Para `lifecycle.message.dispatch.v1` valida `dispatchVersion`, sella el contenido del paso y completa la inscripción únicamente cuando todos los correos fueron aceptados; un fallo terminal cancela los pasos futuros. `POST /api/jobs/domain-events` exige `DOMAIN_WORKER_CRON_SECRET` y procesa hasta cuatro lotes por invocación.

@@ -226,6 +226,7 @@ model ChannelAccount {
   credential            IntegrationCredential  @relation(fields: [credentialId], references: [id], onDelete: Restrict)
   createdBy             AdminUser              @relation("ChannelAccountCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
   oauthAttempts         ChannelOAuthAttempt[]
+  listings              ChannelListing[]
 
   @@unique([provider, siteId, environment, externalAccountId])
   @@index([environment, status, tokenExpiresAt, id])
@@ -258,4 +259,149 @@ model ChannelOAuthAttempt {
   @@index([accountId, createdAt])
   @@index([createdByAdminUserId, createdAt])
   @@map("ChannelOAuthAttempt")
+}
+
+
+enum ChannelListingStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  RECONCILE_REQUIRED
+  CLOSED
+}
+
+enum ChannelOfferPricingMode {
+  FORMULA
+  MANUAL
+}
+
+enum ChannelOfferStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  RECONCILE_REQUIRED
+  CLOSED
+}
+
+enum ChannelLogisticType {
+  CROSS_DOCKING
+  FULFILLMENT
+}
+
+enum ChannelSyncJobKind {
+  PUBLISH
+  SYNC_CONTENT
+  SYNC_PRICE
+  SYNC_LOCAL_STOCK
+  RECONCILE_REMOTE
+}
+
+enum ChannelSyncJobStatus {
+  PENDING
+  PROCESSING
+  RETRY_SCHEDULED
+  SUCCEEDED
+  FAILED
+  UNCERTAIN
+  SUPERSEDED
+}
+
+model ChannelListing {
+  id                    String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId             String                @db.Uuid
+  variantId             String                @db.Uuid
+  externalUserProductId String?               @unique @db.VarChar(64)
+  externalCategoryId    String                @db.VarChar(32)
+  familyName            String                @db.VarChar(200)
+  sellerStoreId         String?               @db.VarChar(64)
+  sellerNetworkNodeId   String?               @db.VarChar(64)
+  sourceHash            Bytes                 @db.ByteA
+  status                ChannelListingStatus  @default(DRAFT)
+  version               Int                   @default(0)
+  localQuantity         Int                   @default(0)
+  remoteLocalQuantity   Int?
+  remoteFullQuantity    Int?
+  remoteStockVersion    BigInt?
+  stockSyncedAt         DateTime?             @db.Timestamptz(6)
+  lastProviderError     String?               @db.VarChar(100)
+  syncClaimId           String?               @db.Uuid
+  syncClaimedAt         DateTime?             @db.Timestamptz(6)
+  syncClaimExpiresAt    DateTime?             @db.Timestamptz(6)
+  createdByAdminUserId  String                @db.Uuid
+  createdAt             DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt             DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  account               ChannelAccount        @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  variant               ProductVariant        @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  createdBy             AdminUser             @relation("ChannelListingCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  offers                ChannelOffer[]
+  syncJobs              ChannelSyncJob[]
+
+  @@unique([accountId, variantId])
+  @@index([variantId, status])
+  @@index([status, updatedAt, id])
+  @@index([syncClaimExpiresAt, status])
+  @@map("ChannelListing")
+}
+
+model ChannelOffer {
+  id                       String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  listingId                String                 @db.Uuid
+  externalItemId           String?                @unique @db.VarChar(64)
+  listingTypeId            String                 @db.VarChar(40)
+  logisticType             ChannelLogisticType
+  pricingMode              ChannelOfferPricingMode
+  manualPriceCents         BigInt?
+  targetNetCents           BigInt?
+  commissionBps            Int
+  fixedFeeCents            BigInt                @default(0)
+  shippingCostCents        BigInt                @default(0)
+  priceCents               BigInt
+  commissionAmountCents    BigInt
+  fixedFeeAppliedCents     BigInt                @default(0)
+  shippingAppliedCents     BigInt                @default(0)
+  netProceedsCents         BigInt
+  deadZoneAdjustmentCents  BigInt                @default(0)
+  stockQuantity            Int                    @default(0)
+  sourceHash               Bytes                  @db.ByteA
+  status                   ChannelOfferStatus     @default(DRAFT)
+  version                  Int                    @default(0)
+  createdAt                DateTime               @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime               @default(now()) @updatedAt @db.Timestamptz(6)
+  listing                  ChannelListing         @relation(fields: [listingId], references: [id], onDelete: Restrict)
+  syncJobs                 ChannelSyncJob[]
+
+  @@unique([listingId, listingTypeId, logisticType])
+  @@index([status, updatedAt, id])
+  @@map("ChannelOffer")
+}
+
+model ChannelSyncJob {
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  listingId         String                @db.Uuid
+  offerId           String?               @db.Uuid
+  kind              ChannelSyncJobKind
+  status            ChannelSyncJobStatus  @default(PENDING)
+  deduplicationKey  String                @unique @db.VarChar(160)
+  requestHash       Bytes                 @db.ByteA
+  payload           Json                  @db.JsonB
+  attempts          Int                   @default(0)
+  availableAt       DateTime              @default(now()) @db.Timestamptz(6)
+  claimId           String?               @db.Uuid
+  claimedBy         String?               @db.VarChar(120)
+  claimedAt         DateTime?             @db.Timestamptz(6)
+  claimExpiresAt    DateTime?             @db.Timestamptz(6)
+  completedAt       DateTime?             @db.Timestamptz(6)
+  failureCode       String?               @db.VarChar(100)
+  createdByAdminUserId String             @db.Uuid
+  createdAt         DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  listing           ChannelListing        @relation(fields: [listingId], references: [id], onDelete: Restrict)
+  offer             ChannelOffer?         @relation(fields: [offerId], references: [id], onDelete: Restrict)
+  createdBy         AdminUser             @relation("ChannelSyncJobCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([status, availableAt, createdAt, id])
+  @@index([listingId, kind, status, createdAt])
+  @@index([claimExpiresAt, status])
+  @@index([createdByAdminUserId, createdAt])
+  @@map("ChannelSyncJob")
 }

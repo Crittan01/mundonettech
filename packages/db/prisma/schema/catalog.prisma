@@ -277,6 +277,7 @@ model ProductVariant {
   returnReplacements  ReturnRequestItem[]       @relation("ReturnReplacementVariant")
   priceListItems      PriceListItem[]
   proposalItems       OpportunityProposalItem[]
+  channelListings     ChannelListing[]
 
   @@unique([id, productId])
   @@index([productId, status])
