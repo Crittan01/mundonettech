@@ -2,7 +2,12 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 
 import { normalizeEmail } from "@mundonettech/core";
 import {
+  IdempotencyStatus,
   LifecycleService,
+  acquireIdempotencyKey,
+  acquireOperationLocks,
+  completeIdempotencyKey,
+  hasUniqueViolation,
   marketingEmailConsentGranted,
   type EmailEvent,
   type EmailEventStatus,
@@ -29,6 +34,7 @@ import {
   assertIntegrationKey,
   assertIntegrationUuid,
   hash32,
+  integrationDigest,
   publicHttpsUrl,
 } from "./integration-utils.js";
 import { parseEmailCredentials, ResendEmailProvider } from "./resend.js";
@@ -77,6 +83,41 @@ function errorCode(error: unknown): string {
   return error instanceof EmailProviderError ? error.code : "PROVIDER_FAILURE";
 }
 
+function matchesPayloadHash(stored: Uint8Array, incoming: Uint8Array): boolean {
+  const left = Buffer.from(stored);
+  const right = Buffer.from(incoming);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function isSvixEventUniqueConflict(error: unknown): boolean {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("code" in error) ||
+    error.code !== "P2002" ||
+    !("meta" in error) ||
+    typeof error.meta !== "object" ||
+    error.meta === null ||
+    !("target" in error.meta)
+  ) {
+    return false;
+  }
+  const rawTarget = error.meta.target;
+  const target = Array.isArray(rawTarget) ? rawTarget : [rawTarget];
+  if (target.some((entry) => typeof entry !== "string")) return false;
+  const fields = target.map((entry) => String(entry).trim());
+  if (fields.length === 2 && fields.includes("credentialId") && fields.includes("svixEventId")) {
+    return true;
+  }
+  if (fields.length !== 1) return false;
+  return [
+    "EmailWebhookEvent_credentialId_svixEventId_key",
+    "credentialId_svixEventId",
+    "credentialId,svixEventId",
+    "credentialId, svixEventId",
+  ].includes(fields[0]!);
+}
+
 export class EmailService {
   constructor(
     private readonly db: import("@mundonettech/db").PrismaClient,
@@ -117,6 +158,11 @@ export class EmailService {
         "Lifecycle campaign templates are sealed per journey step and do not accept overrides.",
       );
     }
+    assertIntegrationKey(input.idempotencyKey, "idempotencyKey");
+    assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (typeof input.publish !== "boolean") {
+      throw new EmailValidationError("publish must be boolean.");
+    }
     const template = validateEmailTemplate({
       templateKey: key,
       subject: input.subject,
@@ -125,7 +171,43 @@ export class EmailService {
       variables: input.variables,
     });
     await this.assertWriter(audit.actorAdminUserId);
+    const scope = "email-template-save";
+    const idempotency = {
+      keyHash: createHash("sha256").update(input.idempotencyKey, "utf8").digest(),
+      subjectHash: integrationDigest({ actorAdminUserId: audit.actorAdminUserId }),
+      requestHash: integrationDigest({ ...template, publish: input.publish }),
+      expiresAt: new Date(Date.now() + 24 * 3_600_000),
+    };
     return this.db.$transaction(async (tx) => {
+      let acquired;
+      try {
+        acquired = await acquireIdempotencyKey(tx, { scope, ...idempotency });
+      } catch (error) {
+        if (hasUniqueViolation(error)) {
+          throw new EmailConflictError(
+            "Email template idempotency key was already used for another request.",
+            "IDEMPOTENCY_CONFLICT",
+          );
+        }
+        throw error;
+      }
+      if (!acquired.acquired) {
+        if (
+          acquired.status === IdempotencyStatus.SUCCEEDED &&
+          acquired.resultType === "EmailTemplateOverride" &&
+          acquired.resultId
+        ) {
+          const existing = await tx.emailTemplateOverride.findUnique({
+            where: { id: acquired.resultId },
+          });
+          if (existing?.templateKey === key && existing.locale === "es-CO") return existing.id;
+        }
+        throw new EmailConflictError(
+          "The email template request is already in progress or its replay is inconsistent.",
+          "INVALID_STATE",
+        );
+      }
+      await acquireOperationLocks(tx, [`email-template:${key}:es-CO`]);
       const latest = await tx.emailTemplateOverride.aggregate({
         where: { templateKey: key, locale: "es-CO" },
         _max: { version: true },
@@ -164,6 +246,17 @@ export class EmailService {
           metadata: { templateKey: key, version },
         },
       });
+      const completed = await completeIdempotencyKey(tx, {
+        scope,
+        ...idempotency,
+        status: IdempotencyStatus.SUCCEEDED,
+        responseStatus: 201,
+        resultType: "EmailTemplateOverride",
+        resultId: created.id,
+      });
+      if (!completed) {
+        throw new EmailConflictError("Unable to seal email template idempotency.", "INVALID_STATE");
+      }
       return created.id;
     });
   }
@@ -825,7 +918,8 @@ export class EmailService {
     });
     if (!event) throw new EmailNotFoundError("Unsubscribe link is no longer available.");
     const actual = createHash("sha256").update(token).digest();
-    if (!timingSafeEqual(actual, Buffer.from(event.unsubscribeTokenHash)))
+    const expected = Buffer.from(event.unsubscribeTokenHash);
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
       throw new EmailValidationError("Unsubscribe token is invalid.");
     return event.topic;
   }
@@ -867,11 +961,36 @@ export class EmailService {
       : new EmailValidationError("No Resend credential accepted the webhook.");
   }
 
+  private async webhookReplay(
+    credentialId: string,
+    event: import("./svix.js").VerifiedSvixEvent,
+    payloadHash: Uint8Array,
+  ): Promise<{ eventId: string | null; status: string; replayed: true } | null> {
+    const existing = await this.db.emailWebhookEvent.findUnique({
+      where: { credentialId_svixEventId: { credentialId, svixEventId: event.svixEventId } },
+      include: { emailEvent: { select: { id: true, status: true } } },
+    });
+    if (!existing) return null;
+    if (!matchesPayloadHash(existing.payloadHash, payloadHash)) {
+      throw new EmailConflictError(
+        "Svix event ID was already used for a different payload.",
+        "IDEMPOTENCY_CONFLICT",
+      );
+    }
+    return {
+      eventId: existing.emailEvent?.id ?? null,
+      status: existing.emailEvent?.status ?? "IGNORED",
+      replayed: true,
+    };
+  }
+
   private async persistWebhook(
     credentialId: string,
     event: import("./svix.js").VerifiedSvixEvent,
   ): Promise<{ eventId: string | null; status: string; replayed: boolean }> {
     const payloadHash = createHash("sha256").update(event.payloadHashInput).digest();
+    const existing = await this.webhookReplay(credentialId, event, payloadHash);
+    if (existing) return existing;
     try {
       return await this.db.$transaction(async (tx) => {
         const email = await tx.emailEvent.findUnique({
@@ -946,9 +1065,13 @@ export class EmailService {
         return { eventId: email.id, status: targetStatus, replayed: false };
       });
     } catch (error) {
-      if (typeof error === "object" && error !== null && "code" in error && error.code === "P2002")
-        return { eventId: null, status: "IGNORED", replayed: true };
-      throw error;
+      if (!isSvixEventUniqueConflict(error)) throw error;
+      const replay = await this.webhookReplay(credentialId, event, payloadHash);
+      if (replay) return replay;
+      throw new EmailConflictError(
+        "The Svix event insertion conflict could not be reconciled.",
+        "PROVIDER_UNCERTAIN",
+      );
     }
   }
 }

@@ -18,7 +18,7 @@ import {
 } from "@/lib/security/session-policy";
 
 function expireCookie(store: Awaited<ReturnType<typeof cookies>>, name: string): void {
-  store.set(name, "", { ...sessionCookieOptions, maxAge: 0 });
+  store.set(name, "", { ...sessionCookieOptions, maxAge: 0, expires: new Date(0) });
 }
 
 export async function establishAdminActivity(subject: string): Promise<void> {

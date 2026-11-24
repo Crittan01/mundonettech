@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 
 import type { ChannelOrderView, ChannelStockLocationChoice } from "@mundonettech/integrations";
 
@@ -95,11 +95,17 @@ export function ChannelOrderActions({
   order,
   canReconcile,
   locations,
+  adjustmentIdempotencyKey,
 }: {
   readonly order: ChannelOrderView;
   readonly canReconcile: boolean;
   readonly locations: readonly ChannelStockLocationChoice[];
+  readonly adjustmentIdempotencyKey: string;
 }) {
+  const [adjustmentRequest] = useState(() => ({
+    expectedVersion: order.version,
+    idempotencyKey: adjustmentIdempotencyKey,
+  }));
   return (
     <div className="space-y-4 rounded-lg border border-border p-4">
       <div className="flex flex-wrap gap-3">
@@ -209,6 +215,16 @@ export function ChannelOrderActions({
                   const directionDefault = values?.direction ?? "CREDIT";
                   return (
                     <>
+                      <input
+                        type="hidden"
+                        name="version"
+                        value={adjustmentRequest.expectedVersion}
+                      />
+                      <input
+                        type="hidden"
+                        name="idempotencyKey"
+                        value={adjustmentRequest.idempotencyKey}
+                      />
                       <div className="grid gap-3 sm:grid-cols-2">
                         <div className="space-y-2">
                           <Label htmlFor={`amount-${order.id}`}>Valor (COP)</Label>

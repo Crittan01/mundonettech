@@ -1,14 +1,19 @@
 "use server";
 
 import { verifyTimeoutToken } from "@mundonettech/core";
-import QRCode from "qrcode";
+import {
+  AdminOperationRateLimitError,
+  consumeAdminOperationRateLimit,
+  consumeOperationRateLimit,
+  OperationRateLimitError,
+} from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import QRCode from "qrcode";
 import { z } from "zod";
 
-import { actionError, type ActionState } from "@/lib/action-state";
-import { getDatabaseClock } from "@/lib/database-clock";
+import { actionError, formEntries, type ActionState } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
 import { getSessionHmacSecret } from "@/lib/env";
 import {
@@ -19,15 +24,43 @@ import {
 } from "@/lib/security/activity-cookies";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import type { MfaState } from "@/lib/security/mfa-state";
-import { consumeRecoveryCode, regenerateRecoveryCodes } from "@/lib/security/recovery-codes";
+import {
+  consumeRecoveryCode,
+  regenerateRecoveryCodes,
+  regenerateRecoveryCodesInTransaction,
+} from "@/lib/security/recovery-codes";
 import { getRequestSecurityContext, recordSecurityEvent } from "@/lib/security/request-context";
 import { factorResetCookie, factorResetSeconds } from "@/lib/security/session-policy";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
+class MfaVerificationError extends Error {}
+
 function mfaError(message: string): MfaState {
   return { status: "error", message };
+}
+
+function pendingRecoverySince(
+  lastSignInAt: Date | null,
+  latestConsumedAt: Date | null,
+): Date | null {
+  return latestConsumedAt && (!lastSignInAt || latestConsumedAt > lastSignInAt)
+    ? latestConsumedAt
+    : null;
+}
+
+function assertFactorCreatedAfterRecovery(
+  factorCreatedAt: string,
+  recoveryConsumedAt: Date | null,
+): void {
+  if (!recoveryConsumedAt) return;
+  const createdAt = Date.parse(factorCreatedAt);
+  if (!Number.isFinite(createdAt) || createdAt < recoveryConsumedAt.getTime()) {
+    throw new MfaVerificationError(
+      "Debes configurar y verificar un autenticador nuevo para terminar la recuperación.",
+    );
+  }
 }
 
 async function safeRecordAdminEvent(eventType: string, adminUserId?: string): Promise<void> {
@@ -53,7 +86,10 @@ async function enrollTotp(): Promise<MfaState> {
   for (const factor of factors.data.all.filter(
     (item) => item.factor_type === "totp" && item.status === "unverified",
   )) {
-    await session.supabase.auth.mfa.unenroll({ factorId: factor.id });
+    const removed = await session.supabase.auth.mfa.unenroll({ factorId: factor.id });
+    if (removed.error) {
+      return mfaError("No pudimos retirar un autenticador incompleto. Inténtalo de nuevo.");
+    }
   }
   const enrolled = await session.supabase.auth.mfa.enroll({
     factorType: "totp",
@@ -76,6 +112,15 @@ async function enrollTotp(): Promise<MfaState> {
   };
 }
 
+function closedForm(formData: FormData): Record<string, string> | null {
+  const values: Record<string, string> = {};
+  for (const [key, value] of formEntries(formData)) {
+    if (typeof value !== "string" || Object.hasOwn(values, key)) return null;
+    values[key] = value;
+  }
+  return values;
+}
+
 export async function loginAdminAction(
   _previous: ActionState,
   formData: FormData,
@@ -86,8 +131,26 @@ export async function loginAdminAction(
       password: z.string().min(1).max(128),
       turnstileToken: z.string().max(2048),
     })
-    .safeParse(Object.fromEntries(formData));
+    .strict()
+    .safeParse(closedForm(formData));
   if (!parsed.success) return actionError("El correo o la contraseña no son válidos.");
+  try {
+    const context = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "admin.auth.login",
+      subject: { type: "IP" },
+      ipHash: context.ipHash,
+      limit: 30,
+      windowSeconds: 300,
+    });
+  } catch (error) {
+    if (error instanceof OperationRateLimitError) {
+      return actionError(
+        `Demasiados intentos recientes. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
+      );
+    }
+    return actionError("No pudimos validar el contexto de seguridad. Inténtalo de nuevo.");
+  }
   try {
     await verifyTurnstileToken(parsed.data.turnstileToken, { expectedAction: "admin_login" });
   } catch (error) {
@@ -107,7 +170,7 @@ export async function loginAdminAction(
   });
   if (!profile) {
     await safeRecordAdminEvent("ADMIN_LOGIN_FAILED");
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" });
     return actionError("Las credenciales no son válidas o la cuenta no está disponible.");
   }
   redirect("/admin/login/mfa");
@@ -132,7 +195,8 @@ export async function recoverAdminFactorAction(
       recoveryCode: z.string().min(1).max(40),
       turnstileToken: z.string().max(2048),
     })
-    .safeParse(Object.fromEntries(formData));
+    .strict()
+    .safeParse(closedForm(formData));
   if (!parsed.success) return mfaError("El código de recuperación no es válido.");
   try {
     await verifyTurnstileToken(parsed.data.turnstileToken, { expectedAction: "admin_recovery" });
@@ -141,17 +205,36 @@ export async function recoverAdminFactorAction(
   }
   try {
     const session = await getAdminSession({ requireAal2: false, permission: "security:write_own" });
-    const admin = createSupabaseAdminClient();
-    const consumed = await consumeRecoveryCode(getDatabase(), {
-      adminUserId: session.profile.id,
-      code: parsed.data.recoveryCode,
+    const context = await getRequestSecurityContext();
+    await consumeAdminOperationRateLimit(getDatabase(), {
+      operation: "admin.auth.recovery",
+      actorAdminUserId: session.profile.id,
+      ipHash: context.ipHash,
+      limit: 10,
+      windowSeconds: 900,
     });
+    const factors = await session.supabase.auth.mfa.listFactors();
+    if (factors.error) return mfaError("No pudimos consultar tus factores de seguridad.");
+    const totpFactors = factors.data.all.filter((item) => item.factor_type === "totp");
+    const admin = createSupabaseAdminClient();
+    let consumed = false;
+    try {
+      consumed = await consumeRecoveryCode(getDatabase(), {
+        adminUserId: session.profile.id,
+        code: parsed.data.recoveryCode,
+      });
+    } catch (error) {
+      if (error instanceof TypeError) {
+        await safeRecordAdminEvent("ADMIN_RECOVERY_CODE_FAILED", session.profile.id);
+        return mfaError("El código no es válido, ya fue usado o expiró.");
+      }
+      throw error;
+    }
     if (!consumed) {
       await safeRecordAdminEvent("ADMIN_RECOVERY_CODE_FAILED", session.profile.id);
       return mfaError("El código no es válido, ya fue usado o expiró.");
     }
-    const factors = await session.supabase.auth.mfa.listFactors();
-    for (const factor of factors.data?.all.filter((item) => item.factor_type === "totp") ?? []) {
+    for (const factor of totpFactors) {
       const deleted = await admin.auth.admin.mfa.deleteFactor({
         userId: session.user.id,
         id: factor.id,
@@ -160,14 +243,31 @@ export async function recoverAdminFactorAction(
         return mfaError("No pudimos retirar el autenticador anterior. Contacta soporte.");
     }
     await markAdminFactorReset(session.user.id);
-    const context = await getRequestSecurityContext();
-    await recordSecurityEvent(getDatabase(), {
+    const db = getDatabase();
+    await db.adminActionLog.create({
+      data: {
+        actorAdminUserId: session.profile.id,
+        targetAdminUserId: session.profile.id,
+        action: "ADMIN_RECOVERY_CODE_USED",
+        targetType: "AdminUser",
+        targetId: session.profile.id,
+        ipHash: context.ipHash,
+        userAgentHash: context.userAgentHash,
+        metadata: { removedFactors: totpFactors.length },
+      },
+    });
+    await recordSecurityEvent(db, {
       context,
       eventType: "ADMIN_RECOVERY_CODE_USED",
       adminUserId: session.profile.id,
     });
     return enrollTotp();
-  } catch {
+  } catch (error) {
+    if (error instanceof AdminOperationRateLimitError) {
+      return mfaError(
+        `Demasiados intentos recientes. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
+      );
+    }
     return mfaError("No pudimos procesar la recuperación. Inténtalo de nuevo o contacta soporte.");
   }
 }
@@ -178,16 +278,36 @@ export async function verifyAdminMfaAction(
 ): Promise<MfaState> {
   const parsed = z
     .object({ factorId: z.string().uuid(), code: z.string().regex(/^[0-9]{6}$/) })
-    .safeParse(Object.fromEntries(formData));
+    .strict()
+    .safeParse(closedForm(formData));
   if (!parsed.success) return mfaError("Ingresa el código de seis dígitos de tu autenticador.");
   try {
     const session = await getAdminSession({ requireAal2: false, permission: "security:write_own" });
+    const preContext = await getRequestSecurityContext();
+    await consumeAdminOperationRateLimit(getDatabase(), {
+      operation: "admin.auth.mfa.verify",
+      actorAdminUserId: session.profile.id,
+      ipHash: preContext.ipHash,
+      limit: 15,
+      windowSeconds: 300,
+    });
     const factors = await session.supabase.auth.mfa.listFactors();
-    const factor = factors.data?.all.find(
+    if (factors.error) return mfaError("No pudimos consultar tus factores de seguridad.");
+    const factor = factors.data.all.find(
       (item) => item.id === parsed.data.factorId && item.factor_type === "totp",
     );
     if (!factor)
       return mfaError("El autenticador no pertenece a esta sesión. Configura uno nuevo.");
+    const db = getDatabase();
+    const latestRecovery = await db.adminRecoveryCode.findFirst({
+      where: { adminUserId: session.profile.id, consumedAt: { not: null } },
+      select: { consumedAt: true },
+      orderBy: { consumedAt: "desc" },
+    });
+    assertFactorCreatedAfterRecovery(
+      factor.created_at,
+      pendingRecoverySince(session.profile.lastSignInAt, latestRecovery?.consumedAt ?? null),
+    );
     const challenge = await session.supabase.auth.mfa.challenge({ factorId: factor.id });
     if (challenge.error) return mfaError("No pudimos crear el desafío. Inténtalo de nuevo.");
     const verified = await session.supabase.auth.mfa.verify({
@@ -203,18 +323,12 @@ export async function verifyAdminMfaAction(
     if (aal.error || aal.data?.currentLevel !== "aal2")
       return mfaError("No pudimos confirmar el segundo factor.");
 
-    const db = getDatabase();
-    const now = await getDatabaseClock(db);
-    const remainingCodes = await db.adminRecoveryCode.count({
-      where: { adminUserId: session.profile.id, consumedAt: null, expiresAt: { gt: now } },
-    });
-
     const store = await cookies();
     const resetToken = store.get(factorResetCookie)?.value;
-    let requiresNewCodes = !session.profile.mfaEnrolledAt || remainingCodes === 0;
+    let resetIssuedAt: number | null = null;
     if (resetToken) {
       try {
-        verifyTimeoutToken({
+        const reset = verifyTimeoutToken({
           token: resetToken,
           expectedKind: "admin_factor_reset",
           expectedSubject: session.user.id,
@@ -222,19 +336,63 @@ export async function verifyAdminMfaAction(
           idleSeconds: factorResetSeconds,
           maximumAbsoluteSeconds: factorResetSeconds,
         });
-        requiresNewCodes = true;
+        resetIssuedAt = reset.iat * 1000;
       } catch {
         await clearAdminFactorResetCookie();
-        requiresNewCodes = true;
       }
     }
     const context = await getRequestSecurityContext();
-    await db.$transaction(async (tx) => {
+    const recoveryCodes = await db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`admin-mfa-completion:${session.profile.id}`}))`;
+      const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = rows[0]?.now;
+      if (!now) throw new Error("Database clock is unavailable.");
+      const profile = await tx.adminUser.findUnique({
+        where: { id: session.profile.id },
+        select: {
+          status: true,
+          deletedAt: true,
+          mfaEnrolledAt: true,
+          lastSignInAt: true,
+        },
+      });
+      if (!profile || profile.status !== "ACTIVE" || profile.deletedAt) {
+        throw new MfaVerificationError("Tu sesión expiró. Vuelve a iniciar sesión.");
+      }
+      const consumed = await tx.adminRecoveryCode.findFirst({
+        where: { adminUserId: session.profile.id, consumedAt: { not: null } },
+        select: { consumedAt: true },
+        orderBy: { consumedAt: "desc" },
+      });
+      const recoveryConsumedAt = pendingRecoverySince(
+        profile.lastSignInAt,
+        consumed?.consumedAt ?? null,
+      );
+      assertFactorCreatedAfterRecovery(factor.created_at, recoveryConsumedAt);
+      const remainingCodes = await tx.adminRecoveryCode.count({
+        where: { adminUserId: session.profile.id, consumedAt: null, expiresAt: { gt: now } },
+      });
+      const resetPending =
+        resetIssuedAt !== null &&
+        (!profile.lastSignInAt || resetIssuedAt > profile.lastSignInAt.getTime());
+      const requiresNewCodes =
+        !profile.mfaEnrolledAt ||
+        remainingCodes === 0 ||
+        recoveryConsumedAt !== null ||
+        resetPending;
+      const generated = requiresNewCodes
+        ? await regenerateRecoveryCodesInTransaction(tx, {
+            adminUserId: session.profile.id,
+            actorAdminUserId: session.profile.id,
+            context,
+          })
+        : undefined;
       await tx.adminUser.update({
         where: { id: session.profile.id },
         data: {
-          mfaEnrolledAt: session.profile.mfaEnrolledAt ?? new Date(),
-          lastSignInAt: new Date(),
+          mfaEnrolledAt:
+            recoveryConsumedAt !== null || !profile.mfaEnrolledAt ? now : profile.mfaEnrolledAt,
+          lastSignInAt: now,
         },
       });
       await tx.adminActionLog.create({
@@ -249,14 +407,8 @@ export async function verifyAdminMfaAction(
           metadata: { factorId: factor.id, recoveryReset: requiresNewCodes },
         },
       });
+      return generated;
     });
-    const recoveryCodes = requiresNewCodes
-      ? await regenerateRecoveryCodes(db, {
-          adminUserId: session.profile.id,
-          actorAdminUserId: session.profile.id,
-          context,
-        })
-      : undefined;
     await establishAdminActivity(session.user.id);
     return {
       status: "success",
@@ -265,6 +417,7 @@ export async function verifyAdminMfaAction(
       ...(recoveryCodes ? { recoveryCodes } : {}),
     };
   } catch (error) {
+    if (error instanceof MfaVerificationError) return mfaError(error.message);
     if (error instanceof AdminAuthorizationError)
       return mfaError("Tu sesión expiró. Vuelve a iniciar sesión.");
     return mfaError("No pudimos completar la verificación. Inténtalo de nuevo.");
@@ -277,12 +430,22 @@ export async function stepUpAdminAction(
 ): Promise<ActionState> {
   const parsed = z
     .object({ factorId: z.string().uuid(), code: z.string().regex(/^[0-9]{6}$/) })
-    .safeParse(Object.fromEntries(formData));
+    .strict()
+    .safeParse(closedForm(formData));
   if (!parsed.success) return actionError("Ingresa un código válido.");
   try {
     const session = await getAdminSession({ permission: "security:write_own" });
+    const preContext = await getRequestSecurityContext();
+    await consumeAdminOperationRateLimit(getDatabase(), {
+      operation: "admin.auth.step-up",
+      actorAdminUserId: session.profile.id,
+      ipHash: preContext.ipHash,
+      limit: 15,
+      windowSeconds: 300,
+    });
     const factors = await session.supabase.auth.mfa.listFactors();
-    const factor = factors.data?.totp.find(
+    if (factors.error) return actionError("No pudimos consultar tus factores de seguridad.");
+    const factor = factors.data.totp.find(
       (item) => item.id === parsed.data.factorId && item.status === "verified",
     );
     if (!factor) return actionError("El autenticador no es válido.");
@@ -294,26 +457,20 @@ export async function stepUpAdminAction(
       await safeRecordAdminEvent("ADMIN_MFA_FAILED", session.profile.id);
       return actionError("El código no es válido o expiró.");
     }
-    const aal = await session.supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-    const timestamp =
-      aal.data?.currentAuthenticationMethods
-        .filter(
-          (entry): entry is { method: string; timestamp: number } => typeof entry !== "string",
-        )
-        .filter((entry) => ["otp", "totp"].includes(entry.method))
-        .reduce((max, entry) => Math.max(max, entry.timestamp), 0) ?? 0;
-    if (aal.data?.currentLevel !== "aal2" || Date.now() - timestamp * 1000 > 10 * 60 * 1000)
-      return actionError("No pudimos confirmar el nuevo desafío.");
+    const steppedUpSession = await getAdminSession({
+      permission: "security:write_own",
+      requireRecentMfa: true,
+    });
 
     const context = await getRequestSecurityContext();
     const db = getDatabase();
     await db.adminActionLog.create({
       data: {
-        actorAdminUserId: session.profile.id,
-        targetAdminUserId: session.profile.id,
+        actorAdminUserId: steppedUpSession.profile.id,
+        targetAdminUserId: steppedUpSession.profile.id,
         action: "ADMIN_STEP_UP_VERIFIED",
         targetType: "AdminUser",
-        targetId: session.profile.id,
+        targetId: steppedUpSession.profile.id,
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
         metadata: { factorId: factor.id },
@@ -322,9 +479,9 @@ export async function stepUpAdminAction(
     await recordSecurityEvent(db, {
       context,
       eventType: "ADMIN_STEP_UP_VERIFIED",
-      adminUserId: session.profile.id,
+      adminUserId: steppedUpSession.profile.id,
     });
-    await establishAdminActivity(session.user.id);
+    await establishAdminActivity(steppedUpSession.user.id);
     revalidatePath("/admin/seguridad");
     revalidatePath("/admin/usuarios");
     return {
@@ -337,9 +494,13 @@ export async function stepUpAdminAction(
 }
 
 export async function signOutAdminAction(): Promise<void> {
-  const supabase = await createSupabaseServerClient();
-  await supabase.auth.signOut({ scope: "global" });
-  await clearActivityCookies();
+  try {
+    const supabase = await createSupabaseServerClient();
+    const { error } = await supabase.auth.signOut({ scope: "local" });
+    if (error) throw new Error("Unable to revoke the local administrator session.");
+  } finally {
+    await clearActivityCookies();
+  }
   redirect("/admin/login");
 }
 
@@ -371,12 +532,20 @@ export async function regenerateAdminRecoveryCodesAction(): Promise<MfaState> {
 }
 
 export async function signOutAllAdminSessionsAction(): Promise<ActionState> {
-  let session;
+  let sessionsRevoked = false;
   try {
-    session = await getAdminSession({
+    const session = await getAdminSession({
       permission: "security:write_own",
       requireRecentMfa: true,
     });
+    const signedOut = await session.supabase.auth.signOut({ scope: "global" });
+    if (signedOut.error) {
+      return actionError(
+        "No pudimos confirmar el cierre global. Tu sesión sigue activa; inténtalo de nuevo.",
+      );
+    }
+    sessionsRevoked = true;
+    await clearActivityCookies();
     const context = await getRequestSecurityContext();
     const db = getDatabase();
     await db.adminActionLog.create({
@@ -396,9 +565,12 @@ export async function signOutAllAdminSessionsAction(): Promise<ActionState> {
       eventType: "ADMIN_SESSIONS_REVOKED_ALL",
       adminUserId: session.profile.id,
     });
-    await session.supabase.auth.signOut({ scope: "global" });
-    await clearActivityCookies();
   } catch (error) {
+    if (sessionsRevoked) {
+      return actionError(
+        "Las sesiones se cerraron, pero no pudimos registrar toda la actividad. Vuelve a iniciar sesión.",
+      );
+    }
     if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
       return actionError(
         "Confirma primero un código actual de tu autenticador para cerrar todas las sesiones.",

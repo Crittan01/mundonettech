@@ -35,6 +35,32 @@ export default async function AssistedPaymentPage({ params }: PageProps<"/pagar/
   }
   if (!cart) notFound();
   const requiresCustomerSignIn = cart.customerId !== null && viewerCustomerId === null;
+  if (requiresCustomerSignIn) {
+    return (
+      <div className="mx-auto max-w-4xl space-y-8">
+        <div>
+          <p className="text-sm font-medium text-primary">Venta preparada por tu asesor</p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight">
+            Inicia sesión para revisar tu compra asistida
+          </h1>
+          <p className="mt-3 text-muted-foreground">
+            Esta venta asistida está asociada a una cuenta registrada. Ingresa con tu correo para
+            revisar los productos, descuentos y continuar al pago.
+          </p>
+        </div>
+        <section role="alert" className="space-y-3 rounded-xl border border-border bg-card p-5">
+          <h2 className="font-semibold">Inicia sesión para aceptar esta venta</h2>
+          <p className="text-sm text-muted-foreground">
+            Esta venta asistida está asociada a una cuenta registrada. Ingresa con tu correo antes
+            de llevarla a tu carrito.
+          </p>
+          <Link href="/ingresar" className="inline-flex font-medium text-primary hover:underline">
+            Iniciar sesión
+          </Link>
+        </section>
+      </div>
+    );
+  }
   return (
     <div className="mx-auto max-w-4xl space-y-8">
       <div>

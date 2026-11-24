@@ -987,10 +987,18 @@ export class ChannelCatalogService {
 
   async updateOffer(options: {
     readonly offerId: string;
+    readonly expectedVersion: number;
     readonly offer: ChannelOfferConfiguration;
     readonly audit: ChannelAuditContext;
   }): Promise<void> {
     assertUuid(options.offerId, "offerId");
+    if (
+      !Number.isInteger(options.expectedVersion) ||
+      options.expectedVersion < 0 ||
+      options.expectedVersion > 2_147_483_647
+    ) {
+      throw new ChannelCatalogError("INVALID_INPUT", "The offer version is invalid.");
+    }
     await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
     const calculated = calculatedOffer(options.offer);
     await this.db.$transaction(async (tx) => {
@@ -1006,6 +1014,9 @@ export class ChannelCatalogService {
       });
       if (!current) throw new ChannelCatalogError("NOT_FOUND", "Channel offer was not found.");
       this.assertEnvironment(current.listing.account.environment);
+      if (current.version !== options.expectedVersion) {
+        throw new ChannelCatalogError("CONFLICT", "The offer changed before the update.");
+      }
       if (current.listing.status === "CLOSED" || current.status === "CLOSED") {
         throw new ChannelCatalogError("CONFLICT", "A closed offer cannot be changed.");
       }
@@ -1019,8 +1030,8 @@ export class ChannelCatalogService {
           "Listing type and logistics require a new offer after publication.",
         );
       }
-      const offer = await tx.channelOffer.update({
-        where: { id: current.id },
+      const result = await tx.channelOffer.updateMany({
+        where: { id: current.id, version: options.expectedVersion },
         data: {
           pricingMode: options.offer.mode,
           manualPriceCents:
@@ -1042,6 +1053,10 @@ export class ChannelCatalogService {
           updatedAt: await this.now(tx),
         },
       });
+      if (result.count !== 1) {
+        throw new ChannelCatalogError("CONFLICT", "The offer changed concurrently.");
+      }
+      const offer = await tx.channelOffer.findUniqueOrThrow({ where: { id: current.id } });
       const listing = await tx.channelListing.findUniqueOrThrow({
         where: { id: current.listingId },
         include: { offers: true },

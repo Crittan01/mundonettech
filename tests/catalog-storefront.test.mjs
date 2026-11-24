@@ -617,3 +617,214 @@ describe("F1.4 — admin catalog persistence, attributes, compatibility and audi
     assert.equal(sony.available, 6);
   });
 });
+
+describe("A2 — catalog audit redaction, rollback and read-only DTO parity", () => {
+  it("persists complete operational before/after metadata without free content or costs", async () => {
+    const references = await service.getReferences();
+    const suffix = randomUUID();
+    const base = {
+      slug: `a2-audit-${suffix}`,
+      name: "Producto A2 inicial",
+      shortDescription: "Texto corto que no debe copiarse al log",
+      description: "Descripción privada de auditoría que no debe copiarse",
+      brandId: references.brands[0].id,
+      categoryId: references.categories[0].id,
+      taxGroupId: references.taxGroups[0].id,
+      status: "ACTIVE",
+      authenticity: "ORIGINAL",
+      retractPolicy: "STANDARD",
+      warrantyMonths: 12,
+      trackSerial: false,
+      seoTitle: "SEO inicial",
+      seoDescription: "SEO que no debe copiarse",
+    };
+    const initialVariant = {
+      sku: `A2-${suffix.toUpperCase()}`,
+      priceCents: "100000",
+      costCents: "60000",
+      weightGrams: 100,
+      lengthMillimeters: 100,
+      widthMillimeters: 100,
+      heightMillimeters: 100,
+      isDefault: true,
+      status: "ACTIVE",
+    };
+    const created = await service.createProduct({ ...base, variant: initialVariant }, audit);
+    const createdLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "CATALOG_PRODUCT_CREATED", targetId: created.id },
+    });
+    assert.equal(createdLog.metadata.product.before, null);
+    assert.equal(createdLog.metadata.product.after.slug, base.slug);
+    assert.equal(createdLog.metadata.variant.before, null);
+    assert.equal(createdLog.metadata.variant.after.sku, initialVariant.sku);
+    assert.equal(createdLog.metadata.variant.costCentsChanged, true);
+
+    await service.updateProduct(
+      created.id,
+      { ...base, name: "Producto A2 actualizado", description: "Descripción posterior secreta" },
+      audit,
+    );
+    const updatedLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "CATALOG_PRODUCT_UPDATED", targetId: created.id },
+    });
+    assert.equal(updatedLog.metadata.before.name, "Producto A2 inicial");
+    assert.equal(updatedLog.metadata.after.name, "Producto A2 actualizado");
+    assert.equal(updatedLog.metadata.contentChanges.bodyChanged, true);
+
+    const second = await service.upsertVariant(
+      created.id,
+      { ...initialVariant, sku: `A2-SECOND-${suffix.toUpperCase()}`, isDefault: false },
+      audit,
+    );
+    await service.upsertVariant(
+      created.id,
+      {
+        ...initialVariant,
+        id: second.id,
+        sku: `A2-SECOND-${suffix.toUpperCase()}`,
+        priceCents: "120000",
+        costCents: "70000",
+        isDefault: false,
+        status: "INACTIVE",
+      },
+      audit,
+    );
+    const variantLogs = await db.adminActionLog.findMany({
+      where: { targetType: "ProductVariant", targetId: second.id },
+      orderBy: { createdAt: "asc" },
+    });
+    assert.equal(variantLogs.length, 2);
+    assert.equal(variantLogs[0].metadata.before, null);
+    assert.equal(variantLogs[0].metadata.after.status, "ACTIVE");
+    assert.equal(variantLogs[1].metadata.before.priceCents, "100000");
+    assert.equal(variantLogs[1].metadata.after.priceCents, "120000");
+    assert.equal(variantLogs[1].metadata.after.status, "INACTIVE");
+    assert.equal(variantLogs[1].metadata.costCentsChanged, true);
+
+    const attribute = references.attributes.find((entry) => entry.valueType === "TEXT");
+    assert.ok(attribute);
+    const savedAttribute = await service.upsertProductAttribute(
+      created.id,
+      { attributeId: attribute.id, value: "Valor técnico inicial que no se registra" },
+      audit,
+    );
+    await service.upsertProductAttribute(
+      created.id,
+      {
+        id: savedAttribute.id,
+        attributeId: attribute.id,
+        value: "Valor técnico posterior que tampoco se registra",
+      },
+      audit,
+    );
+    await service.removeProductAttribute(created.id, savedAttribute.id, audit);
+    const attributeLogs = await db.adminActionLog.findMany({
+      where: { targetType: "ProductAttributeValue", targetId: savedAttribute.id },
+      orderBy: { createdAt: "asc" },
+    });
+    assert.equal(attributeLogs.length, 3);
+    assert.equal(attributeLogs[0].metadata.before, null);
+    assert.equal(attributeLogs[1].metadata.valueChanged, true);
+    assert.equal(attributeLogs[2].metadata.after, null);
+    assert.equal(attributeLogs[2].metadata.before.attributeId, attribute.id);
+
+    const device = references.compatibilityDevices[0];
+    const savedCompatibility = await service.upsertProductCompatibility(
+      created.id,
+      { deviceId: device.id, fit: "EXACT", notes: "Nota inicial con persona@example.com" },
+      audit,
+    );
+    await service.upsertProductCompatibility(
+      created.id,
+      { deviceId: device.id, fit: "ADAPTER", notes: "Nota posterior con +573001112233" },
+      audit,
+    );
+    await service.removeProductCompatibility(created.id, savedCompatibility.id, audit);
+    const compatibilityLogs = await db.adminActionLog.findMany({
+      where: { targetType: "ProductCompatibility", targetId: savedCompatibility.id },
+      orderBy: { createdAt: "asc" },
+    });
+    assert.equal(compatibilityLogs.length, 3);
+    assert.equal(compatibilityLogs[0].metadata.before, null);
+    assert.equal(compatibilityLogs[1].metadata.before.fit, "EXACT");
+    assert.equal(compatibilityLogs[1].metadata.after.fit, "ADAPTER");
+    assert.equal(compatibilityLogs[1].metadata.notesChanged, true);
+    assert.equal(compatibilityLogs[2].metadata.after, null);
+
+    const allMetadata = JSON.stringify(
+      [createdLog, updatedLog, ...variantLogs, ...attributeLogs, ...compatibilityLogs].map(
+        (log) => log.metadata,
+      ),
+    );
+    for (const forbidden of [
+      base.shortDescription,
+      base.description,
+      "Descripción posterior secreta",
+      "Valor técnico inicial que no se registra",
+      "Valor técnico posterior que tampoco se registra",
+      "persona@example.com",
+      "+573001112233",
+      '"60000"',
+      '"70000"',
+      "costCents:",
+    ]) {
+      assert.equal(allMetadata.includes(forbidden), false, forbidden);
+    }
+
+    const productLogCount = await db.adminActionLog.count({
+      where: { targetType: "Product", targetId: created.id },
+    });
+    await assert.rejects(
+      service.updateProduct(
+        created.id,
+        { ...base, name: "Debe revertirse" },
+        { ...audit, actorAdminUserId: randomUUID() },
+      ),
+    );
+    assert.equal(
+      (await db.product.findUniqueOrThrow({ where: { id: created.id } })).name,
+      "Producto A2 actualizado",
+    );
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "Product", targetId: created.id } }),
+      productLogCount,
+    );
+
+    const initial = await db.productVariant.findFirstOrThrow({
+      where: { productId: created.id, sku: initialVariant.sku },
+    });
+    await assert.rejects(
+      service.upsertVariant(
+        created.id,
+        { ...initialVariant, id: initial.id, isDefault: false, status: "INACTIVE" },
+        audit,
+      ),
+      CatalogQueryError,
+    );
+    assert.equal(
+      (await db.productVariant.findUniqueOrThrow({ where: { id: initial.id } })).status,
+      "ACTIVE",
+    );
+    assert.equal(
+      await db.adminActionLog.count({
+        where: { targetType: "ProductVariant", targetId: initial.id },
+      }),
+      0,
+    );
+
+    const readOnly = await service.getAdminProduct(created.id);
+    const writable = await service.getAdminProduct(created.id, { includeCosts: true });
+    assert.ok(readOnly.variants.every((variant) => variant.costCents === null));
+    assert.ok(writable.variants.every((variant) => typeof variant.costCents === "bigint"));
+    const withoutCosts = (variants) =>
+      variants.map((variant) => {
+        const snapshot = { ...variant };
+        delete snapshot.costCents;
+        return snapshot;
+      });
+    assert.deepEqual(withoutCosts(readOnly.variants), withoutCosts(writable.variants));
+    assert.equal(readOnly.formattedAttributes.length, 0);
+    assert.equal(readOnly.compatibility.length, 0);
+    assert.equal(readOnly.hasInventoryHistory, false);
+  });
+});

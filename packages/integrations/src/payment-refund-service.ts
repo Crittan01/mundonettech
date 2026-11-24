@@ -41,7 +41,7 @@ export class PaymentRefundService {
   constructor(
     private readonly db: PrismaClient,
     private readonly options: {
-      vault?: IntegrationCredentialVault;
+      vault?: Pick<IntegrationCredentialVault, "reveal">;
       fetchImpl?: typeof fetch;
       timeoutMs?: number;
     } = {},

@@ -25,7 +25,7 @@ export function domainEventWorker(): DomainEventWorker {
     email: emailService(db),
     invoice: invoiceService(db),
     metaCapi: metaCapiService(db),
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("resend"),
     publicSiteUrl: getPublicSiteUrl(),
     storeName: storeConfig.name,
     receiptTokenForSubmission,

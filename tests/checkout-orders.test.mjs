@@ -303,6 +303,8 @@ describe("F3.2 — atomic checkout, receipt and inventory snapshots", () => {
     assert.equal(receipt.pickupLocationName, "Sede secundaria");
     assert.equal(receipt.paymentStatus, "UNPAID");
     assert.equal(receipt.totalCents, "100000");
+    assert.equal("unitCostWacCents" in receipt.items[0], false);
+    assert.equal(JSON.stringify(receipt).includes("unitCostWacCents"), false);
     assert.equal(await orders.getReceiptByToken(hash()), null);
   });
 
@@ -468,6 +470,45 @@ describe("F3.2 — atomic checkout, receipt and inventory snapshots", () => {
     const savedReceipt = await db.orderReceipt.findUniqueOrThrow({
       where: { orderId: activeOrder.orderId },
     });
+    const savedItem = await db.orderItem.findFirstOrThrow({
+      where: { orderId: activeOrder.orderId },
+    });
+    await assert.rejects(
+      sql.query(
+        `UPDATE "OrderItem" SET "unitCostWacCents" = "unitCostWacCents" + 1 WHERE "id" = $1`,
+        [savedItem.id],
+      ),
+      /OrderItem is append-only/,
+    );
+    async function overrideOrderItemWac(value) {
+      await sql.query("BEGIN");
+      try {
+        await sql.query("SET LOCAL session_replication_role = 'replica'");
+        if (value === undefined) {
+          await sql.query(
+            `UPDATE "OrderItem" SET "unitCostWacCents" = "unitCostWacCents" + 1 WHERE "id" = $1`,
+            [savedItem.id],
+          );
+        } else {
+          await sql.query(`UPDATE "OrderItem" SET "unitCostWacCents" = $1 WHERE "id" = $2`, [
+            value,
+            savedItem.id,
+          ]);
+        }
+        await sql.query("COMMIT");
+      } catch (error) {
+        await sql.query("ROLLBACK");
+        throw error;
+      }
+    }
+    await overrideOrderItemWac();
+    try {
+      await assert.rejects(orders.getReceiptByToken(receiptTokenHash), ReceiptBalanceError);
+    } finally {
+      await overrideOrderItemWac(savedItem.unitCostWacCents);
+    }
+    const publicReceipt = await orders.getReceiptByToken(receiptTokenHash);
+    assert.equal("unitCostWacCents" in publicReceipt.items[0], false);
     await sql.query(`ALTER TABLE "OrderReceipt" DISABLE TRIGGER "OrderReceipt_immutable_history"`);
     await sql.query(`UPDATE "OrderReceipt" SET "contentHash" = $1 WHERE "id" = $2`, [
       randomBytes(32),

@@ -20,7 +20,7 @@ export async function establishGuestOrderSession(
 
 export async function clearGuestOrderSession(): Promise<void> {
   const store = await cookies();
-  store.set(guestOrderCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+  store.set(guestOrderCookie, "", { ...sessionCookieOptions, maxAge: 0, expires: new Date(0) });
 }
 
 export async function getGuestOrderAccess(
@@ -39,14 +39,4 @@ export async function getGuestOrderAccess(
   } catch {
     return null;
   }
-}
-
-async function getGuestOrderActor(token: string): Promise<PostSaleActor | null> {
-  return (await getGuestOrderAccess(token))?.actor ?? null;
-}
-
-export async function requireGuestOrderActor(token: string): Promise<PostSaleActor> {
-  const actor = await getGuestOrderActor(token);
-  if (!actor) throw new Error("La sesión de posventa expiró. Verifica un código nuevo.");
-  return actor;
 }

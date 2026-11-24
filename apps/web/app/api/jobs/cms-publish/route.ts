@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { CmsService } from "@mundonettech/cms";
 import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
 import { revalidatePath, revalidateTag } from "next/cache";
@@ -12,12 +14,25 @@ const noStoreHeaders = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
-export async function GET() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } },
   );
 }
+
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
   const secret = process.env.CMS_CRON_SECRET?.trim() ?? "";
@@ -34,40 +49,49 @@ export async function POST(request: Request) {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers: noStoreHeaders });
   }
 
-  const db = getDatabase();
-  const actor = await db.adminUser.findFirst({
-    where: { id: actorId, status: "ACTIVE", deletedAt: null },
-  });
-  if (!actor || !hasAdminPermission(actor.role, "content:write")) {
+  try {
+    const db = getDatabase();
+    const actor = await db.adminUser.findFirst({
+      where: { id: actorId, status: "ACTIVE", deletedAt: null },
+      select: { id: true, role: true },
+    });
+    if (!actor || !hasAdminPermission(actor.role, "content:write")) {
+      return Response.json(
+        { error: "Scheduler actor is not authorized." },
+        { status: 403, headers: noStoreHeaders },
+      );
+    }
+
+    const security = await getRequestSecurityContext();
+    const result = await new CmsService(db).publishScheduled({
+      actorAdminUserId: actor.id,
+      requestId: randomUUID(),
+      ipHash: security.ipHash,
+      userAgentHash: security.userAgentHash,
+    });
+
+    if (result.versions > 0 || result.pages > 0) {
+      revalidateTag("cms", { expire: 0 });
+      revalidateTag("seo", { expire: 0 });
+      revalidateTag("sitemap", { expire: 0 });
+      for (const slug of result.affectedSlugs) {
+        revalidateTag(`cms:page:${slug}`, { expire: 0 });
+      }
+      revalidatePath("/admin/contenido");
+    }
+
     return Response.json(
-      { error: "Scheduler actor is not authorized." },
-      { status: 403, headers: noStoreHeaders },
+      {
+        versions: result.versions,
+        pages: result.pages,
+        pagesDeferred: result.pagesDeferred,
+      },
+      { headers: noStoreHeaders },
+    );
+  } catch {
+    return Response.json(
+      { error: "CMS scheduler execution failed." },
+      { status: 500, headers: noStoreHeaders },
     );
   }
-
-  const security = await getRequestSecurityContext();
-  const result = await new CmsService(db).publishScheduled({
-    actorAdminUserId: actor.id,
-    ipHash: security.ipHash,
-    userAgentHash: security.userAgentHash,
-  });
-
-  if (result.versions > 0 || result.pages > 0) {
-    revalidateTag("cms", { expire: 0 });
-    revalidateTag("seo", { expire: 0 });
-    revalidateTag("sitemap", { expire: 0 });
-    for (const slug of result.affectedSlugs) {
-      revalidateTag(`cms:page:${slug}`, { expire: 0 });
-    }
-    revalidatePath("/admin/contenido");
-  }
-
-  return Response.json(
-    {
-      versions: result.versions,
-      pages: result.pages,
-      pagesDeferred: result.pagesDeferred,
-    },
-    { headers: noStoreHeaders },
-  );
 }

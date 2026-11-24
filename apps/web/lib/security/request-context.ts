@@ -1,10 +1,10 @@
 import "server-only";
 
-import { createHmac } from "node:crypto";
-import { isIP } from "node:net";
-
+import { sanitizeAuditValue } from "@mundonettech/core";
 import type { Prisma, PrismaClient } from "@mundonettech/db";
 import { ipAddress } from "@vercel/functions";
+import { createHmac } from "node:crypto";
+import { isIP } from "node:net";
 import { headers } from "next/headers";
 
 import { getSecurityEventPepper } from "@/lib/env";
@@ -29,21 +29,37 @@ function isLoopbackSiteUrl(): boolean {
   }
 }
 
+function normalizeIpAddress(ip: string): string {
+  const trimmed = ip.trim().toLowerCase();
+  if (isIP(trimmed) === 6) {
+    try {
+      return new URL(`http://[${trimmed}]`).hostname.slice(1, -1);
+    } catch {
+      return trimmed;
+    }
+  }
+  return trimmed;
+}
+
 function resolveVerifiedClientIp(requestHeaders: Headers): string {
   if (process.env.VERCEL === "1") {
     const vercelIp = ipAddress(requestHeaders)?.trim();
-    if (vercelIp && isIP(vercelIp)) return vercelIp;
+    if (vercelIp && isIP(vercelIp)) return normalizeIpAddress(vercelIp);
     throw new Error("A verified Vercel client IP is unavailable.");
   }
 
   if (process.env.TRUSTED_PROXY === "cloudflare") {
     const cfRay = requestHeaders.get("cf-ray");
     const cfIp = requestHeaders.get("cf-connecting-ip")?.trim();
-    if (cfRay && cfIp && isIP(cfIp)) return cfIp;
+    if (cfRay && cfIp && isIP(cfIp)) return normalizeIpAddress(cfIp);
     throw new Error("A verified Cloudflare client IP is unavailable.");
   }
 
-  if (process.env.NODE_ENV !== "production" || isLoopbackSiteUrl()) {
+  const integrationEnv = process.env.INTEGRATION_ENVIRONMENT?.trim().toUpperCase();
+  if (
+    process.env.NODE_ENV !== "production" ||
+    (integrationEnv === "LOCAL" && isLoopbackSiteUrl())
+  ) {
     return "127.0.0.1";
   }
 
@@ -73,7 +89,7 @@ export async function recordSecurityEvent(
   },
 ): Promise<void> {
   try {
-    const metadata = JSON.parse(JSON.stringify(options.metadata ?? {})) as Prisma.InputJsonValue;
+    const metadata = sanitizeAuditValue(options.metadata ?? {}) as Prisma.InputJsonValue;
     await db.securityEvent.create({
       data: {
         eventType: options.eventType,

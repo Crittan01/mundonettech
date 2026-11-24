@@ -16,6 +16,7 @@ export {
   CredentialAlreadyExistsError,
   CredentialConflictError,
   CredentialCursorError,
+  CredentialForbiddenError,
   CredentialNotFoundError,
   CredentialRevokedError,
   IntegrationCredentialVault,

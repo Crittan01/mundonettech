@@ -168,13 +168,24 @@ export class PostSaleService {
       await this.lockOrderActor(tx, orderId, actor);
       return tx.order.findUniqueOrThrow({
         where: { id: orderId },
+        omit: {
+          acceptanceIpHash: true,
+          acceptanceUserAgentHash: true,
+        },
         include: {
           items: {
+            omit: { unitCostWacCents: true },
             include: {
               variant: {
+                omit: { costCents: true },
                 include: {
                   product: {
-                    include: { variants: { where: { status: "ACTIVE", deletedAt: null } } },
+                    include: {
+                      variants: {
+                        where: { status: "ACTIVE", deletedAt: null },
+                        omit: { costCents: true },
+                      },
+                    },
                   },
                 },
               },

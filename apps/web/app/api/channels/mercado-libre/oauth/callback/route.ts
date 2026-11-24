@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import { ChannelAccountError } from "@mundonettech/integrations";
 import { cookies } from "next/headers";
@@ -22,6 +22,9 @@ const headers = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
   "Referrer-Policy": "no-referrer",
 } as const;
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const statePattern = /^[A-Za-z0-9_-]{43}$/;
 
 const outcomes = {
   connected: "La cuenta quedó conectada. Estamos volviendo a Canales.",
@@ -56,6 +59,7 @@ function callbackResponse(outcome: Outcome): Response {
     secure: channelOAuthCookieSecure,
     path: channelOAuthCookiePath,
     maxAge: 0,
+    expires: new Date(0),
   });
   return response;
 }
@@ -67,43 +71,52 @@ function methodNotAllowed(): Response {
   );
 }
 
+function statesMatch(supplied: string, expected: string): boolean {
+  if (!statePattern.test(supplied) || !statePattern.test(expected)) return false;
+  const suppliedBytes = Buffer.from(supplied, "utf8");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  return (
+    suppliedBytes.length === expectedBytes.length && timingSafeEqual(suppliedBytes, expectedBytes)
+  );
+}
+
 export async function HEAD() {
   return new Response(null, { status: 405, headers: { ...headers, Allow: "GET" } });
 }
 
-export async function POST() {
-  return methodNotAllowed();
-}
-
-export async function PUT() {
-  return methodNotAllowed();
-}
-
-export async function PATCH() {
-  return methodNotAllowed();
-}
-
-export async function DELETE() {
-  return methodNotAllowed();
-}
+export const POST = methodNotAllowed;
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const store = await cookies();
-  const cookie = store.get(channelOAuthCookie)?.value ?? "";
-  const [attemptId = "", expectedState = "", extra = ""] = cookie.split(".");
-  const state = url.searchParams.get("state") ?? "";
-  if (!attemptId || !expectedState || extra || !state || state !== expectedState) {
+  const cookieParts = (store.get(channelOAuthCookie)?.value ?? "").split(".");
+  const [attemptId = "", expectedState = ""] = cookieParts;
+  const stateValues = url.searchParams.getAll("state");
+  const codeValues = url.searchParams.getAll("code");
+  const providerErrorValues = url.searchParams.getAll("error");
+  const state = stateValues.length === 1 ? stateValues[0]! : "";
+  if (
+    cookieParts.length !== 2 ||
+    !uuidPattern.test(attemptId) ||
+    codeValues.length > 1 ||
+    providerErrorValues.length > 1 ||
+    !statesMatch(state, expectedState)
+  ) {
     return callbackResponse("replay");
   }
   let outcome: Outcome = "uncertain";
   try {
     const security = await getRequestSecurityContext();
-    const providerError = url.searchParams.get("error")?.trim() ?? "";
+    const providerError = providerErrorValues[0]?.trim() ?? "";
+    const code = codeValues[0];
     await channelAccountService().completeMercadoLibreOAuth({
       attemptId,
       state,
-      ...(url.searchParams.get("code") ? { code: url.searchParams.get("code")! } : {}),
+      ...(code ? { code } : {}),
       ...(providerError && /^[a-z][a-z0-9_]{0,99}$/.test(providerError) ? { providerError } : {}),
       redirectUri: mercadoLibreOAuthRedirectUri(),
       audit: {

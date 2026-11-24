@@ -7,13 +7,7 @@ import { ChannelCatalogError, type ChannelOfferConfiguration } from "@mundonette
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import {
-  actionError,
-  actionSuccess,
-  formSnapshot,
-  formString,
-  type ActionState,
-} from "@/lib/action-state";
+import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
 import { channelCatalogService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
@@ -45,6 +39,34 @@ const offerSchema = z.object({
   targetNetCop: z.string().max(22),
   manualPriceCop: z.string().max(22),
 });
+const versionSchema = z
+  .string()
+  .regex(/^[0-9]{1,10}$/)
+  .transform(Number)
+  .pipe(z.number().int().nonnegative().max(2_147_483_647));
+
+const publicValueKeys = [
+  "accountId",
+  "variantId",
+  "externalCategoryId",
+  "familyName",
+  "sellerStoreId",
+  "sellerNetworkNodeId",
+  "pricingMode",
+  "listingTypeId",
+  "logisticType",
+  "commissionBps",
+  "fixedFeeCop",
+  "shippingCostCop",
+  "targetNetCop",
+  "manualPriceCop",
+] as const;
+
+function publicValues(formData: FormData): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const key of publicValueKeys) values[key] = formString(formData, key);
+  return values;
+}
 
 function cents(value: string): bigint {
   return BigInt(parseDecimalCopToCents(value));
@@ -140,6 +162,9 @@ function failure(error: unknown, values?: Record<string, string>): ActionState {
     };
     return actionError(messages[error.code] ?? "No pudimos completar la sincronización.", values);
   }
+  if (error instanceof z.ZodError) {
+    return actionError("Revisa los identificadores y campos de sincronización.", values);
+  }
   if (error instanceof TypeError || error instanceof RangeError) {
     return actionError(
       "La variante necesita datos logísticos, GTIN válido y una imagen JPEG, PNG o WebP lista.",
@@ -159,7 +184,7 @@ function syncMessage(result: {
 }): ActionState {
   if (result.failures.length > 0) {
     return actionError(
-      `Sincronización detenida: ${result.failures[0]?.code}. Revisa el job y concilia antes de reintentar.`,
+      "La sincronización se detuvo. Revisa el trabajo persistido y concilia antes de reintentar.",
     );
   }
   if (result.claimed === 0) {
@@ -174,7 +199,7 @@ export async function createChannelListingAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = publicValues(formData);
   try {
     const audit = await authorize();
     const parsed = listingSchema.safeParse({
@@ -212,7 +237,7 @@ export async function addChannelOfferAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = publicValues(formData);
   try {
     const audit = await authorize();
     const listingId = z.string().uuid().parse(formString(formData, "listingId"));
@@ -228,11 +253,17 @@ export async function updateChannelOfferAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = publicValues(formData);
   try {
     const audit = await authorize();
     const offerId = z.string().uuid().parse(formString(formData, "offerId"));
-    await channelCatalogService().updateOffer({ offerId, offer: parseOffer(formData), audit });
+    const expectedVersion = versionSchema.parse(formString(formData, "version"));
+    await channelCatalogService().updateOffer({
+      offerId,
+      expectedVersion,
+      offer: parseOffer(formData),
+      audit,
+    });
     revalidatePath("/admin/canales");
     return actionSuccess(
       "Precio y condiciones actualizados. Procesa el job para confirmarlos en Mercado Libre.",
@@ -258,6 +289,7 @@ export async function synchronizeChannelListingAction(
     const desiredStatus = z
       .union([z.literal(""), z.enum(["ACTIVE", "PAUSED", "CLOSED"])])
       .parse(formString(formData, "desiredStatus"));
+    const force = z.enum(["true", "false"]).parse(formString(formData, "force"));
     if (desiredStatus === "CLOSED" && formString(formData, "confirmation") !== "CERRAR") {
       return actionError("Escribe CERRAR para confirmar el cierre definitivo de la publicación.");
     }
@@ -267,7 +299,7 @@ export async function synchronizeChannelListingAction(
       ...(offerId ? { offerId } : {}),
       kind,
       ...(desiredStatus ? { desiredStatus } : {}),
-      force: formString(formData, "force") === "true",
+      force: force === "true",
       audit,
     });
     const result = await service.processSyncJobs(

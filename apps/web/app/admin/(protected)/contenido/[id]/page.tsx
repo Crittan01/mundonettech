@@ -1,5 +1,5 @@
 import { CmsService, type CmsBlockType } from "@mundonettech/cms";
-import { hasAdminPermission, maskEmail } from "@mundonettech/core";
+import { hasAdminPermission, maskEmail, maskName } from "@mundonettech/core";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -226,7 +226,8 @@ export default async function CmsPageDetail({
                         {version.effectiveAt
                           ? ` (vigencia ${bogotaFormatter.format(version.effectiveAt)})`
                           : ""}{" "}
-                        · {version.createdBy.displayName} ({maskEmail(version.createdBy.email)}) ·{" "}
+                        · {maskName(version.createdBy.displayName)} (
+                        {maskEmail(version.createdBy.email)}) ·{" "}
                         {bogotaFormatter.format(version.createdAt)}
                       </li>
                     ))}

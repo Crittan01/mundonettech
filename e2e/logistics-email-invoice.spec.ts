@@ -141,13 +141,16 @@ test("operational vault, communications and fiscal views stay accessible with MF
   await expect(page.getByLabel("Modelo habilitado", { exact: false })).toHaveValue("");
   await provider.selectOption("resend");
   await expect(page.getByLabel("Endpoint de envío")).toHaveValue("https://api.resend.com/emails");
+  await page.getByLabel("Nombre operativo de la integración").fill(resendAccount);
+  await page.getByLabel("Correo remitente verificado").fill("ventas@example.test");
+  await page.getByLabel("Nombre del remitente").fill("Tienda E2E");
   await page.getByLabel("Llave API de Resend").fill("re_e2e_1234567890abcdef");
   await page.getByLabel("Secreto Svix").fill("whsec_c2VjcmV0LWV2ZW50b3Mtd2l0aC0zMi1ieXRlcw");
   await page
     .getByLabel(/Secreto HMAC de baja/)
     .fill(Buffer.from("unsubscribe-secret-e2e-with-32bytes").toString("base64"));
   await submitCredential.click();
-  await expect(page.getByText(new RegExp(`Credencial ${resendAccount} cifrada`))).toBeVisible();
+  await expect(page.getByText(/Credencial cifrada y registrada en LOCAL/)).toBeVisible();
   const credential = await db.integrationCredential.findFirstOrThrow({
     where: { provider: "resend", accountName: resendAccount },
   });

@@ -10,12 +10,25 @@ const headers = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
-export async function GET() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...headers, Allow: "POST" } },
   );
 }
+
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
   const secret = process.env.HEALTH_CRON_SECRET?.trim() ?? "";
@@ -29,15 +42,19 @@ export async function POST(request: Request) {
   if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers });
   }
-  const db = getDatabase();
-  const result = await new OperationalHealthService(db).capture(getIntegrationEnvironment());
-  await new OperationsService(db).synchronizeNotifications();
-  return Response.json(
-    {
-      capturedAt: result.snapshot.capturedAt,
-      status: result.snapshot.status,
-      activeAlerts: result.activeAlerts,
-    },
-    { headers },
-  );
+  try {
+    const db = getDatabase();
+    const result = await new OperationalHealthService(db).capture(getIntegrationEnvironment());
+    await new OperationsService(db).synchronizeNotifications();
+    return Response.json(
+      {
+        capturedAt: result.snapshot.capturedAt,
+        status: result.snapshot.status,
+        activeAlerts: result.activeAlerts,
+      },
+      { headers },
+    );
+  } catch {
+    return Response.json({ error: "Health scheduler execution failed." }, { status: 500, headers });
+  }
 }

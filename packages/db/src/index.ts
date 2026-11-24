@@ -23,6 +23,7 @@ export {
   StockLocationType,
   RecoveryRunStatus,
   OperationalHealthStatus,
+  OperationRateLimitSubjectType,
   ChannelProvider,
   ChannelAccountStatus,
   ChannelOAuthAttemptStatus,
@@ -125,17 +126,20 @@ export type {
 export { exportInventoryStockCsv, importInventoryStockCsv } from "./inventory-csv.js";
 export type { ImportInventoryStockCsvOptions, InventoryCsvImportResult } from "./inventory-csv.js";
 export {
+  AdminActorAuthorizationError,
   acquireIdempotencyKey,
+  assertAdminActorInTransaction,
   claimDomainOutbox,
   claimDomainOutboxEvents,
   completeDomainOutbox,
   completeIdempotencyKey,
   consumeAdminRecoveryCode,
   failDomainOutbox,
+  isAdminSelfDealingCustomer,
   purgeExpiredIdempotencyKeys,
   retryDomainOutbox,
 } from "./primitives.js";
-export type { AcquiredIdempotencyKey, DatabaseExecutor } from "./primitives.js";
+export type { AcquiredIdempotencyKey, DatabaseExecutor, VerifiedAdminActor } from "./primitives.js";
 export {
   CatalogConflictError,
   CatalogNotFoundError,
@@ -359,6 +363,17 @@ export type { FunnelCounters } from "./funnel-service.js";
 export { FinanceService, bogotaDayStart, currentYearRange } from "./finance-service.js";
 export type { FiscalWatchDefaults } from "./finance-service.js";
 export { OperationsService, canReadNotificationCategory } from "./operations-service.js";
+export {
+  AdminOperationRateLimitError,
+  OperationRateLimitError,
+  consumeAdminOperationRateLimit,
+  consumeOperationRateLimit,
+  purgeExpiredOperationRateLimits,
+} from "./operation-rate-limit.js";
+export type {
+  OperationRateLimitResult,
+  OperationRateLimitSubject,
+} from "./operation-rate-limit.js";
 export { AdminOrderService } from "./admin-order-service.js";
 export type { AdminOrderFilters } from "./admin-order-service.js";
 export type {

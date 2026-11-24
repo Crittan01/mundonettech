@@ -281,7 +281,33 @@ test("Meta credential, catalog feed and Purchase dispatch work through the stand
   await wizard.getByLabel("Token de acceso del sistema de Meta").fill(accessToken);
   await wizard.getByLabel(/Código de eventos de prueba/).fill("TESTE2E1");
   await wizard.getByRole("button", { name: "Cifrar y guardar credencial", exact: true }).click();
-  await expect(page.getByText(/Credencial Meta E2E cifrada y registrada en LOCAL/)).toBeVisible();
+  await expect
+    .poll(async () => {
+      const credential = await db.integrationCredential.findFirst({
+        where: { provider: "meta", environment: "LOCAL", revokedAt: null, accountName: "Meta E2E" },
+        select: { id: true },
+      });
+      return credential !== null;
+    })
+    .toBe(true);
+  const credential = await db.integrationCredential.findFirstOrThrow({
+    where: { provider: "meta", environment: "LOCAL", revokedAt: null, accountName: "Meta E2E" },
+  });
+  expect(credential.keyVersion).toBe(1);
+  await expect(page.getByText("Credencial cifrada y registrada en LOCAL.")).toBeVisible();
+  const createAudit = await db.adminActionLog.findFirstOrThrow({
+    where: { targetId: credential.id, action: "INTEGRATION_CREDENTIAL_CREATED" },
+  });
+  expect(createAudit.metadata).not.toHaveProperty("accountName");
+  expect(JSON.stringify(createAudit.metadata)).not.toContain("Meta E2E");
+  expect(JSON.stringify(createAudit.metadata)).not.toContain(accessToken);
+  await page.reload();
+  const credentialItem = page.getByRole("listitem").filter({ hasText: credential.id });
+  await expect(credentialItem).toContainText(`Credencial ${credential.id}`);
+  await expect(credentialItem).toContainText("meta · LOCAL");
+  await expect(credentialItem).toContainText("Activa");
+  expect(await page.content()).not.toContain("Meta E2E");
+  expect(await page.content()).not.toContain(accessToken);
 
   const scenario = await enqueueScenario(seeded);
   await page.getByRole("button", { name: "Actualizar feed", exact: true }).click();

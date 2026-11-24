@@ -41,7 +41,7 @@ const querySchema = z.object({
 });
 
 export default async function OrdersPage({ searchParams }: PageProps<"/admin/pedidos">) {
-  await requireAdminPage("orders:read");
+  const session = await requireAdminPage("orders:read");
   const raw = await searchParams;
   const rawInput = {
     q: single(raw.q)?.trim() || undefined,
@@ -60,7 +60,7 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
   let page: AdminOrderPage = { items: [], nextCursor: null };
   if (parsed.success) {
     try {
-      page = await new AdminOrderService(getDatabase()).list({
+      page = await new AdminOrderService(getDatabase(), session.profile.id).list({
         query: query.q,
         orderStatus: query.orderStatus,
         paymentStatus: query.paymentStatus,

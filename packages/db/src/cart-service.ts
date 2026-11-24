@@ -4,6 +4,7 @@ import {
   calculateCartPricing,
   maxCartLines,
   normalizeCouponCode,
+  sanitizeAuditValue,
   type CartPricingIssue,
   type PricingBundle,
   type PricingCoupon,
@@ -193,9 +194,82 @@ function assertActiveCart(cart: Cart, now: Date): void {
 }
 
 function assertAdminMutable(cart: Cart, audit?: PricingMutationAudit): void {
-  if (audit && cart.kind === "ASSISTED" && cart.assistedClaimedAt !== null) {
+  if (!audit) return;
+  if (cart.kind !== "ASSISTED") {
+    throw new CartStateError("Administrative cart mutations require an assisted cart.");
+  }
+  if (cart.assistedClaimedAt !== null) {
     throw new CartStateError("Assisted cart has already been claimed by the customer.");
   }
+}
+
+function redactedAuditMetadata(metadata: Prisma.JsonObject): Prisma.JsonObject {
+  return sanitizeAuditValue(metadata) as Prisma.JsonObject;
+}
+
+function cartAuditState(cart: CartWithItems): Prisma.JsonObject {
+  return {
+    kind: cart.kind,
+    status: cart.status,
+    itemCount: cart.items.length,
+    totalUnits: cart.items.reduce((total, item) => total + item.quantity, 0),
+    customerAssigned: cart.customerId !== null,
+    couponId: cart.couponId,
+    subtotalCents: cart.subtotalCents.toString(),
+    wholesaleDiscountCents: cart.wholesaleDiscountCents.toString(),
+    bundleDiscountCents: cart.bundleDiscountCents.toString(),
+    couponDiscountCents: cart.couponDiscountCents.toString(),
+    totalCents: cart.totalCents.toString(),
+    expiresAt: cart.expiresAt.toISOString(),
+    assistedExpiresAt: cart.assistedExpiresAt?.toISOString() ?? null,
+    assistedClaimed: cart.assistedClaimedAt !== null,
+  };
+}
+
+function cartItemAuditState(item: CartItemWithVariant): Prisma.JsonObject {
+  return {
+    variantId: item.variantId,
+    bundleId: item.bundleId,
+    quantity: item.quantity,
+    bundleQuantity: item.bundleQuantity,
+    unitPriceCents: item.unitPriceCents.toString(),
+    wholesaleDiscountCents: item.wholesaleDiscountCents.toString(),
+    bundleDiscountCents: item.bundleDiscountCents.toString(),
+    couponDiscountCents: item.couponDiscountCents.toString(),
+    lineTotalCents: item.lineTotalCents.toString(),
+  };
+}
+
+function cartAuditChanges(before: CartWithItems, after: CartWithItems): Prisma.JsonObject {
+  const beforeItems = new Map(before.items.map((item) => [item.id, item]));
+  const afterItems = new Map(after.items.map((item) => [item.id, item]));
+  const changedIds = [...new Set([...beforeItems.keys(), ...afterItems.keys()])].filter((id) => {
+    const previous = beforeItems.get(id);
+    const current = afterItems.get(id);
+    return (
+      JSON.stringify(previous ? cartItemAuditState(previous) : null) !==
+      JSON.stringify(current ? cartItemAuditState(current) : null)
+    );
+  });
+  const changedItems = Object.fromEntries(
+    changedIds.slice(0, 25).map((id) => {
+      const previous = beforeItems.get(id);
+      const current = afterItems.get(id);
+      return [
+        id,
+        {
+          before: previous ? cartItemAuditState(previous) : null,
+          after: current ? cartItemAuditState(current) : null,
+        },
+      ];
+    }),
+  );
+  return {
+    before: cartAuditState(before),
+    after: cartAuditState(after),
+    changedItems,
+    omittedChangedItemCount: Math.max(0, changedIds.length - 25),
+  };
 }
 
 async function writeCartAudit(
@@ -221,7 +295,7 @@ async function writeCartAudit(
       targetId: cartId,
       ipHash: Uint8Array.from(audit.ipHash),
       userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-      metadata,
+      metadata: redactedAuditMetadata(metadata),
     },
   });
 }
@@ -800,9 +874,10 @@ export class CartService {
         throw new CartStateError("B2B carts are mutable only through proposal versioning.");
       }
       await callback(tx, cart, now);
-      await writeCartAudit(tx, audit, action, cart.id);
       const snapshot = await this.revalidateLocked(tx, cart.id, now);
       if (strict) assertStrictMutation(snapshot);
+      const after = await loadCart(tx, cart.id);
+      await writeCartAudit(tx, audit, action, cart.id, cartAuditChanges(cart, after));
       return snapshot;
     });
   }
@@ -1195,10 +1270,6 @@ export class CartService {
         });
       }
       await tx.cart.update({ where: { id: cart.id }, data: { couponId: coupon.id } });
-      await writeCartAudit(tx, audit, "CART_COUPON_APPLIED", cart.id, {
-        couponId: coupon.id,
-        code: coupon.code,
-      });
       const snapshot = await this.revalidateLocked(tx, cart.id, now);
       if (snapshot.issues.some((issue) => issue.code === "COUPON_MINIMUM_NOT_MET")) {
         throw new CouponError(
@@ -1209,6 +1280,11 @@ export class CartService {
       if (snapshot.issues.some((issue) => issue.code === "COUPON_INVALID")) {
         throw new CouponError("NO_ELIGIBLE_ITEMS", "Cart has no items eligible for this coupon.");
       }
+      const after = await loadCart(tx, cart.id);
+      await writeCartAudit(tx, audit, "CART_COUPON_APPLIED", cart.id, {
+        ...cartAuditChanges(cart, after),
+        appliedCouponId: coupon.id,
+      });
       return snapshot;
     });
   }
@@ -1267,11 +1343,14 @@ export class CartService {
           priceRevalidatedAt: now,
         },
       });
+      const snapshot = await this.revalidateLocked(tx, cart.id, now);
+      const after = await loadCart(tx, cart.id);
       await writeCartAudit(tx, input.audit, "ASSISTED_CART_CREATED", cart.id, {
-        customerId: input.customerId ?? null,
-        expiresAt: expiresAt.toISOString(),
+        before: null,
+        after: cartAuditState(after),
+        assistedByAdminUserId: input.assistedByAdminUserId,
       });
-      return this.revalidateLocked(tx, cart.id, now);
+      return snapshot;
     });
   }
 
@@ -1308,9 +1387,17 @@ export class CartService {
     const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / pageSize)));
     const items = await this.db.cart.findMany({
       where,
-      include: {
-        customer: { select: { email: true, givenName: true, familyName: true } },
-        assistedBy: { select: { displayName: true, email: true } },
+      select: {
+        id: true,
+        status: true,
+        expiresAt: true,
+        assistedExpiresAt: true,
+        assistedClaimedAt: true,
+        assistedTokenHash: true,
+        totalCents: true,
+        itemCount: true,
+        customer: { select: { email: true } },
+        assistedBy: { select: { displayName: true } },
       },
       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
       skip: (page - 1) * pageSize,
@@ -1342,11 +1429,13 @@ export class CartService {
         where: { id: cart.id },
         data: { assistedTokenHash, assistedExpiresAt: expiresAt, expiresAt },
       });
+      const result = await storedSnapshot(tx, cart.id);
+      const after = await loadCart(tx, cart.id);
       await writeCartAudit(tx, input.audit, "ASSISTED_PAYMENT_LINK_ISSUED", cart.id, {
-        expiresAt: expiresAt.toISOString(),
+        ...cartAuditChanges(cart, after),
         rotated: cart.assistedTokenHash !== null,
       });
-      return storedSnapshot(tx, cart.id);
+      return result;
     });
   }
 
@@ -1475,8 +1564,16 @@ export class CartService {
         where: { id: cart.id },
         data: { status: "CANCELLED", couponId: null, assistedTokenHash: null },
       });
-      await writeCartAudit(tx, audit, "ASSISTED_CART_CANCELLED", cart.id);
-      return storedSnapshot(tx, cart.id);
+      const result = await storedSnapshot(tx, cart.id);
+      const after = await loadCart(tx, cart.id);
+      await writeCartAudit(
+        tx,
+        audit,
+        "ASSISTED_CART_CANCELLED",
+        cart.id,
+        cartAuditChanges(cart, after),
+      );
+      return result;
     });
   }
 }

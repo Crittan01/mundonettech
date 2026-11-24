@@ -3,6 +3,7 @@ import { OperationsService } from "@mundonettech/db";
 import Link from "next/link";
 
 import { EmptyState as Empty } from "@/components/admin/empty-state";
+import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { NotificationReadForm } from "@/components/admin/notification-read-form";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
@@ -62,6 +63,7 @@ export default async function TodayPage() {
           comerciales y personales se muestran según tu permiso y con máscara en el servidor.
         </p>
       </div>
+      <CmsStepUp session={session} />
       <section aria-label="Resumen operativo" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         {summaryCards.map(([label, value]) => (
           <article key={label} className="rounded-xl border border-border bg-card p-5">

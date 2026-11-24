@@ -5,6 +5,7 @@ import {
   hasUniqueViolation,
   Prisma,
   type IntegrationCredential,
+  type IntegrationEnvironment,
   type PrismaClient,
 } from "@mundonettech/db";
 
@@ -145,7 +146,8 @@ export class B2bCopilotService {
   constructor(
     private readonly db: PrismaClient,
     private readonly options: {
-      readonly vault: IntegrationCredentialVault;
+      readonly vault: Pick<IntegrationCredentialVault, "reveal">;
+      readonly environment?: IntegrationEnvironment;
       readonly fetchImpl?: typeof fetch;
       readonly timeoutMs?: number;
     },
@@ -153,7 +155,12 @@ export class B2bCopilotService {
 
   private async credential(id: string): Promise<IntegrationCredential> {
     const record = await this.db.integrationCredential.findFirst({
-      where: { id, provider: "gemini", revokedAt: null },
+      where: {
+        id,
+        provider: "gemini",
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+        revokedAt: null,
+      },
     });
     if (!record) throw new B2bCopilotError("NOT_FOUND", "Active Gemini credential not found.");
     return record;

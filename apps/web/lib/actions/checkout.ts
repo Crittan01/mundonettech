@@ -33,7 +33,11 @@ import {
   storeCreditService,
 } from "@/lib/integrations";
 import { getConfiguredLegalDocument as legalDocument } from "@/lib/legal";
-import { emailIdentityHash, phoneIdentityHash } from "@/lib/payment-identities";
+import {
+  documentIdentityHash,
+  emailIdentityHash,
+  phoneIdentityHash,
+} from "@/lib/payment-identities";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const submissionSchema = z
@@ -233,6 +237,9 @@ export async function confirmCheckoutAction(
         ? {
             EMAIL: emailIdentityHash(input.email),
             PHONE: phoneIdentityHash(input.phoneE164),
+            ...(input.buyerDocumentNumber
+              ? { DOCUMENT: documentIdentityHash(input.buyerDocumentNumber) }
+              : {}),
           }
         : undefined;
     if (codIdentityHashes && (await blockedIdentityService().isBlocked(codIdentityHashes))) {
@@ -242,7 +249,9 @@ export async function confirmCheckoutAction(
       );
     }
     if (input.paymentMethod === "WOMPI") {
-      const credentials = await getIntegrationCredentialVault().list({ limit: 100 });
+      const credentials = await getIntegrationCredentialVault()
+        .forSystemProvider("wompi")
+        .list({ limit: 100 });
       const activeWompi = credentials.items.filter(
         (item) => item.provider === "wompi" && !item.revokedAt,
       );

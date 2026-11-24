@@ -21,6 +21,7 @@ import { z } from "zod";
 import {
   actionError,
   actionSuccess,
+  formEntries,
   formSnapshot,
   formString,
   type ActionState,
@@ -30,11 +31,51 @@ import { shippingService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-async function authorize() {
+const snapshotFields = new Set([
+  "code",
+  "active",
+  "baseFeeCents",
+  "freeShippingThresholdCents",
+  "cutoffMinutes",
+  "deliveryPromiseMinutes",
+]);
+function safeSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(
+      ([key, value]) => snapshotFields.has(key) && value.length <= 256,
+    ),
+  );
+}
+
+function assertClosedForm(formData: FormData, allowedFields: readonly string[]): void {
+  const shape: Record<string, z.ZodOptional<z.ZodString>> = {};
+  const values: Record<string, string> = {};
+  for (const field of allowedFields) shape[field] = z.string().optional();
+  for (const [key, value] of formEntries(formData)) {
+    if (typeof value !== "string" || Object.hasOwn(values, key)) {
+      throw new TypeError("Form fields must be unique strings.");
+    }
+    values[key] = value;
+  }
+  z.object(shape).strict().parse(values);
+}
+
+async function authorize(
+  formData: FormData,
+  allowedFields: readonly string[],
+  requireDeliveryZoneManager = false,
+) {
   const session = await getAdminSession({
     permission: "fulfillment:write",
     requireRecentMfa: true,
   });
+  if (
+    requireDeliveryZoneManager &&
+    !["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(session.profile.role)
+  ) {
+    throw new AdminAuthorizationError("FORBIDDEN");
+  }
+  assertClosedForm(formData, allowedFields);
   const context = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
@@ -99,23 +140,41 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
 }
 
 function cents(value: string): bigint {
-  if (!/^[0-9]+$/.test(value)) throw new TypeError("Money must be integer cents.");
-  return BigInt(value);
+  if (!/^[0-9]{1,19}$/.test(value)) throw new TypeError("Money must be integer cents.");
+  const parsed = BigInt(value);
+  if (parsed > 9_223_372_036_854_775_807n) throw new RangeError("Money exceeds BIGINT.");
+  return parsed;
+}
+
+function integer(value: string, minimum: number, maximum: number): number {
+  const normalized = z
+    .string()
+    .regex(/^(?:0|[1-9][0-9]{0,9})$/)
+    .parse(value);
+  return z.number().int().min(minimum).max(maximum).parse(Number(normalized));
 }
 
 const packageSchema = z
   .array(
-    z.object({
-      weightGrams: z.number().int().positive().max(10_000_000),
-      lengthMillimeters: z.number().int().positive().max(100_000),
-      widthMillimeters: z.number().int().positive().max(100_000),
-      heightMillimeters: z.number().int().positive().max(100_000),
-      items: z
-        .array(
-          z.object({ shipmentItemId: z.string().uuid(), quantity: z.number().int().positive() }),
-        )
-        .min(1),
-    }),
+    z
+      .object({
+        weightGrams: z.number().int().positive().max(10_000_000),
+        lengthMillimeters: z.number().int().positive().max(100_000),
+        widthMillimeters: z.number().int().positive().max(100_000),
+        heightMillimeters: z.number().int().positive().max(100_000),
+        items: z
+          .array(
+            z
+              .object({
+                shipmentItemId: z.string().uuid(),
+                quantity: z.number().int().positive().max(1_000_000_000),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(1000),
+      })
+      .strict(),
   )
   .min(1)
   .max(1000);
@@ -130,9 +189,9 @@ export async function startPickingAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["shipmentId"]);
     await shippingService().startPicking(
       z.string().uuid().parse(formString(formData, "shipmentId")),
       audit,
@@ -148,10 +207,12 @@ export async function packShipmentAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
-    const packages = packageSchema.parse(JSON.parse(formString(formData, "packages")));
+    const audit = await authorize(formData, ["shipmentId", "packages"]);
+    const packages = packageSchema.parse(
+      JSON.parse(z.string().max(2_000_000).parse(formString(formData, "packages"))),
+    );
     const result = await shippingService().pack(
       z.string().uuid().parse(formString(formData, "shipmentId")),
       packages,
@@ -168,9 +229,9 @@ export async function processLabelAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["packageId"]);
     const result = await shippingService().processLabel(
       z.string().uuid().parse(formString(formData, "packageId")),
       `admin:${audit.actorAdminUserId}`,
@@ -191,9 +252,9 @@ export async function reconcileLabelAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["packageId"]);
     const result = await shippingService().reconcileLabel(
       z.string().uuid().parse(formString(formData, "packageId")),
       `admin:${audit.actorAdminUserId}`,
@@ -214,14 +275,21 @@ export async function assignShipmentSerialsAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["shipmentId", "serialUnitIds"]);
     const shipmentId = z.string().uuid().parse(formString(formData, "shipmentId"));
     const serialUnitIds = z
       .array(z.string().uuid())
       .max(10_000)
-      .parse(JSON.parse(formString(formData, "serialUnitIds") || "[]"));
+      .parse(
+        JSON.parse(
+          z
+            .string()
+            .max(500_000)
+            .parse(formString(formData, "serialUnitIds") || "[]"),
+        ),
+      );
     const count = await shippingService().assignSerialUnits(shipmentId, serialUnitIds, audit);
     revalidateLogistics();
     return actionSuccess(`${count} seriales asignados al envío y auditados.`);
@@ -234,13 +302,22 @@ export async function dispatchShipmentAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, [
+      "shipmentId",
+      "driverName",
+      "driverPhoneE164",
+      "serialUnitIds",
+    ]);
     const shipmentId = z.string().uuid().parse(formString(formData, "shipmentId"));
-    const driverName = formString(formData, "driverName").trim();
-    const driverPhoneE164 = formString(formData, "driverPhoneE164").trim();
-    const rawSerialUnitIds = formString(formData, "serialUnitIds");
+    const driverName = z.string().max(200).parse(formString(formData, "driverName")).trim();
+    const driverPhoneE164 = z
+      .string()
+      .max(16)
+      .parse(formString(formData, "driverPhoneE164"))
+      .trim();
+    const rawSerialUnitIds = z.string().max(500_000).parse(formString(formData, "serialUnitIds"));
     const serialUnitIds = rawSerialUnitIds
       ? z.array(z.string().uuid()).max(10_000).parse(JSON.parse(rawSerialUnitIds))
       : undefined;
@@ -263,9 +340,9 @@ export async function deliverShipmentAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["shipmentId"]);
     await shippingService().markDelivered(
       z.string().uuid().parse(formString(formData, "shipmentId")),
       audit,
@@ -281,19 +358,47 @@ export async function saveDeliveryZoneAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(
+      formData,
+      [
+        "zoneId",
+        "expectedUpdatedAt",
+        "code",
+        "name",
+        "active",
+        "municipalityCodes",
+        "polygon",
+        "baseFeeCents",
+        "freeShippingThresholdCents",
+        "cutoffMinutes",
+        "deliveryPromiseMinutes",
+      ],
+      true,
+    );
     const id = formString(formData, "zoneId");
     const expected = formString(formData, "expectedUpdatedAt");
-    const municipalityCodes = formString(formData, "municipalityCodes")
-      .split(",")
-      .map((code) => code.trim())
-      .filter(Boolean);
-    const polygon = formString(formData, "polygon")
-      .split(";")
-      .map((pair) => pair.trim())
-      .filter(Boolean)
+    const municipalityCodes = z
+      .array(z.string().regex(/^[0-9]{5}$/))
+      .min(1)
+      .max(1122)
+      .parse(
+        formString(formData, "municipalityCodes")
+          .split(",")
+          .map((code) => code.trim())
+          .filter(Boolean),
+      );
+    const polygon = z
+      .array(z.string())
+      .min(3)
+      .max(500)
+      .parse(
+        formString(formData, "polygon")
+          .split(";")
+          .map((pair) => pair.trim())
+          .filter(Boolean),
+      )
       .map((pair) => {
         const [latitude = "", longitude = ""] = pair.split(",");
         return {
@@ -310,25 +415,15 @@ export async function saveDeliveryZoneAction(
               expectedUpdatedAt: new Date(z.string().datetime().parse(expected)),
             }
           : {}),
-        code: formString(formData, "code"),
-        name: formString(formData, "name"),
-        active: formString(formData, "active") === "on",
+        code: z.string().min(2).max(40).parse(formString(formData, "code")),
+        name: z.string().min(2).max(120).parse(formString(formData, "name")),
+        active: z.enum(["", "on"]).parse(formString(formData, "active")) === "on",
         municipalityCodes,
         polygon,
         baseFeeCents: cents(formString(formData, "baseFeeCents")),
         freeShippingThresholdCents: freeThreshold ? cents(freeThreshold) : null,
-        cutoffMinutes: z.coerce
-          .number()
-          .int()
-          .min(0)
-          .max(1439)
-          .parse(formString(formData, "cutoffMinutes")),
-        deliveryPromiseMinutes: z.coerce
-          .number()
-          .int()
-          .min(5)
-          .max(10080)
-          .parse(formString(formData, "deliveryPromiseMinutes")),
+        cutoffMinutes: integer(formString(formData, "cutoffMinutes"), 0, 1439),
+        deliveryPromiseMinutes: integer(formString(formData, "deliveryPromiseMinutes"), 5, 10080),
       },
       audit,
     );
@@ -347,9 +442,9 @@ export async function archiveDeliveryZoneAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["zoneId", "expectedUpdatedAt"], true);
     await new LocalDeliveryService(getDatabase()).archive(
       z.string().uuid().parse(formString(formData, "zoneId")),
       new Date(z.string().datetime().parse(formString(formData, "expectedUpdatedAt"))),

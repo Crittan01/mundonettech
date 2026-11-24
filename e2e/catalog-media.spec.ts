@@ -162,6 +162,12 @@ test.afterAll(async () => {
       data: { deletedAt: new Date() },
     });
   }
+  if (db) {
+    await db.cmsMedia.updateMany({
+      where: { altText: { contains: runSuffix }, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+  }
   await db?.$disconnect();
   if (server) {
     server.closeAllConnections();
@@ -200,6 +206,9 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
       .toBe(1);
 
     await page.goto(`/producto/${product.slug}`);
+    await expect(page.getByText("Aún no hay imágenes publicadas para este producto.")).toHaveCount(
+      0,
+    );
     const publicImage = page.getByRole("img", { name: imageAlt, exact: true });
     await expect(publicImage).toBeVisible();
     const imageUrl = await publicImage.getAttribute("src");
@@ -313,7 +322,9 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
       ),
     });
     await svgUploadForm.getByRole("button", { name: "Procesar y publicar medio" }).click();
-    await expect(page.getByText(/No pudimos procesar o almacenar el medio/)).toBeVisible();
+    await expect(
+      page.getByText(/Revisa los campos y vuelve a seleccionar archivos válidos/),
+    ).toBeVisible();
     expect(
       await db.productMedia.count({
         where: { productId: product.id, altText: `SVG bloqueado ${runSuffix}` },
@@ -331,5 +342,72 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
       where: { productId: product.id, altText: spinAlt },
     });
     expect(spin.altText).toBe(spinAlt);
+  });
+});
+
+test.describe.serial("Admin CMS media Route Handler → R2 → metadata lifecycle", () => {
+  test("writer uploads, edits and archives CMS media with a real XHR and no duplicate retry", async ({
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    const alt = `CMS imagen E2E ${runSuffix}`;
+    const updatedAlt = `CMS imagen actualizada E2E ${runSuffix}`;
+    await authenticateAdmin(page, writer);
+    await page.goto("/admin/contenido/medios");
+    const form = page.getByRole("form", { name: "Subir medio CMS" });
+    await form.getByLabel("Texto alternativo").fill(alt);
+    await form.getByLabel("Imagen JPEG, PNG, WebP, HEIC o AVIF").setInputFiles({
+      name: "cms.png",
+      mimeType: "image/png",
+      buffer: createPng(72, 48),
+    });
+    await form.getByRole("button", { name: "Procesar y subir imagen" }).click();
+    await expect(page.getByText(/Imagen procesada, almacenada en R2/)).toBeVisible();
+    await expect
+      .poll(() => db.cmsMedia.count({ where: { altText: alt, deletedAt: null } }))
+      .toBe(1);
+    const stored = await db.cmsMedia.findFirstOrThrow({ where: { altText: alt } });
+    expect(objects.has(stored.storageKey)).toBe(true);
+    expect(objects.has(stored.storageKey.replace(/\.webp$/, ".avif"))).toBe(true);
+
+    const card = page.getByRole("article").filter({ has: page.getByRole("img", { name: alt }) });
+    await expect(card).toBeVisible();
+    await card.getByLabel("Texto alternativo").fill(updatedAlt);
+    await card.getByRole("button", { name: "Guardar texto alternativo" }).click();
+    await expect(page.getByText(/Texto alternativo actualizado/)).toBeVisible();
+    await expect
+      .poll(() => db.cmsMedia.count({ where: { altText: updatedAlt, deletedAt: null } }))
+      .toBe(1);
+
+    const updatedCard = page.getByRole("article").filter({
+      has: page.getByRole("img", { name: updatedAlt }),
+    });
+    await updatedCard.getByRole("button", { name: "Archivar activo" }).click();
+    await expect(page.getByText(/Activo archivado sin borrar su objeto/)).toBeVisible();
+    await expect
+      .poll(async () => {
+        const record = await db.cmsMedia.findUniqueOrThrow({ where: { id: stored.id } });
+        return record.deletedAt !== null;
+      })
+      .toBe(true);
+    expect(objects.has(stored.storageKey)).toBe(true);
+
+    const logs = await db.adminActionLog.findMany({
+      where: {
+        actorAdminUserId: writer.id,
+        targetType: "CmsMedia",
+        targetId: stored.id,
+        action: { in: ["CMS_MEDIA_CREATED", "CMS_MEDIA_UPDATED", "CMS_MEDIA_ARCHIVED"] },
+      },
+      select: { action: true, requestId: true },
+    });
+    expect(logs.map((entry) => entry.action).sort()).toEqual([
+      "CMS_MEDIA_ARCHIVED",
+      "CMS_MEDIA_CREATED",
+      "CMS_MEDIA_UPDATED",
+    ]);
+    expect(
+      logs.every((entry) => entry.requestId !== null || entry.action !== "CMS_MEDIA_CREATED"),
+    ).toBe(true);
   });
 });

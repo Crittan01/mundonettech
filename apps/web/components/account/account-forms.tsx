@@ -20,6 +20,7 @@ export function ProfileForm({
   initial,
 }: {
   readonly initial: {
+    updatedAt: string;
     givenName: string;
     familyName: string;
     phoneE164: string;
@@ -28,6 +29,7 @@ export function ProfileForm({
   };
 }) {
   const [state, action, pending] = useActionState(updateProfileAction, initialActionState);
+  const expectedUpdatedAt = state.values?.expectedUpdatedAt ?? initial.updatedAt;
   const errorValues = state.status === "error" ? state.values : undefined;
   const givenName = errorValues?.givenName ?? initial.givenName;
   const familyName = errorValues?.familyName ?? initial.familyName;
@@ -40,6 +42,7 @@ export function ProfileForm({
     : initial.advertising;
   return (
     <form action={action} className="space-y-5 rounded-xl border border-border bg-card p-6">
+      <input type="hidden" name="expectedUpdatedAt" value={expectedUpdatedAt} />
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="givenName">Nombres</Label>

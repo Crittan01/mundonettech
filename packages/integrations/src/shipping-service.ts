@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
 import {
   ShippingProviderCode,
   type OrderFulfillmentStatus,
+  type PrismaClient,
   type ShipmentPackageStatus,
 } from "@mundonettech/db";
 
@@ -26,6 +28,7 @@ import {
   type ShippingTransaction,
 } from "./shipping-shared.js";
 import {
+  ShippingAuthorizationError,
   ShippingConflictError,
   ShippingNotFoundError,
   ShippingProviderError,
@@ -70,6 +73,33 @@ export class ShippingService {
     );
   }
 
+  private async assertHumanActor(
+    db: PrismaClient | ShippingTransaction,
+    audit: ShippingAuditContext | undefined,
+    lock = false,
+  ): Promise<void> {
+    if (!audit) return;
+    assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
+    let role: string | undefined;
+    if (lock) {
+      const rows = await db.$queryRaw<Array<{ role: string }>>`
+        SELECT "role"::text AS "role" FROM "AdminUser"
+        WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      role = rows[0]?.role;
+    } else {
+      const actor = await db.adminUser.findFirst({
+        where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { role: true },
+      });
+      role = actor?.role;
+    }
+    if (!role || !isAdminRole(role) || !hasAdminPermission(role, "fulfillment:write")) {
+      throw new ShippingAuthorizationError();
+    }
+  }
+
   async ensureFulfillments(
     orderId: string,
     credentialId?: string,
@@ -77,6 +107,7 @@ export class ShippingService {
   ): Promise<readonly string[]> {
     assertIntegrationUuid(orderId, "orderId");
     if (credentialId !== undefined) assertIntegrationUuid(credentialId, "credentialId");
+    await this.assertHumanActor(this.db, audit);
     const order = await this.db.order.findUnique({
       where: { id: orderId },
       include: { shipments: true },
@@ -102,7 +133,7 @@ export class ShippingService {
       aveonlineCredentialId = selected.id;
     }
     return this.db.$transaction(async (tx) => {
-      if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      await this.assertHumanActor(tx, audit, true);
       const locked = await lockOrder(tx, orderId);
       await assertPaidOrder(tx, locked);
       const shipments = await tx.shipment.findMany({
@@ -532,6 +563,11 @@ export class ShippingService {
       }
       if (!["CLAIMED", "RECONCILING"].includes(record.status))
         throw new ShippingConflictError("Only a claimed package can accept a provider label.");
+      if (record.status === "CLAIMED" && record.claimedBy !== workerId) {
+        throw new ShippingConflictError(
+          "Package label claim ownership changed before persistence.",
+        );
+      }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
       await tx.shipmentPackage.update({
@@ -624,6 +660,11 @@ export class ShippingService {
           replayed: true,
         };
       }
+      if (record.claimedBy !== workerId) {
+        throw new ShippingConflictError(
+          "Package label claim ownership changed before failure update.",
+        );
+      }
       const status: ShipmentPackageStatus = uncertain ? "RECONCILING" : "SEALED";
       await tx.shipmentPackage.update({
         where: { id: packageId },
@@ -685,10 +726,12 @@ export class ShippingService {
   ): Promise<LabelProcessResult> {
     assertIntegrationUuid(packageId, "packageId");
     const workerId = shippingWorkerId(workerIdInput);
+    await this.assertHumanActor(this.db, audit);
     const claimSeconds = this.options.claimSeconds ?? 300;
     if (!Number.isInteger(claimSeconds) || claimSeconds < 60 || claimSeconds > 900)
       throw new ShippingValidationError("claimSeconds must be between 60 and 900.");
     const claim = await this.db.$transaction(async (tx) => {
+      await this.assertHumanActor(tx, audit, true);
       const peek = await tx.shipmentPackage.findUnique({
         where: { id: packageId },
         select: { shipmentId: true },
@@ -753,7 +796,6 @@ export class ShippingService {
         },
       });
       if (audit) {
-        await assertFulfillmentActor(tx, audit.actorAdminUserId);
         await writeShippingAudit(tx, {
           action: "SHIPMENT_LABEL_CLAIMED",
           targetType: "ShipmentPackage",
@@ -805,32 +847,38 @@ export class ShippingService {
   ): Promise<LabelProcessResult> {
     assertIntegrationUuid(packageId, "packageId");
     const workerId = shippingWorkerId(workerIdInput);
-    const current = await this.db.shipmentPackage.findUnique({ where: { id: packageId } });
-    if (!current) throw new ShippingNotFoundError("Shipment package not found.");
-    if (["LABELLED", "SHIPPED", "DELIVERED"].includes(current.status))
-      return {
-        packageId,
-        status: current.status,
-        trackingCode: current.trackingCode,
-        replayed: true,
-      };
-    if (current.status !== "RECONCILING")
-      throw new ShippingConflictError("Only an uncertain package requires reconciliation.");
-    if (audit) {
-      await this.db.$transaction(async (tx) => {
-        await assertFulfillmentActor(tx, audit.actorAdminUserId);
+    const current = await this.db.$transaction(async (tx) => {
+      if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      const locked = await lockPackage(tx, packageId);
+      if (["LABELLED", "SHIPPED", "DELIVERED"].includes(locked.status)) {
+        return { done: true as const, record: locked };
+      }
+      if (locked.status !== "RECONCILING") {
+        throw new ShippingConflictError("Only an uncertain package requires reconciliation.");
+      }
+      if (audit) {
         await writeShippingAudit(tx, {
           action: "SHIPMENT_LABEL_RECONCILIATION_STARTED",
           targetType: "ShipmentPackage",
           targetId: packageId,
           audit,
         });
-      });
+      }
+      return { done: false as const, record: locked };
+    });
+    if (current.done) {
+      return {
+        packageId,
+        status: current.record.status,
+        trackingCode: current.record.trackingCode,
+        replayed: true,
+      };
     }
     const { provider } = await this.labelRequest(packageId);
-    const result = await provider.findLabel(current.requestKey);
+    const result = await provider.findLabel(current.record.requestKey);
     if (result) return this.persistLabel(packageId, result, workerId, audit);
     return this.db.$transaction(async (tx) => {
+      if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
       const record = await lockPackage(tx, packageId);
       if (record.status !== "RECONCILING")
         return {
@@ -865,6 +913,15 @@ export class ShippingService {
           metadata: { code: "PROVIDER_CONFIRMED_NOT_FOUND" },
         },
       });
+      if (audit) {
+        await writeShippingAudit(tx, {
+          action: "SHIPMENT_LABEL_RECONCILED_NOT_FOUND",
+          targetType: "ShipmentPackage",
+          targetId: packageId,
+          audit,
+          metadata: { orderId: fulfillment.orderId, shipmentId: record.shipmentId },
+        });
+      }
       return { packageId, status: "SEALED" as const, trackingCode: null, replayed: false };
     });
   }

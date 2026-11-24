@@ -22,6 +22,6 @@ export function phoneIdentityHash(phone: string): Uint8Array<ArrayBuffer> {
 
 export function documentIdentityHash(document: string): Uint8Array<ArrayBuffer> {
   const normalized = document.trim().toUpperCase();
-  if (!/^[A-Z0-9.-]{4,32}$/.test(normalized)) throw new TypeError("Invalid document identity.");
+  if (!/^[A-Z0-9.-]{3,30}$/.test(normalized)) throw new TypeError("Invalid document identity.");
   return digest("DOCUMENT", normalized);
 }

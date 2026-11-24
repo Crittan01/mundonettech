@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { hasAdminPermission, maskEmail } from "@mundonettech/core";
 import { defaultEmailTemplate, emailTemplateKeys } from "@mundonettech/integrations";
 
@@ -25,8 +27,28 @@ export default async function CommunicationsPage() {
   const session = await requireAdminPage("communications:read");
   const db = getDatabase();
   const [events, templates] = await Promise.all([
-    db.emailEvent.findMany({ orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 100 }),
+    db.emailEvent.findMany({
+      select: {
+        id: true,
+        templateKey: true,
+        topic: true,
+        status: true,
+        attemptCount: true,
+        recipientEmail: true,
+        anonymizedAt: true,
+        lastError: true,
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 100,
+    }),
     db.emailTemplateOverride.findMany({
+      select: {
+        id: true,
+        templateKey: true,
+        version: true,
+        status: true,
+        subject: true,
+      },
       orderBy: [{ templateKey: "asc" }, { version: "desc" }],
       take: 100,
     }),
@@ -66,7 +88,7 @@ export default async function CommunicationsPage() {
           <h2 id="template-editor" className="mb-4 text-xl font-semibold">
             Nueva versión de plantilla
           </h2>
-          <EmailTemplateForm templates={defaults} />
+          <EmailTemplateForm templates={defaults} idempotencyKey={randomUUID()} />
         </section>
       ) : null}
       <section aria-labelledby="template-history" className="space-y-3">

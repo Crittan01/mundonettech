@@ -1,4 +1,9 @@
+import type { Metadata } from "next";
 import { Suspense, type ReactNode } from "react";
+
+export const metadata: Metadata = {
+  robots: { index: false, follow: false, nocache: true },
+};
 
 export default function AuthGroupLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (

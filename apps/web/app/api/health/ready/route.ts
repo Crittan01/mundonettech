@@ -15,6 +15,13 @@ interface ReadinessRow {
   readonly rlsTriggerEnabled: boolean;
 }
 
+function methodNotAllowed(): Response {
+  return Response.json(
+    { error: "Method not allowed." },
+    { status: 405, headers: { ...headers, Allow: "GET" } },
+  );
+}
+
 export async function GET() {
   await connection();
   try {
@@ -34,13 +41,14 @@ export async function GET() {
         EXISTS (
           SELECT 1
           FROM pg_event_trigger
-          WHERE evtname = 'enforce_rls_on_new_table' AND evtenabled <> 'D'
+          WHERE evtname = 'enforce_rls_on_new_table' AND evtenabled IN ('O', 'A')
         ) AS "rlsTriggerEnabled"
     `;
     const readiness = rows[0];
     if (
       !readiness ||
       readiness.serverVersion < 170_000 ||
+      readiness.serverVersion >= 180_000 ||
       readiness.appliedMigrations === 0 ||
       readiness.unfinishedMigrations !== 0 ||
       !readiness.rlsTriggerEnabled
@@ -56,3 +64,10 @@ export async function GET() {
     return Response.json({ status: "unavailable" }, { status: 503, headers });
   }
 }
+
+export const HEAD = methodNotAllowed;
+export const POST = methodNotAllowed;
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;

@@ -34,6 +34,7 @@ export async function fetchWithLimit(options: {
   try {
     const response = await options.fetchImpl(options.url, {
       ...options.init,
+      redirect: "error",
       signal: controller.signal,
     });
     const declaredLength = Number(response.headers.get("content-length") ?? 0);

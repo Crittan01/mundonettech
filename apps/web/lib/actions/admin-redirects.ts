@@ -47,17 +47,40 @@ function audit(session: AdminSession, request: RequestSecurityContext) {
   };
 }
 
+const redirectSnapshotFields = new Set([
+  "redirectId",
+  "fromPath",
+  "toPath",
+  "statusCode",
+  "active",
+]);
+
+function redirectSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(([key]) => redirectSnapshotFields.has(key)),
+  );
+}
+
 function invalidate(): void {
   revalidatePath("/admin/contenido/redirecciones");
 }
 
+const redirectInputSchema = z
+  .object({
+    fromPath: z.string().trim().min(1).max(2048),
+    toPath: z.string().trim().min(1).max(2048),
+    statusCode: z.enum(["301", "302", "307", "308"]).transform(Number),
+    active: z.enum(["true", "false"]).transform((value) => value === "true"),
+  })
+  .strict();
+
 function input(formData: FormData) {
-  return {
+  return redirectInputSchema.parse({
     fromPath: formString(formData, "fromPath"),
     toPath: formString(formData, "toPath"),
-    statusCode: z.coerce.number().int().parse(formString(formData, "statusCode")),
-    active: formString(formData, "active") !== "false",
-  };
+    statusCode: formString(formData, "statusCode"),
+    active: formString(formData, "active"),
+  });
 }
 
 function errorState(error: unknown, values: Record<string, string>): ActionState {
@@ -86,7 +109,7 @@ export async function createUrlRedirectAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = redirectSnapshot(formData);
   try {
     const { session, request } = await authorize();
     const created = await service().create(input(formData), audit(session, request));
@@ -101,7 +124,7 @@ export async function updateUrlRedirectAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = redirectSnapshot(formData);
   try {
     const { session, request } = await authorize();
     const id = z.uuid().parse(formString(formData, "redirectId"));
@@ -117,7 +140,7 @@ export async function setUrlRedirectActiveAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = redirectSnapshot(formData);
   try {
     const { session, request } = await authorize();
     const id = z.uuid().parse(formString(formData, "redirectId"));
@@ -134,7 +157,7 @@ export async function archiveUrlRedirectAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = redirectSnapshot(formData);
   try {
     const { session, request } = await authorize();
     const id = z.uuid().parse(formString(formData, "redirectId"));

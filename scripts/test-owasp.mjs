@@ -19,7 +19,7 @@ try {
     authOrigin: authFixture.origin,
     port: 4110,
   });
-  await verifyWebSecurity(runtime.origin);
+  await verifyWebSecurity(runtime.origin, runtime.environment);
 } finally {
   if (runtime) await runtime.stop();
   if (authFixture) await authFixture.stop();

@@ -8,7 +8,7 @@ import {
 } from "@mundonettech/core";
 
 import type { Order, OrderRefund, PrismaClient } from "./generated/client.js";
-import type { DatabaseExecutor } from "./primitives.js";
+import { isAdminSelfDealingCustomer, type DatabaseExecutor } from "./primitives.js";
 import {
   acquireOperationLocks,
   assertUuid,
@@ -114,10 +114,16 @@ function optionalNote(value: string | null | undefined): string | null {
 
 function validatedAudit(audit: RefundAudit) {
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+  if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
   const ipHash = hash32(audit.ipHash, "ipHash");
   const userAgentHash =
     audit.userAgentHash === null ? null : hash32(audit.userAgentHash, "userAgentHash");
-  return { actorAdminUserId: audit.actorAdminUserId, ipHash, userAgentHash };
+  return {
+    actorAdminUserId: audit.actorAdminUserId,
+    ipHash,
+    userAgentHash,
+    requestId: audit.requestId ?? null,
+  };
 }
 
 export class OrderRefundService {
@@ -139,7 +145,7 @@ export class OrderRefundService {
     input: RefundRequestInput,
   ): Promise<RefundRequestResult> {
     assertUuid(input.orderId, "orderId");
-    const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
+    const { actorAdminUserId, ipHash, userAgentHash, requestId } = validatedAudit(input.audit);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
     if (!["RETRACT", "WARRANTY", "ADJUSTMENT", "CUSTOMER_SUPPORT"].includes(input.reason)) {
       throw new RefundValidationError("Invalid refund reason.");
@@ -166,6 +172,13 @@ export class OrderRefundService {
 
     try {
       return await inInventoryTransaction(db, async (tx) => {
+        const actor = await tx.adminUser.findFirst({
+          where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+          select: { id: true, authUserId: true, email: true, role: true },
+        });
+        if (!actor || !refundActorRoles.has(actor.role)) {
+          throw new RefundConflictError("The administrator is not authorized to request refunds.");
+        }
         await acquireOperationLocks(tx, [`order-refund:${input.orderId}`]);
         const orderRows = await tx.$queryRaw<
           Order[]
@@ -183,13 +196,6 @@ export class OrderRefundService {
             );
           }
           return result(existing, true);
-        }
-        const actor = await tx.adminUser.findFirst({
-          where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-          select: { role: true },
-        });
-        if (!actor || !refundActorRoles.has(actor.role)) {
-          throw new RefundConflictError("The administrator is not authorized to request refunds.");
         }
         if (
           order.orderStatus === "PENDING" ||
@@ -302,12 +308,18 @@ export class OrderRefundService {
         await tx.orderRefundItem.createMany({
           data: calculations.map((item) => ({ ...item, refundId: refund.id })),
         });
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
         await tx.adminActionLog.create({
           data: {
             actorAdminUserId,
+            ...(selfDealing ? { selfDealing: true } : {}),
             action: "ORDER_REFUND_REQUESTED",
             targetType: "OrderRefund",
             targetId: refund.id,
+            requestId,
             ipHash,
             userAgentHash,
             metadata: {
@@ -423,7 +435,7 @@ export class OrderRefundService {
     allowLinkedPostSale = false,
   ): Promise<RefundRequestResult> {
     assertUuid(input.refundId, "refundId");
-    const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
+    const { actorAdminUserId, ipHash, userAgentHash, requestId } = validatedAudit(input.audit);
     const note = input.note === undefined ? undefined : optionalNote(input.note);
     return inInventoryTransaction(db, async (tx) => {
       const peek = await tx.orderRefund.findUnique({
@@ -440,18 +452,18 @@ export class OrderRefundService {
       if (targetStatus === "CANCELLED") {
         await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${peek.orderId}::uuid FOR UPDATE`;
       }
+      const actor = await tx.adminUser.findFirst({
+        where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { id: true, authUserId: true, email: true, role: true },
+      });
+      if (!actor || !refundActorRoles.has(actor.role)) {
+        throw new RefundConflictError("The administrator is not authorized to manage refunds.");
+      }
       const rows = await tx.$queryRaw<
         OrderRefund[]
       >`SELECT * FROM "OrderRefund" WHERE "id" = ${input.refundId}::uuid FOR UPDATE`;
       const existing = rows[0];
       if (!existing) throw new RefundNotFoundError("Refund request not found.");
-      const actor = await tx.adminUser.findFirst({
-        where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { role: true },
-      });
-      if (!actor || !refundActorRoles.has(actor.role)) {
-        throw new RefundConflictError("The administrator is not authorized to manage refunds.");
-      }
       if (existing.status === targetStatus) {
         return result(existing, true);
       }
@@ -511,12 +523,26 @@ export class OrderRefundService {
           ...(note === undefined ? {} : { note }),
         },
       });
+      const orderForAudit = await tx.order.findUnique({
+        where: { id: updated.orderId },
+        select: { customerId: true, emailSnapshot: true },
+      });
+      const selfDealing =
+        (targetStatus === "APPROVED" && existing.requestedByAdminUserId === actorAdminUserId) ||
+        (orderForAudit
+          ? await isAdminSelfDealingCustomer(tx, actor, {
+              customerId: orderForAudit.customerId,
+              email: orderForAudit.emailSnapshot,
+            })
+          : false);
       await tx.adminActionLog.create({
         data: {
           actorAdminUserId,
+          ...(selfDealing ? { selfDealing: true } : {}),
           action: auditAction,
           targetType: "OrderRefund",
           targetId: updated.id,
+          requestId,
           ipHash,
           userAgentHash,
           metadata: {

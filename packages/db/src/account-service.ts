@@ -211,8 +211,16 @@ export class AccountService {
     };
   }
 
-  async updateProfile(customerId: string, input: ProfileInput, auditInput: AccountAudit) {
+  async updateProfile(
+    customerId: string,
+    input: ProfileInput,
+    expectedUpdatedAt: Date,
+    auditInput: AccountAudit,
+  ) {
     const values = profileInput(input);
+    if (!(expectedUpdatedAt instanceof Date) || Number.isNaN(expectedUpdatedAt.getTime())) {
+      throw new AccountError("VALIDATION", "expectedUpdatedAt is invalid.");
+    }
     const audit = this.audit(auditInput);
     return inInventoryTransaction(this.db, async (tx) => {
       const customer = await this.lockActiveCustomer(tx, customerId);
@@ -240,6 +248,18 @@ export class AccountService {
       ]);
       const currentlyGranted = latestConsent !== null;
       const currentlyAdvertisingGranted = latestAdvertisingConsent !== null;
+      if (
+        customer.givenName === values.givenName &&
+        customer.familyName === values.familyName &&
+        customer.phoneE164 === values.phoneE164 &&
+        currentlyGranted === values.marketingEmail &&
+        currentlyAdvertisingGranted === values.advertising
+      ) {
+        return customer;
+      }
+      if (customer.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+        throw new AccountError("CONFLICT", "The profile changed in another session.");
+      }
       const proofHash = createHash("sha256")
         .update(
           JSON.stringify({
@@ -446,6 +466,10 @@ export class AccountService {
             }
           : {}),
       },
+      omit: {
+        acceptanceIpHash: true,
+        acceptanceUserAgentHash: true,
+      },
       include: { items: { select: { id: true, titleSnapshot: true, quantity: true } } },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: limit + 1,
@@ -457,13 +481,24 @@ export class AccountService {
     assertUuid(orderId, "orderId");
     const order = await this.db.order.findFirst({
       where: { id: orderId, customerId },
+      omit: {
+        acceptanceIpHash: true,
+        acceptanceUserAgentHash: true,
+      },
       include: {
         items: {
+          omit: { unitCostWacCents: true },
           include: {
             variant: {
+              omit: { costCents: true },
               include: {
                 product: {
-                  include: { variants: { where: { deletedAt: null, status: "ACTIVE" } } },
+                  include: {
+                    variants: {
+                      where: { deletedAt: null, status: "ACTIVE" },
+                      omit: { costCents: true },
+                    },
+                  },
                 },
               },
             },
@@ -640,9 +675,17 @@ export class AccountService {
     await tx.address.deleteMany({ where: { customerId } });
     await tx.wishlistItem.deleteMany({ where: { customerId } });
     await tx.backInStockSubscription.updateMany({
-      where: { customerId },
+      where: {
+        OR: [{ customerId }, { customerId: null, email: previousEmail }],
+      },
       data: { customerId: null, email: anonymizedEmail, status: "CANCELLED", cancelledAt: now },
     });
+    await tx.$executeRaw`
+      UPDATE "AbandonedCart" SET "contactEmail" = NULL,
+        "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
+        "lastReminderOutcome" = 'SUPPRESSED'
+      WHERE "customerId" IS NULL AND lower("contactEmail") = lower(${previousEmail})
+    `;
     await tx.cart.updateMany({
       where: { customerId, status: "ACTIVE" },
       data: { status: "CANCELLED" },
@@ -703,16 +746,33 @@ export class AccountService {
           { orderId: null, recipientEmail: previousEmail },
         ],
       },
-      data: { recipientEmail: anonymizedEmail, anonymizedAt: now },
+      data: {
+        recipientEmail: anonymizedEmail,
+        subjectSnapshot: "Notificación anonimizada",
+        htmlBodySnapshot: "<p>Contenido anonimizado por solicitud de privacidad.</p>",
+        textBodySnapshot: "Contenido anonimizado por solicitud de privacidad.",
+        variablesSnapshot: {},
+        anonymizedAt: now,
+      },
     });
     await tx.supportTicket.updateMany({
-      where: { requesterCustomerId: customerId, contactEmailSnapshot: { not: anonymizedEmail } },
+      where: {
+        OR: [{ requesterCustomerId: customerId }, { order: { customerId } }],
+        contactEmailSnapshot: { not: anonymizedEmail },
+      },
       data: { contactEmailSnapshot: anonymizedEmail, version: { increment: 1 } },
+    });
+    const affectedReviews = await tx.review.findMany({
+      where: {
+        authorDisplayName: { not: "Cliente verificado" },
+        OR: [{ requesterCustomerId: customerId }, { orderItem: { order: { customerId } } }],
+      },
+      select: { product: { select: { slug: true } } },
     });
     await tx.review.updateMany({
       where: {
-        requesterCustomerId: customerId,
         authorDisplayName: { not: "Cliente verificado" },
+        OR: [{ requesterCustomerId: customerId }, { orderItem: { order: { customerId } } }],
       },
       data: { authorDisplayName: "Cliente verificado" },
     });
@@ -732,7 +792,10 @@ export class AccountService {
         },
       });
     }
-    return { customerId, anonymizedAt: now };
+    const affectedReviewProductSlugs = [
+      ...new Set(affectedReviews.map((review) => review.product.slug)),
+    ];
+    return { customerId, anonymizedAt: now, affectedReviewProductSlugs };
   }
 
   async getDaneDirectory() {

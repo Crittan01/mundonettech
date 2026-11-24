@@ -16,7 +16,7 @@ function testVerificationEndpoint(): string | undefined {
   const value = process.env.TURNSTILE_VERIFY_ENDPOINT?.trim();
   if (!value) return undefined;
   const environment = process.env.INTEGRATION_ENVIRONMENT?.trim().toUpperCase();
-  if (process.env.NODE_ENV === "production" && environment && environment !== "LOCAL") {
+  if (process.env.NODE_ENV === "production" && environment !== "LOCAL") {
     throw new Error("TURNSTILE_VERIFY_ENDPOINT is only permitted in LOCAL environments.");
   }
   const url = new URL(value);
@@ -40,7 +40,7 @@ export async function verifyTurnstileToken(
     const expectedHostname =
       options.expectedHostname ??
       (process.env.NODE_ENV === "production"
-        ? (process.env.TURNSTILE_EXPECTED_HOSTNAME ?? storeConfig.domain)
+        ? process.env.TURNSTILE_EXPECTED_HOSTNAME?.trim() || storeConfig.domain
         : undefined);
     const endpoint = options.endpoint ?? testVerificationEndpoint();
     await verifyTurnstile(token, {

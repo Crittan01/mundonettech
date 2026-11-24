@@ -21,6 +21,7 @@ import { clearReferralCode } from "@/lib/security/referral";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const profileSchema = z.object({
+  expectedUpdatedAt: z.string().max(64),
   givenName: z.string().trim().max(100),
   familyName: z.string().trim().max(100),
   phoneE164: z.union([z.literal(""), z.string().regex(/^\+[1-9][0-9]{7,14}$/)]),
@@ -90,14 +91,17 @@ export async function updateProfileAction(
   try {
     const { profile } = await requireCustomerPage();
     const input = profileSchema.parse({
+      expectedUpdatedAt: formString(formData, "expectedUpdatedAt"),
       givenName: formString(formData, "givenName"),
       familyName: formString(formData, "familyName"),
       phoneE164: formString(formData, "phoneE164"),
       marketingEmail: formData.get("marketingEmail") === "on",
       advertising: formData.get("advertising") === "on",
     });
+    const expectedUpdatedAt = new Date(input.expectedUpdatedAt);
+    if (Number.isNaN(expectedUpdatedAt.getTime())) throw new z.ZodError([]);
     const context = await getRequestSecurityContext();
-    await accountService().updateProfile(
+    const updated = await accountService().updateProfile(
       profile.id,
       {
         givenName: input.givenName || null,
@@ -106,11 +110,20 @@ export async function updateProfileAction(
         marketingEmail: input.marketingEmail,
         advertising: input.advertising,
       },
+      expectedUpdatedAt,
       context,
     );
     revalidateAccount();
-    return actionSuccess("Perfil y preferencias de tratamiento actualizados.");
+    return actionSuccess("Perfil y preferencias de tratamiento actualizados.", {
+      expectedUpdatedAt: updated.updatedAt.toISOString(),
+    });
   } catch (error) {
+    if (error instanceof AccountError && error.code === "CONFLICT") {
+      return actionError(
+        "Tu perfil cambió en otra sesión. Recarga la página y revisa los datos antes de guardar.",
+        values,
+      );
+    }
     return failure(error, values);
   }
 }
@@ -193,8 +206,12 @@ export async function anonymizeAccountAction(
       .literal("ELIMINAR MI CUENTA")
       .parse(formString(formData, "confirmation"));
     const context = await getRequestSecurityContext();
-    await accountService().anonymize(profile.id, confirmation, context);
+    const result = await accountService().anonymize(profile.id, confirmation, context);
     updateTag("reviews");
+    for (const slug of result.affectedReviewProductSlugs) {
+      updateTag(`reviews:${slug}`);
+      revalidatePath(`/producto/${slug}`);
+    }
     const supabase = await createSupabaseServerClient();
     await supabase.auth.signOut();
     await clearActivityCookies();

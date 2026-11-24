@@ -11,6 +11,11 @@ import {
   clearCustomerCartCookie,
   establishCustomerActivity,
 } from "@/lib/security/activity-cookies";
+import {
+  clearCustomerAuthRequest,
+  establishCustomerAuthRequest,
+  readCustomerAuthRequest,
+} from "@/lib/security/customer-auth-request";
 import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
 import { isPasswordCompromised } from "@/lib/security/hibp";
 import { isServerOutboundEmailDisabled } from "@/lib/security/outbound-email";
@@ -33,6 +38,8 @@ const passwordSchema = z.string().min(1).max(128);
 const otpSchema = z.string().regex(/^[0-9]{6}$/);
 const genericRequestMessage =
   "Si la solicitud es válida, enviaremos un código de seis dígitos a tu correo.";
+const expiredRequestMessage =
+  "La solicitud de verificación expiró o no está disponible. Solicita un código nuevo.";
 
 function emailFieldError(): ActionState {
   return {
@@ -98,16 +105,18 @@ export async function registerCustomerAction(
   if (captchaError) return captchaError;
   const invalidPassword = await passwordError(parsed.data.password, parsed.data.confirmation);
   if (invalidPassword) return invalidPassword;
-  if (isServerOutboundEmailDisabled()) return actionSuccess(genericRequestMessage);
-
-  const supabase = await createSupabaseServerClient();
-  await supabase.auth.signUp({
-    email: normalizeEmail(parsed.data.email),
-    password: parsed.data.password,
-    options: {
-      emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://127.0.0.1:4010"}/verificar-correo`,
-    },
-  });
+  const email = normalizeEmail(parsed.data.email);
+  if (!isServerOutboundEmailDisabled()) {
+    const supabase = await createSupabaseServerClient();
+    await supabase.auth.signUp({
+      email,
+      password: parsed.data.password,
+      options: {
+        emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://127.0.0.1:4010"}/verificar-correo`,
+      },
+    });
+  }
+  await establishCustomerAuthRequest("signup", email);
   return actionSuccess(genericRequestMessage);
 }
 
@@ -121,12 +130,12 @@ export async function requestCustomerOtpAction(
   if (!parsed.success) return emailFieldError();
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_login");
   if (captchaError) return captchaError;
-  if (isServerOutboundEmailDisabled()) return actionSuccess(genericRequestMessage);
-  const supabase = await createSupabaseServerClient();
-  await supabase.auth.signInWithOtp({
-    email: normalizeEmail(parsed.data.email),
-    options: { shouldCreateUser: false },
-  });
+  const email = normalizeEmail(parsed.data.email);
+  if (!isServerOutboundEmailDisabled()) {
+    const supabase = await createSupabaseServerClient();
+    await supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+  }
+  await establishCustomerAuthRequest("login", email);
   return actionSuccess(genericRequestMessage);
 }
 
@@ -140,11 +149,14 @@ export async function requestCustomerRecoveryAction(
   if (!parsed.success) return emailFieldError();
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_recovery");
   if (captchaError) return captchaError;
-  if (isServerOutboundEmailDisabled()) return actionSuccess(genericRequestMessage);
-  const supabase = await createSupabaseServerClient();
-  await supabase.auth.resetPasswordForEmail(normalizeEmail(parsed.data.email), {
-    redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://127.0.0.1:4010"}/recuperar?code=1`,
-  });
+  const email = normalizeEmail(parsed.data.email);
+  if (!isServerOutboundEmailDisabled()) {
+    const supabase = await createSupabaseServerClient();
+    await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${process.env.NEXT_PUBLIC_SITE_URL ?? "http://127.0.0.1:4010"}/recuperar?code=1`,
+    });
+  }
+  await establishCustomerAuthRequest("recovery", email);
   return actionSuccess(genericRequestMessage);
 }
 
@@ -153,28 +165,29 @@ export async function verifyCustomerOtpAction(
   formData: FormData,
 ): Promise<ActionState> {
   const parsed = z
-    .object({
-      email: emailSchema,
-      code: otpSchema,
-      mode: z.enum(["signup", "email"]),
-      turnstileToken: z.string().max(2048),
-    })
-    .safeParse(Object.fromEntries(formData));
-  if (!parsed.success) return actionError("El código o el correo no tienen un formato válido.");
+    .object({ code: otpSchema, turnstileToken: z.string().max(2048) })
+    .safeParse({ code: formData.get("code"), turnstileToken: formData.get("turnstileToken") });
+  if (!parsed.success) return actionError("El código no tiene un formato válido.");
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_verify");
   if (captchaError) return captchaError;
+  const request = await readCustomerAuthRequest(["signup", "login"]);
+  if (!request) {
+    await clearCustomerAuthRequest();
+    return actionError(expiredRequestMessage);
+  }
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase.auth.verifyOtp({
-    email: normalizeEmail(parsed.data.email),
+    email: request.email,
     token: parsed.data.code,
-    type: parsed.data.mode,
+    type: request.purpose === "signup" ? "signup" : "email",
   });
   if (error || !data.user || !data.session) {
     await safeRecordCustomerEvent("CUSTOMER_OTP_FAILED");
     return actionError("El código no es válido o expiró. Solicita uno nuevo.");
   }
+  await clearCustomerAuthRequest();
   try {
-    await synchronizeCustomerProfile(data.user.id, normalizeEmail(parsed.data.email));
+    await synchronizeCustomerProfile(data.user.id, request.email);
     await establishCustomerActivity(data.user.id);
   } catch {
     await supabase.auth.signOut();
@@ -189,21 +202,30 @@ export async function resetCustomerPasswordAction(
 ): Promise<ActionState> {
   const parsed = z
     .object({
-      email: emailSchema,
       code: otpSchema,
       password: passwordSchema,
       confirmation: passwordSchema,
       turnstileToken: z.string().max(2048),
     })
-    .safeParse(Object.fromEntries(formData));
-  if (!parsed.success) return actionError("Revisa el correo, el código y la contraseña.");
+    .safeParse({
+      code: formData.get("code"),
+      password: formData.get("password"),
+      confirmation: formData.get("confirmation"),
+      turnstileToken: formData.get("turnstileToken"),
+    });
+  if (!parsed.success) return actionError("Revisa el código y la contraseña.");
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_reset");
   if (captchaError) return captchaError;
+  const request = await readCustomerAuthRequest(["recovery"]);
+  if (!request) {
+    await clearCustomerAuthRequest();
+    return actionError(expiredRequestMessage);
+  }
   const invalidPassword = await passwordError(parsed.data.password, parsed.data.confirmation);
   if (invalidPassword) return invalidPassword;
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase.auth.verifyOtp({
-    email: normalizeEmail(parsed.data.email),
+    email: request.email,
     token: parsed.data.code,
     type: "recovery",
   });
@@ -211,13 +233,14 @@ export async function resetCustomerPasswordAction(
     await safeRecordCustomerEvent("CUSTOMER_OTP_FAILED");
     return actionError("El código no es válido o expiró. Solicita uno nuevo.");
   }
+  await clearCustomerAuthRequest();
   const updated = await supabase.auth.updateUser({ password: parsed.data.password });
   if (updated.error) {
     await supabase.auth.signOut();
     return actionError("No pudimos actualizar la contraseña. Solicita un código nuevo.");
   }
   try {
-    await synchronizeCustomerProfile(data.user.id, normalizeEmail(parsed.data.email));
+    await synchronizeCustomerProfile(data.user.id, request.email);
     await establishCustomerActivity(data.user.id);
   } catch {
     await supabase.auth.signOut();
@@ -226,11 +249,24 @@ export async function resetCustomerPasswordAction(
   redirect((await consumeReferralPath()) ?? "/mi-cuenta");
 }
 
+export async function cancelCustomerAuthRequestAction(): Promise<void> {
+  const request = await readCustomerAuthRequest(["signup", "login", "recovery"]);
+  await clearCustomerAuthRequest();
+  redirect(
+    request?.purpose === "signup"
+      ? "/registro"
+      : request?.purpose === "recovery"
+        ? "/recuperar"
+        : "/ingresar",
+  );
+}
+
 export async function signOutCustomerAction(): Promise<void> {
   const supabase = await createSupabaseServerClient();
   await supabase.auth.signOut();
   await clearActivityCookies();
   await clearCustomerCartCookie();
+  await clearCustomerAuthRequest();
   await clearReferralCode();
   redirect("/");
 }

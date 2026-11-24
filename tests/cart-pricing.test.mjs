@@ -594,3 +594,313 @@ describe("F3.1 — bundles and assisted sale lifecycle", () => {
     ]);
   });
 });
+
+describe("A2 — assisted audit completeness and administrative cart isolation", () => {
+  it("persists useful before/after metadata for every assisted mutation without secrets or PII", async () => {
+    const cart = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: adminId,
+      audit,
+    });
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1, audit);
+    const coupon = await activePercentCoupon();
+    await service.applyCoupon({ cartId: cart.id }, coupon.code, audit);
+    const assistedTokenHash = hash();
+    await service.issueAssistedToken({
+      cartId: cart.id,
+      assistedTokenHash,
+      expiresAt: future(),
+      audit,
+    });
+    await service.cancelAssistedCart(cart.id, audit);
+
+    const logs = await db.adminActionLog.findMany({
+      where: { targetType: "Cart", targetId: cart.id },
+    });
+    const byAction = new Map(logs.map((log) => [log.action, log.metadata]));
+    const created = byAction.get("ASSISTED_CART_CREATED");
+    assert.equal(created.before, null);
+    assert.equal(created.after.kind, "ASSISTED");
+    assert.equal(created.after.customerAssigned, false);
+
+    const added = byAction.get("CART_VARIANT_ADDED");
+    assert.equal(added.before.itemCount, 0);
+    assert.equal(added.after.itemCount, 1);
+    assert.equal(added.omittedChangedItemCount, 0);
+    assert.equal(Object.keys(added.changedItems).length, 1);
+    const changed = Object.values(added.changedItems)[0];
+    assert.equal(changed.before, null);
+    assert.equal(changed.after.quantity, 1);
+    assert.equal(changed.after.variantId, catalog.variantId);
+    assert.equal(typeof changed.after.unitPriceCents, "string");
+    assert.equal(changed.after.priceCents, undefined);
+
+    const applied = byAction.get("CART_COUPON_APPLIED");
+    assert.equal(applied.before.couponId, null);
+    assert.equal(applied.after.couponId, coupon.id);
+    assert.equal(applied.appliedCouponId, coupon.id);
+
+    const issued = byAction.get("ASSISTED_PAYMENT_LINK_ISSUED");
+    assert.equal(issued.rotated, false);
+    assert.equal(issued.after.kind, "ASSISTED");
+    assert.ok(issued.after.assistedExpiresAt);
+    const cancelled = byAction.get("ASSISTED_CART_CANCELLED");
+    assert.equal(cancelled.before.status, "ACTIVE");
+    assert.equal(cancelled.after.status, "CANCELLED");
+    assert.equal(cancelled.after.couponId, null);
+
+    const serialized = JSON.stringify(logs.map((log) => log.metadata));
+    for (const forbidden of [
+      "accessTokenHash",
+      "assistedTokenHash",
+      "customerId",
+      "email",
+      coupon.code,
+      Buffer.from(assistedTokenHash).toString("hex"),
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+  });
+
+  it("rejects every audited non-assisted mutation, including a locked kind race, with zero side effects", async () => {
+    const storefront = await createCart();
+    const initialLogCount = await db.adminActionLog.count({
+      where: { targetType: "Cart", targetId: storefront.id },
+    });
+    await assert.rejects(
+      service.addVariant({ cartId: storefront.id }, catalog.variantId, 1, audit),
+      CartStateError,
+    );
+    assert.equal(await db.cartItem.count({ where: { cartId: storefront.id } }), 0);
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "Cart", targetId: storefront.id } }),
+      initialLogCount,
+    );
+
+    const publicSnapshot = await service.addVariant(
+      { cartId: storefront.id },
+      catalog.variantId,
+      1,
+    );
+    assert.equal(publicSnapshot.items.length, 1, "public mutation without audit remains valid");
+    const coupon = await activePercentCoupon();
+    await assert.rejects(
+      service.applyCoupon({ cartId: storefront.id }, coupon.code, audit),
+      CartStateError,
+    );
+    assert.equal(await db.couponUsage.count({ where: { cartId: storefront.id } }), 0);
+    assert.equal(
+      (await db.cart.findUniqueOrThrow({ where: { id: storefront.id } })).couponId,
+      null,
+    );
+
+    const racing = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: adminId,
+      audit,
+    });
+    const racingLogCount = await db.adminActionLog.count({
+      where: { targetType: "Cart", targetId: racing.id },
+    });
+    await sql.query("BEGIN");
+    let pending;
+    try {
+      await sql.query(
+        `UPDATE "Cart"
+         SET "kind" = 'STOREFRONT', "assistedByAdminUserId" = NULL, "assistedExpiresAt" = NULL,
+             "assistedTokenHash" = NULL, "assistedClaimedAt" = NULL
+         WHERE "id" = $1`,
+        [racing.id],
+      );
+      pending = service.addVariant({ cartId: racing.id }, catalog.variantId, 1, audit);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK");
+      throw error;
+    }
+    await assert.rejects(pending, CartStateError);
+    const afterRace = await db.cart.findUniqueOrThrow({ where: { id: racing.id } });
+    assert.equal(afterRace.kind, "STOREFRONT");
+    assert.equal(afterRace.itemCount, 0);
+    assert.equal(afterRace.totalCents, 0n);
+    assert.equal(afterRace.assistedTokenHash, null);
+    assert.equal(await db.cartItem.count({ where: { cartId: racing.id } }), 0);
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "Cart", targetId: racing.id } }),
+      racingLogCount,
+    );
+
+    const failedAssisted = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: adminId,
+      audit,
+    });
+    const failedLogCount = await db.adminActionLog.count({
+      where: { targetType: "Cart", targetId: failedAssisted.id },
+    });
+    await assert.rejects(
+      service.addVariant({ cartId: failedAssisted.id }, catalog.variantId, 1_000_000, audit),
+      CartStockError,
+    );
+    assert.equal(await db.cartItem.count({ where: { cartId: failedAssisted.id } }), 0);
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "Cart", targetId: failedAssisted.id } }),
+      failedLogCount,
+    );
+  });
+});
+
+describe("A2 — pricing operational audit before/after and rollback", () => {
+  it("audits tiers, coupons and bundles with real states, restrictions and items", async () => {
+    const minimumQuantity = 100_000 + Math.floor(Math.random() * 50_000);
+    const tier = await pricing.upsertWholesaleTier(
+      null,
+      { scope: "GLOBAL", minimumQuantity, unitPriceCents: "99000", active: true },
+      audit,
+    );
+    await pricing.upsertWholesaleTier(
+      tier.id,
+      { scope: "GLOBAL", minimumQuantity, unitPriceCents: "98000", active: false },
+      audit,
+    );
+    await pricing.archiveWholesaleTier(tier.id, audit);
+    const tierLogs = await db.adminActionLog.findMany({
+      where: { targetType: "WholesaleTier", targetId: tier.id },
+      orderBy: { createdAt: "asc" },
+    });
+    assert.equal(tierLogs.length, 3);
+    assert.equal(tierLogs[0].metadata.before, null);
+    assert.equal(tierLogs[0].metadata.after.minimumQuantity, minimumQuantity);
+    assert.equal(tierLogs[1].metadata.before.unitPriceCents, "99000");
+    assert.equal(tierLogs[1].metadata.after.unitPriceCents, "98000");
+    assert.equal(tierLogs[1].metadata.after.active, false);
+    assert.equal(tierLogs[2].metadata.before.deleted, false);
+    assert.equal(tierLogs[2].metadata.after.deleted, true);
+
+    const couponCodeValue = code("A2AUDIT");
+    const coupon = await pricing.upsertCoupon(
+      null,
+      {
+        code: couponCodeValue,
+        name: "Nombre interno que no se copia",
+        discountType: "PERCENTAGE",
+        status: "ACTIVE",
+        percentageBps: 1000,
+        minimumSubtotalCents: "0",
+      },
+      audit,
+    );
+    await pricing.upsertCoupon(
+      coupon.id,
+      {
+        code: couponCodeValue,
+        name: "Nombre posterior que tampoco se copia",
+        discountType: "FIXED_AMOUNT",
+        status: "DRAFT",
+        amountCents: "5000",
+        maximumDiscountCents: "4000",
+        minimumSubtotalCents: "10000",
+        maximumUsages: 20,
+        perCustomerUsages: 2,
+        productSlugs: [await productSlug()],
+      },
+      audit,
+    );
+    const couponLogCount = await db.adminActionLog.count({
+      where: { targetType: "Coupon", targetId: coupon.id },
+    });
+    await assert.rejects(
+      pricing.upsertCoupon(
+        coupon.id,
+        {
+          code: couponCodeValue,
+          name: "Debe revertirse",
+          discountType: "FIXED_AMOUNT",
+          status: "DRAFT",
+          amountCents: "6000",
+          minimumSubtotalCents: "10000",
+        },
+        { ...audit, actorAdminUserId: randomUUID() },
+      ),
+    );
+    assert.equal((await pricing.getCoupon(coupon.id)).amountCents, 5000n);
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "Coupon", targetId: coupon.id } }),
+      couponLogCount,
+    );
+    await pricing.archiveCoupon(coupon.id, audit);
+    const couponLogs = await db.adminActionLog.findMany({
+      where: { targetType: "Coupon", targetId: coupon.id },
+      orderBy: { createdAt: "asc" },
+    });
+    assert.equal(couponLogs.length, 3);
+    assert.equal(couponLogs[0].metadata.before, null);
+    assert.equal(couponLogs[0].metadata.after.code, "[redactado]");
+    assert.equal(couponLogs[1].metadata.before.discountType, "PERCENTAGE");
+    assert.equal(couponLogs[1].metadata.after.discountType, "FIXED_AMOUNT");
+    assert.equal(couponLogs[1].metadata.after.productIds.length, 1);
+    assert.equal(couponLogs[1].metadata.nameChanged, true);
+    assert.equal(couponLogs[2].metadata.after.status, "ARCHIVED");
+    assert.equal(couponLogs[2].metadata.releasedReservationCount, 0);
+
+    const slug = `a2-audit-bundle-${randomUUID()}`;
+    const bundle = await pricing.upsertBundle(
+      null,
+      {
+        slug,
+        name: "Bundle inicial",
+        description: "Descripción inicial que no se copia",
+        status: "DRAFT",
+        priceCents: "100000",
+        discountCents: "10000",
+        items: [{ sku: catalog.sku, quantity: 1 }],
+      },
+      audit,
+    );
+    await pricing.upsertBundle(
+      bundle.id,
+      {
+        slug,
+        name: "Bundle posterior",
+        description: "Descripción posterior que no se copia",
+        status: "DRAFT",
+        priceCents: "110000",
+        discountCents: "20000",
+        items: [{ sku: catalog.sku, quantity: 2 }],
+      },
+      audit,
+    );
+    await pricing.archiveBundle(bundle.id, audit);
+    const bundleLogs = await db.adminActionLog.findMany({
+      where: { targetType: "Bundle", targetId: bundle.id },
+      orderBy: { createdAt: "asc" },
+    });
+    assert.equal(bundleLogs.length, 3);
+    assert.equal(bundleLogs[0].metadata.before, null);
+    assert.equal(bundleLogs[1].metadata.before.priceCents, "100000");
+    assert.equal(bundleLogs[1].metadata.after.priceCents, "110000");
+    assert.equal(bundleLogs[1].metadata.detailsChanged, true);
+    assert.equal(bundleLogs[1].metadata.before.items[catalog.variantId].quantity, 1);
+    assert.equal(bundleLogs[1].metadata.after.items[catalog.variantId].quantity, 2);
+    assert.equal(bundleLogs[2].metadata.after.status, "ARCHIVED");
+    assert.equal(bundleLogs[2].metadata.after.deleted, true);
+
+    const serialized = JSON.stringify(
+      [...tierLogs, ...couponLogs, ...bundleLogs].map((log) => log.metadata),
+    );
+    for (const forbidden of [
+      couponCodeValue,
+      "Nombre interno que no se copia",
+      "Nombre posterior que tampoco se copia",
+      "Descripción inicial que no se copia",
+      "Descripción posterior que no se copia",
+      "Debe revertirse",
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+  });
+});

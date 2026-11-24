@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  hasAdminPermission,
+  isAdminRole,
+  sanitizeAuditValue,
+  type AdminPermission,
+  type AdminRoleValue,
+} from "@mundonettech/core";
+
+import {
   IdempotencyStatus,
   type DomainOutbox,
   type IdempotencyKey,
@@ -21,9 +29,85 @@ export interface AdminActionAudit {
   readonly requestId?: string;
 }
 
+export interface VerifiedAdminActor {
+  readonly id: string;
+  readonly authUserId: string;
+  readonly email: string;
+  readonly role: AdminRoleValue;
+}
+
+export class AdminActorAuthorizationError extends Error {
+  constructor(message = "Actor is not an active authorized administrator.") {
+    super(message);
+    this.name = "AdminActorAuthorizationError";
+  }
+}
+
 export async function databaseNow(db: DatabaseExecutor): Promise<Date> {
   const rows = await db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
   return rows[0]!.now;
+}
+
+export async function assertAdminActorInTransaction(
+  tx: Prisma.TransactionClient,
+  actorAdminUserId: string,
+  permission: AdminPermission,
+  options: { readonly lock?: "SHARE" | "UPDATE" } = {},
+): Promise<VerifiedAdminActor> {
+  assertUuid(actorAdminUserId, "actorAdminUserId");
+  const rows =
+    options.lock === "UPDATE"
+      ? await tx.$queryRaw<Array<{ id: string; authUserId: string; email: string; role: string }>>`
+          SELECT "id", "authUserId", "email", "role"::text AS "role"
+          FROM "AdminUser"
+          WHERE "id" = ${actorAdminUserId}::uuid
+            AND "status" = 'ACTIVE'
+            AND "deletedAt" IS NULL
+          FOR UPDATE
+        `
+      : await tx.$queryRaw<Array<{ id: string; authUserId: string; email: string; role: string }>>`
+          SELECT "id", "authUserId", "email", "role"::text AS "role"
+          FROM "AdminUser"
+          WHERE "id" = ${actorAdminUserId}::uuid
+            AND "status" = 'ACTIVE'
+            AND "deletedAt" IS NULL
+          FOR SHARE
+        `;
+  const actor = rows[0];
+  if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
+    throw new AdminActorAuthorizationError();
+  }
+  return {
+    id: actor.id,
+    authUserId: actor.authUserId,
+    email: actor.email,
+    role: actor.role,
+  };
+}
+
+export async function isAdminSelfDealingCustomer(
+  tx: Prisma.TransactionClient,
+  actor: Pick<VerifiedAdminActor, "authUserId" | "email">,
+  target: {
+    readonly customerId?: string | null;
+    readonly email?: string | null;
+    readonly authUserId?: string | null;
+  },
+): Promise<boolean> {
+  const normalizedActorEmail = actor.email.trim().toLowerCase();
+  if (target.authUserId && target.authUserId === actor.authUserId) return true;
+  if (target.email && target.email.trim().toLowerCase() === normalizedActorEmail) return true;
+  if (target.customerId) {
+    const customer = await tx.customer.findUnique({
+      where: { id: target.customerId },
+      select: { email: true, authUserId: true },
+    });
+    if (customer) {
+      if (customer.authUserId && customer.authUserId === actor.authUserId) return true;
+      if (customer.email.trim().toLowerCase() === normalizedActorEmail) return true;
+    }
+  }
+  return false;
 }
 
 export async function recordAdminAction(
@@ -32,18 +116,25 @@ export async function recordAdminAction(
   action: string,
   targetType: string,
   targetId: string,
-  metadata: Prisma.JsonObject = {},
+  metadata: Record<string, unknown> = {},
+  options: { readonly targetAdminUserId?: string | null; readonly selfDealing?: boolean } = {},
 ): Promise<void> {
+  assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+  assertSha256Bytes(audit.ipHash, "ipHash");
+  if (audit.userAgentHash) assertSha256Bytes(audit.userAgentHash, "userAgentHash");
+  const sanitized = sanitizeAuditValue(metadata) as Prisma.InputJsonValue;
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,
+      ...(options.targetAdminUserId ? { targetAdminUserId: options.targetAdminUserId } : {}),
+      ...(options.selfDealing ? { selfDealing: true } : {}),
       action,
       targetType,
       targetId,
       requestId: audit.requestId ?? randomUUID(),
       ipHash: Uint8Array.from(audit.ipHash),
       userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-      metadata,
+      metadata: sanitized,
     },
   });
 }

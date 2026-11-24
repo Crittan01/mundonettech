@@ -1,6 +1,11 @@
 "use server";
 
-import { PaymentProvider } from "@mundonettech/db";
+import {
+  consumeOperationRateLimit,
+  OperationRateLimitError,
+  PaymentProvider,
+  type PrismaClient,
+} from "@mundonettech/db";
 import {
   PaymentConflictError,
   PaymentNotFoundError,
@@ -23,7 +28,58 @@ import {
   storeCreditService,
   wompiWebhookService,
 } from "@/lib/integrations";
-import { emailIdentityHash, phoneIdentityHash } from "@/lib/payment-identities";
+import {
+  documentIdentityHash,
+  emailIdentityHash,
+  phoneIdentityHash,
+} from "@/lib/payment-identities";
+import { getRequestSecurityContext } from "@/lib/security/request-context";
+
+async function consumeWompiIpQuota(db: PrismaClient): Promise<Uint8Array<ArrayBuffer>> {
+  const { ipHash } = await getRequestSecurityContext();
+  await consumeOperationRateLimit(db, {
+    operation: "payments.wompi.verify.ip",
+    subject: { type: "IP" },
+    ipHash,
+    limit: 20,
+    windowSeconds: 60,
+  });
+  return ipHash;
+}
+
+async function consumeWompiOrderQuota(
+  db: PrismaClient,
+  orderId: string,
+  ipHash: Uint8Array<ArrayBuffer>,
+): Promise<void> {
+  await consumeOperationRateLimit(db, {
+    operation: "payments.wompi.verify.order",
+    subject: { type: "ORDER", orderId },
+    ipHash,
+    limit: 5,
+    windowSeconds: 60,
+  });
+  await consumeOperationRateLimit(db, {
+    operation: "payments.wompi.verify.order.global",
+    subject: { type: "ORDER", orderId },
+    ipHash,
+    scope: "subject",
+    limit: 15,
+    windowSeconds: 60,
+  });
+}
+
+function verificationFailure(error: unknown): ActionState & { retryAfterSeconds?: number } {
+  if (error instanceof OperationRateLimitError) {
+    return {
+      ...actionError(
+        `Has alcanzado el límite de verificaciones. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
+      ),
+      retryAfterSeconds: error.retryAfterSeconds,
+    };
+  }
+  return failure(error);
+}
 
 function failure(error: unknown): ActionState {
   if (error instanceof PaymentConflictError) {
@@ -84,7 +140,7 @@ export async function startReceiptPaymentAction(
     const [order, attempts] = await Promise.all([
       getDatabase().order.findUnique({
         where: { id: receipt.orderId },
-        select: { customerId: true },
+        select: { customerId: true, buyerDocumentNumberSnapshot: true },
       }),
       getDatabase().paymentAttempt.findMany({
         where: { orderId: receipt.orderId },
@@ -147,6 +203,9 @@ export async function startReceiptPaymentAction(
             identityHashes: {
               EMAIL: emailIdentityHash(receipt.emailSnapshot),
               PHONE: phoneIdentityHash(receipt.phoneE164Snapshot),
+              ...(order?.buyerDocumentNumberSnapshot
+                ? { DOCUMENT: documentIdentityHash(order.buyerDocumentNumberSnapshot) }
+                : {}),
             },
           }
         : {}),
@@ -197,7 +256,7 @@ export async function resumeWompiPaymentAction(
 export async function verifyWompiPaymentAction(
   _previous: ActionState,
   formData: FormData,
-): Promise<ActionState> {
+): Promise<ActionState & { retryAfterSeconds?: number }> {
   const parsed = z
     .object({
       token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
@@ -210,17 +269,17 @@ export async function verifyWompiPaymentAction(
   if (!parsed.success) return actionError("El identificador de transacción Wompi no es válido.");
   const { token, externalId } = parsed.data;
   try {
+    const db = getDatabase();
+    const ipHash = await consumeWompiIpQuota(db);
     const receipt = await orderService().getReceiptByToken(hashCartToken(token));
     if (!receipt) return actionError("El comprobante ya no está disponible.");
-    const db = getDatabase();
     const matchedTx = await db.paymentTransaction.findFirst({
-      where: {
-        provider: "WOMPI",
-        externalId,
-        attempt: { orderId: receipt.orderId },
-      },
-      select: { attempt: { select: { credentialId: true } } },
+      where: { provider: "WOMPI", externalId },
+      select: { attempt: { select: { orderId: true, credentialId: true } } },
     });
+    if (matchedTx && matchedTx.attempt.orderId !== receipt.orderId) {
+      return actionError("No hay un intento Wompi asociado a este pedido.");
+    }
     const attempt =
       matchedTx?.attempt ??
       (await db.paymentAttempt.findFirst({
@@ -230,6 +289,7 @@ export async function verifyWompiPaymentAction(
       }));
     if (!attempt?.credentialId)
       return actionError("No hay un intento Wompi asociado a este pedido.");
+    await consumeWompiOrderQuota(db, receipt.orderId, ipHash);
     await wompiWebhookService().synchronize({
       externalId,
       environment: getIntegrationEnvironment(),
@@ -238,7 +298,7 @@ export async function verifyWompiPaymentAction(
     });
     revalidatePath(`/recibo/${token}`);
   } catch (error) {
-    return failure(error);
+    return verificationFailure(error);
   }
   redirect(`/recibo/${token}?verificado=1`);
 }

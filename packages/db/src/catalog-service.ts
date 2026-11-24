@@ -4,11 +4,13 @@ import {
   assertValidGs1,
   normalizeAttributeValue,
   normalizeSku,
+  sanitizeAuditValue,
 } from "@mundonettech/core";
 
 import type {
   AttributeDefinition,
   PrismaClient,
+  Product,
   ProductAttributeValue,
   ProductMedia,
   ProductStatus,
@@ -107,7 +109,25 @@ const detailInclude = {
 
 type SummaryRecord = Prisma.ProductGetPayload<{ include: typeof summaryInclude }>;
 type DetailRecord = Prisma.ProductGetPayload<{ include: typeof detailInclude }>;
-type AttributeRecord = ProductAttributeValue & { attribute: AttributeDefinition };
+type CatalogMediaRecord = Pick<
+  ProductMedia,
+  | "id"
+  | "variantId"
+  | "mediaType"
+  | "storageKey"
+  | "altText"
+  | "width"
+  | "height"
+  | "focalX"
+  | "focalY"
+  | "frames"
+  | "posterKey"
+  | "usdzKey"
+>;
+type AttributeRecord = Pick<
+  ProductAttributeValue,
+  "textValue" | "integerValue" | "decimalValue" | "booleanValue" | "urlValue" | "jsonValue"
+> & { attribute: Pick<AttributeDefinition, "valueType"> };
 
 export type CatalogQueryErrorCode =
   | "INVALID_INPUT"
@@ -377,6 +397,125 @@ function rethrowCatalogMutationError(error: unknown, duplicateMessage: string): 
   throw error;
 }
 
+interface ProductAuditInput {
+  readonly slug: string;
+  readonly name: string;
+  readonly shortDescription?: string | null;
+  readonly description?: string | null;
+  readonly brandId: string;
+  readonly categoryId: string;
+  readonly taxGroupId: string;
+  readonly status: string;
+  readonly authenticity: string;
+  readonly retractPolicy: string;
+  readonly warrantyMonths: number;
+  readonly trackSerial: boolean;
+  readonly seoTitle?: string | null;
+  readonly seoDescription?: string | null;
+}
+
+type ProductAuditRecord = Pick<
+  Product,
+  | "id"
+  | "slug"
+  | "name"
+  | "shortDescription"
+  | "description"
+  | "brandId"
+  | "categoryId"
+  | "taxGroupId"
+  | "status"
+  | "authenticity"
+  | "retractPolicy"
+  | "warrantyMonths"
+  | "trackSerial"
+  | "seoTitle"
+  | "seoDescription"
+>;
+
+interface VariantAuditInput {
+  readonly id?: string | null;
+  readonly productId?: string;
+  readonly sku: string;
+  readonly priceCents: string | bigint;
+  readonly costCents: string | bigint;
+  readonly compareAtPriceCents?: string | bigint | null;
+  readonly gtin?: string | null;
+  readonly ean?: string | null;
+  readonly mpn?: string | null;
+  readonly weightGrams: number;
+  readonly lengthMillimeters: number;
+  readonly widthMillimeters: number;
+  readonly heightMillimeters: number;
+  readonly isDefault: boolean;
+  readonly status: string;
+}
+
+function productAuditState(product: ProductAuditInput): Prisma.JsonObject {
+  return {
+    slug: product.slug,
+    name: product.name,
+    brandId: product.brandId,
+    categoryId: product.categoryId,
+    taxGroupId: product.taxGroupId,
+    status: product.status,
+    authenticity: product.authenticity,
+    retractPolicy: product.retractPolicy,
+    warrantyMonths: product.warrantyMonths,
+    trackSerial: product.trackSerial,
+    shortTextPresent: Boolean(product.shortDescription),
+    bodyPresent: Boolean(product.description),
+    seoTitlePresent: Boolean(product.seoTitle),
+    seoSummaryPresent: Boolean(product.seoDescription),
+  };
+}
+
+function productAuditChanges(
+  before: ProductAuditInput | null,
+  after: ProductAuditInput,
+): Prisma.JsonObject {
+  return {
+    before: before ? productAuditState(before) : null,
+    after: productAuditState(after),
+    contentChanges: {
+      shortTextChanged: before?.shortDescription !== after.shortDescription,
+      bodyChanged: before?.description !== after.description,
+      seoTitleChanged: before?.seoTitle !== after.seoTitle,
+      seoSummaryChanged: before?.seoDescription !== after.seoDescription,
+    },
+  };
+}
+
+function variantAuditState(variant: VariantAuditInput): Prisma.JsonObject {
+  return {
+    id: variant.id ?? null,
+    productId: variant.productId ?? null,
+    sku: variant.sku,
+    priceCents: variant.priceCents.toString(),
+    compareAtPriceCents: variant.compareAtPriceCents?.toString() ?? null,
+    gtin: variant.gtin ?? null,
+    ean: variant.ean ?? null,
+    mpn: variant.mpn ?? null,
+    weightGrams: variant.weightGrams,
+    lengthMillimeters: variant.lengthMillimeters,
+    widthMillimeters: variant.widthMillimeters,
+    heightMillimeters: variant.heightMillimeters,
+    isDefault: variant.isDefault,
+    status: variant.status,
+  };
+}
+
+function variantAuditChanges(
+  before: VariantAuditInput | null,
+  after: VariantAuditInput,
+): Prisma.JsonObject {
+  return {
+    before: before ? variantAuditState(before) : null,
+    after: variantAuditState(after),
+    costCentsChanged: before === null || before.costCents.toString() !== after.costCents.toString(),
+  };
+}
+
 async function writeCatalogAudit(
   tx: Prisma.TransactionClient,
   audit: CatalogMutationAudit,
@@ -397,7 +536,7 @@ async function writeCatalogAudit(
       targetId,
       ipHash: Uint8Array.from(audit.ipHash),
       userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-      metadata,
+      metadata: sanitizeAuditValue(metadata) as Prisma.JsonObject,
     },
   });
 }
@@ -645,7 +784,7 @@ function parseFrameDerivatives(raw: unknown): CatalogMediaDerivative[] {
   return derivatives;
 }
 
-function mediaFrames(media: ProductMedia): CatalogMediaFrame[] {
+function mediaFrames(media: CatalogMediaRecord): CatalogMediaFrame[] {
   if (!Array.isArray(media.frames)) return [];
   const frames: CatalogMediaFrame[] = [];
   for (let index = 0; index < media.frames.length; index += 1) {
@@ -678,7 +817,7 @@ function mediaFrames(media: ProductMedia): CatalogMediaFrame[] {
   return frames.sort((left, right) => left.frame - right.frame);
 }
 
-function toMedia(media: ProductMedia): CatalogMedia {
+function toMedia(media: CatalogMediaRecord): CatalogMedia {
   return {
     id: media.id,
     variantId: media.variantId,
@@ -1421,11 +1560,16 @@ export class CatalogService {
     const products = productIds.length
       ? await this.db.product.findMany({
           where: { id: { in: productIds } },
-          include: {
-            brand: true,
-            category: true,
-            taxGroup: true,
-            variants: { where: { deletedAt: null } },
+          select: {
+            id: true,
+            slug: true,
+            name: true,
+            status: true,
+            updatedAt: true,
+            brand: { select: { name: true } },
+            category: { select: { name: true } },
+            taxGroup: { select: { code: true } },
+            variants: { where: { deletedAt: null }, select: { status: true } },
           },
         })
       : [];
@@ -1455,31 +1599,105 @@ export class CatalogService {
     };
   }
 
-  async getAdminProduct(id: string) {
+  async getAdminProduct(id: string, options: { includeCosts?: boolean } = {}) {
     if (!uuidPattern.test(id)) return null;
+    const includeCosts = options.includeCosts === true;
     const [product, hasInventoryHistory] = await Promise.all([
       this.db.product.findFirst({
         where: { id, deletedAt: null },
-        include: {
-          brand: true,
-          category: true,
-          taxGroup: true,
+        select: {
+          id: true,
+          slug: true,
+          name: true,
+          shortDescription: true,
+          description: true,
+          brandId: true,
+          categoryId: true,
+          taxGroupId: true,
+          status: true,
+          authenticity: true,
+          retractPolicy: true,
+          warrantyMonths: true,
+          trackSerial: true,
+          seoTitle: true,
+          seoDescription: true,
+          brand: { select: { name: true } },
+          category: { select: { name: true } },
+          taxGroup: { select: { code: true } },
           media: {
             orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+            select: {
+              id: true,
+              variantId: true,
+              mediaType: true,
+              status: true,
+              storageKey: true,
+              mimeType: true,
+              altText: true,
+              width: true,
+              height: true,
+              focalX: true,
+              focalY: true,
+              frames: true,
+              posterKey: true,
+              usdzKey: true,
+              frameCount: true,
+              position: true,
+              createdAt: true,
+              deletedAt: true,
+            },
           },
           variants: {
             where: { deletedAt: null },
             orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+            select: {
+              id: true,
+              sku: true,
+              priceCents: true,
+              costCents: includeCosts,
+              compareAtPriceCents: true,
+              gtin: true,
+              ean: true,
+              mpn: true,
+              weightGrams: true,
+              lengthMillimeters: true,
+              widthMillimeters: true,
+              heightMillimeters: true,
+              isDefault: true,
+              status: true,
+            },
           },
           attributeValues: {
             where: { attribute: { deletedAt: null } },
-            include: { attribute: true },
             orderBy: [{ attribute: { name: "asc" } }, { normalizedValue: "asc" }],
+            select: {
+              id: true,
+              attributeId: true,
+              textValue: true,
+              integerValue: true,
+              decimalValue: true,
+              booleanValue: true,
+              urlValue: true,
+              jsonValue: true,
+              attribute: { select: { key: true, name: true, valueType: true, unit: true } },
+            },
           },
           compatibility: {
             where: { device: { deletedAt: null, brand: { deletedAt: null } } },
-            include: { device: { include: { brand: true } } },
             orderBy: [{ device: { model: "asc" } }],
+            select: {
+              id: true,
+              fit: true,
+              notes: true,
+              device: {
+                select: {
+                  slug: true,
+                  model: true,
+                  generation: true,
+                  brand: { select: { name: true } },
+                },
+              },
+            },
           },
         },
       }),
@@ -1488,6 +1706,10 @@ export class CatalogService {
     if (!product) return null;
     return {
       ...product,
+      variants: product.variants.map((variant) => ({
+        ...variant,
+        costCents: includeCosts && "costCents" in variant ? (variant.costCents as bigint) : null,
+      })),
       media: product.media.map((media) => ({
         ...toMedia(media),
         status: media.status,
@@ -1577,10 +1799,12 @@ export class CatalogService {
         const created = await tx.product.create({
           data: { ...product, variants: { create: this.variantData(variant) } },
         });
+        const createdVariant = await tx.productVariant.findFirstOrThrow({
+          where: { productId: created.id, sku: variant.sku },
+        });
         await writeCatalogAudit(tx, audit, "CATALOG_PRODUCT_CREATED", "Product", created.id, {
-          slug: created.slug,
-          status: created.status,
-          sku: variant.sku,
+          product: productAuditChanges(null, created),
+          variant: variantAuditChanges(null, createdVariant),
         });
         return { id: created.id, slug: created.slug };
       });
@@ -1598,10 +1822,10 @@ export class CatalogService {
     const product = normalizeBaseInput(input);
     try {
       return await this.db.$transaction(async (tx) => {
-        const existingRows = await tx.$queryRaw<
-          Array<{ id: string; slug: string; status: ProductStatus; trackSerial: boolean }>
-        >`
-          SELECT "id", "slug", "status", "trackSerial"
+        const existingRows = await tx.$queryRaw<ProductAuditRecord[]>`
+          SELECT "id", "slug", "name", "shortDescription", "description", "brandId",
+                 "categoryId", "taxGroupId", "status", "authenticity", "retractPolicy",
+                 "warrantyMonths", "trackSerial", "seoTitle", "seoDescription"
           FROM "Product"
           WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
           FOR UPDATE
@@ -1628,14 +1852,16 @@ export class CatalogService {
             );
           }
         }
-        await tx.product.update({ where: { id }, data: product });
-        await writeCatalogAudit(tx, audit, "CATALOG_PRODUCT_UPDATED", "Product", id, {
-          previousStatus: existing.status,
-          status: product.status,
-          previousSlug: existing.slug,
-          slug: product.slug,
-        });
-        return { id, slug: product.slug, previousSlug: existing.slug };
+        const updated = await tx.product.update({ where: { id }, data: product });
+        await writeCatalogAudit(
+          tx,
+          audit,
+          "CATALOG_PRODUCT_UPDATED",
+          "Product",
+          id,
+          productAuditChanges(existing, updated),
+        );
+        return { id, slug: updated.slug, previousSlug: existing.slug };
       });
     } catch (error) {
       rethrowCatalogMutationError(error, "The product slug already exists.");
@@ -1706,13 +1932,23 @@ export class CatalogService {
             data: { isDefault: true },
           });
         }
+        const auditedVariant = await tx.productVariant.findUniqueOrThrow({
+          where: { id: saved.id },
+        });
+        const defaultVariant = await tx.productVariant.findFirst({
+          where: { productId, status: "ACTIVE", deletedAt: null, isDefault: true },
+          select: { id: true },
+        });
         await writeCatalogAudit(
           tx,
           audit,
           existing ? "CATALOG_VARIANT_UPDATED" : "CATALOG_VARIANT_CREATED",
           "ProductVariant",
           saved.id,
-          { productId, sku: saved.sku, status: saved.status },
+          {
+            ...variantAuditChanges(existing, auditedVariant),
+            defaultVariantId: defaultVariant?.id ?? null,
+          },
         );
         return { id: saved.id, slug: product.slug };
       });
@@ -1752,22 +1988,25 @@ export class CatalogService {
         }
         const columns = typedAttributeColumns(definition.valueType, input.value);
         let saved: ProductAttributeValue;
+        let previous: (ProductAttributeValue & { attribute: AttributeDefinition }) | null = null;
         if (existingId) {
-          const current = await tx.productAttributeValue.findFirst({
+          previous = await tx.productAttributeValue.findFirst({
             where: { id: existingId, productId },
+            include: { attribute: true },
           });
-          if (!current) throw new CatalogNotFoundError("Attribute value not found.");
+          if (!previous) throw new CatalogNotFoundError("Attribute value not found.");
           saved = await tx.productAttributeValue.update({
-            where: { id: existingId },
+            where: { id: previous.id },
             data: { ...columns, attributeId },
           });
         } else {
-          const duplicate = await tx.productAttributeValue.findFirst({
+          previous = await tx.productAttributeValue.findFirst({
             where: { productId, attributeId, normalizedValue: columns.normalizedValue },
+            include: { attribute: true },
           });
-          saved = duplicate
+          saved = previous
             ? await tx.productAttributeValue.update({
-                where: { id: duplicate.id },
+                where: { id: previous.id },
                 data: columns,
               })
             : await tx.productAttributeValue.create({
@@ -1791,7 +2030,26 @@ export class CatalogService {
           "CATALOG_ATTRIBUTE_UPSERTED",
           "ProductAttributeValue",
           saved.id,
-          { productId, attributeKey: definition.key, normalizedValue: saved.normalizedValue },
+          {
+            before: previous
+              ? {
+                  id: previous.id,
+                  productId,
+                  attributeId: previous.attributeId,
+                  attributeKey: previous.attribute.key,
+                  valueType: previous.attribute.valueType,
+                }
+              : null,
+            after: {
+              id: saved.id,
+              productId,
+              attributeId: saved.attributeId,
+              attributeKey: definition.key,
+              valueType: definition.valueType,
+            },
+            valueChanged: previous === null || previous.normalizedValue !== saved.normalizedValue,
+            categoryAttributeCreated: categoryAttribute === null,
+          },
         );
         return { id: saved.id, slug: product.slug };
       });
@@ -1825,7 +2083,16 @@ export class CatalogService {
         "CATALOG_ATTRIBUTE_REMOVED",
         "ProductAttributeValue",
         existing.id,
-        { productId, attributeKey: existing.attribute.key },
+        {
+          before: {
+            id: existing.id,
+            productId,
+            attributeId: existing.attributeId,
+            attributeKey: existing.attribute.key,
+            valueType: existing.attribute.valueType,
+          },
+          after: null,
+        },
       );
       return { id: existing.id, slug: product.slug };
     });
@@ -1874,7 +2141,27 @@ export class CatalogService {
         "CATALOG_COMPATIBILITY_UPSERTED",
         "ProductCompatibility",
         saved.id,
-        { productId, deviceSlug: device.slug, fit: saved.fit },
+        {
+          before: existing
+            ? {
+                id: existing.id,
+                productId,
+                deviceId,
+                deviceSlug: device.slug,
+                fit: existing.fit,
+                notesPresent: Boolean(existing.notes),
+              }
+            : null,
+          after: {
+            id: saved.id,
+            productId,
+            deviceId,
+            deviceSlug: device.slug,
+            fit: saved.fit,
+            notesPresent: Boolean(saved.notes),
+          },
+          notesChanged: existing === null || existing.notes !== saved.notes,
+        },
       );
       return { id: saved.id, slug: product.slug };
     });
@@ -1905,7 +2192,17 @@ export class CatalogService {
         "CATALOG_COMPATIBILITY_REMOVED",
         "ProductCompatibility",
         existing.id,
-        { productId, deviceSlug: existing.device.slug },
+        {
+          before: {
+            id: existing.id,
+            productId,
+            deviceId: existing.deviceId,
+            deviceSlug: existing.device.slug,
+            fit: existing.fit,
+            notesPresent: Boolean(existing.notes),
+          },
+          after: null,
+        },
       );
       return { id: existing.id, slug: product.slug };
     });

@@ -5,6 +5,7 @@ import {
   isReservedRedirectTarget,
   normalizeRedirectPath,
   redirectChain,
+  sanitizeAuditValue,
 } from "@mundonettech/core";
 
 import type { CatalogMutationAudit } from "./catalog-types.js";
@@ -21,14 +22,6 @@ class UrlRedirectCacheStateError extends Error {
 }
 
 class UrlRedirectGenerationChangedError extends Error {}
-
-async function advanceUrlRedirectGeneration(tx: Prisma.TransactionClient): Promise<void> {
-  const updated = await tx.urlRedirectCacheState.updateMany({
-    where: { id: urlRedirectCacheStateId },
-    data: { version: { increment: 1 } },
-  });
-  if (updated.count !== 1) throw new UrlRedirectCacheStateError();
-}
 
 export interface UrlRedirectInput {
   readonly fromPath: string;
@@ -122,6 +115,17 @@ async function lockGraph(tx: Prisma.TransactionClient): Promise<void> {
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('url-redirect-graph'))`;
 }
 
+function redirectAuditState(record: UrlRedirect): Prisma.JsonObject {
+  return {
+    id: record.id,
+    fromPath: record.fromPath,
+    toPath: record.toPath,
+    statusCode: record.statusCode,
+    active: record.active,
+    deleted: record.deletedAt !== null,
+  };
+}
+
 async function audit(
   tx: Prisma.TransactionClient,
   context: CatalogMutationAudit,
@@ -144,7 +148,7 @@ async function audit(
       targetId,
       ipHash: Uint8Array.from(context.ipHash),
       userAgentHash: context.userAgentHash ? Uint8Array.from(context.userAgentHash) : null,
-      metadata,
+      metadata: sanitizeAuditValue(metadata) as Prisma.JsonObject,
     },
   });
 }
@@ -229,10 +233,8 @@ export class UrlRedirectService {
         }
         const created = await tx.urlRedirect.create({ data: normalized });
         await audit(tx, context, "URL_REDIRECT_CREATED", created.id, {
-          fromPath: created.fromPath,
-          toPath: created.toPath,
-          statusCode: created.statusCode,
-          active: created.active,
+          before: null,
+          after: redirectAuditState(created),
         });
         return created;
       });
@@ -256,18 +258,8 @@ export class UrlRedirectService {
         }
         const updated = await tx.urlRedirect.update({ where: { id }, data: normalized });
         await audit(tx, context, "URL_REDIRECT_UPDATED", id, {
-          before: {
-            fromPath: existing.fromPath,
-            toPath: existing.toPath,
-            statusCode: existing.statusCode,
-            active: existing.active,
-          },
-          after: {
-            fromPath: updated.fromPath,
-            toPath: updated.toPath,
-            statusCode: updated.statusCode,
-            active: updated.active,
-          },
+          before: redirectAuditState(existing),
+          after: redirectAuditState(updated),
         });
         return updated;
       });
@@ -286,10 +278,7 @@ export class UrlRedirectService {
         await lockGraph(tx);
         const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
         if (!existing) throw new UrlRedirectNotFoundError();
-        if (existing.active === active) {
-          await advanceUrlRedirectGeneration(tx);
-          return existing;
-        }
+        if (existing.active === active) return existing;
         if (active) {
           assertGraph(existing.fromPath, existing.toPath, await activeEdges(tx), {
             excludeId: id,
@@ -297,8 +286,8 @@ export class UrlRedirectService {
         }
         const updated = await tx.urlRedirect.update({ where: { id }, data: { active } });
         await audit(tx, context, "URL_REDIRECT_ACTIVITY_UPDATED", id, {
-          previousActive: existing.active,
-          active,
+          before: redirectAuditState(existing),
+          after: redirectAuditState(updated),
         });
         return updated;
       });
@@ -319,8 +308,8 @@ export class UrlRedirectService {
         data: { active: false, deletedAt: rows[0]!.now },
       });
       await audit(tx, context, "URL_REDIRECT_ARCHIVED", id, {
-        fromPath: existing.fromPath,
-        toPath: existing.toPath,
+        before: redirectAuditState(existing),
+        after: redirectAuditState(updated),
       });
       return updated;
     });

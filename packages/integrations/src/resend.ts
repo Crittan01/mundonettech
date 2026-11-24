@@ -1,4 +1,5 @@
 import { assertOutboundEmailAllowed } from "@mundonettech/core";
+import { IntegrationEnvironment } from "@mundonettech/db";
 
 import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./integration-http.js";
 import { credentialObject, integrationText, publicHttpsUrl } from "./integration-utils.js";
@@ -40,7 +41,11 @@ function email(value: string): string {
   return value;
 }
 
-export function parseEmailCredentials(plaintext: Uint8Array): EmailCredentials {
+export function parseEmailCredentials(
+  plaintext: Uint8Array,
+  environment: IntegrationEnvironment = IntegrationEnvironment.LOCAL,
+): EmailCredentials {
+  const allowLoopback = environment === IntegrationEnvironment.LOCAL;
   try {
     const record = credentialObject(plaintext, keys);
     const apiKey = text(record, "apiKey", 255, 20);
@@ -66,7 +71,7 @@ export function parseEmailCredentials(plaintext: Uint8Array): EmailCredentials {
       replyTo: replyToValue === null ? null : email(replyToValue),
       svixSecret,
       unsubscribeSecret,
-      apiUrl: publicHttpsUrl(text(record, "apiUrl", 2048), "apiUrl"),
+      apiUrl: publicHttpsUrl(text(record, "apiUrl", 2048), "apiUrl", { allowLoopback }),
     };
   } catch (error) {
     if (error instanceof EmailProviderError) throw error;

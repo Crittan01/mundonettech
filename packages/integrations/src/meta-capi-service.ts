@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
-import { hasAdminPermission, normalizeEmail } from "@mundonettech/core";
+import { hasAdminPermission, isAdminRole, normalizeEmail } from "@mundonettech/core";
 import {
   IntegrationEnvironment,
   Prisma,
@@ -151,7 +151,26 @@ function sameHash(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-function view(record: MetaCapiEvent & { order: { orderNumber: string } }): MetaCapiEventView {
+type MetaCapiEventViewRecord = Pick<
+  MetaCapiEvent,
+  | "id"
+  | "eventId"
+  | "eventName"
+  | "status"
+  | "orderId"
+  | "eventTime"
+  | "valueCents"
+  | "attempts"
+  | "availableAt"
+  | "sentAt"
+  | "completedAt"
+  | "failureCode"
+  | "providerTraceId"
+  | "reconciliationReference"
+  | "version"
+> & { order: { orderNumber: string } };
+
+function view(record: MetaCapiEventViewRecord): MetaCapiEventView {
   return {
     id: record.id,
     eventId: record.eventId,
@@ -723,7 +742,11 @@ export class MetaCapiService {
         where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
         select: { id: true, role: true },
       });
-      if (!actor || !hasAdminPermission(actor.role, "integrations:write")) {
+      if (
+        !actor ||
+        !isAdminRole(actor.role) ||
+        !hasAdminPermission(actor.role, "integrations:write")
+      ) {
         throw new MetaCapiServiceError(
           "UNAUTHORIZED",
           "Active integrations administrator required.",
@@ -744,20 +767,48 @@ export class MetaCapiService {
     });
   }
 
-  async listEvents(limit = 50): Promise<MetaCapiEventView[]> {
+  async listEvents(actorAdminUserId: string, limit = 50): Promise<MetaCapiEventView[]> {
+    assertIntegrationUuid(actorAdminUserId, "actorAdminUserId");
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new MetaCapiServiceError(
         "VALIDATION",
         "Meta CAPI list limit must be between 1 and 100.",
       );
     }
-    const records = await this.db.metaCapiEvent.findMany({
-      where: { environment: this.options.environment },
-      include: { order: { select: { orderNumber: true } } },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: limit,
+    return this.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR UPDATE`;
+      const actor = await tx.adminUser.findFirst({
+        where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { id: true, role: true },
+      });
+      if (!actor || !hasAdminPermission(actor.role, "integrations:read")) {
+        throw new MetaCapiServiceError("UNAUTHORIZED", "Active integrations reader required.");
+      }
+      const records = await tx.metaCapiEvent.findMany({
+        where: { environment: this.options.environment },
+        select: {
+          id: true,
+          eventId: true,
+          eventName: true,
+          status: true,
+          orderId: true,
+          eventTime: true,
+          valueCents: true,
+          attempts: true,
+          availableAt: true,
+          sentAt: true,
+          completedAt: true,
+          failureCode: true,
+          providerTraceId: true,
+          reconciliationReference: true,
+          version: true,
+          order: { select: { orderNumber: true } },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: limit,
+      });
+      return records.map(view);
     });
-    return records.map(view);
   }
 
   async reconcile(input: {
@@ -775,11 +826,20 @@ export class MetaCapiService {
       throw new MetaCapiServiceError("VALIDATION", "Reconciliation reference is invalid.");
     }
     return this.db.$transaction(async (tx) => {
-      const actor = await tx.adminUser.findFirst({
-        where: { id: input.audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { id: true, role: true },
-      });
-      if (!actor || !hasAdminPermission(actor.role, "integrations:write")) {
+      const actorRows = await tx.$queryRaw<Array<{ id: string; role: string }>>`
+        SELECT "id", "role"::text AS "role"
+        FROM "AdminUser"
+        WHERE "id" = ${input.audit.actorAdminUserId}::uuid
+          AND "status" = 'ACTIVE'
+          AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      const actor = actorRows[0];
+      if (
+        !actor ||
+        !isAdminRole(actor.role) ||
+        !hasAdminPermission(actor.role, "integrations:write")
+      ) {
         throw new MetaCapiServiceError(
           "UNAUTHORIZED",
           "Active integrations administrator required.",
@@ -789,7 +849,9 @@ export class MetaCapiService {
         SELECT * FROM "MetaCapiEvent" WHERE "id" = ${input.metaEventId}::uuid FOR UPDATE
       `;
       const event = rows[0];
-      if (!event) throw new MetaCapiServiceError("NOT_FOUND", "Meta CAPI event not found.");
+      if (!event || event.environment !== this.options.environment) {
+        throw new MetaCapiServiceError("NOT_FOUND", "Meta CAPI event not found.");
+      }
       if (input.resolution === "CONFIRMED_SENT" && event.status !== "UNCERTAIN") {
         throw new MetaCapiServiceError(
           "CONFLICT",

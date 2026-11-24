@@ -590,15 +590,64 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   await expect(page.getByText(/Pedido, pack, envío y ledger sincronizados/)).toBeVisible();
   await page.getByText("Agregar ajuste al ledger", { exact: true }).click();
   const adjustRegion = page.locator("details").filter({ hasText: "Agregar ajuste al ledger" });
+  const beforeAdjustment = await db.channelOrder.findUniqueOrThrow({
+    where: { id: channelOrder.id },
+  });
+  const idempotencyKey = await adjustRegion.locator('input[name="idempotencyKey"]').inputValue();
+  expect(idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
+  expect(Number(await adjustRegion.locator('input[name="version"]').inputValue())).toBe(
+    beforeAdjustment.version,
+  );
   await adjustRegion.getByLabel("Valor (COP)").fill("500");
   await adjustRegion.getByLabel("Referencia de evidencia").fill("SETTLEMENT-E2E-001");
   await adjustRegion.getByRole("button", { name: "Agregar ajuste auditable" }).click();
-  await expect(page.getByText(/Ajuste financiero agregado al ledger append-only/)).toBeVisible();
+  await expect
+    .poll(async () => {
+      const entry = await db.channelLedgerEntry.findFirst({
+        where: { orderId: channelOrder.id, entryType: "MANUAL_ADJUSTMENT" },
+      });
+      return entry !== null;
+    })
+    .toBe(true);
+  const adjustment = await db.channelLedgerEntry.findFirstOrThrow({
+    where: { orderId: channelOrder.id, entryType: "MANUAL_ADJUSTMENT" },
+  });
+  expect(adjustment.amountCents).toBe(50_000n);
+  expect(adjustment.evidenceReference).toBe("SETTLEMENT-E2E-001");
+  expect(adjustment.deduplicationKey).toBe(
+    `channel-ledger:${channelOrder.id}:MANUAL:${idempotencyKey}`,
+  );
+  const afterAdjustment = await db.channelOrder.findUniqueOrThrow({
+    where: { id: channelOrder.id },
+  });
+  expect(afterAdjustment.version).toBe(beforeAdjustment.version + 1);
+  await expect(
+    page.getByText(`Ajuste ${adjustment.id} agregado al ledger append-only`, { exact: false }),
+  ).toBeVisible();
+
+  await adjustRegion.getByLabel("Valor (COP)").fill("500");
+  await adjustRegion.getByLabel("Referencia de evidencia").fill("SETTLEMENT-E2E-001");
+  await adjustRegion.getByRole("button", { name: "Agregar ajuste auditable" }).click();
+  await expect(page.getByText(/recuperamos la misma entrada sin duplicarla/)).toBeVisible();
   expect(
     await db.channelLedgerEntry.count({
       where: { orderId: channelOrder.id, entryType: "MANUAL_ADJUSTMENT" },
     }),
   ).toBe(1);
+  expect(
+    (await db.channelOrder.findUniqueOrThrow({ where: { id: channelOrder.id } })).version,
+  ).toBe(afterAdjustment.version);
+  expect(
+    await db.adminActionLog.count({
+      where: { targetId: adjustment.id, action: "CHANNEL_LEDGER_ADJUSTMENT_APPEND" },
+    }),
+  ).toBe(1);
+  expect(await adjustRegion.locator('input[name="idempotencyKey"]').inputValue()).toBe(
+    idempotencyKey,
+  );
+  expect(Number(await adjustRegion.locator('input[name="version"]').inputValue())).toBe(
+    beforeAdjustment.version,
+  );
   const orderAxe = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();
@@ -724,7 +773,11 @@ test("finance role can inspect channel descriptors without mutation controls", a
   await page.goto("/admin/canales");
   await expect(page.getByText(/Vista de solo lectura/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Conectar con Mercado Libre" })).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: accountLabel, exact: true })).toBeVisible();
+  const persistedAccount = await db.channelAccount.findUniqueOrThrow({ where: { id: accountId } });
+  await expect(
+    page.getByRole("heading", { name: persistedAccount.label, exact: true }),
+  ).toBeVisible();
+  expect(persistedAccount.status).toBe("DISCONNECTED");
   await expect(page.getByText("Desvinculada", { exact: true })).toBeVisible();
   await expect(page.getByText("Audífonos TÁCTILES Pro", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Preparar una publicación", { exact: true })).toHaveCount(0);
@@ -733,6 +786,8 @@ test("finance role can inspect channel descriptors without mutation controls", a
     page.getByRole("heading", { name: `Pedido ${channelOrderExternalId}`, exact: true }),
   ).toBeVisible();
   await expect(page.getByText(/Descontado por despacho/)).toBeVisible();
+  await page.getByText(/Ledger financiero reciente/).click();
+  await expect(page.getByText(/Evidencia SETTLEMENT-E2E-001/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Sincronizar pedido y envío" })).toHaveCount(0);
 });
 

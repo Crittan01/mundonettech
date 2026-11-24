@@ -8,13 +8,7 @@ import { ChannelOrderError } from "@mundonettech/integrations";
 import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
-import {
-  actionError,
-  actionSuccess,
-  formSnapshot,
-  formString,
-  type ActionState,
-} from "@/lib/action-state";
+import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
 import { channelOrderService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
@@ -22,7 +16,34 @@ import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const idSchema = z.string().uuid();
 const evidenceSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/);
-const reasonSchema = z.string().regex(/^[A-Z][A-Z0-9_]{2,79}$/);
+const reasonSchema = z.enum([
+  "PROVIDER_SETTLEMENT_MATCH",
+  "PROVIDER_CORRECTION",
+  "FINANCE_MANUAL_REVIEW",
+]);
+const amountSchema = z.string().regex(/^[0-9]{1,15}$/);
+const versionSchema = z
+  .string()
+  .regex(/^[0-9]{1,10}$/)
+  .transform(Number)
+  .pipe(z.number().int().nonnegative().max(2_147_483_647));
+const directionSchema = z.nativeEnum(ChannelLedgerDirection);
+const publicValueSchemas = {
+  locationId: idSchema,
+  amountCop: amountSchema,
+  direction: directionSchema,
+  evidenceReference: evidenceSchema,
+  reasonCode: reasonSchema,
+};
+
+function publicValues(formData: FormData): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const [key, schema] of Object.entries(publicValueSchemas)) {
+    const parsed = schema.safeParse(formString(formData, key));
+    if (parsed.success && typeof parsed.data === "string") values[key] = parsed.data;
+  }
+  return values;
+}
 
 async function authorize(options: { readonly requireFinanceRead?: boolean } = {}) {
   const session = await getAdminSession({
@@ -113,7 +134,7 @@ export async function assignChannelOrderStockAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = publicValues(formData);
   try {
     const audit = await authorize();
     const orderId = idSchema.parse(formString(formData, "orderId"));
@@ -131,15 +152,11 @@ export async function reconcileChannelOrderAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = publicValues(formData);
   try {
     const audit = await authorize({ requireFinanceRead: true });
     const orderId = idSchema.parse(formString(formData, "orderId"));
-    const expectedVersion = z.coerce
-      .number()
-      .int()
-      .nonnegative()
-      .parse(formString(formData, "version"));
+    const expectedVersion = versionSchema.parse(formString(formData, "version"));
     const evidenceReference = evidenceSchema.parse(formString(formData, "evidenceReference"));
     const reasonCode = reasonSchema.parse(formString(formData, "reasonCode"));
     await channelOrderService().markReconciled({
@@ -160,28 +177,34 @@ export async function adjustChannelOrderLedgerAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = publicValues(formData);
   try {
     const audit = await authorize({ requireFinanceRead: true });
     const orderId = idSchema.parse(formString(formData, "orderId"));
-    const amountCop = z
-      .string()
-      .regex(/^[0-9]{1,15}$/)
-      .parse(formString(formData, "amountCop"));
-    const direction = z.nativeEnum(ChannelLedgerDirection).parse(formString(formData, "direction"));
+    const expectedVersion = versionSchema.parse(formString(formData, "version"));
+    const idempotencyKey = idSchema.parse(formString(formData, "idempotencyKey"));
+    const amountCop = amountSchema.parse(formString(formData, "amountCop"));
+    const direction = directionSchema.parse(formString(formData, "direction"));
     const evidenceReference = evidenceSchema.parse(formString(formData, "evidenceReference"));
     const reasonCode = reasonSchema.parse(formString(formData, "reasonCode"));
-    await channelOrderService().appendLedgerAdjustment({
+    const result = await channelOrderService().appendLedgerAdjustment({
       orderId,
+      expectedVersion,
+      idempotencyKey,
       amountCents: BigInt(parseWholeCopToCents(amountCop)),
       direction,
       evidenceReference,
       reasonCode,
       audit,
     });
+    if (result.replayed) {
+      return actionSuccess(
+        "El ajuste ya estaba registrado; recuperamos la misma entrada sin duplicarla.",
+      );
+    }
     await refreshChannelSurfaces();
     return actionSuccess(
-      "Ajuste financiero agregado al ledger append-only; no altera capturas del proveedor.",
+      `Ajuste ${result.entry.id} agregado al ledger append-only; no altera capturas del proveedor.`,
     );
   } catch (error) {
     return failure(error, values);

@@ -165,7 +165,16 @@ test("home delivery checkout persists DANE, totals, receipt and an accessible th
   const download = await page.request.get(`/api/recibos/${token}/descargar`);
   expect(download.status()).toBe(200);
   expect(download.headers()["content-disposition"]).toContain(reorderFilename(order.orderNumber));
-  expect(await download.text()).toContain("COMPROBANTE DE COMPRA NO FISCAL");
+  const downloadBody = await download.text();
+  expect(downloadBody).toContain("COMPROBANTE DE COMPRA NO FISCAL");
+  const wac = order.items[0]!.unitCostWacCents.toString();
+  const receiptHtml = await page.content();
+  if (wac !== "0") {
+    expect(downloadBody).not.toContain(wac);
+    expect(receiptHtml).not.toContain(wac);
+  }
+  expect(downloadBody).not.toContain("unitCostWacCents");
+  expect(receiptHtml).not.toContain("unitCostWacCents");
   const receiptAxe = await new AxeBuilder({ page })
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();

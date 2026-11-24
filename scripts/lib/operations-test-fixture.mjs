@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 export const operationsTables = [
   "Notification",
   "NotificationRead",
+  "OperationRateLimit",
   "DailyFunnelMetric",
   "FiscalWatchSnapshot",
   "BackupRun",
@@ -32,6 +33,16 @@ export async function seedOperationsFixture(client, { adminId, catalog, checkout
   await client.query(
     `INSERT INTO "NotificationRead" ("notificationId", "adminUserId") VALUES ($1, $2)`,
     [notificationId, adminId],
+  );
+  const ipHash = randomBytes(32);
+  await client.query(
+    `INSERT INTO "OperationRateLimit" (
+      "operation", "subjectType", "subjectHash", "ipHash", "windowStartedAt", "expiresAt"
+    ) VALUES (
+      'rls.matrix', 'IP', $1, $1, CURRENT_TIMESTAMP - INTERVAL '1 minute',
+      CURRENT_TIMESTAMP + INTERVAL '1 minute'
+    )`,
+    [ipHash],
   );
   await client.query(
     `INSERT INTO "DailyFunnelMetric" ("metricDate", "source")

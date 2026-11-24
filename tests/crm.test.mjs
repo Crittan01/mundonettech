@@ -387,6 +387,11 @@ describe("CRM 360 production behavior", () => {
       ),
       (error) => error instanceof CrmError && error.code === "FORBIDDEN",
     );
+    await assert.rejects(
+      merges.listCandidates(supportId, "PENDING"),
+      (error) => error instanceof CrmError && error.code === "FORBIDDEN",
+    );
+    assert.ok(Array.isArray(await merges.listCandidates(adminId, "PENDING")));
     const rejected = await merges.reject(
       {
         candidateId: candidate.id,

@@ -10,6 +10,7 @@ import { z } from "zod";
 import {
   actionError,
   actionSuccess,
+  formEntries,
   formSnapshot,
   formString,
   type ActionState,
@@ -18,8 +19,35 @@ import { getDatabase } from "@/lib/db";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-async function audit(permission: AdminPermission) {
+const snapshotFields = new Set(["transition", "status"]);
+function safeSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(
+      ([key, value]) => snapshotFields.has(key) && value.length <= 256,
+    ),
+  );
+}
+
+function assertClosedForm(formData: FormData, allowedFields: readonly string[]): void {
+  const shape: Record<string, z.ZodOptional<z.ZodString>> = {};
+  const values: Record<string, string> = {};
+  for (const field of allowedFields) shape[field] = z.string().optional();
+  for (const [key, value] of formEntries(formData)) {
+    if (typeof value !== "string" || Object.hasOwn(values, key)) {
+      throw new TypeError("Form fields must be unique strings.");
+    }
+    values[key] = value;
+  }
+  z.object(shape).strict().parse(values);
+}
+
+async function audit(
+  permission: AdminPermission,
+  formData: FormData,
+  allowedFields: readonly string[],
+) {
   const session = await getAdminSession({ permission, requireRecentMfa: true });
+  assertClosedForm(formData, allowedFields);
   const context = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
@@ -27,6 +55,14 @@ async function audit(permission: AdminPermission) {
     userAgentHash: context.userAgentHash,
     requestId: randomUUID(),
   };
+}
+
+function expectedVersion(formData: FormData): number {
+  const value = z
+    .string()
+    .regex(/^(?:0|[1-9][0-9]{0,9})$/)
+    .parse(formString(formData, "expectedVersion"));
+  return z.number().int().nonnegative().max(2_147_483_647).parse(Number(value));
 }
 
 function failure(error: unknown, values: Record<string, string>): ActionState {
@@ -73,20 +109,22 @@ export async function transitionReturnAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
+    const auditContext = await audit("postsale:write", formData, [
+      "returnRequestId",
+      "transition",
+      "expectedVersion",
+      "note",
+    ]);
     const result = await new PostSaleAdminService(getDatabase()).transitionReturn({
       returnRequestId: z.string().uuid().parse(formString(formData, "returnRequestId")),
       transition: z
         .enum(["APPROVE", "REJECT", "RECEIVE", "COMPLETE", "CANCEL"])
         .parse(formString(formData, "transition")),
-      expectedVersion: z.coerce
-        .number()
-        .int()
-        .nonnegative()
-        .parse(formString(formData, "expectedVersion")),
-      note: formString(formData, "note"),
-      audit: await audit("postsale:write"),
+      expectedVersion: expectedVersion(formData),
+      note: z.string().max(500).parse(formString(formData, "note")),
+      audit: auditContext,
     });
     revalidateAdmin();
     return actionSuccess(
@@ -103,20 +141,22 @@ export async function transitionWarrantyAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
+    const auditContext = await audit("postsale:write", formData, [
+      "warrantyClaimId",
+      "transition",
+      "expectedVersion",
+      "note",
+    ]);
     const result = await new PostSaleAdminService(getDatabase()).transitionWarranty({
       warrantyClaimId: z.string().uuid().parse(formString(formData, "warrantyClaimId")),
       transition: z
         .enum(["UNDER_REVIEW", "APPROVE", "REJECT", "RESOLVE", "CANCEL"])
         .parse(formString(formData, "transition")),
-      expectedVersion: z.coerce
-        .number()
-        .int()
-        .nonnegative()
-        .parse(formString(formData, "expectedVersion")),
-      note: formString(formData, "note"),
-      audit: await audit("postsale:write"),
+      expectedVersion: expectedVersion(formData),
+      note: z.string().max(500).parse(formString(formData, "note")),
+      audit: auditContext,
     });
     revalidateAdmin();
     return actionSuccess(
@@ -133,21 +173,27 @@ export async function replySupportAdminAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
+    const auditContext = await audit("postsale:write", formData, [
+      "ticketId",
+      "body",
+      "status",
+      "expectedVersion",
+      "idempotencyKey",
+    ]);
     const result = await new PostSaleAdminService(getDatabase()).replySupport({
       ticketId: z.string().uuid().parse(formString(formData, "ticketId")),
-      body: formString(formData, "body"),
+      body: z.string().min(2).max(5000).parse(formString(formData, "body")),
       status: z
         .enum(["IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED"])
         .parse(formString(formData, "status")),
-      expectedVersion: z.coerce
-        .number()
-        .int()
-        .nonnegative()
-        .parse(formString(formData, "expectedVersion")),
-      idempotencyKey: formString(formData, "idempotencyKey"),
-      audit: await audit("postsale:write"),
+      expectedVersion: expectedVersion(formData),
+      idempotencyKey: z
+        .string()
+        .regex(/^[A-Za-z0-9._:-]{3,128}$/)
+        .parse(formString(formData, "idempotencyKey")),
+      audit: auditContext,
     });
     revalidateAdmin();
     return actionSuccess(
@@ -164,16 +210,13 @@ export async function closeSupportAdminAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
+    const auditContext = await audit("postsale:write", formData, ["ticketId", "expectedVersion"]);
     const result = await new PostSaleAdminService(getDatabase()).closeSupport({
       ticketId: z.string().uuid().parse(formString(formData, "ticketId")),
-      expectedVersion: z.coerce
-        .number()
-        .int()
-        .nonnegative()
-        .parse(formString(formData, "expectedVersion")),
-      audit: await audit("postsale:write"),
+      expectedVersion: expectedVersion(formData),
+      audit: auditContext,
     });
     revalidateAdmin();
     return actionSuccess(
@@ -188,9 +231,14 @@ export async function moderateReviewAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const auditContext = await audit("reviews:write");
+    const auditContext = await audit("reviews:write", formData, [
+      "reviewId",
+      "status",
+      "note",
+      "expectedUpdatedAt",
+    ]);
     const reviewId = z.string().uuid().parse(formString(formData, "reviewId"));
     const review = await getDatabase().review.findUnique({
       where: { id: reviewId },
@@ -199,7 +247,7 @@ export async function moderateReviewAction(
     const result = await new PostSaleAdminService(getDatabase()).moderateReview({
       reviewId,
       status: z.enum(["PUBLISHED", "REJECTED"]).parse(formString(formData, "status")),
-      note: formString(formData, "note"),
+      note: z.string().max(500).parse(formString(formData, "note")),
       expectedUpdatedAt: new Date(
         z.string().datetime().parse(formString(formData, "expectedUpdatedAt")),
       ),

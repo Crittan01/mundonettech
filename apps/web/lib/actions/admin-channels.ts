@@ -35,10 +35,11 @@ const connectionSchema = z.object({
 });
 
 function publicValues(formData: FormData): Record<string, string> {
+  const accountId = connectionSchema.shape.accountId.safeParse(formString(formData, "accountId"));
+  const clientId = connectionSchema.shape.clientId.safeParse(formString(formData, "clientId"));
   return {
-    accountId: formString(formData, "accountId"),
-    label: formString(formData, "label"),
-    clientId: formString(formData, "clientId"),
+    ...(accountId.success ? { accountId: accountId.data } : {}),
+    ...(clientId.success ? { clientId: clientId.data } : {}),
   };
 }
 
@@ -94,6 +95,9 @@ function failure(error: unknown, values?: Record<string, string>): ActionState {
     if (error.code === "INVALID_INPUT") {
       return actionError("Revisa los datos de la cuenta y la aplicación de Mercado Libre.", values);
     }
+  }
+  if (error instanceof z.ZodError) {
+    return actionError("Revisa el identificador de la cuenta de canal.", values);
   }
   return actionError("No pudimos completar la operación del canal. Inténtalo de nuevo.", values);
 }

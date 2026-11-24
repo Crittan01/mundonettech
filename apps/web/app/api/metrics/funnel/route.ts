@@ -2,8 +2,10 @@ import { FunnelService } from "@mundonettech/db";
 import { z } from "zod";
 
 import { getDatabase } from "@/lib/db";
+import { hasCanonicalSameOrigin } from "@/lib/security/origin";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
+const maximumBodyBytes = 16_384;
 const headers = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
@@ -57,44 +59,97 @@ function acceptRate(clientKey: string): boolean {
   return true;
 }
 
-export async function GET() {
+function hasValidOrigin(request: Request): boolean {
+  return hasCanonicalSameOrigin(request);
+}
+
+function declaredBodyLength(request: Request): number {
+  const value = request.headers.get("content-length");
+  if (value === null || !/^[0-9]+$/.test(value)) throw new RangeError("Invalid body size.");
+  const declared = Number(value);
+  if (!Number.isSafeInteger(declared) || declared < 2 || declared > maximumBodyBytes) {
+    throw new RangeError("Invalid body size.");
+  }
+  return declared;
+}
+
+async function readBody(request: Request): Promise<string> {
+  declaredBodyLength(request);
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maximumBodyBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new RangeError("Invalid body size.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
+  } catch {
+    throw new SyntaxError("Invalid UTF-8 body.");
+  }
+}
+
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...headers, Allow: "POST" } },
   );
 }
 
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
+
 export async function POST(request: Request) {
-  const origin = request.headers.get("origin");
-  try {
-    if (!origin || new URL(origin).host !== request.headers.get("host")) {
-      return Response.json({ error: "Invalid origin." }, { status: 403, headers });
-    }
-  } catch {
+  if (!hasValidOrigin(request)) {
     return Response.json({ error: "Invalid origin." }, { status: 403, headers });
   }
-  if (request.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") {
+  if (
+    request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !==
+    "application/json"
+  ) {
     return Response.json({ error: "JSON is required." }, { status: 415, headers });
   }
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (!Number.isSafeInteger(length) || length < 2 || length > 16_384) {
+  try {
+    declaredBodyLength(request);
+  } catch {
     return Response.json({ error: "Invalid batch size." }, { status: 413, headers });
   }
-  let clientKey = "loopback";
+  let clientKey: string;
   try {
     const context = await getRequestSecurityContext();
     clientKey = Buffer.from(context.ipHash).toString("hex");
   } catch {
-    clientKey = "unverified";
+    return Response.json({ error: "Metrics are unavailable." }, { status: 503, headers });
   }
   if (!acceptRate(clientKey)) {
-    return Response.json({ error: "Rate limit exceeded." }, { status: 429, headers });
-  }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > 16_384) {
-    return Response.json({ error: "Invalid batch size." }, { status: 413, headers });
+    return Response.json(
+      { error: "Rate limit exceeded." },
+      { status: 429, headers: { ...headers, "Retry-After": "60" } },
+    );
   }
   try {
+    const text = await readBody(request);
     const batch = batchSchema.parse(JSON.parse(text));
     await new FunnelService(getDatabase()).recordPublicBatch({
       ...(batch.pageViews === undefined ? {} : { pageViews: BigInt(batch.pageViews) }),
@@ -106,14 +161,12 @@ export async function POST(request: Request) {
     });
     return Response.json({ accepted: true }, { status: 202, headers });
   } catch (error) {
-    if (
-      error instanceof z.ZodError ||
-      error instanceof SyntaxError ||
-      error instanceof TypeError ||
-      error instanceof RangeError
-    ) {
+    if (error instanceof RangeError) {
+      return Response.json({ error: "Invalid batch size." }, { status: 413, headers });
+    }
+    if (error instanceof z.ZodError || error instanceof SyntaxError || error instanceof TypeError) {
       return Response.json({ error: "Invalid aggregate batch." }, { status: 400, headers });
     }
-    throw error;
+    return Response.json({ error: "Metrics could not be recorded." }, { status: 500, headers });
   }
 }

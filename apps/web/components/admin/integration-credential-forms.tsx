@@ -17,7 +17,6 @@ import { initialActionState } from "@/lib/action-state";
 export interface IntegrationCredentialView {
   readonly id: string;
   readonly provider: string;
-  readonly accountName: string;
   readonly environment: string;
   readonly keyVersion: number;
   readonly createdAt: string;
@@ -242,7 +241,6 @@ export function CredentialRotationForm({ credential }: { credential: Integration
   return (
     <form action={action} className="space-y-4">
       <input type="hidden" name="credentialId" value={credential.id} />
-      <input type="hidden" name="accountName" value={credential.accountName} />
       <div className="space-y-2">
         <Label htmlFor={`public-${credential.id}`}>Nueva llave pública</Label>
         <Input

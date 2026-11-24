@@ -1,10 +1,11 @@
 import { helpArticles } from "@mundonettech/config/help";
-import { refreshTimeoutToken } from "@mundonettech/core";
+import { isReservedRedirectSource, refreshTimeoutToken } from "@mundonettech/core";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 import { getPublicMediaOrigin, getSessionHmacSecret, getSupabasePublicConfig } from "@/lib/env";
 import { resolveCachedUrlRedirect } from "@/lib/redirects";
+import { hasCanonicalSameOrigin } from "@/lib/security/origin";
 import {
   adminAbsoluteSeconds,
   adminActivityCookie,
@@ -18,6 +19,14 @@ import {
 const helpArticlePaths = new Set(helpArticles.map((article) => `/ayuda/${article.slug}`));
 const staticRedirectBypassPattern =
   /^\/(?:favicon\.ico|manifest\.webmanifest|apple-touch-icon(?:\.[^/]+)?|icon(?:\.[^/]+)?|opengraph-image(?:\.[^/]+)?|twitter-image(?:\.[^/]+)?)$|\.(?:ico|png|jpe?g|webp|avif|gif|svg|woff2?|css|js|mjs|map)$/i;
+
+function hasPathPrefix(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+function hasProtectedPathPrefix(pathname: string, prefix: string): boolean {
+  return hasPathPrefix(pathname, prefix) || pathname.startsWith(`${prefix}.`);
+}
 
 function securityPolicy(
   supabaseUrl: string,
@@ -75,12 +84,72 @@ function loginRedirect(request: NextRequest, destination: string, reason: string
   return NextResponse.redirect(url);
 }
 
+function isPrivateNoStorePath(pathname: string): boolean {
+  return (
+    hasProtectedPathPrefix(pathname, "/admin") ||
+    hasProtectedPathPrefix(pathname, "/mi-cuenta") ||
+    hasPathPrefix(pathname, "/pedido") ||
+    hasPathPrefix(pathname, "/recibo") ||
+    hasPathPrefix(pathname, "/pagar") ||
+    hasPathPrefix(pathname, "/propuesta") ||
+    hasPathPrefix(pathname, "/carrito") ||
+    hasPathPrefix(pathname, "/checkout") ||
+    hasPathPrefix(pathname, "/ingresar") ||
+    hasPathPrefix(pathname, "/registro") ||
+    hasPathPrefix(pathname, "/recuperar") ||
+    hasPathPrefix(pathname, "/verificar-correo")
+  );
+}
+
+function isCapabilityTokenPath(pathname: string): boolean {
+  return (
+    pathname === "/api/channels/mercado-libre/oauth/callback" ||
+    hasPathPrefix(pathname, "/recibo") ||
+    hasPathPrefix(pathname, "/api/recibos") ||
+    hasPathPrefix(pathname, "/pagar") ||
+    hasPathPrefix(pathname, "/propuesta") ||
+    hasPathPrefix(pathname, "/pedido") ||
+    hasPathPrefix(pathname, "/email/baja")
+  );
+}
+
+function isNonApiRouteHandlerPath(pathname: string): boolean {
+  return (
+    pathname === "/sitemap.xml" ||
+    hasPathPrefix(pathname, "/sitemaps") ||
+    hasPathPrefix(pathname, "/referido") ||
+    hasPathPrefix(pathname, "/email/baja") ||
+    hasPathPrefix(pathname, "/admin/finanzas/exportar") ||
+    hasPathPrefix(pathname, "/admin/facturacion/documentos")
+  );
+}
+
+function isServerActionPost(request: NextRequest): boolean {
+  if (request.method !== "POST") return false;
+  if (request.headers.has("next-action")) return true;
+  const pathname = request.nextUrl.pathname;
+  return !hasPathPrefix(pathname, "/api") && !isNonApiRouteHandlerPath(pathname);
+}
+
 export async function proxy(request: NextRequest) {
   const isDevelopment = process.env.NODE_ENV === "development";
+  const isProduction = process.env.NODE_ENV === "production";
   const requestNonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const config = getSupabasePublicConfig();
   const mediaOrigin = getPublicMediaOrigin();
   const csp = securityPolicy(config.url, mediaOrigin, isDevelopment);
+  const serverActionPost = isServerActionPost(request);
+  if (
+    serverActionPost &&
+    !hasCanonicalSameOrigin(request, { fallbackHost: request.nextUrl.host })
+  ) {
+    const rejected = new NextResponse(null, {
+      status: 403,
+      headers: { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow, noarchive" },
+    });
+    applyHeaders(rejected, csp, isDevelopment);
+    return rejected;
+  }
   const isSafeNavigationMethod = request.method === "GET" || request.method === "HEAD";
   const helpPath = request.nextUrl.pathname.replace(/\/+$/, "");
   if (isSafeNavigationMethod && helpPath.startsWith("/ayuda/") && !helpArticlePaths.has(helpPath)) {
@@ -100,6 +169,7 @@ export async function proxy(request: NextRequest) {
     isSafeNavigationMethod &&
     !request.headers.has("next-action") &&
     !isLiveEditRequest &&
+    !isReservedRedirectSource(request.nextUrl.pathname) &&
     !staticRedirectBypassPattern.test(request.nextUrl.pathname)
   ) {
     const persistedRedirect = await resolveCachedUrlRedirect(request.nextUrl.pathname);
@@ -118,6 +188,12 @@ export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request: { headers: requestHeaders } });
 
   const supabase = createServerClient(config.url, config.key, {
+    cookieOptions: {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: "lax",
+      path: "/",
+    },
     cookies: {
       getAll() {
         return request.cookies.getAll();
@@ -130,20 +206,31 @@ export async function proxy(request: NextRequest) {
           response.cookies.set(cookie);
         }
         for (const { name, value, options } of cookiesToSet) {
-          response.cookies.set(name, value, options);
+          response.cookies.set(name, value, {
+            ...options,
+            httpOnly: true,
+            secure: isProduction,
+            sameSite: options?.sameSite ?? "lax",
+            path: options?.path ?? "/",
+          });
         }
       },
     },
   });
 
   const hasAuthCookie = request.cookies.getAll().some(({ name }) => /^(?:sb-|supabase)/.test(name));
-  const user = hasAuthCookie ? (await supabase.auth.getUser()).data.user : null;
+  const user = hasAuthCookie
+    ? await supabase.auth
+        .getUser()
+        .then(({ data }) => data.user)
+        .catch(() => null)
+    : null;
   const pathname = request.nextUrl.pathname;
   const isAdmin =
-    pathname.startsWith("/admin") &&
-    !pathname.startsWith("/admin/login") &&
-    !pathname.startsWith("/admin/invitacion");
-  const isCustomer = pathname.startsWith("/mi-cuenta");
+    hasProtectedPathPrefix(pathname, "/admin") &&
+    !hasProtectedPathPrefix(pathname, "/admin/login") &&
+    !hasProtectedPathPrefix(pathname, "/admin/invitacion");
+  const isCustomer = hasProtectedPathPrefix(pathname, "/mi-cuenta");
   let redirectResponse: NextResponse | null = null;
 
   const isPrefetch =
@@ -175,7 +262,11 @@ export async function proxy(request: NextRequest) {
     } catch {
       redirectResponse = loginRedirect(request, isAdmin ? "/admin/login" : "/ingresar", "timeout");
       if (token && !isPrefetch) {
-        response.cookies.set(cookieName, "", { ...sessionCookieOptions, maxAge: 0 });
+        response.cookies.set(cookieName, "", {
+          ...sessionCookieOptions,
+          maxAge: 0,
+          expires: new Date(0),
+        });
       }
     }
   } else if (user && pathname.startsWith("/pagina/") && !isPrefetch) {
@@ -197,7 +288,11 @@ export async function proxy(request: NextRequest) {
           });
         }
       } catch {
-        response.cookies.set(adminActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+        response.cookies.set(adminActivityCookie, "", {
+          ...sessionCookieOptions,
+          maxAge: 0,
+          expires: new Date(0),
+        });
       }
     }
   } else if (
@@ -205,7 +300,7 @@ export async function proxy(request: NextRequest) {
     !isPrefetch &&
     (pathname === "/carrito" ||
       pathname === "/empresas" ||
-      pathname.startsWith("/checkout") ||
+      hasPathPrefix(pathname, "/checkout") ||
       pathname.startsWith("/pagar/") ||
       pathname.startsWith("/pedido/") ||
       pathname.startsWith("/referido/") ||
@@ -230,7 +325,11 @@ export async function proxy(request: NextRequest) {
           });
         }
       } catch {
-        response.cookies.set(customerActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+        response.cookies.set(customerActivityCookie, "", {
+          ...sessionCookieOptions,
+          maxAge: 0,
+          expires: new Date(0),
+        });
       }
     }
   }
@@ -240,14 +339,20 @@ export async function proxy(request: NextRequest) {
     response = redirectResponse;
   }
   applyHeaders(response, csp, isDevelopment);
-  if (pathname === "/api/channels/mercado-libre/oauth/callback") {
+  if (serverActionPost) {
     response.headers.set("Cache-Control", "no-store");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
-    response.headers.set("Referrer-Policy", "no-referrer");
   }
-  if (pathname.startsWith("/propuesta/")) {
+  if (isPrivateNoStorePath(pathname)) {
     response.headers.set("Cache-Control", "private, no-store, max-age=0");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
+  if (isCapabilityTokenPath(pathname)) {
+    response.headers.set("Referrer-Policy", "no-referrer");
+    if (pathname === "/api/channels/mercado-libre/oauth/callback") {
+      response.headers.set("Cache-Control", "no-store");
+      response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+    }
   }
   return response;
 }

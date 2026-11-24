@@ -48,7 +48,7 @@ export async function readCheckoutPreview(): Promise<StorefrontCheckoutPreview |
   const preview = await orderService().preview(reference);
   if (!preview) return null;
   const [credentials, credit] = await Promise.all([
-    getIntegrationCredentialVault().list({ limit: 100 }),
+    getIntegrationCredentialVault().forSystemProvider("wompi").list({ limit: 100 }),
     preview.customer?.authenticated
       ? storeCreditService().get(preview.customer.id)
       : Promise.resolve(null),
@@ -58,7 +58,10 @@ export async function readCheckoutPreview(): Promise<StorefrontCheckoutPreview |
     paymentMethods: {
       wompiAccounts: credentials.items
         .filter((credential) => credential.provider === "wompi" && !credential.revokedAt)
-        .map((credential) => ({ id: credential.id, accountName: credential.accountName })),
+        .map((credential, index) => ({
+          id: credential.id,
+          accountName: `Cuenta Wompi ${index + 1}`,
+        })),
       bankTransferEnabled: getBankTransferInstructions() !== null,
       storeCreditAvailableCents:
         credit?.active && BigInt(credit.availableCents) > 0n ? credit.availableCents : null,

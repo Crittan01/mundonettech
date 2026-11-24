@@ -585,7 +585,6 @@ function receiptSnapshot(record: ReceiptWithOrder): OrderReceiptSnapshot {
       productSlugSnapshot: item.productSlugSnapshot,
       quantity: item.quantity,
       unitPriceCents: item.unitPriceCents.toString(),
-      unitCostWacCents: item.unitCostWacCents.toString(),
       discountCents: item.discountCents.toString(),
       lineTotalCents: item.lineTotalCents.toString(),
       taxCents: item.taxCents.toString(),
@@ -1778,6 +1777,7 @@ export class OrderService {
     });
     if (!record) return null;
     const typed = record as ReceiptWithOrder;
+    if (typed.order.anonymizedAt !== null) return null;
     try {
       const expected = receiptHash(
         typed.order,

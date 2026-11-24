@@ -22,6 +22,7 @@ import {
   CredentialConflictError,
   CredentialCursorError,
   CredentialDecryptionError,
+  CredentialForbiddenError,
   CredentialNotFoundError,
   CredentialRevokedError,
   createCredentialKeyRing,
@@ -43,6 +44,7 @@ const tables = [
   "IntegrationCredential",
   "DomainOutbox",
   "IdempotencyKey",
+  "OperationRateLimit",
 ];
 
 let harness;
@@ -171,7 +173,7 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
     const migrations = await admin.query(
       "SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL",
     );
-    assert.equal(migrations.rows.length, 35);
+    assert.equal(migrations.rows.length, 38);
   });
 
   it("forces RLS on every application table and denies rows even with SQL grants", async () => {
@@ -851,6 +853,20 @@ describe("F0.3 — persisted integration credential vault", () => {
       assert.equal(Object.hasOwn(created, secretField), false);
     }
     assert.equal(decoder.decode(await vault.reveal(created.id)), decoder.decode(plaintext));
+    const scoped = vault.forSystemProvider(provider);
+    assert.deepEqual(
+      (await scoped.list({ limit: 100 })).items.map((item) => item.id),
+      [created.id],
+    );
+    assert.equal(decoder.decode(await scoped.reveal(created.id)), decoder.decode(plaintext));
+    await assert.rejects(
+      scoped.list({ limit: 100, includeRevoked: true }),
+      CredentialForbiddenError,
+    );
+    await assert.rejects(
+      vault.forSystemProvider(`other-${randomUUID()}`).reveal(created.id),
+      CredentialNotFoundError,
+    );
     const stored = await admin.query('SELECT * FROM "IntegrationCredential" WHERE "id" = $1', [
       created.id,
     ]);
@@ -940,7 +956,7 @@ describe("F0.3 — persisted integration credential vault", () => {
     ]);
     await admin.query("COMMIT");
     assert.notEqual(recreated.id, created.id);
-    const listed = await vault.list({ limit: 100 });
+    const listed = await vault.list(actor.id, { limit: 100 });
     assert.equal(
       listed.items.some((item) => item.id === created.id),
       false,
@@ -949,7 +965,7 @@ describe("F0.3 — persisted integration credential vault", () => {
       listed.items.some((item) => item.id === recreated.id),
       true,
     );
-    const withRevoked = await vault.list({ limit: 100, includeRevoked: true });
+    const withRevoked = await vault.list(actor.id, { limit: 100, includeRevoked: true });
     assert.equal(
       withRevoked.items.some((item) => item.id === created.id),
       true,
@@ -997,7 +1013,7 @@ describe("F0.3 — persisted integration credential vault", () => {
       }),
     );
     await assert.rejects(stagingVault.reveal(created.id), CredentialNotFoundError);
-    assert.deepEqual((await stagingVault.list()).items, []);
+    assert.deepEqual((await stagingVault.list(actor.id)).items, []);
   });
 
   it("keeps concurrent rotations valid and detects conflicting writes when applicable", async () => {
@@ -1044,17 +1060,17 @@ describe("F0.3 — persisted integration credential vault", () => {
       plaintext: encoder.encode("page-secret"),
       actorAdminUserId: actor.id,
     });
-    const page = await vault.list({ limit: 1 });
+    const page = await vault.list(actor.id, { limit: 1 });
     assert.equal(page.items.length, 1);
     assert.ok(page.nextCursor);
-    const next = await vault.list({ limit: 1, cursor: page.nextCursor });
+    const next = await vault.list(actor.id, { limit: 1, cursor: page.nextCursor });
     assert.equal(next.items.length, 1);
     assert.notEqual(next.items[0].id, page.items[0].id);
     assert.equal(Object.hasOwn(next.items[0], "ciphertext"), false);
 
-    await assert.rejects(vault.list({ limit: 0 }), RangeError);
-    await assert.rejects(vault.list({ limit: 101 }), RangeError);
-    await assert.rejects(vault.list({ cursor: randomUUID() }), CredentialCursorError);
+    await assert.rejects(vault.list(actor.id, { limit: 0 }), RangeError);
+    await assert.rejects(vault.list(actor.id, { limit: 101 }), RangeError);
+    await assert.rejects(vault.list(actor.id, { cursor: randomUUID() }), CredentialCursorError);
     await assert.rejects(vault.reveal("invalid"), TypeError);
     await assert.rejects(
       vault.rotate({
@@ -1086,14 +1102,14 @@ describe("F0.3 — persisted integration credential vault", () => {
 });
 
 describe("F0.5 — complete RLS and Data API matrix over persisted fixtures", () => {
-  it("denies all 2289 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
+  it("denies all 2306 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
     const { runRlsMatrix } = await import("../scripts/rls-matrix.mjs");
     const summary = await runRlsMatrix(databaseUrl);
-    assert.equal(summary.tables, 132);
+    assert.equal(summary.tables, 133);
     assert.equal(summary.functions, 15);
-    assert.equal(summary.rlsOperations, 660);
-    assert.equal(summary.dataApiOperations, 1629);
-    assert.equal(summary.operations, 2289);
+    assert.equal(summary.rlsOperations, 665);
+    assert.equal(summary.dataApiOperations, 1641);
+    assert.equal(summary.operations, 2306);
     assert.ok(summary.results.every((result) => result.passed));
   });
 });

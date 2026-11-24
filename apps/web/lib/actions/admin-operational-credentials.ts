@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import {
   CredentialAlreadyExistsError,
   CredentialConflictError,
+  CredentialForbiddenError,
   CredentialNotFoundError,
   CredentialRevokedError,
   EmailProviderError,
@@ -21,33 +22,17 @@ import {
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import {
-  actionError,
-  actionSuccess,
-  formSnapshot,
-  formString,
-  type ActionState,
-} from "@/lib/action-state";
+import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
 import { getIntegrationCredentialVault, getIntegrationEnvironment } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const providerSchema = z.enum(["aveonline", "resend", "dian", "gemini", "meta"]);
 type OperationalProvider = z.infer<typeof providerSchema>;
-const secretFields = new Set([
-  "password",
-  "apiKey",
-  "accessToken",
-  "svixSecret",
-  "unsubscribeSecret",
-  "bearerToken",
-  "softwarePin",
-]);
 
 function publicValues(formData: FormData): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(formSnapshot(formData)).filter(([key]) => !secretFields.has(key)),
-  );
+  const provider = providerSchema.safeParse(formString(formData, "provider"));
+  return provider.success ? { provider: provider.data } : {};
 }
 
 function required(formData: FormData, key: string): string {
@@ -56,8 +41,12 @@ function required(formData: FormData, key: string): string {
 
 function integer(formData: FormData, key: string): number {
   const value = required(formData, key);
-  if (!/^[0-9]+$/.test(value)) throw new TypeError(`${key} must be an integer.`);
-  return Number(value);
+  if (!/^[0-9]{1,10}$/.test(value)) throw new TypeError(`${key} must be an integer.`);
+  const parsed = Number(value);
+  if (parsed < 1 || parsed > 2_147_483_647) {
+    throw new RangeError(`${key} is outside the provider range.`);
+  }
+  return parsed;
 }
 
 function credentialPayload(
@@ -149,7 +138,7 @@ async function authorize() {
 function failure(error: unknown, values: Record<string, string>): ActionState {
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE")
     return actionError("Confirma tu autenticador antes de modificar la bóveda.", values);
-  if (error instanceof AdminAuthorizationError)
+  if (error instanceof AdminAuthorizationError || error instanceof CredentialForbiddenError)
     return actionError("Tu sesión no está autorizada para administrar integraciones.", values);
   if (error instanceof CredentialAlreadyExistsError)
     return actionError(
@@ -187,6 +176,28 @@ async function persist(formData: FormData, rotate: boolean): Promise<ActionState
   try {
     const audit = await authorize();
     const provider = providerSchema.parse(required(formData, "provider"));
+    sealed = Uint8Array.from(
+      new TextEncoder().encode(JSON.stringify(credentialPayload(provider, formData))),
+    );
+    const environment = getIntegrationEnvironment();
+    if (provider === "aveonline") parseAveonlineCredentials(sealed, environment);
+    else if (provider === "resend") parseEmailCredentials(sealed, environment);
+    else if (provider === "gemini") parseGeminiCredentials(sealed);
+    else if (provider === "meta") parseMetaCredentials(sealed, environment);
+    else parseDianCredentials(sealed, environment);
+    const vault = getIntegrationCredentialVault();
+    if (rotate) {
+      const credentialId = z.string().uuid().parse(required(formData, "credentialId"));
+      await vault.rotate({
+        credentialId,
+        expectedProvider: provider,
+        plaintext: sealed,
+        actorAdminUserId: audit.actorAdminUserId,
+        audit,
+      });
+      revalidatePath("/admin/integraciones");
+      return actionSuccess("Credencial rotada con un nonce nuevo.");
+    }
     const accountName = z
       .string()
       .trim()
@@ -194,34 +205,7 @@ async function persist(formData: FormData, rotate: boolean): Promise<ActionState
       .max(120)
       .regex(/^[^\u0000-\u001f\u007f]+$/)
       .parse(required(formData, "accountName"));
-    sealed = Uint8Array.from(
-      new TextEncoder().encode(JSON.stringify(credentialPayload(provider, formData))),
-    );
-    const environment = getIntegrationEnvironment();
-    if (provider === "aveonline") parseAveonlineCredentials(sealed);
-    else if (provider === "resend") parseEmailCredentials(sealed);
-    else if (provider === "gemini") parseGeminiCredentials(sealed);
-    else if (provider === "meta") parseMetaCredentials(sealed, environment);
-    else parseDianCredentials(sealed, environment);
-    const vault = getIntegrationCredentialVault();
-    if (rotate) {
-      const credentialId = z.string().uuid().parse(required(formData, "credentialId"));
-      const descriptors = await vault.list({ includeRevoked: false, limit: 100 });
-      const existing = descriptors.items.find(
-        (item) => item.id === credentialId && item.provider === provider,
-      );
-      if (!existing || existing.accountName !== accountName)
-        return actionError("La cuenta no coincide con la credencial seleccionada.", values);
-      await vault.rotate({
-        credentialId,
-        plaintext: sealed,
-        actorAdminUserId: audit.actorAdminUserId,
-        audit,
-      });
-      revalidatePath("/admin/integraciones");
-      return actionSuccess(`Credencial ${accountName} rotada con un nonce nuevo.`);
-    }
-    const created = await vault.create({
+    await vault.create({
       provider,
       accountName,
       plaintext: sealed,
@@ -229,9 +213,7 @@ async function persist(formData: FormData, rotate: boolean): Promise<ActionState
       audit,
     });
     revalidatePath("/admin/integraciones");
-    return actionSuccess(
-      `Credencial ${created.accountName} cifrada y registrada en ${environment}.`,
-    );
+    return actionSuccess(`Credencial cifrada y registrada en ${environment}.`);
   } catch (error) {
     return failure(error, values);
   } finally {

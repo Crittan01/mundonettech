@@ -5,7 +5,6 @@ import {
   maskName,
   maskPhone,
 } from "@mundonettech/core";
-import { LocalDeliveryService } from "@mundonettech/db";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { EmptyState as Empty } from "@/components/admin/empty-state";
@@ -49,13 +48,22 @@ export default async function LogisticsPage() {
   const [shipments, zoneRecords] = await Promise.all([
     db.shipment.findMany({
       where: { status: { notIn: ["DELIVERED", "CANCELLED"] } },
-      include: {
+      select: {
+        id: true,
+        kind: true,
+        status: true,
+        originLocationId: true,
+        shippingCents: true,
+        localDriverName: true,
+        localDriverPhoneE164: true,
         order: {
           select: { id: true, orderNumber: true, emailSnapshot: true, paymentStatus: true },
         },
-        fulfillment: true,
+        fulfillment: { select: { status: true, provider: true } },
         items: {
-          include: {
+          select: {
+            id: true,
+            quantity: true,
             orderItem: {
               select: {
                 titleSnapshot: true,
@@ -65,13 +73,41 @@ export default async function LogisticsPage() {
             },
           },
         },
-        packages: { orderBy: { packageNumber: "asc" } },
+        packages: {
+          select: {
+            id: true,
+            packageNumber: true,
+            weightGrams: true,
+            declaredValueCents: true,
+            status: true,
+            trackingCode: true,
+            lastError: true,
+            labelUrl: true,
+          },
+          orderBy: { packageNumber: "asc" },
+        },
         localDeliveryZone: { select: { code: true } },
       },
       orderBy: [{ promisedAt: "asc" }, { createdAt: "asc" }],
       take: 100,
     }),
-    new LocalDeliveryService(db).list(true),
+    db.localDeliveryZone.findMany({
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        active: true,
+        municipalityCodes: true,
+        polygon: true,
+        baseFeeCents: true,
+        freeShippingThresholdCents: true,
+        cutoffMinutes: true,
+        deliveryPromiseMinutes: true,
+        updatedAt: true,
+      },
+      orderBy: [{ code: "asc" }, { createdAt: "asc" }],
+      take: 1000,
+    }),
   ]);
   const serialUnits = await db.serializedUnit.findMany({
     where: {
@@ -105,6 +141,9 @@ export default async function LogisticsPage() {
     updatedAt: zone.updatedAt.toISOString(),
   }));
   const canWrite = hasAdminPermission(session.profile.role, "fulfillment:write");
+  const canManageDeliveryZones = ["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(
+    session.profile.role,
+  );
   return (
     <div className="space-y-10">
       <div>
@@ -233,7 +272,13 @@ export default async function LogisticsPage() {
         <h2 id="delivery-zones" className="text-xl font-semibold">
           Zonas Flex
         </h2>
-        {canWrite ? (
+        {!canManageDeliveryZones ? (
+          <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+            Tu rol puede consultar la cobertura histórica. Crear, editar o archivar zonas requiere
+            un rol de gestión logística autorizado.
+          </p>
+        ) : null}
+        {canManageDeliveryZones ? (
           <details className="rounded-xl border border-border bg-card p-5">
             <summary className="cursor-pointer font-semibold">
               Crear una zona de entrega local
@@ -260,9 +305,9 @@ export default async function LogisticsPage() {
                       {formatCopCents(zone.baseFeeCents)} · corte {zone.cutoffMinutes} min
                     </p>
                   </div>
-                  {canWrite ? <ArchiveDeliveryZoneForm zone={zone} /> : null}
+                  {canManageDeliveryZones ? <ArchiveDeliveryZoneForm zone={zone} /> : null}
                 </div>
-                {canWrite ? (
+                {canManageDeliveryZones ? (
                   <details className="mt-4">
                     <summary className="cursor-pointer text-sm font-medium">
                       Editar cobertura y tarifa

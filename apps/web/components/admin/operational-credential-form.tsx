@@ -119,7 +119,7 @@ export function OperationalCredentialForm({
   credential,
 }: {
   readonly environment: string;
-  readonly credential?: { id: string; provider: Provider; accountName: string };
+  readonly credential?: { id: string; provider: Provider };
 }) {
   const [provider, setProvider] = useState<Provider>(credential?.provider ?? "aveonline");
   const [state, action, pending] = useActionState(
@@ -160,22 +160,21 @@ export function OperationalCredentialForm({
             </select>
           </div>
         ) : null}
-        <div className="space-y-2">
-          <Label htmlFor={`operational-account-${credential?.id ?? "new"}`}>
-            Nombre operativo de la integración
-          </Label>
-          <Input
-            id={`operational-account-${credential?.id ?? "new"}`}
-            name="accountName"
-            defaultValue={values?.accountName ?? credential?.accountName ?? ""}
-            maxLength={120}
-            readOnly={Boolean(credential)}
-            required
-          />
-          <p className="text-xs text-muted-foreground">
-            Ambiente aislado: {environment}. No incluyas PII ni secretos en este nombre.
-          </p>
-        </div>
+        {!credential ? (
+          <div className="space-y-2">
+            <Label htmlFor="operational-account-new">Nombre operativo de la integración</Label>
+            <Input
+              id="operational-account-new"
+              name="accountName"
+              defaultValue={values?.accountName ?? ""}
+              maxLength={120}
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              Ambiente aislado: {environment}. No incluyas PII ni secretos en este nombre.
+            </p>
+          </div>
+        ) : null}
       </div>
       {currentFields.map((field, index) => {
         const heading = field.section && field.section !== currentFields[index - 1]?.section;

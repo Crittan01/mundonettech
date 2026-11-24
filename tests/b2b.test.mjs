@@ -821,3 +821,200 @@ describe("F4B.2 production B2B flow", () => {
     { timeout: 120_000 },
   );
 });
+
+describe("A2 — B2B audit before/after, redaction and conflict atomicity", () => {
+  it("audits price list versions and item create/update/remove/archive without free descriptions", async () => {
+    priceListSequence += 1;
+    const code = `A2-AUDIT-${priceListSequence}`;
+    const created = await service.createPriceList(
+      {
+        code,
+        name: "Lista A2 inicial",
+        description: "Descripción inicial con persona@example.com",
+      },
+      audit,
+    );
+    const updated = await service.updatePriceList(
+      created.id,
+      created.version,
+      { code, name: "Lista A2 posterior", description: "Descripción posterior con +573001112233" },
+      audit,
+    );
+    const staleLogCount = await db.adminActionLog.count({
+      where: { targetType: "PriceList", targetId: created.id },
+    });
+    await assert.rejects(
+      service.updatePriceList(
+        created.id,
+        created.version,
+        { code, name: "No debe aplicarse" },
+        audit,
+      ),
+      (error) => error instanceof B2bError && error.code === "CONFLICT",
+    );
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "PriceList", targetId: created.id } }),
+      staleLogCount,
+    );
+
+    const firstItem = await service.upsertPriceListItem(
+      created.id,
+      updated.version,
+      { sku: catalog.sku, unitPriceCents: "90000" },
+      audit,
+    );
+    let current = await service.getPriceList(created.id);
+    await service.upsertPriceListItem(
+      created.id,
+      current.version,
+      { sku: catalog.sku, unitPriceCents: "85000" },
+      audit,
+    );
+    current = await service.getPriceList(created.id);
+    await service.removePriceListItem(created.id, firstItem.id, current.version, audit);
+    current = await service.getPriceList(created.id);
+    await service.upsertPriceListItem(
+      created.id,
+      current.version,
+      { sku: catalog.sku, unitPriceCents: "88000" },
+      audit,
+    );
+    current = await service.getPriceList(created.id);
+    const active = await service.activatePriceList(created.id, current.version, audit);
+    await service.archivePriceList(active.id, active.version, audit);
+
+    const listLogs = await db.adminActionLog.findMany({
+      where: { targetType: "PriceList", targetId: created.id },
+      orderBy: { createdAt: "asc" },
+    });
+    const listByAction = new Map(listLogs.map((log) => [log.action, log.metadata]));
+    assert.equal(listByAction.get("B2B_PRICE_LIST_CREATED").before, null);
+    assert.equal(listByAction.get("B2B_PRICE_LIST_CREATED").after.code, "[redactado]");
+    assert.equal(listByAction.get("B2B_PRICE_LIST_UPDATED").before.name, "Lista A2 inicial");
+    assert.equal(listByAction.get("B2B_PRICE_LIST_UPDATED").after.name, "Lista A2 posterior");
+    assert.equal(listByAction.get("B2B_PRICE_LIST_UPDATED").detailsChanged, true);
+    assert.equal(listByAction.get("B2B_PRICE_LIST_ACTIVATED").before.status, "DRAFT");
+    assert.equal(listByAction.get("B2B_PRICE_LIST_ACTIVATED").after.status, "ACTIVE");
+    assert.equal(listByAction.get("B2B_PRICE_LIST_ARCHIVED").after.status, "ARCHIVED");
+    assert.equal(listByAction.get("B2B_PRICE_LIST_ARCHIVED").after.deleted, true);
+
+    const itemLogs = await db.adminActionLog.findMany({
+      where: { targetType: "PriceListItem", targetId: firstItem.id },
+      orderBy: { createdAt: "asc" },
+    });
+    assert.equal(itemLogs.length, 3);
+    assert.equal(itemLogs[0].metadata.before, null);
+    assert.equal(itemLogs[0].metadata.after.unitPriceCents, "90000");
+    assert.equal(itemLogs[1].metadata.before.unitPriceCents, "90000");
+    assert.equal(itemLogs[1].metadata.after.unitPriceCents, "85000");
+    assert.ok(
+      itemLogs[1].metadata.after.priceListVersion > itemLogs[1].metadata.before.priceListVersion,
+    );
+    assert.equal(itemLogs[2].metadata.before.unitPriceCents, "85000");
+    assert.equal(itemLogs[2].metadata.after, null);
+
+    const serialized = JSON.stringify([...listLogs, ...itemLogs].map((log) => log.metadata));
+    for (const forbidden of [
+      "Descripción inicial con persona@example.com",
+      "Descripción posterior con +573001112233",
+      "persona@example.com",
+      "+573001112233",
+      "No debe aplicarse",
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+  });
+
+  it("audits proposal/opportunity states without commercial notes, CRM PII or tokens", async () => {
+    const lead = await captureLead();
+    const { proposal, issued, active } = await issueForLead(lead.opportunityId, 1);
+    const activeListLogCount = await db.adminActionLog.count({
+      where: { targetType: "PriceList", targetId: active.id },
+    });
+    await assert.rejects(
+      service.archivePriceList(active.id, active.version, audit),
+      (error) => error instanceof B2bError && error.code === "CONFLICT",
+    );
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "PriceList", targetId: active.id } }),
+      activeListLogCount,
+    );
+
+    const createdLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "B2B_PROPOSAL_VERSION_CREATED", targetId: proposal.id },
+    });
+    assert.equal(createdLog.metadata.before.opportunity.id, lead.opportunityId);
+    assert.equal(createdLog.metadata.after.proposal.status, "DRAFT");
+    assert.equal(createdLog.metadata.after.proposal.opportunityId, lead.opportunityId);
+    assert.equal(createdLog.metadata.after.proposal.commercialNotesPresent, true);
+    assert.equal(createdLog.metadata.after.proposal.itemCount, 1);
+    assert.equal(createdLog.metadata.after.proposal.omittedItemCount, 0);
+    assert.equal(typeof createdLog.metadata.after.proposal.shippingCents, "string");
+    const proposalItem = createdLog.metadata.after.proposal.items[catalog.variantId];
+    assert.ok(proposalItem);
+    assert.equal(typeof proposalItem.unitPriceCents, "string");
+    assert.equal(proposalItem.priceCents, undefined);
+
+    const issuedLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "B2B_PROPOSAL_ISSUED", targetId: proposal.id },
+    });
+    assert.equal(issuedLog.metadata.before.proposal.status, "DRAFT");
+    assert.equal(issuedLog.metadata.after.proposal.status, "SENT");
+    assert.equal(issuedLog.metadata.after.proposal.cartId, issued.proposal.cartId);
+    assert.equal(issuedLog.metadata.after.opportunity.currentVersion, proposal.version);
+
+    let current = await service.getOpportunity(lead.opportunityId);
+    await service.cancelProposal(proposal.id, current.version, audit);
+    const cancelLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "B2B_PROPOSAL_CANCELLED", targetId: proposal.id },
+    });
+    assert.equal(cancelLog.metadata.before.proposal.status, "SENT");
+    assert.equal(cancelLog.metadata.after.proposal.status, "CANCELLED");
+    assert.equal(cancelLog.metadata.cartCancelled, true);
+
+    current = await service.getOpportunity(lead.opportunityId);
+    await service.closeOpportunity(lead.opportunityId, current.version, "LOST", audit);
+    const closeLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "B2B_OPPORTUNITY_CLOSED", targetId: lead.opportunityId },
+    });
+    assert.equal(closeLog.metadata.before.status, "QUALIFYING");
+    assert.equal(closeLog.metadata.after.status, "LOST");
+    assert.ok(closeLog.metadata.after.version > closeLog.metadata.before.version);
+
+    const assignmentLog = await db.adminActionLog.findFirstOrThrow({
+      where: {
+        action: "B2B_ORGANIZATION_PRICE_LIST_ASSIGNED",
+        targetId: current.organization.id,
+      },
+    });
+    assert.equal(assignmentLog.metadata.before.priceListId, null);
+    assert.equal(assignmentLog.metadata.after.priceListId, active.id);
+    assert.ok(
+      assignmentLog.metadata.after.organizationVersion >
+        assignmentLog.metadata.before.organizationVersion,
+    );
+
+    const proposalMetadata = JSON.stringify([
+      createdLog.metadata,
+      issuedLog.metadata,
+      cancelLog.metadata,
+      closeLog.metadata,
+      assignmentLog.metadata,
+    ]);
+    for (const forbidden of [
+      "Pago pendiente y entrega sujeta a validación final de inventario.",
+      lead.input.legalName,
+      lead.input.givenName,
+      lead.input.familyName,
+      lead.input.email,
+      lead.input.taxId,
+      issued.token,
+      "publicTokenHash",
+      "commercialNotes:",
+      "requirements",
+      "signerName",
+    ]) {
+      assert.equal(proposalMetadata.includes(forbidden), false, forbidden);
+    }
+  });
+});

@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 import {
   acquireOperationLocks,
   GrowthService,
@@ -31,6 +33,19 @@ export interface WompiWebhookResult {
   readonly replayed: boolean;
 }
 
+function matchesPayloadHash(stored: Uint8Array, incoming: Uint8Array): boolean {
+  const left = Buffer.from(stored);
+  const right = Buffer.from(incoming);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+class WompiWebhookReplayError extends PaymentConflictError {
+  constructor() {
+    super("Wompi event key was already used for a different payload.", "IDEMPOTENCY_CONFLICT");
+    this.name = "WompiWebhookReplayError";
+  }
+}
+
 function externalErrorCode(error: unknown): string {
   if (error instanceof PaymentConflictError) return error.code;
   if (error instanceof Error) return error.name.slice(0, 100);
@@ -61,7 +76,7 @@ export class WompiWebhookService {
   constructor(
     private readonly db: PrismaClient,
     private readonly options: {
-      vault: IntegrationCredentialVault;
+      vault: Pick<IntegrationCredentialVault, "reveal">;
       fetchImpl?: typeof fetch;
       timeoutMs?: number;
     },
@@ -120,14 +135,90 @@ export class WompiWebhookService {
     credentialId?: string;
     expectedOrderId?: string;
   }): Promise<WompiWebhookResult> {
+    if (!/^[A-Za-z0-9_-]{3,128}$/.test(options.externalId)) {
+      throw new PaymentValidationError("Wompi external transaction ID is invalid.");
+    }
+    const known = await this.db.paymentTransaction.findFirst({
+      where: { provider: PaymentProvider.WOMPI, externalId: options.externalId },
+      select: {
+        kind: true,
+        status: true,
+        attempt: {
+          select: {
+            id: true,
+            orderId: true,
+            credentialId: true,
+            environment: true,
+            status: true,
+          },
+        },
+      },
+    });
+    if (
+      known &&
+      ((options.expectedOrderId && known.attempt.orderId !== options.expectedOrderId) ||
+        (options.credentialId && known.attempt.credentialId !== options.credentialId) ||
+        known.attempt.environment !== options.environment)
+    ) {
+      throw new PaymentValidationError(
+        "Wompi transaction does not belong to this payment attempt.",
+      );
+    }
+    if (
+      known?.kind === "CAPTURE" &&
+      known.status === "SUCCEEDED" &&
+      known.attempt.status === "SUCCEEDED"
+    ) {
+      const processed = await this.db.paymentWebhookEvent.findFirst({
+        where: {
+          provider: PaymentProvider.WOMPI,
+          transactionExternalId: options.externalId,
+          status: { in: ["PROCESSED", "IGNORED"] },
+        },
+        select: { eventKey: true, status: true, attemptId: true },
+      });
+      return {
+        eventKey:
+          processed?.eventKey ??
+          Buffer.from(
+            paymentDigest({
+              source: "WOMPI_API_TERMINAL_REPLAY",
+              externalId: options.externalId,
+              attemptId: known.attempt.id,
+            }),
+          ).toString("hex"),
+        status: processed?.status === "IGNORED" ? "IGNORED" : "PROCESSED",
+        attemptId: known.attempt.id,
+        replayed: true,
+      };
+    }
+    if (options.expectedOrderId) {
+      const candidate = await this.db.paymentAttempt.findFirst({
+        where: {
+          orderId: options.expectedOrderId,
+          provider: PaymentProvider.WOMPI,
+          ...(options.credentialId ? { credentialId: options.credentialId } : {}),
+        },
+        select: { id: true },
+      });
+      if (!candidate) {
+        throw new PaymentValidationError("Wompi credential does not belong to this order.");
+      }
+    }
     const resolution = await this.resolve(options.environment, options.credentialId);
     const transaction = await resolution.provider.getTransaction(options.externalId);
     if (options.expectedOrderId) {
       const owner = await this.db.paymentAttempt.findUnique({
         where: { reference: transaction.reference },
-        select: { orderId: true },
+        select: { orderId: true, provider: true, credentialId: true, environment: true },
       });
-      if (!owner || owner.orderId !== options.expectedOrderId) {
+      if (
+        !owner ||
+        owner.orderId !== options.expectedOrderId ||
+        owner.provider !== PaymentProvider.WOMPI ||
+        owner.credentialId !== resolution.credential.id ||
+        owner.environment !== resolution.credential.environment
+      ) {
         throw new PaymentValidationError("Wompi transaction does not belong to this order.");
       }
     }
@@ -149,6 +240,12 @@ export class WompiWebhookService {
   private async recordFailure(event: WompiTransactionEvent, error: unknown): Promise<void> {
     const errorCode = externalErrorCode(error);
     await inInventoryTransaction(this.db, async (tx) => {
+      const key = { provider: PaymentProvider.WOMPI, eventKey: event.eventKey } as const;
+      const existing = await tx.paymentWebhookEvent.findUnique({
+        where: { provider_eventKey: key },
+        select: { status: true },
+      });
+      if (existing?.status === "PROCESSED" || existing?.status === "IGNORED") return;
       const attempt = event.transaction
         ? await tx.paymentAttempt.findUnique({
             where: { reference: event.transaction.reference },
@@ -156,7 +253,7 @@ export class WompiWebhookService {
           })
         : null;
       await tx.paymentWebhookEvent.upsert({
-        where: { provider_eventKey: { provider: PaymentProvider.WOMPI, eventKey: event.eventKey } },
+        where: { provider_eventKey: key },
         create: {
           provider: PaymentProvider.WOMPI,
           attemptId: attempt?.id ?? null,
@@ -201,6 +298,9 @@ export class WompiWebhookService {
         let webhook = await tx.paymentWebhookEvent.findUnique({
           where: { provider_eventKey: key },
         });
+        if (webhook && !matchesPayloadHash(webhook.payloadHash, event.payloadHash)) {
+          throw new WompiWebhookReplayError();
+        }
         if (webhook?.status === "PROCESSED" || webhook?.status === "IGNORED") {
           return {
             eventKey: event.eventKey,
@@ -488,7 +588,7 @@ export class WompiWebhookService {
         return finish("PROCESSED");
       });
     } catch (error) {
-      await this.recordFailure(event, error);
+      if (!(error instanceof WompiWebhookReplayError)) await this.recordFailure(event, error);
       throw error;
     }
   }

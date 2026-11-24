@@ -240,6 +240,7 @@ describe("F6.2 — User Products, offers and prices", () => {
 
     await service.updateOffer({
       offerId: persisted.offers[0].id,
+      expectedVersion: persisted.offers[0].version,
       offer: formula({ targetNetCents: 5_400_000n }),
       audit: audit(),
     });

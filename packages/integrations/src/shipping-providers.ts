@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { IntegrationEnvironment } from "@mundonettech/db";
+
 import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./integration-http.js";
 import {
   assertIntegrationKey,
@@ -54,9 +56,13 @@ function credentialText(
   }
 }
 
-function credentialUrl(record: Record<string, unknown>, key: string): string {
+function credentialUrl(
+  record: Record<string, unknown>,
+  key: string,
+  allowLoopback: boolean,
+): string {
   try {
-    return publicHttpsUrl(credentialText(record, key, 2048), key);
+    return publicHttpsUrl(credentialText(record, key, 2048), key, { allowLoopback });
   } catch {
     throw new ShippingProviderError(
       `Aveonline credential ${key} is invalid.`,
@@ -65,10 +71,14 @@ function credentialUrl(record: Record<string, unknown>, key: string): string {
   }
 }
 
-export function parseAveonlineCredentials(plaintext: Uint8Array): AveonlineCredentials {
+export function parseAveonlineCredentials(
+  plaintext: Uint8Array,
+  environment: IntegrationEnvironment = IntegrationEnvironment.LOCAL,
+): AveonlineCredentials {
+  const allowLoopback = environment === IntegrationEnvironment.LOCAL;
   try {
     const record = credentialObject(plaintext, credentialKeys);
-    const lookupUrl = credentialUrl(record, "lookupUrl");
+    const lookupUrl = credentialUrl(record, "lookupUrl", allowLoopback);
     if (!lookupUrl.includes("{requestKey}")) {
       throw new ShippingProviderError(
         "Aveonline lookup URL requires the requestKey placeholder.",
@@ -85,8 +95,8 @@ export function parseAveonlineCredentials(plaintext: Uint8Array): AveonlineCrede
       originEmail: credentialText(record, "originEmail", 320, 3),
       agentId: credentialText(record, "agentId", 30),
       carrierId: credentialText(record, "carrierId", 30),
-      authUrl: credentialUrl(record, "authUrl"),
-      labelsUrl: credentialUrl(record, "labelsUrl"),
+      authUrl: credentialUrl(record, "authUrl", allowLoopback),
+      labelsUrl: credentialUrl(record, "labelsUrl", allowLoopback),
       lookupUrl,
     };
   } catch (error) {

@@ -292,11 +292,13 @@ export function ChannelListingCreateForm({
 
 export function ChannelOfferEditForm({ offer }: { readonly offer: ChannelOfferView }) {
   const [state, action, pending] = useActionState(updateChannelOfferAction, initialActionState);
+  const [expectedVersion] = useState(offer.version);
   return (
     <details className="rounded-lg border border-border p-4">
       <summary className="cursor-pointer text-sm font-medium">Editar precio y tarifas</summary>
       <form action={action} className="mt-4 space-y-4" aria-busy={pending}>
         <input type="hidden" name="offerId" value={offer.id} />
+        <input type="hidden" name="version" value={expectedVersion} />
         <OfferFields suffix={`edit-${offer.id}`} offer={offer} values={state.values} />
         <FormMessage state={state} />
         <Button type="submit" variant="outline" disabled={pending}>

@@ -32,10 +32,12 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 export default async function OrderDetailPage({ params }: PageProps<"/admin/pedidos/[id]">) {
   const [{ id }, session] = await Promise.all([params, requireAdminPage("orders:read")]);
   if (!z.string().uuid().safeParse(id).success) notFound();
-  const order = await new AdminOrderService(getDatabase()).detail(id);
+  const order = await new AdminOrderService(getDatabase(), session.profile.id).detail(id);
   if (!order) notFound();
+  const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
+  const canReadPayments = hasAdminPermission(session.profile.role, "payments:read");
   const canDispatch = hasAdminPermission(session.profile.role, "fulfillment:write");
-  const canRefund = hasAdminPermission(session.profile.role, "payments:write");
+  const canRefund = canReadPayments && hasAdminPermission(session.profile.role, "payments:write");
   const refundable = ["PARTIALLY_PAID", "PAID", "PARTIALLY_REFUNDED"].includes(order.paymentStatus);
   const hasRemainingItems = order.items.some((item) => item.refundedQuantity < item.quantity);
   return (
@@ -89,7 +91,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
       </section>
       <section aria-labelledby="order-items" className="space-y-4">
         <h2 id="order-items" className="text-xl font-semibold">
-          Líneas, impuestos y WAC
+          {canReadFinance ? "Líneas, impuestos y WAC" : "Líneas e impuestos"}
         </h2>
         <div className="overflow-x-auto rounded-xl border border-border">
           <table className="w-full min-w-[980px] text-left text-sm">
@@ -104,7 +106,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                   "Precio",
                   "Descuento",
                   "IVA",
-                  "WAC unitario",
+                  ...(canReadFinance ? ["WAC unitario"] : []),
                   "Total",
                 ].map((heading) => (
                   <th key={heading} scope="col" className="p-3">
@@ -138,7 +140,9 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                   <td className="p-3">{formatCopCents(item.unitPriceCents)}</td>
                   <td className="p-3">{formatCopCents(item.discountCents)}</td>
                   <td className="p-3">{formatCopCents(item.taxCents)}</td>
-                  <td className="p-3">{formatCopCents(item.unitCostWacCents)}</td>
+                  {canReadFinance && item.unitCostWacCents !== undefined ? (
+                    <td className="p-3">{formatCopCents(item.unitCostWacCents)}</td>
+                  ) : null}
                   <td className="p-3 font-semibold">{formatCopCents(item.lineTotalCents)}</td>
                 </tr>
               ))}
@@ -264,126 +268,135 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
           </div>
         )}
       </section>
-      <section aria-labelledby="order-payments" className="space-y-4">
-        <h2 id="order-payments" className="text-xl font-semibold">
-          Libro de pagos
-        </h2>
-        {order.payments.length === 0 ? (
-          <Empty>No hay intentos de pago registrados.</Empty>
-        ) : (
-          <ul className="space-y-3">
-            {order.payments.map((attempt) => (
-              <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
-                <div className="flex flex-wrap justify-between gap-3">
-                  <h3 className="font-semibold">
-                    {attempt.provider} · {attempt.status}
-                  </h3>
-                  <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
-                </div>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {attempt.reference} · {dateFormatter.format(new Date(attempt.createdAt))}
-                </p>
-                {attempt.transactions.length ? (
-                  <ul className="mt-3 space-y-1 text-sm">
-                    {attempt.transactions.map((transaction) => (
-                      <li key={transaction.id}>
-                        {transaction.kind} · {transaction.status} ·{" "}
-                        {formatCopCents(transaction.amountCents)} ·{" "}
-                        {transaction.externalId ?? "Sin ID externo"}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                {canRefund &&
-                attempt.provider === "BANK_TRANSFER" &&
-                ["PENDING", "PROCESSING"].includes(attempt.status) ? (
-                  <BankTransferConfirmationForm paymentAttemptId={attempt.id} />
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      <section aria-labelledby="order-refunds" className="space-y-4">
-        <h2 id="order-refunds" className="text-xl font-semibold">
-          Reembolsos
-        </h2>
-        {order.refunds.length === 0 ? (
-          <Empty>No hay reembolsos solicitados para este pedido.</Empty>
-        ) : (
-          <ul className="space-y-4">
-            {order.refunds.map((refund) => (
-              <li key={refund.id} className="rounded-xl border border-border bg-card p-5">
-                <div className="flex flex-wrap justify-between gap-3">
-                  <div>
+      {canReadPayments && order.payments !== undefined ? (
+        <section aria-labelledby="order-payments" className="space-y-4">
+          <h2 id="order-payments" className="text-xl font-semibold">
+            Libro de pagos
+          </h2>
+          {order.payments.length === 0 ? (
+            <Empty>No hay intentos de pago registrados.</Empty>
+          ) : (
+            <ul className="space-y-3">
+              {order.payments.map((attempt) => (
+                <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
+                  <div className="flex flex-wrap justify-between gap-3">
                     <h3 className="font-semibold">
-                      {refund.reason} · {refund.status}
+                      {attempt.provider} · {attempt.status}
                     </h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {refund.items.map((item) => `${item.quantity} unidades`).join(" · ")} ·{" "}
-                      {dateFormatter.format(new Date(refund.createdAt))}
-                    </p>
+                    <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
                   </div>
-                  <p className="font-semibold">{formatCopCents(refund.totalCents)}</p>
-                </div>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  Subtotal {formatCopCents(refund.subtotalCents)} · IVA{" "}
-                  {formatCopCents(refund.taxCents)} · Flete {formatCopCents(refund.shippingCents)}
-                </p>
-                {refund.note ? <p className="mt-2 text-sm">{refund.note}</p> : null}
-                {canRefund && ["REQUESTED", "APPROVED", "FAILED"].includes(refund.status) ? (
-                  <RefundExecutionForm
-                    refundId={refund.id}
-                    requiresApproval={refund.status === "REQUESTED"}
-                  />
-                ) : null}
-                {canRefund
-                  ? refund.transactions
-                      .filter(
-                        (transaction) =>
-                          ["PENDING", "PROCESSING"].includes(transaction.status) &&
-                          transaction.provider !== "STORE_CREDIT",
-                      )
-                      .map((transaction) => (
-                        <CompensationForm key={transaction.id} transactionId={transaction.id} />
-                      ))
-                  : null}
-                {canRefund && refund.status === "REQUESTED" ? (
-                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                    <RefundTransitionForm
-                      orderId={order.id}
-                      refundId={refund.id}
-                      transition="reject"
-                    />
-                    <RefundTransitionForm
-                      orderId={order.id}
-                      refundId={refund.id}
-                      transition="cancel"
-                    />
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {attempt.reference} · {dateFormatter.format(new Date(attempt.createdAt))}
+                  </p>
+                  {attempt.transactions.length ? (
+                    <ul className="mt-3 space-y-1 text-sm">
+                      {attempt.transactions.map((transaction) => (
+                        <li key={transaction.id}>
+                          {transaction.kind} · {transaction.status} ·{" "}
+                          {formatCopCents(transaction.amountCents)} ·{" "}
+                          {transaction.externalId ?? "Sin ID externo"}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {canRefund &&
+                  attempt.provider === "BANK_TRANSFER" &&
+                  ["PENDING", "PROCESSING"].includes(attempt.status) ? (
+                    <BankTransferConfirmationForm paymentAttemptId={attempt.id} />
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      {canReadPayments && order.refunds !== undefined ? (
+        <section aria-labelledby="order-refunds" className="space-y-4">
+          <h2 id="order-refunds" className="text-xl font-semibold">
+            Reembolsos
+          </h2>
+          {order.refunds.length === 0 ? (
+            <Empty>No hay reembolsos solicitados para este pedido.</Empty>
+          ) : (
+            <ul className="space-y-4">
+              {order.refunds.map((refund) => (
+                <li key={refund.id} className="rounded-xl border border-border bg-card p-5">
+                  <div className="flex flex-wrap justify-between gap-3">
+                    <div>
+                      <h3 className="font-semibold">
+                        {refund.reason} · {refund.status}
+                      </h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {refund.items.map((item) => `${item.quantity} unidades`).join(" · ")} ·{" "}
+                        {dateFormatter.format(new Date(refund.createdAt))}
+                      </p>
+                    </div>
+                    <p className="font-semibold">{formatCopCents(refund.totalCents)}</p>
                   </div>
-                ) : null}
-                {canRefund && ["APPROVED", "FAILED"].includes(refund.status) ? (
-                  <div className="mt-3">
-                    <RefundTransitionForm
-                      orderId={order.id}
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    Subtotal {formatCopCents(refund.subtotalCents)} · IVA{" "}
+                    {formatCopCents(refund.taxCents)} · Flete {formatCopCents(refund.shippingCents)}
+                  </p>
+                  {refund.note ? <p className="mt-2 text-sm">{refund.note}</p> : null}
+                  {canRefund && ["REQUESTED", "APPROVED", "FAILED"].includes(refund.status) ? (
+                    <RefundExecutionForm
                       refundId={refund.id}
-                      transition="cancel"
+                      requiresApproval={refund.status === "REQUESTED"}
                     />
-                  </div>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-        {canRefund && refundable && hasRemainingItems ? (
-          <RequestRefundForm
-            key={order.refunds.length}
-            orderId={order.id}
-            idempotencyKey={`admin-refund:${randomUUID()}`}
-            items={order.items}
-          />
-        ) : null}
-      </section>
+                  ) : null}
+                  {canRefund
+                    ? refund.transactions
+                        .filter(
+                          (transaction) =>
+                            ["PENDING", "PROCESSING"].includes(transaction.status) &&
+                            transaction.provider !== "STORE_CREDIT",
+                        )
+                        .map((transaction) => (
+                          <CompensationForm key={transaction.id} transactionId={transaction.id} />
+                        ))
+                    : null}
+                  {canRefund && refund.status === "REQUESTED" ? (
+                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                      <RefundTransitionForm
+                        orderId={order.id}
+                        refundId={refund.id}
+                        transition="reject"
+                      />
+                      <RefundTransitionForm
+                        orderId={order.id}
+                        refundId={refund.id}
+                        transition="cancel"
+                      />
+                    </div>
+                  ) : null}
+                  {canRefund && ["APPROVED", "FAILED"].includes(refund.status) ? (
+                    <div className="mt-3">
+                      <RefundTransitionForm
+                        orderId={order.id}
+                        refundId={refund.id}
+                        transition="cancel"
+                      />
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+          {canRefund && refundable && hasRemainingItems ? (
+            <RequestRefundForm
+              key={order.refunds.length}
+              orderId={order.id}
+              idempotencyKey={`admin-refund:${randomUUID()}`}
+              items={order.items.map(({ id, title, quantity, refundedQuantity }) => ({
+                id,
+                title,
+                quantity,
+                refundedQuantity,
+              }))}
+            />
+          ) : null}
+        </section>
+      ) : null}
       <section aria-labelledby="order-timeline" className="space-y-4">
         <h2 id="order-timeline" className="text-xl font-semibold">
           Línea de tiempo

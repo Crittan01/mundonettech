@@ -84,15 +84,21 @@ export function getBankTransferInstructions(): string | null {
 }
 
 export function paymentService(db: PrismaClient = getDatabase()): PaymentService {
-  return new PaymentService(db, { vault: getIntegrationCredentialVault() });
+  return new PaymentService(db, {
+    vault: getIntegrationCredentialVault().forSystemProvider("wompi"),
+  });
 }
 
 export function paymentRefundService(db: PrismaClient = getDatabase()): PaymentRefundService {
-  return new PaymentRefundService(db, { vault: getIntegrationCredentialVault() });
+  return new PaymentRefundService(db, {
+    vault: getIntegrationCredentialVault().forSystemProvider("wompi"),
+  });
 }
 
 export function wompiWebhookService(db: PrismaClient = getDatabase()): WompiWebhookService {
-  return new WompiWebhookService(db, { vault: getIntegrationCredentialVault() });
+  return new WompiWebhookService(db, {
+    vault: getIntegrationCredentialVault().forSystemProvider("wompi"),
+  });
 }
 
 export function storeCreditService(db: PrismaClient = getDatabase()): StoreCreditService {
@@ -111,34 +117,37 @@ export function blockedIdentityService(db: PrismaClient = getDatabase()): Blocke
 
 export function shippingService(db: PrismaClient = getDatabase()): ShippingService {
   return new ShippingService(db, {
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("aveonline"),
     environment: getIntegrationEnvironment(),
   });
 }
 
 export function emailService(db: PrismaClient = getDatabase()): EmailService {
   return new EmailService(db, {
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("resend"),
     publicSiteUrl: getPublicSiteUrl(),
   });
 }
 
 export function invoiceService(db: PrismaClient = getDatabase()): InvoiceService {
   return new InvoiceService(db, {
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("dian"),
     environment: getIntegrationEnvironment(),
   });
 }
 
 export function b2bCopilotService(db: PrismaClient = getDatabase()): B2bCopilotService {
-  return new B2bCopilotService(db, { vault: getIntegrationCredentialVault() });
+  return new B2bCopilotService(db, {
+    vault: getIntegrationCredentialVault().forSystemProvider("gemini"),
+    environment: getIntegrationEnvironment(),
+  });
 }
 
 export function guestOrderAccessService(db: PrismaClient = getDatabase()): GuestOrderAccessService {
   return new GuestOrderAccessService(db, {
     secret: getSessionHmacSecret(),
     storeName: storeConfig.name,
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("resend"),
   });
 }
 
@@ -187,7 +196,7 @@ export function metaCapiService(db: PrismaClient = getDatabase()): MetaCapiServi
   return new MetaCapiService(db, {
     environment,
     publicSiteUrl: getPublicSiteUrl(),
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("meta"),
     ...(apiUrl ? { apiUrl } : {}),
     allowLoopback: environment === IntegrationEnvironment.LOCAL,
   });

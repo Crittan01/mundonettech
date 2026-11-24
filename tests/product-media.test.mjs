@@ -531,3 +531,100 @@ describe("ProductMedia compensation and immutable history", () => {
     );
   });
 });
+
+describe("A2 — ProductMedia audit redaction and transactional rollback", () => {
+  it("records real media states without object keys or alt text and rolls back failed audits", async () => {
+    const input = {
+      productId: fixture.productId,
+      variantId: fixture.variantId,
+      bytes: createPng(83, 47),
+      altText: "Texto inicial con persona@example.com",
+    };
+    const created = await service.uploadImage(input, audit);
+    const createdLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "CATALOG_MEDIA_CREATED", targetId: created.media.id },
+    });
+    assert.equal(createdLog.metadata.before, null);
+    assert.equal(createdLog.metadata.after.id, created.media.id);
+    assert.equal(createdLog.metadata.after.status, "READY");
+    assert.equal(createdLog.metadata.after.deleted, false);
+    assert.equal(createdLog.metadata.derivativeCount, 2);
+
+    const updated = await service.update(
+      fixture.productId,
+      created.media.id,
+      { altText: "Texto posterior con +573001112233", position: 0 },
+      audit,
+    );
+    const updateLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "CATALOG_MEDIA_UPDATED", targetId: created.media.id },
+    });
+    assert.equal(updateLog.metadata.before.position, created.media.position);
+    assert.equal(updateLog.metadata.after.position, updated.media.position);
+    assert.equal(updateLog.metadata.altTextChanged, true);
+
+    const updateLogCount = await db.adminActionLog.count({
+      where: { targetType: "ProductMedia", targetId: created.media.id },
+    });
+    await assert.rejects(
+      service.update(
+        fixture.productId,
+        created.media.id,
+        { altText: "Debe revertirse", position: created.media.position },
+        { ...audit, actorAdminUserId: randomUUID() },
+      ),
+    );
+    assert.equal(
+      (await db.productMedia.findUniqueOrThrow({ where: { id: created.media.id } })).altText,
+      "Texto posterior con +573001112233",
+    );
+    assert.equal(
+      await db.adminActionLog.count({
+        where: { targetType: "ProductMedia", targetId: created.media.id },
+      }),
+      updateLogCount,
+    );
+
+    await service.archive(fixture.productId, created.media.id, audit);
+    const archiveLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "CATALOG_MEDIA_ARCHIVED", targetId: created.media.id },
+    });
+    assert.equal(archiveLog.metadata.before.deleted, false);
+    assert.equal(archiveLog.metadata.after.deleted, true);
+    assert.equal(archiveLog.metadata.before.mediaType, "IMAGE");
+    assert.equal(archiveLog.metadata.after.position, updated.media.position);
+
+    const serialized = JSON.stringify([
+      createdLog.metadata,
+      updateLog.metadata,
+      archiveLog.metadata,
+    ]);
+    for (const forbidden of [
+      input.altText,
+      "Texto posterior con +573001112233",
+      created.media.storageKey,
+      "storageKey",
+      "usdzKey",
+      '"altText":',
+    ]) {
+      assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+
+    const objectCount = objects.size;
+    const mediaCount = await db.productMedia.count();
+    const auditCount = await db.adminActionLog.count();
+    await assert.rejects(
+      service.uploadImage(
+        {
+          productId: fixture.productId,
+          bytes: createPng(84, 48),
+          altText: "Fallo completo de persistencia",
+        },
+        { ...audit, actorAdminUserId: randomUUID() },
+      ),
+    );
+    assert.equal(objects.size, objectCount);
+    assert.equal(await db.productMedia.count(), mediaCount);
+    assert.equal(await db.adminActionLog.count(), auditCount);
+  });
+});

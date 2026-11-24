@@ -1,8 +1,11 @@
+import { randomUUID } from "node:crypto";
+
 import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
 import {
   OperationsService,
   OrderLifecycleService,
   purgeExpiredIdempotencyKeys,
+  purgeExpiredOperationRateLimits,
 } from "@mundonettech/db";
 import { revalidateTag } from "next/cache";
 import { z } from "zod";
@@ -20,12 +23,25 @@ const noStoreHeaders = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
-export async function GET() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } },
   );
 }
+
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
   const secret = process.env.ORDER_CRON_SECRET?.trim() ?? "";
@@ -40,67 +56,78 @@ export async function POST(request: Request) {
   if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers: noStoreHeaders });
   }
-  const db = getDatabase();
-  const actor = await db.adminUser.findFirst({
-    where: { id: actorId, status: "ACTIVE", deletedAt: null },
-  });
-  if (!actor || !hasAdminPermission(actor.role, "crm:suppress")) {
+  try {
+    const db = getDatabase();
+    const actor = await db.adminUser.findFirst({
+      where: { id: actorId, status: "ACTIVE", deletedAt: null },
+      select: { id: true, role: true },
+    });
+    if (!actor || !hasAdminPermission(actor.role, "crm:suppress")) {
+      return Response.json(
+        { error: "Scheduler actor is not authorized." },
+        { status: 403, headers: noStoreHeaders },
+      );
+    }
+    const security = await getRequestSecurityContext();
+    const service = new OrderLifecycleService(db);
+    const abandoned = await service.captureAbandonedCarts();
+    let reservations: Awaited<ReturnType<OrderLifecycleService["releaseExpiredOrderReservations"]>>;
+    try {
+      reservations = await service.releaseExpiredOrderReservations();
+      if (reservations.releasedOrders > 0) revalidateTag("catalog:inventory", { expire: 0 });
+    } catch (error) {
+      revalidateTag("catalog:inventory", { expire: 0 });
+      throw error;
+    }
+    const partialPaymentReviews = await service.flagExpiredPartialPaymentReviews();
+    const fiscalWatch = await financeService().refreshFiscalWatch();
+    const expiredProposals = await b2bService(db).expireDueProposals();
+    const lifecycle = await lifecycleService(db).runScheduledWork(100);
+    let crmRetention: Awaited<ReturnType<ReturnType<typeof crmRetentionService>["runDue"]>>;
+    try {
+      crmRetention = await crmRetentionService(db).runDue(
+        { privacyPolicyVersion: crmPrivacyPolicyVersion! },
+        {
+          actorAdminUserId: actor.id,
+          requestId: randomUUID(),
+          ipHash: security.ipHash,
+          userAgentHash: security.userAgentHash,
+        },
+      );
+      if (crmRetention.suppressed.length > 0) revalidateTag("reviews", { expire: 0 });
+    } catch (error) {
+      revalidateTag("reviews", { expire: 0 });
+      throw error;
+    }
+    const purgedIdempotencyKeys = await purgeExpiredIdempotencyKeys(db, { limit: 500 });
+    const purgedRateLimits = await purgeExpiredOperationRateLimits(db, 500);
+    await new OperationsService(db).synchronizeNotifications();
     return Response.json(
-      { error: "Scheduler actor is not authorized." },
-      { status: 403, headers: noStoreHeaders },
-    );
-  }
-  const service = new OrderLifecycleService(db);
-  const abandoned = await service.captureAbandonedCarts();
-  let reservations: Awaited<ReturnType<OrderLifecycleService["releaseExpiredOrderReservations"]>>;
-  try {
-    reservations = await service.releaseExpiredOrderReservations();
-    if (reservations.releasedOrders > 0) revalidateTag("catalog:inventory", { expire: 0 });
-  } catch (error) {
-    revalidateTag("catalog:inventory", { expire: 0 });
-    throw error;
-  }
-  const partialPaymentReviews = await service.flagExpiredPartialPaymentReviews();
-  const fiscalWatch = await financeService().refreshFiscalWatch();
-  const expiredProposals = await b2bService(db).expireDueProposals();
-  const lifecycle = await lifecycleService(db).runScheduledWork(100);
-  const security = await getRequestSecurityContext();
-  let crmRetention: Awaited<ReturnType<ReturnType<typeof crmRetentionService>["runDue"]>>;
-  try {
-    crmRetention = await crmRetentionService(db).runDue(
-      { privacyPolicyVersion: crmPrivacyPolicyVersion! },
       {
-        actorAdminUserId: actor.id,
-        ipHash: security.ipHash,
-        userAgentHash: security.userAgentHash,
+        abandonedCarts: abandoned,
+        expiredReservations: reservations,
+        partialPaymentReviews,
+        expiredProposals,
+        lifecycle,
+        purgedIdempotencyKeys,
+        purgedRateLimits,
+        crmRetention: {
+          scanned: crmRetention.scanned,
+          suppressed: crmRetention.suppressed.length,
+          deferred: crmRetention.deferred.length,
+        },
+        fiscalWatch: {
+          fiscalYear: fiscalWatch.fiscalYear,
+          snapshotDate: fiscalWatch.snapshotDate,
+          status: fiscalWatch.status,
+        },
       },
+      { headers: noStoreHeaders },
     );
-    if (crmRetention.suppressed.length > 0) revalidateTag("reviews", { expire: 0 });
-  } catch (error) {
-    revalidateTag("reviews", { expire: 0 });
-    throw error;
+  } catch {
+    return Response.json(
+      { error: "Order scheduler execution failed." },
+      { status: 500, headers: noStoreHeaders },
+    );
   }
-  const purgedIdempotencyKeys = await purgeExpiredIdempotencyKeys(db, { limit: 500 });
-  await new OperationsService(db).synchronizeNotifications();
-  return Response.json(
-    {
-      abandonedCarts: abandoned,
-      expiredReservations: reservations,
-      partialPaymentReviews,
-      expiredProposals,
-      lifecycle,
-      purgedIdempotencyKeys,
-      crmRetention: {
-        scanned: crmRetention.scanned,
-        suppressed: crmRetention.suppressed.length,
-        deferred: crmRetention.deferred.length,
-      },
-      fiscalWatch: {
-        fiscalYear: fiscalWatch.fiscalYear,
-        snapshotDate: fiscalWatch.snapshotDate,
-        status: fiscalWatch.status,
-      },
-    },
-    { headers: noStoreHeaders },
-  );
 }

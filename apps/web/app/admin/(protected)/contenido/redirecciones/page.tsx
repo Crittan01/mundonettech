@@ -114,7 +114,15 @@ export default async function RedirectsPage({
                 <details className="mt-4 border-t border-border pt-4">
                   <summary className="cursor-pointer text-sm font-medium">Editar</summary>
                   <div className="mt-4">
-                    <EditRedirectForm redirect={redirect} />
+                    <EditRedirectForm
+                      redirect={{
+                        id: redirect.id,
+                        fromPath: redirect.fromPath,
+                        toPath: redirect.toPath,
+                        statusCode: redirect.statusCode,
+                        active: redirect.active,
+                      }}
+                    />
                   </div>
                 </details>
               ) : null}

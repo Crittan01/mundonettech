@@ -507,6 +507,16 @@ export class CrmService {
         throw new CrmError("CONFLICT", "The contact changed in another session.");
       }
       const now = await crmNow(tx);
+      if (
+        input.level === "SINGLE_CHANNEL_VERIFIED" &&
+        input.channel !== "EMAIL" &&
+        input.channel !== "PHONE"
+      ) {
+        throw new CrmError(
+          "VALIDATION",
+          "A specific verification channel (EMAIL or PHONE) is required.",
+        );
+      }
       const verifyEmail = input.level !== "SINGLE_CHANNEL_VERIFIED" || input.channel === "EMAIL";
       const verifyPhone = input.level !== "SINGLE_CHANNEL_VERIFIED" || input.channel === "PHONE";
       if (verifyEmail) {

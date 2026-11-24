@@ -14,7 +14,7 @@ import { z } from "zod";
 import {
   actionError,
   actionSuccess,
-  formSnapshot,
+  formEntries,
   formString,
   type ActionState,
 } from "@/lib/action-state";
@@ -22,8 +22,26 @@ import { invoiceService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-async function authorize() {
+function safeSnapshot(): Record<string, string> {
+  return {};
+}
+
+function assertClosedForm(formData: FormData, allowedFields: readonly string[]): void {
+  const shape: Record<string, z.ZodOptional<z.ZodString>> = {};
+  const values: Record<string, string> = {};
+  for (const field of allowedFields) shape[field] = z.string().optional();
+  for (const [key, value] of formEntries(formData)) {
+    if (typeof value !== "string" || Object.hasOwn(values, key)) {
+      throw new TypeError("Form fields must be unique strings.");
+    }
+    values[key] = value;
+  }
+  z.object(shape).strict().parse(values);
+}
+
+async function authorize(formData: FormData, allowedFields: readonly string[]) {
   const session = await getAdminSession({ permission: "invoices:write", requireRecentMfa: true });
+  assertClosedForm(formData, allowedFields);
   const security = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
@@ -73,9 +91,9 @@ export async function prepareInvoiceAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot();
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["orderId"]);
     const result = await invoiceService().prepareInvoice(
       z.string().uuid().parse(formString(formData, "orderId")),
       undefined,
@@ -92,9 +110,9 @@ export async function transmitInvoiceAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot();
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["invoiceId"]);
     const result = await invoiceService().transmitInvoice(
       z.string().uuid().parse(formString(formData, "invoiceId")),
       `admin:${audit.actorAdminUserId}`,
@@ -111,9 +129,9 @@ export async function prepareCreditNoteAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot();
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["refundId"]);
     const result = await invoiceService().prepareCreditNote(
       z.string().uuid().parse(formString(formData, "refundId")),
       audit,
@@ -129,9 +147,9 @@ export async function transmitCreditNoteAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot();
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["creditNoteId"]);
     const result = await invoiceService().transmitCreditNote(
       z.string().uuid().parse(formString(formData, "creditNoteId")),
       `admin:${audit.actorAdminUserId}`,
