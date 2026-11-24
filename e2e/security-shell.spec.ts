@@ -163,3 +163,170 @@ test("customer and admin authentication forms expose labelled keyboard-accessibl
   await adminEmail.press("Tab");
   await expect(page.getByLabel("Contraseña")).toBeFocused();
 });
+
+test("customer registration and recovery connect server field errors to their controls", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  await page.route("https://challenges.cloudflare.com/**", async (route) => {
+    await route.fulfill({
+      contentType: "application/javascript",
+      body: "window.turnstile={render(){return 'e2e-widget'},reset(){},remove(){}};",
+    });
+  });
+  const { createServer } = await import("node:http");
+  const turnstile = createServer(async (request, response) => {
+    if (request.method !== "POST" || request.url !== "/siteverify") {
+      response.writeHead(404).end();
+      return;
+    }
+    let body = "";
+    for await (const chunk of request) body += String(chunk);
+    const token = new URLSearchParams(body).get("response") ?? "";
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        success: true,
+        action: token.replace(/^e2e_/, ""),
+        hostname: "127.0.0.1",
+        "error-codes": [],
+      }),
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    turnstile.once("error", reject);
+    turnstile.listen(54427, "127.0.0.1", () => {
+      turnstile.off("error", reject);
+      resolve();
+    });
+  });
+
+  async function passChallenge(action: string) {
+    const token = `e2e_${action}`;
+    const input = page.locator('input[name="turnstileToken"]');
+    await expect(input).toHaveValue("");
+    await input.evaluate((element, value) => {
+      (element as HTMLInputElement).value = value;
+    }, token);
+    await expect(input).toHaveValue(token);
+  }
+
+  async function expectFieldError(
+    selector: string,
+    errorId: string,
+    message: string,
+    describedBy: string = errorId,
+  ) {
+    const control = page.locator(selector);
+    const error = page.locator(`#${errorId}`);
+    await expect(error).toContainText(message);
+    await expect(control).toHaveAttribute("aria-invalid", "true");
+    await expect(control).toHaveAttribute("aria-describedby", describedBy);
+    await expect(page.getByText(message, { exact: true })).toHaveCount(1);
+  }
+
+  try {
+    await page.goto("/registro");
+    const registration = page.locator("form").filter({
+      has: page.getByRole("button", { name: "Crear cuenta" }),
+    });
+    await registration.evaluate((form) => {
+      (form as HTMLFormElement).noValidate = true;
+    });
+    await page.getByLabel("Correo electrónico").fill("correo-invalido");
+    await page.getByRole("button", { name: "Crear cuenta" }).click();
+    await expectFieldError("#email", "registration-email-error", "Ingresa un correo válido.");
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Revisa los datos ingresados." }),
+    ).toHaveText("Revisa los datos ingresados.");
+
+    await page.getByLabel("Correo electrónico").fill("persona@example.test");
+    await page.getByLabel("Contraseña", { exact: true }).fill("ClaveSegura123!");
+    await page.getByLabel("Confirma la contraseña").fill("ClaveSegura124!");
+    await passChallenge("customer_register");
+    await page.getByRole("button", { name: "Crear cuenta" }).click();
+    await expectFieldError(
+      "#confirmation",
+      "registration-confirmation-error",
+      "Las contraseñas no coinciden.",
+    );
+    await expect(page.locator("#registration-password-error")).toHaveCount(0);
+
+    await page.getByLabel("Contraseña", { exact: true }).fill("password123!");
+    await page.getByLabel("Confirma la contraseña").fill("password123!");
+    await passChallenge("customer_register");
+    await page.getByRole("button", { name: "Crear cuenta" }).click();
+    const policyError = page.locator("#registration-password-error");
+    await expect(policyError).toBeVisible();
+    await expect(policyError.locator("li")).not.toHaveCount(0);
+    await expect(page.getByLabel("Contraseña", { exact: true })).toHaveAttribute(
+      "aria-describedby",
+      "registration-password-help registration-password-error",
+    );
+    await expect(page.getByLabel("Contraseña", { exact: true })).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    await expect(
+      page
+        .getByRole("alert")
+        .filter({ hasText: "La contraseña no cumple la política de seguridad." }),
+    ).toHaveText("La contraseña no cumple la política de seguridad.");
+
+    await page.goto("/recuperar");
+    const recovery = page.locator("form").filter({
+      has: page.getByRole("button", { name: "Solicitar recuperación" }),
+    });
+    await recovery.evaluate((form) => {
+      (form as HTMLFormElement).noValidate = true;
+    });
+    await page.getByLabel("Correo electrónico").fill("correo-invalido");
+    await page.getByRole("button", { name: "Solicitar recuperación" }).click();
+    await expectFieldError("#email", "recovery-request-email-error", "Ingresa un correo válido.");
+
+    await page.goto("/recuperar?code=1&email=persona%40example.test");
+    const reset = page.locator("form").filter({
+      has: page.getByRole("button", { name: "Actualizar contraseña e ingresar" }),
+    });
+    await reset.evaluate((form) => {
+      (form as HTMLFormElement).noValidate = true;
+    });
+    await page.getByLabel("Código de recuperación").fill("123456");
+    await page.getByLabel("Contraseña", { exact: true }).fill("ClaveSegura123!");
+    await page.getByLabel("Confirma la contraseña").fill("ClaveSegura124!");
+    await passChallenge("customer_reset");
+    await page.getByRole("button", { name: "Actualizar contraseña e ingresar" }).click();
+    await expectFieldError(
+      "#confirmation",
+      "recovery-reset-confirmation-error",
+      "Las contraseñas no coinciden.",
+    );
+
+    await page.goto("/recuperar?code=1&email=persona%40example.test");
+    await reset.evaluate((form) => {
+      (form as HTMLFormElement).noValidate = true;
+    });
+    await page.getByLabel("Código de recuperación").fill("123456");
+    await page.getByLabel("Contraseña", { exact: true }).fill("password123!");
+    await page.getByLabel("Confirma la contraseña").fill("password123!");
+    await expect(page.getByLabel("Código de recuperación")).toHaveValue("123456");
+    await expect(page.getByLabel("Contraseña", { exact: true })).toHaveValue("password123!");
+    await expect(page.getByLabel("Confirma la contraseña")).toHaveValue("password123!");
+    await passChallenge("customer_reset");
+    await page.getByRole("button", { name: "Actualizar contraseña e ingresar" }).click();
+    await expect(page.locator("#recovery-reset-password-error")).toBeVisible();
+    await expect(page.getByLabel("Contraseña", { exact: true })).toHaveAttribute(
+      "aria-describedby",
+      "recovery-reset-password-help recovery-reset-password-error",
+    );
+    await expect(page.getByLabel("Contraseña", { exact: true })).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+  } finally {
+    turnstile.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      turnstile.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+});

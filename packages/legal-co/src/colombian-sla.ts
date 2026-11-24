@@ -1,9 +1,8 @@
 import type { DateLike } from "./types.js";
 
-export const colombiaTimeZone = "America/Bogota";
-export const retractBusinessDays = 5;
-export const retractRefundCalendarDays = 15;
-export const defaultDeliveryCalendarDays = 30;
+const colombiaTimeZone = "America/Bogota";
+const retractBusinessDays = 5;
+const retractRefundCalendarDays = 15;
 export const paymentReversalNoticeBusinessDays = 5;
 export const habeasDataQueryBusinessDays = 10;
 export const habeasDataQueryExtensionBusinessDays = 5;
@@ -49,7 +48,7 @@ function utcDate(year: number, month: number, day: number): Date {
   return date;
 }
 
-export function formatDateOnly(date: Date): string {
+function formatDateOnly(date: Date): string {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
     throw new TypeError("A valid Date is required.");
   }
@@ -58,13 +57,13 @@ export function formatDateOnly(date: Date): string {
   return `${String(year).padStart(4, "0")}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
-export function parseDateOnly(value: string): Date {
+function parseDateOnly(value: string): Date {
   const match = datePattern.exec(value);
   if (!match) throw new TypeError("Date-only values must use YYYY-MM-DD.");
   return utcDate(Number(match[1]), Number(match[2]), Number(match[3]));
 }
 
-export function addCalendarDays(value: string, days: number): string {
+function addCalendarDays(value: string, days: number): string {
   if (!Number.isInteger(days) || Math.abs(days) > 36_500) {
     throw new RangeError("Calendar-day offset must be an integer within 36500 days.");
   }

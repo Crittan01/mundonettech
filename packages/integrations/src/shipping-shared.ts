@@ -7,12 +7,7 @@ import {
   type ShipmentPackage,
 } from "@mundonettech/db";
 
-import {
-  assertIntegrationKey,
-  assertIntegrationUuid,
-  hash32,
-  integrationText,
-} from "./integration-utils.js";
+import { assertIntegrationKey, assertIntegrationUuid, hash32 } from "./integration-utils.js";
 import {
   ShippingAuthorizationError,
   ShippingConflictError,
@@ -33,7 +28,7 @@ export function shippingWorkerId(value: string): string {
   return assertIntegrationKey(value, "workerId");
 }
 
-export function shippingAudit(audit: ShippingAuditContext): {
+function shippingAudit(audit: ShippingAuditContext): {
   actorAdminUserId: string;
   ipHash: Uint8Array<ArrayBuffer>;
   userAgentHash: Uint8Array<ArrayBuffer> | null;
@@ -175,9 +170,4 @@ export function positiveInteger(value: number, field: string, maximum = 1_000_00
     );
   }
   return value;
-}
-
-export function safeWorkerError(error: unknown): string {
-  if (error instanceof Error) return integrationText(error.name, "error", 200).slice(0, 200);
-  return "Error";
 }

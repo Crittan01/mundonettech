@@ -2,8 +2,12 @@ import AxeBuilder from "@axe-core/playwright";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { expect, test } from "@playwright/test";
+import pg from "pg";
 
+import { CmsService } from "../packages/cms/dist/index.js";
+import { storeConfig } from "../config/dist/store.config.js";
 import { CartService, createDatabaseClient } from "../packages/db/dist/index.js";
+import { seedCatalogFixture } from "../scripts/lib/catalog-test-fixture.mjs";
 
 const databaseUrl =
   process.env.DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54422/postgres";
@@ -283,4 +287,183 @@ test("order scheduler rejects anonymous callers and processes abandonment and ex
   });
   expect(expiredAttempt.status).toBe("EXPIRED");
   expect(expiredAttempt.codReconciliation?.status).toBe("CANCELLED");
+});
+
+test("checkout and reservation expiry refresh every inventory-tagged public surface", async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const sql = new pg.Client({ connectionString: databaseUrl });
+  await sql.connect();
+  let catalog: Awaited<ReturnType<typeof seedCatalogFixture>>;
+  try {
+    catalog = await seedCatalogFixture(sql);
+  } finally {
+    await sql.end();
+  }
+  const product = await db.product.findUniqueOrThrow({
+    where: { id: catalog.productId },
+    include: { brand: true, category: true },
+  });
+  const location = await db.stockLocation.create({
+    data: {
+      code: `CACHE-${randomUUID().slice(0, 8).toUpperCase()}`,
+      name: "Bodega de caché E2E",
+      type: "LOCAL_MAIN",
+    },
+  });
+  await db.stockLevel.create({
+    data: {
+      locationId: location.id,
+      variantId: catalog.variantId,
+      onHand: 1,
+      committed: 0,
+      safetyStock: 0,
+      weightedAvgCostCents: 60_000n,
+    },
+  });
+  await db.inventoryLedger.create({
+    data: {
+      locationId: location.id,
+      variantId: catalog.variantId,
+      entryType: "OPENING",
+      quantityDelta: 1,
+      committedDelta: 0,
+      onHandAfter: 1,
+      committedAfter: 0,
+      safetyStockAfter: 0,
+      weightedAvgCostAfterCents: 60_000n,
+      operationKey: `cache-opening-${randomUUID()}`,
+      operationHash: randomBytes(32),
+      operationSequence: 0,
+      metadata: { source: "checkout-cache-e2e" },
+    },
+  });
+  const actor = await db.adminUser.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `cache-cms-${randomUUID()}@example.test`,
+      displayName: "Editor de caché E2E",
+      role: "SUPERADMIN",
+      status: "ACTIVE",
+    },
+  });
+  const audit = {
+    actorAdminUserId: actor.id,
+    ipHash: randomBytes(32),
+    userAgentHash: randomBytes(32),
+  };
+  const cms = new CmsService(db, {
+    "store.name": storeConfig.name,
+    "store.domain": storeConfig.domain,
+  });
+  const cmsSlug = `inventario-${randomUUID()}`;
+  const createdPage = await cms.createPage(
+    { slug: cmsSlug, title: "Inventario editorial E2E" },
+    [
+      {
+        type: "PRODUCT_GRID",
+        content: {
+          heading: "Disponibilidad editorial E2E",
+          categorySlug: product.category.slug,
+          productSlugs: [product.slug],
+          maxItems: 1,
+        },
+      },
+    ],
+    audit,
+  );
+  const pageDetail = await cms.getPage(createdPage.id);
+  if (!pageDetail) throw new Error("The cache CMS fixture was not persisted.");
+  for (const block of pageDetail.blocks) {
+    await cms.publishVersion(block.versions[0]!.id, audit);
+  }
+  await cms.publishPage(createdPage.id, audit);
+
+  const read = async (path: string) => {
+    const response = await page.request.get(path);
+    expect(response.status(), path).toBe(200);
+    return response.text();
+  };
+  const expectPublicInventory = async (available: 0 | 1) => {
+    for (const path of ["/", `/productos?marca=${product.brand.slug}`, `/pagina/${cmsSlug}`]) {
+      const html = await read(path);
+      const cards = html.match(/<article\b[^>]*>[\s\S]*?<\/article>/g) ?? [];
+      const card = cards.find((entry) => entry.includes(`href="/producto/${product.slug}"`));
+      expect(card, path).toBeDefined();
+      expect(card).toContain(available > 0 ? "Disponible" : "Sin unidades disponibles");
+    }
+    const pdp = await read(`/producto/${product.slug}`);
+    expect(pdp).toContain(
+      available > 0 ? "1 unidad disponible para compra" : "Sin unidades disponibles",
+    );
+    const comparison = await read(
+      `/comparar?productos=${encodeURIComponent(`${product.slug},sony-wh-1000xm5`)}`,
+    );
+    expect(comparison).toContain(available > 0 ? "1 unidades" : "Sin unidades");
+
+    const merchant = await read("/api/feeds/google-merchant");
+    const merchantItem = merchant
+      .match(/<item>[\s\S]*?<\/item>/g)
+      ?.find((entry) => entry.includes(`<g:id>${catalog.variantId}</g:id>`));
+    expect(merchantItem).toBeDefined();
+    expect(merchantItem).toContain(
+      available > 0
+        ? "<g:availability>in stock</g:availability>"
+        : "<g:availability>out of stock</g:availability>",
+    );
+    const meta = await read("/api/feeds/meta-catalog");
+    const metaItem = meta.split(/\r?\n/).find((line) => line.startsWith(`${catalog.variantId},`));
+    expect(metaItem).toBeDefined();
+    expect(metaItem).toContain(available > 0 ? ",in stock," : ",out of stock,");
+  };
+
+  await expectPublicInventory(1);
+  await page.goto(`/producto/${product.slug}`);
+  await page.getByLabel("Cantidad", { exact: true }).fill("1");
+  await page.getByRole("button", { name: "Añadir al carrito" }).click();
+  await expect(page.getByText(/Producto añadido/)).toBeVisible();
+  await page.goto("/checkout");
+  await fillContact(page, true);
+  await acceptAndConfirm(page);
+  const order = await db.order.findFirstOrThrow({
+    where: {
+      orderStatus: "CONFIRMED",
+      cart: { items: { some: { variantId: catalog.variantId } } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  await expectPublicInventory(0);
+
+  await db.order.update({
+    where: { id: order.id },
+    data: { reservationExpiresAt: new Date(Date.now() - 1_000) },
+  });
+  const secret = process.env.ORDER_CRON_SECRET ?? "e2e-order-scheduler-secret-32-chars-ok";
+  const released = await page.request.post("/api/jobs/orders", {
+    headers: { authorization: `Bearer ${secret}` },
+  });
+  expect(released.status()).toBe(200);
+  const releasedBody = await released.json();
+  expect(releasedBody.expiredReservations.releasedOrders).toBeGreaterThanOrEqual(1);
+  expect(releasedBody.expiredReservations.orderIds).toContain(order.id);
+  await expectPublicInventory(1);
+
+  await db.stockLevel.update({
+    where: { locationId_variantId: { locationId: location.id, variantId: catalog.variantId } },
+    data: { safetyStock: 1 },
+  });
+  try {
+    const withoutReleases = await page.request.post("/api/jobs/orders", {
+      headers: { authorization: `Bearer ${secret}` },
+    });
+    expect(withoutReleases.status()).toBe(200);
+    expect((await withoutReleases.json()).expiredReservations.releasedOrders).toBe(0);
+    await expectPublicInventory(1);
+  } finally {
+    await db.stockLevel.update({
+      where: { locationId_variantId: { locationId: location.id, variantId: catalog.variantId } },
+      data: { safetyStock: 0 },
+    });
+  }
 });

@@ -179,7 +179,11 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
 
   const variant = await db.productVariant.findFirstOrThrow({
     where: { status: "ACTIVE", deletedAt: null, product: { status: "ACTIVE", deletedAt: null } },
-    select: { sku: true, priceCents: true },
+    select: {
+      sku: true,
+      priceCents: true,
+      product: { select: { slug: true } },
+    },
   });
   const unitPrice = Math.max(1, Math.floor((Number(variant.priceCents) * 0.9) / 100));
   await page.getByLabel("SKU activo").fill(variant.sku);
@@ -219,6 +223,23 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
   expect(proposalId.status).toBe("SENT");
   expect(proposalId.publicTokenHash).toHaveLength(32);
 
+  const stockLevels = await db.stockLevel.findMany({
+    where: {
+      variant: { sku: variant.sku },
+      location: { deletedAt: null, type: { not: "QUARANTINE" } },
+    },
+    select: { onHand: true, committed: true, safetyStock: true },
+  });
+  const availableBefore = stockLevels.reduce(
+    (total, level) => total + Math.max(0, level.onHand - level.committed - level.safetyStock),
+    0,
+  );
+  const availabilityCopy = (available: number) =>
+    `${available} ${available === 1 ? "unidad disponible" : "unidades disponibles"} para compra`;
+  const cachedPdp = await page.request.get(`/producto/${variant.product.slug}`);
+  expect(cachedPdp.status()).toBe(200);
+  expect(await cachedPdp.text()).toContain(availabilityCopy(availableBefore));
+
   const proposalResponse = await page.goto(proposalUrl);
   expect(proposalResponse?.headers()["cache-control"]).toContain("no-store");
   expect(proposalResponse?.headers()["x-robots-tag"]).toContain("noindex");
@@ -249,6 +270,10 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
   expect(converted.order?.totalCents).toBe(converted.totalCents);
   expect(converted.opportunity.status).toBe("WON");
   expect(converted.signerDocumentNumber).toBe("1020304050");
+  await page.goto(`/producto/${variant.product.slug}`);
+  await expect(
+    page.getByText(availabilityCopy(availableBefore - 1), { exact: true }),
+  ).toBeVisible();
   await page.goto(proposalUrl);
   await expect(page.getByRole("heading", { name: "Propuesta convertida en pedido" })).toBeVisible();
   await page.getByRole("link", { name: "Abrir recibo del pedido" }).click();

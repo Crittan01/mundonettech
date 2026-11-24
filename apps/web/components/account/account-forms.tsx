@@ -6,6 +6,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   deleteAddressAction,
@@ -14,9 +15,6 @@ import {
   updateProfileAction,
 } from "@/lib/actions/account";
 import { initialActionState } from "@/lib/action-state";
-
-export const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 
 export function ProfileForm({
   initial,
@@ -124,7 +122,7 @@ export interface DaneDepartmentOption {
   readonly municipalities: readonly { code: string; name: string }[];
 }
 
-export interface AddressFormValue {
+interface AddressFormValue {
   readonly id?: string;
   readonly updatedAt?: string;
   readonly label: string;
@@ -204,12 +202,12 @@ export function AddressForm({
         </div>
         <div className="space-y-2">
           <Label htmlFor={`department-${formId}`}>Departamento</Label>
-          <select
+          <Select
             id={`department-${formId}`}
             name="departmentCode"
             value={departmentCode}
             onChange={(event) => setDepartmentCode(event.target.value)}
-            className={selectClass}
+            className="disabled:opacity-50"
             required
             disabled={pending}
           >
@@ -218,11 +216,11 @@ export function AddressForm({
                 {item.name}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`municipality-${formId}`}>Municipio o área</Label>
-          <select
+          <Select
             id={`municipality-${formId}`}
             name="municipalityCode"
             key={departmentCode}
@@ -232,7 +230,7 @@ export function AddressForm({
                 ? values.municipalityCode
                 : municipalities[0]?.code
             }
-            className={selectClass}
+            className="disabled:opacity-50"
             required
             disabled={pending}
           >
@@ -241,7 +239,7 @@ export function AddressForm({
                 {item.name}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`postal-${formId}`}>Código postal (opcional)</Label>

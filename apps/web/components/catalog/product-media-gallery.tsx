@@ -119,15 +119,24 @@ export function ProductMediaGallery({
           La galería no está disponible porque el origen multimedia no está configurado.
         </p>
       ) : (
-        media.map((item) => (
-          <figure
-            key={item.id}
-            className="overflow-hidden rounded-2xl border border-border bg-card p-3"
-          >
-            <MediaItem media={item} origin={origin} />
-            <figcaption className="sr-only">{item.altText}</figcaption>
-          </figure>
-        ))
+        media.map((item) =>
+          item.mediaType === "SPIN_360" ? (
+            <div
+              key={item.id}
+              className="overflow-hidden rounded-2xl border border-border bg-card p-3"
+            >
+              <MediaItem media={item} origin={origin} />
+            </div>
+          ) : (
+            <figure
+              key={item.id}
+              className="overflow-hidden rounded-2xl border border-border bg-card p-3"
+            >
+              <MediaItem media={item} origin={origin} />
+              <figcaption className="sr-only">{item.altText}</figcaption>
+            </figure>
+          ),
+        )
       )}
     </section>
   );

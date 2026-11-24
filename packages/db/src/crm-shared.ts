@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import {
   assertCrmRetentionMonths,
@@ -12,6 +12,7 @@ import {
 
 import type { AdminUser, Contact, Prisma } from "./generated/client.js";
 import { acquireOperationLocks, assertUuid } from "./inventory-shared.js";
+import { databaseNow, recordAdminAction } from "./primitives.js";
 
 export type CrmErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN";
 export type CrmPermission = Extract<
@@ -220,23 +221,11 @@ export async function crmLog(
   targetId: string,
   metadata: Prisma.JsonObject = {},
 ): Promise<void> {
-  await tx.adminActionLog.create({
-    data: {
-      actorAdminUserId: audit.actorAdminUserId,
-      action,
-      targetType,
-      targetId,
-      requestId: audit.requestId ?? randomUUID(),
-      ipHash: Uint8Array.from(audit.ipHash),
-      userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-      metadata,
-    },
-  });
+  await recordAdminAction(tx, audit, action, targetType, targetId, metadata);
 }
 
 export async function crmNow(tx: Prisma.TransactionClient): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
+  return databaseNow(tx);
 }
 
 export async function crmRetentionReviewAt(
@@ -263,6 +252,89 @@ export function crmJsonStringArray(value: unknown, field: string): string[] {
   }
   for (const entry of value as string[]) assertUuid(entry, field);
   return value as string[];
+}
+
+export async function redactCrmActivitiesInTransaction(
+  tx: Prisma.TransactionClient,
+  lineageIds: readonly string[],
+  now: Date,
+): Promise<void> {
+  await tx.contactActivity.updateMany({
+    where: { contactId: { in: [...lineageIds] }, redactedAt: null },
+    data: {
+      subject: null,
+      body: "[contenido suprimido por retención]",
+      redactedAt: now,
+    },
+  });
+}
+
+export async function redactCrmMergeHistoryInTransaction(
+  tx: Prisma.TransactionClient,
+  lineageIds: readonly string[],
+): Promise<number> {
+  const mergeHistory = await tx.identityMergeCandidate.findMany({
+    where: {
+      status: { in: ["MERGED", "REVERSED"] },
+      OR: [
+        { sourceContactId: { in: [...lineageIds] } },
+        { targetContactId: { in: [...lineageIds] } },
+      ],
+    },
+    select: { id: true },
+  });
+  for (const candidate of mergeHistory) {
+    await tx.identityMergeCandidate.update({
+      where: { id: candidate.id },
+      data: {
+        sourceSnapshot: { redacted: true },
+        targetSnapshot: { redacted: true },
+        movedIdentityIds: [],
+        retiredIdentityIds: [],
+        movedActivityIds: [],
+        movedTaskIds: [],
+        movedOpportunityIds: [],
+        resolutionNote: "[contenido suprimido por retención]",
+        version: { increment: 1 },
+      },
+    });
+  }
+  return mergeHistory.length;
+}
+
+export async function redactCrmOpportunitiesInTransaction(
+  tx: Prisma.TransactionClient,
+  lineageIds: readonly string[],
+  now: Date,
+): Promise<void> {
+  const opportunities = await tx.opportunity.findMany({
+    where: { contactId: { in: [...lineageIds] }, anonymizedAt: null },
+    select: { id: true },
+  });
+  const opportunityIds = opportunities.map((opportunity) => opportunity.id);
+  if (opportunityIds.length > 0) {
+    await tx.opportunity.updateMany({
+      where: { id: { in: opportunityIds } },
+      data: {
+        requirements: "[contenido suprimido por retención]",
+        acceptanceIpHash: null,
+        acceptanceUserAgentHash: null,
+        anonymizedAt: now,
+      },
+    });
+    await tx.opportunityProposal.updateMany({
+      where: { opportunityId: { in: opportunityIds }, anonymizedAt: null },
+      data: {
+        commercialNotes: null,
+        signerName: null,
+        signerDocumentType: null,
+        signerDocumentNumber: null,
+        acceptanceIpHash: null,
+        acceptanceUserAgentHash: null,
+        anonymizedAt: now,
+      },
+    });
+  }
 }
 
 export async function suppressCustomerCrmLineageInTransaction(
@@ -313,14 +385,7 @@ export async function suppressCustomerCrmLineageInTransaction(
       "Close active B2B opportunities and proposals before suppressing this lineage.",
     );
   }
-  await tx.contactActivity.updateMany({
-    where: { contactId: { in: lineageIds }, redactedAt: null },
-    data: {
-      subject: null,
-      body: "[contenido suprimido por retención]",
-      redactedAt: now,
-    },
-  });
+  await redactCrmActivitiesInTransaction(tx, lineageIds, now);
   await tx.task.updateMany({
     where: { contactId: { in: lineageIds }, status: { in: ["PENDING", "IN_PROGRESS"] } },
     data: {
@@ -340,29 +405,7 @@ export async function suppressCustomerCrmLineageInTransaction(
       version: { increment: 1 },
     },
   });
-  const mergeHistory = await tx.identityMergeCandidate.findMany({
-    where: {
-      status: { in: ["MERGED", "REVERSED"] },
-      OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
-    },
-    select: { id: true },
-  });
-  for (const candidate of mergeHistory) {
-    await tx.identityMergeCandidate.update({
-      where: { id: candidate.id },
-      data: {
-        sourceSnapshot: { redacted: true },
-        targetSnapshot: { redacted: true },
-        movedIdentityIds: [],
-        retiredIdentityIds: [],
-        movedActivityIds: [],
-        movedTaskIds: [],
-        movedOpportunityIds: [],
-        resolutionNote: "[contenido suprimido por retención]",
-        version: { increment: 1 },
-      },
-    });
-  }
+  await redactCrmMergeHistoryInTransaction(tx, lineageIds);
   await tx.identityMergeCandidate.updateMany({
     where: {
       status: "REJECTED",
@@ -373,34 +416,7 @@ export async function suppressCustomerCrmLineageInTransaction(
       version: { increment: 1 },
     },
   });
-  const opportunities = await tx.opportunity.findMany({
-    where: { contactId: { in: lineageIds }, anonymizedAt: null },
-    select: { id: true },
-  });
-  const opportunityIds = opportunities.map((opportunity) => opportunity.id);
-  if (opportunityIds.length > 0) {
-    await tx.opportunity.updateMany({
-      where: { id: { in: opportunityIds } },
-      data: {
-        requirements: "[contenido suprimido por retención]",
-        acceptanceIpHash: null,
-        acceptanceUserAgentHash: null,
-        anonymizedAt: now,
-      },
-    });
-    await tx.opportunityProposal.updateMany({
-      where: { opportunityId: { in: opportunityIds }, anonymizedAt: null },
-      data: {
-        commercialNotes: null,
-        signerName: null,
-        signerDocumentType: null,
-        signerDocumentNumber: null,
-        acceptanceIpHash: null,
-        acceptanceUserAgentHash: null,
-        anonymizedAt: now,
-      },
-    });
-  }
+  await redactCrmOpportunitiesInTransaction(tx, lineageIds, now);
   for (const contact of contacts) {
     if (contact.status === "ANONYMIZED") continue;
     await tx.contact.update({

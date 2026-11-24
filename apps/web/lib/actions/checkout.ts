@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 
-import { legalConfig } from "@mundonettech/config/legal";
+import { parseCoordinateE6 as coordinateE6 } from "@mundonettech/core";
 import {
   PaymentProvider,
   type CheckoutFulfillmentInput,
@@ -14,7 +14,7 @@ import {
   PaymentProviderError,
   PaymentValidationError,
 } from "@mundonettech/integrations";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
@@ -22,6 +22,7 @@ import { actionError, formSnapshot, formString, type ActionState } from "@/lib/a
 import { clearCartAccessToken, optionalCustomerId } from "@/lib/cart";
 import { orderService, readCheckoutCartReference, receiptTokenForSubmission } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
+import { optionalTrimmedText as optionalText, phoneInputPattern } from "@/lib/form-validation";
 import {
   blockedIdentityService,
   getBankTransferInstructions,
@@ -31,18 +32,9 @@ import {
   paymentService,
   storeCreditService,
 } from "@/lib/integrations";
+import { getConfiguredLegalDocument as legalDocument } from "@/lib/legal";
 import { emailIdentityHash, phoneIdentityHash } from "@/lib/payment-identities";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
-
-const optionalText = (maximumLength: number) =>
-  z
-    .string()
-    .trim()
-    .max(maximumLength)
-    .transform((value) => value || null);
-
-const phoneInputPattern =
-  /^(?:\+57[\s()-]*[36][0-9\s()-]{9}|[36][0-9\s()-]{9}|\+[1-9][0-9\s()-]{7,18})$/;
 
 const submissionSchema = z
   .object({
@@ -110,23 +102,6 @@ const submissionSchema = z
 
 function digest(value: string | Uint8Array): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(createHash("sha256").update(value).digest());
-}
-
-function coordinateE6(value: string, field: string, minimum: number, maximum: number): number {
-  const match = /^(-?)([0-9]{1,3})(?:\.([0-9]{1,6}))?$/.exec(value.trim());
-  if (!match) throw new TypeError(`${field} must use at most six decimal places.`);
-  const whole = Number(match[2]);
-  const fraction = Number((match[3] ?? "").padEnd(6, "0") || 0);
-  const scaled = (match[1] === "-" ? -1 : 1) * (whole * 1_000_000 + fraction);
-  if (!Number.isSafeInteger(scaled) || scaled < minimum || scaled > maximum)
-    throw new RangeError(`${field} is outside its valid range.`);
-  return scaled;
-}
-
-function legalDocument(slug: string) {
-  const document = legalConfig.documents.find((candidate) => candidate.slug === slug);
-  if (!document) throw new Error(`Legal document ${slug} is not configured.`);
-  return document;
 }
 
 export async function confirmCheckoutAction(
@@ -311,6 +286,7 @@ export async function confirmCheckoutAction(
       receiptDeliveryReference: input.submissionId,
       expectedReviewFingerprint: input.reviewFingerprint,
     });
+    updateTag("catalog:inventory");
     try {
       const payment = await paymentService().start({
         orderId: checkout.orderId,
@@ -362,7 +338,7 @@ export async function confirmCheckoutAction(
   redirect(receiptUrl);
 }
 
-export interface FlexQuoteActionState {
+interface FlexQuoteActionState {
   readonly status: "idle" | "success" | "error";
   readonly message: string;
   readonly quotes: readonly LocalDeliveryQuoteSnapshot[];

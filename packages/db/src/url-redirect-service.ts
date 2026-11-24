@@ -11,6 +11,24 @@ import type { CatalogMutationAudit } from "./catalog-types.js";
 import { Prisma, PrismaClient, type UrlRedirect } from "./generated/client.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const urlRedirectCacheStateId = "00000000-0000-0000-0000-000000000001";
+
+class UrlRedirectCacheStateError extends Error {
+  constructor() {
+    super("URL redirect cache generation is not initialized.");
+    this.name = "UrlRedirectCacheStateError";
+  }
+}
+
+class UrlRedirectGenerationChangedError extends Error {}
+
+async function advanceUrlRedirectGeneration(tx: Prisma.TransactionClient): Promise<void> {
+  const updated = await tx.urlRedirectCacheState.updateMany({
+    where: { id: urlRedirectCacheStateId },
+    data: { version: { increment: 1 } },
+  });
+  if (updated.count !== 1) throw new UrlRedirectCacheStateError();
+}
 
 export interface UrlRedirectInput {
   readonly fromPath: string;
@@ -268,7 +286,10 @@ export class UrlRedirectService {
         await lockGraph(tx);
         const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
         if (!existing) throw new UrlRedirectNotFoundError();
-        if (existing.active === active) return existing;
+        if (existing.active === active) {
+          await advanceUrlRedirectGeneration(tx);
+          return existing;
+        }
         if (active) {
           assertGraph(existing.fromPath, existing.toPath, await activeEdges(tx), {
             excludeId: id,
@@ -325,5 +346,127 @@ export class UrlRedirectService {
       statusCode: first.statusCode,
       hops: chain.length - 1,
     };
+  }
+}
+
+interface CachedRedirectEdge {
+  readonly toPath: string;
+  readonly statusCode: number;
+}
+
+interface UrlRedirectCacheSnapshot {
+  readonly generation: bigint;
+  readonly edges: ReadonlyMap<string, CachedRedirectEdge>;
+}
+
+interface PendingUrlRedirectLoad {
+  readonly generation: bigint;
+  readonly promise: Promise<UrlRedirectCacheSnapshot>;
+}
+
+export class CachedUrlRedirectResolver {
+  private snapshot: UrlRedirectCacheSnapshot | undefined;
+  private pending: PendingUrlRedirectLoad | undefined;
+
+  constructor(private readonly db: PrismaClient) {}
+
+  private async readGeneration(): Promise<bigint> {
+    const cacheState = await this.db.urlRedirectCacheState.findUnique({
+      where: { id: urlRedirectCacheStateId },
+      select: { version: true },
+    });
+    if (!cacheState) throw new UrlRedirectCacheStateError();
+    return cacheState.version;
+  }
+
+  private async loadEdges(): Promise<ReadonlyMap<string, CachedRedirectEdge>> {
+    const records = await this.db.urlRedirect.findMany({
+      where: { active: true, deletedAt: null },
+      select: { fromPath: true, toPath: true, statusCode: true },
+      orderBy: { id: "asc" },
+    });
+    const edges = new Map<string, CachedRedirectEdge>();
+    for (const record of records) {
+      const fromPath = normalizeRedirectPath(record.fromPath);
+      const toPath = normalizeRedirectPath(record.toPath);
+      if (isReservedRedirectSource(fromPath) || isReservedRedirectTarget(toPath)) {
+        continue;
+      }
+      if (edges.has(fromPath)) throw new Error("Duplicate active URL redirect source.");
+      edges.set(fromPath, { toPath, statusCode: record.statusCode });
+    }
+    return edges;
+  }
+
+  private async load(generation: bigint): Promise<UrlRedirectCacheSnapshot> {
+    const edges = await this.loadEdges();
+    const currentGeneration = await this.readGeneration();
+    if (currentGeneration !== generation) throw new UrlRedirectGenerationChangedError();
+    return { generation, edges };
+  }
+
+  private async getEdges(): Promise<ReadonlyMap<string, CachedRedirectEdge>> {
+    const maxAttempts = 8;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const generation = await this.readGeneration();
+      if (this.snapshot?.generation === generation) return this.snapshot.edges;
+      const existingPending = this.pending;
+      if (existingPending?.generation === generation) {
+        try {
+          return (await existingPending.promise).edges;
+        } catch (error) {
+          if (error instanceof UrlRedirectGenerationChangedError) continue;
+          throw error;
+        }
+      }
+      const promise = this.load(generation);
+      const pending = { generation, promise };
+      this.pending = pending;
+      try {
+        const snapshot = await promise;
+        if (!this.snapshot || this.snapshot.generation <= snapshot.generation) {
+          this.snapshot = snapshot;
+        }
+        return snapshot.edges;
+      } catch (error) {
+        if (error instanceof UrlRedirectGenerationChangedError) continue;
+        throw error;
+      } finally {
+        if (this.pending === pending) this.pending = undefined;
+      }
+    }
+    throw new UrlRedirectGenerationChangedError(
+      "URL redirect graph changed repeatedly during cache refresh.",
+    );
+  }
+
+  async resolve(path: string): Promise<{
+    toPath: string;
+    statusCode: number;
+    hops: number;
+  } | null> {
+    let normalized: string;
+    try {
+      normalized = normalizeRedirectPath(path);
+    } catch {
+      return null;
+    }
+    if (isReservedRedirectSource(normalized)) return null;
+    const edges = await this.getEdges();
+    const first = edges.get(normalized);
+    if (!first) return null;
+    const visited = new Set([normalized]);
+    let current = normalized;
+    let edge: CachedRedirectEdge | undefined = first;
+    let hops = 0;
+    while (edge) {
+      if (visited.has(edge.toPath)) return null;
+      visited.add(edge.toPath);
+      current = edge.toPath;
+      hops += 1;
+      if (hops > 100) return null;
+      edge = edges.get(current);
+    }
+    return { toPath: current, statusCode: first.statusCode, hops };
   }
 }

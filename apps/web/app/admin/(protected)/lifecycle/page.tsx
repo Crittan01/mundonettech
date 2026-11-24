@@ -13,6 +13,7 @@ import { z } from "zod";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { JourneyEditorForm, JourneyStateButtons } from "@/components/admin/lifecycle-forms";
 import { Button } from "@/components/ui/button";
+import { single } from "@/lib/admin-search-params";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 import { lifecycleService, segmentationService } from "@/lib/lifecycle";
 
@@ -39,10 +40,6 @@ const emailStatusLabels: Record<string, string> = {
   CANCELLED: "Cancelado",
   FAILED: "Fallido",
 };
-
-function single(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
 
 export default async function LifecyclePage({ searchParams }: PageProps<"/admin/lifecycle">) {
   const session = await requireAdminPage("crm:read");

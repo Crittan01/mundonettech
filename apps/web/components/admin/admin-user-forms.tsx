@@ -70,6 +70,13 @@ export function AdministratorEditor({
 }) {
   const [state, action, pending] = useActionState(updateAdministratorAction, initialActionState);
   const roles = adminRoles.filter((role) => canAssignAdminRole(actorRole, role));
+  if (!canAssignAdminRole(actorRole, target.role)) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Solo lectura: tu rol no permite administrar una cuenta de este anillo.
+      </p>
+    );
+  }
   return (
     <form action={action} className="space-y-3">
       <input type="hidden" name="targetId" value={target.id} />

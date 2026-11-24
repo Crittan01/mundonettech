@@ -12,6 +12,8 @@ Pipeline multimedia productivo para Cloudflare R2 y visores 360°/3D/AR de carga
 
 `R2MediaStorage` usa AWS SDK S3 (`region: auto`, *path-style*), exige HTTPS salvo loopback en pruebas, sube objetos `<= 8 MiB` con `PutObject` y mayores con multipart de 8 MiB (`leavePartsOnError: false`). `storeImageDerivatives()`, `storeSpin360()` (`2..120` frames) y `storeModel3d()` validan prefijos antes de decodificar, generan claves SHA-256 inmutables y ejecutan rollback completo ante fallos parciales (propagando `AggregateError` con todas las causas si falla también el borrado).
 
+`ProductMediaService` conecta esos pipelines con `ProductMedia` para imágenes, secuencias 360° y modelos GLB/USDZ. Valida producto/variante, límites tempranos y texto alternativo; serializa posiciones mediante el bloqueo del producto, deduplica asociaciones activas, escribe `AdminActionLog` en la misma transacción y compensa en R2 únicamente grupos sin referencias activas o archivadas. El archivado conserva objetos e historial; las acciones web exigen `catalog:write` + MFA reciente e invalidan el catálogo público tras el commit.
+
 ## Modelos 3D/AR y Visores (`@mundonettech/media/viewers`)
 
 - `validateGlb()` exige GLB 2.0 (`asset.version` `2.x`), alineación de 4 bytes en `JSON`/`BIN`, cero `uri` externas en todo el árbol JSON, rechazo de `KHR_draco_mesh_compression`/`EXT_meshopt_compression` (sin decodificadores WASM externos bajo CSP) y vistas/accesores/texturas embebidas válidas (`<= 50 MiB`).

@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { hasAdminPermission, parseWholeCopToCents } from "@mundonettech/core";
 import { ChannelLedgerDirection, OperationsService } from "@mundonettech/db";
 import { ChannelOrderError } from "@mundonettech/integrations";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
 import {
@@ -81,6 +81,7 @@ export async function synchronizeChannelOrderAction(
     const audit = await authorize();
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const result = await channelOrderService().synchronizeOrder(orderId, audit);
+    updateTag("catalog:inventory");
     await refreshChannelSurfaces();
     return actionSuccess(
       result.stale
@@ -100,6 +101,7 @@ export async function retryChannelOrderStockAction(
     const audit = await authorize();
     const orderId = idSchema.parse(formString(formData, "orderId"));
     await channelOrderService().retryStock(orderId, audit);
+    updateTag("catalog:inventory");
     await refreshChannelSurfaces();
     return actionSuccess("La evaluación de stock terminó; revisa el estado persistido del pedido.");
   } catch (error) {
@@ -117,6 +119,7 @@ export async function assignChannelOrderStockAction(
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const locationId = idSchema.parse(formString(formData, "locationId"));
     await channelOrderService().assignStockLocation({ orderId, locationId, audit });
+    updateTag("catalog:inventory");
     await refreshChannelSurfaces();
     return actionSuccess("Bodega asignada y evaluación de stock ejecutada con auditoría.");
   } catch (error) {

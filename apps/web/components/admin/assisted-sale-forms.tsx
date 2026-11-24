@@ -289,5 +289,3 @@ export function AssistedCancelForm({ cartId }: { cartId: string }) {
     </form>
   );
 }
-
-export type { ActionState };

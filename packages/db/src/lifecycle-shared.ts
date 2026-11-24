@@ -12,6 +12,7 @@ import {
 import type { Prisma } from "./generated/client.js";
 import { assertUuid } from "./inventory-shared.js";
 import type { DatabaseExecutor } from "./primitives.js";
+export { databaseNow } from "./primitives.js";
 
 export type LifecycleErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN";
 
@@ -83,7 +84,7 @@ export function segmentDefinitionHash(definition: unknown): Uint8Array<ArrayBuff
   );
 }
 
-export function auditHash(value: Uint8Array, field: string): Uint8Array<ArrayBuffer> {
+function auditHash(value: Uint8Array, field: string): Uint8Array<ArrayBuffer> {
   if (!(value instanceof Uint8Array) || value.length !== 32) {
     throw new LifecycleError("VALIDATION", `${field} must contain exactly 32 bytes.`);
   }
@@ -130,11 +131,6 @@ export async function lifecycleLog(
       metadata,
     },
   });
-}
-
-export async function databaseNow(tx: DatabaseExecutor): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
 }
 
 export async function lifecycleReader(

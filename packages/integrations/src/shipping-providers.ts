@@ -389,17 +389,17 @@ export class AveonlineShippingProvider implements ShippingProvider {
   }
 }
 
+export function flexTrackingCode(requestKey: string): string {
+  const suffix = createHash("sha256").update(requestKey).digest("hex").slice(0, 20).toUpperCase();
+  return `FLEX-${suffix}`;
+}
+
 export class FlexShippingProvider implements ShippingProvider {
   async createLabel(input: ShippingLabelRequest): Promise<ShippingLabelResult> {
     assertIntegrationKey(input.requestKey, "requestKey");
-    const suffix = createHash("sha256")
-      .update(input.requestKey)
-      .digest("hex")
-      .slice(0, 20)
-      .toUpperCase();
     return {
       providerReference: input.requestKey,
-      trackingCode: `FLEX-${suffix}`,
+      trackingCode: flexTrackingCode(input.requestKey),
       carrier: "FLEX",
       labelUrl: null,
     };
@@ -407,10 +407,9 @@ export class FlexShippingProvider implements ShippingProvider {
 
   async findLabel(requestKey: string): Promise<ShippingLabelResult | null> {
     assertIntegrationKey(requestKey, "requestKey");
-    const suffix = createHash("sha256").update(requestKey).digest("hex").slice(0, 20).toUpperCase();
     return {
       providerReference: requestKey,
-      trackingCode: `FLEX-${suffix}`,
+      trackingCode: flexTrackingCode(requestKey),
       carrier: "FLEX",
       labelUrl: null,
     };

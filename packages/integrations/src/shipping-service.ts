@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import {
   ShippingProviderCode,
@@ -6,7 +6,11 @@ import {
   type ShipmentPackageStatus,
 } from "@mundonettech/db";
 
-import { AveonlineShippingProvider, parseAveonlineCredentials } from "./shipping-providers.js";
+import {
+  AveonlineShippingProvider,
+  flexTrackingCode,
+  parseAveonlineCredentials,
+} from "./shipping-providers.js";
 import { assertIntegrationUuid, integrationDigest, integrationText } from "./integration-utils.js";
 import {
   assertFulfillmentActor,
@@ -50,10 +54,6 @@ export interface LabelProcessResult {
 function roundDiv(value: bigint, divisor: bigint): bigint {
   if (divisor <= 0n) throw new ShippingValidationError("Declared value divisor must be positive.");
   return (value + divisor / 2n) / divisor;
-}
-
-function localTracking(requestKey: string): string {
-  return `FLEX-${createHash("sha256").update(requestKey).digest("hex").slice(0, 20).toUpperCase()}`;
 }
 
 export class ShippingService {
@@ -325,7 +325,7 @@ export class ShippingService {
           contents,
         });
         const local = fulfillment.provider !== ShippingProviderCode.AVEONLINE;
-        const trackingCode = local ? localTracking(requestKey) : null;
+        const trackingCode = local ? flexTrackingCode(requestKey) : null;
         const created = await tx.shipmentPackage.create({
           data: {
             shipmentId,
@@ -390,7 +390,7 @@ export class ShippingService {
       }
       const firstTracking =
         fulfillment.provider !== ShippingProviderCode.AVEONLINE
-          ? localTracking(`shipment:${shipmentId}:package:1:v1`)
+          ? flexTrackingCode(`shipment:${shipmentId}:package:1:v1`)
           : null;
       await tx.shipment.update({
         where: { id: shipmentId },

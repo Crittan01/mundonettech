@@ -2,11 +2,11 @@
 
 import { useActionState } from "react";
 
-import { selectClass } from "@/components/account/account-forms";
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   closeSupportAdminAction,
@@ -46,10 +46,10 @@ export function ReturnModerationForm({
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`return-transition-${id}`}>Transición con MFA</Label>
-          <select
+          <Select
             id={`return-transition-${id}`}
             name="transition"
-            className={selectClass}
+            className="disabled:opacity-50"
             disabled={pending}
           >
             {available.map((transition) => (
@@ -57,7 +57,7 @@ export function ReturnModerationForm({
                 {transition}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`return-note-${id}`}>Nota de resolución</Label>
@@ -107,10 +107,10 @@ export function WarrantyModerationForm({
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`warranty-transition-${id}`}>Transición con MFA</Label>
-          <select
+          <Select
             id={`warranty-transition-${id}`}
             name="transition"
-            className={selectClass}
+            className="disabled:opacity-50"
             disabled={pending}
           >
             {available.map((transition) => (
@@ -118,7 +118,7 @@ export function WarrantyModerationForm({
                 {transition}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`warranty-note-${id}`}>Nota de resolución</Label>
@@ -179,16 +179,16 @@ export function SupportAdminForm({
           </div>
           <div className="space-y-2">
             <Label htmlFor={`admin-ticket-status-${id}`}>Nuevo estado</Label>
-            <select
+            <Select
               id={`admin-ticket-status-${id}`}
               name="status"
-              className={selectClass}
+              className="disabled:opacity-50"
               disabled={pending}
             >
               <option value="IN_PROGRESS">En gestión</option>
               <option value="WAITING_CUSTOMER">Espera respuesta del cliente</option>
               <option value="RESOLVED">Resuelta</option>
-            </select>
+            </Select>
           </div>
           <Button type="submit" size="sm" disabled={pending}>
             {pending ? "Respondiendo…" : "Responder con MFA"}
@@ -225,15 +225,15 @@ export function ReviewModerationForm({
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`review-status-${id}`}>Decisión con MFA</Label>
-          <select
+          <Select
             id={`review-status-${id}`}
             name="status"
-            className={selectClass}
+            className="disabled:opacity-50"
             disabled={pending}
           >
             <option value="PUBLISHED">Publicar</option>
             <option value="REJECTED">Rechazar</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`review-note-${id}`}>Nota de moderación</Label>

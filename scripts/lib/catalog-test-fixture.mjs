@@ -35,6 +35,7 @@ export const catalogTables = [
   "WishlistItem",
   "BackInStockSubscription",
   "UrlRedirect",
+  "UrlRedirectCacheState",
 ];
 
 export async function seedCatalogFixture(client) {

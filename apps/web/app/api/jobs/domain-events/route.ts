@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { matchesSecretTimingSafe as matches } from "@mundonettech/core";
 
 import { domainEventWorker } from "@/lib/domain-worker";
 
@@ -12,13 +12,6 @@ export async function GET() {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...headers, Allow: "POST" } },
-  );
-}
-
-function matches(provided: string, expected: string): boolean {
-  return timingSafeEqual(
-    createHash("sha256").update(provided).digest(),
-    createHash("sha256").update(expected).digest(),
   );
 }
 

@@ -1,24 +1,15 @@
-import { isAdminRole, maskEmail, type AdminRoleValue } from "@mundonettech/core";
+import { canAssignAdminRole, isAdminRole, maskEmail } from "@mundonettech/core";
 import Link from "next/link";
 
 import { AdministratorEditor, InviteAdministratorForm } from "@/components/admin/admin-user-forms";
 import { StepUpPrompt } from "@/components/admin/security-manager";
+import { roleLabels } from "@/lib/admin-presenters";
 import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Usuarios administrativos" };
 const pageSize = 20;
-const roleLabels: Record<AdminRoleValue, string> = {
-  SUPERADMIN: "Superadministrador",
-  OPERATIONS_MANAGER: "Dirección de operaciones",
-  STORE_MANAGER: "Gestión de tienda",
-  INVENTORY_BUYER: "Inventario y compras",
-  FULFILLMENT: "Alistamiento y despacho",
-  CUSTOMER_SUPPORT: "Servicio al cliente",
-  FINANCE_ANALYST: "Análisis financiero",
-  CMS_EDITOR: "Edición de contenido",
-};
 
 function pageHref(params: Record<string, string>, page: number): string {
   const query = new URLSearchParams(params);
@@ -153,6 +144,10 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
               {user.id === session.profile.id ? (
                 <p className="mt-4 text-sm text-muted-foreground">
                   Tu propia cuenta solo se administra mediante otro superadministrador autorizado.
+                </p>
+              ) : !canAssignAdminRole(session.profile.role, user.role) ? (
+                <p className="mt-4 text-sm text-muted-foreground">
+                  Solo lectura: tu rol no permite administrar una cuenta de este anillo.
                 </p>
               ) : (
                 <div className="mt-4">

@@ -44,5 +44,3 @@ export const requiredLegalSlugs = [
   "envios-y-entregas",
   "pqrs",
 ] as const;
-
-export type RequiredLegalSlug = (typeof requiredLegalSlugs)[number];

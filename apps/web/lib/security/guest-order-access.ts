@@ -41,7 +41,7 @@ export async function getGuestOrderAccess(
   }
 }
 
-export async function getGuestOrderActor(token: string): Promise<PostSaleActor | null> {
+async function getGuestOrderActor(token: string): Promise<PostSaleActor | null> {
   return (await getGuestOrderAccess(token))?.actor ?? null;
 }
 

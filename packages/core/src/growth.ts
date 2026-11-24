@@ -2,7 +2,7 @@ import { roundDivHalfUp } from "./inventory.js";
 
 export const loyaltyEarnUnitCents = 10_000_000n;
 export const loyaltyReferralPoints = 50;
-export const referralCodeLength = 12;
+const referralCodeLength = 12;
 
 const maximumPoints = 2_147_483_647;
 

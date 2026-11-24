@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 
-export const maxSignedBigInt = 9_223_372_036_854_775_807n;
+const maxSignedBigInt = 9_223_372_036_854_775_807n;
 export const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-export const operationKeyPattern = /^[A-Za-z0-9._:-]{3,128}$/;
+const operationKeyPattern = /^[A-Za-z0-9._:-]{3,128}$/;
 
 export function assertIntegrationUuid(value: string, field: string): string {
   if (typeof value !== "string" || !uuidPattern.test(value))
@@ -53,26 +53,59 @@ export function hash32(value: Uint8Array, field: string): Uint8Array<ArrayBuffer
   return Uint8Array.from(value);
 }
 
-function canonical(value: unknown): unknown {
-  if (typeof value === "bigint") return value.toString();
-  if (value instanceof Uint8Array) return Buffer.from(value).toString("base64");
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(canonical);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, entry]) => [key, canonical(entry)]),
-    );
-  }
-  return value;
+interface IntegrationCanonicalizationOptions {
+  readonly strict?: boolean;
 }
 
-export function integrationDigest(value: unknown): Uint8Array<ArrayBuffer> {
-  return createHash("sha256")
-    .update(JSON.stringify(canonical(value)), "utf8")
-    .digest();
+function serializeCanonical(value: unknown, strict: boolean): string {
+  if (typeof value === "bigint") return JSON.stringify(value.toString());
+  if (!strict && value instanceof Uint8Array) {
+    return JSON.stringify(Buffer.from(value).toString("base64"));
+  }
+  if (!strict && value instanceof Date) return JSON.stringify(value.toISOString());
+  if (strict && typeof value === "number" && !Number.isFinite(value)) {
+    throw new TypeError("Non-finite numbers are not canonical JSON.");
+  }
+  if (Array.isArray(value)) {
+    return `[${value
+      .map((entry) =>
+        !strict && (entry === undefined || typeof entry === "function" || typeof entry === "symbol")
+          ? "null"
+          : serializeCanonical(entry, strict),
+      )
+      .join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${serializeCanonical(entry, strict)}`);
+    return `{${entries.join(",")}}`;
+  }
+  if (strict && (value === undefined || typeof value === "function" || typeof value === "symbol")) {
+    throw new TypeError("Unsupported value in integration payload.");
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) {
+    throw new TypeError("Integration payload must be JSON serializable.");
+  }
+  return serialized;
+}
+
+export function canonicalIntegrationJson(
+  value: unknown,
+  options: IntegrationCanonicalizationOptions = {},
+): string {
+  return serializeCanonical(value, options.strict === true);
+}
+
+export function integrationDigest(
+  value: unknown,
+  options: IntegrationCanonicalizationOptions = {},
+): Uint8Array<ArrayBuffer> {
+  return Uint8Array.from(
+    createHash("sha256").update(canonicalIntegrationJson(value, options), "utf8").digest(),
+  );
 }
 
 export function centsToDecimal(value: bigint): string {
@@ -91,7 +124,7 @@ export function publicHttpsUrl(value: string, field: string, maximumPathLength =
   } catch {
     throw new TypeError(`${field} must be an absolute URL.`);
   }
-  const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
   if (
     (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
     url.username ||

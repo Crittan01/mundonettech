@@ -14,6 +14,7 @@ import type {
   ProductStatus,
 } from "./generated/client.js";
 import { Prisma } from "./generated/client.js";
+import { compareStrings } from "./inventory-shared.js";
 import type {
   AdminCatalogPage,
   AdminCatalogStatus,
@@ -399,10 +400,6 @@ async function writeCatalogAudit(
       metadata,
     },
   });
-}
-
-function compareStrings(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function parseLookupSlug(value: string | undefined): string | null {
@@ -1467,6 +1464,9 @@ export class CatalogService {
           brand: true,
           category: true,
           taxGroup: true,
+          media: {
+            orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+          },
           variants: {
             where: { deletedAt: null },
             orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
@@ -1488,6 +1488,15 @@ export class CatalogService {
     if (!product) return null;
     return {
       ...product,
+      media: product.media.map((media) => ({
+        ...toMedia(media),
+        status: media.status,
+        mimeType: media.mimeType,
+        frameCount: media.frameCount,
+        position: media.position,
+        createdAt: media.createdAt,
+        deletedAt: media.deletedAt,
+      })),
       hasInventoryHistory,
       formattedAttributes: product.attributeValues.map((entry) => ({
         id: entry.id,

@@ -25,7 +25,9 @@ import {
   assertUuid,
   hasUniqueViolation,
   inInventoryTransaction,
+  isSellableVariant,
 } from "./inventory-shared.js";
+import { databaseNow } from "./primitives.js";
 import type { PricingMutationAudit } from "./pricing-types.js";
 import type { CartReference, CartSnapshot } from "./cart-types.js";
 import { assertProposalIntegrity } from "./b2b-shared.js";
@@ -158,11 +160,6 @@ function validateExpiration(value: Date, field: string): Date {
   return value;
 }
 
-async function databaseNow(tx: Prisma.TransactionClient): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
-}
-
 async function loadCart(tx: Prisma.TransactionClient, id: string): Promise<CartWithItems> {
   const cart = await tx.cart.findUnique({ where: { id }, include: cartInclude });
   if (!cart) throw new CartNotFoundError();
@@ -291,14 +288,7 @@ function serializeIssues(issues: readonly CartPricingIssue[]): Prisma.InputJsonV
 }
 
 function isSellable(variant: VariantWithProduct): boolean {
-  return (
-    variant.status === "ACTIVE" &&
-    variant.deletedAt === null &&
-    variant.product.status === "ACTIVE" &&
-    variant.product.deletedAt === null &&
-    variant.product.brand.deletedAt === null &&
-    variant.product.category.deletedAt === null
-  );
+  return isSellableVariant(variant);
 }
 
 function couponDefinition(coupon: CouponWithRestrictions): PricingCoupon {

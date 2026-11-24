@@ -8,6 +8,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   resumeWompiPaymentAction,
   startReceiptPaymentAction,
@@ -32,9 +33,6 @@ const statusLabels = {
   CANCELLED: "Cancelado",
   EXPIRED: "Expirado",
 } as const;
-
-const selectClass =
-  "flex h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export function ReceiptPaymentPanel({
   token,
@@ -211,12 +209,12 @@ export function ReceiptPaymentPanel({
           {paymentMethod === "WOMPI" && wompiAccounts.length > 1 ? (
             <div className="space-y-2">
               <Label htmlFor="receipt-wompi-account">Cuenta Wompi</Label>
-              <select
+              <Select
                 id="receipt-wompi-account"
                 name="wompiCredentialId"
                 value={credentialId}
                 onChange={(event) => setCredentialId(event.target.value)}
-                className={selectClass}
+                className="flex py-2"
                 required
               >
                 {wompiAccounts.map((account) => (
@@ -224,7 +222,7 @@ export function ReceiptPaymentPanel({
                     {account.accountName}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           ) : (
             <input type="hidden" name="wompiCredentialId" value={credentialId} />

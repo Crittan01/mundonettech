@@ -2,7 +2,7 @@ const supportedGs1Lengths = new Set([8, 12, 13, 14, 18]);
 const supportedCommercialGtinLengths = new Set([8, 12, 13, 14]);
 const supportedEanLengths = new Set([8, 13]);
 
-export function normalizeGs1(value: string): string {
+function normalizeGs1(value: string): string {
   return value.trim().replace(/[\s-]/g, "");
 }
 

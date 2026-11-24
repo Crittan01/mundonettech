@@ -10,6 +10,23 @@ export class DeliveryValidationError extends Error {
   }
 }
 
+export function parseCoordinateE6(
+  value: string,
+  field: string,
+  minimum: number,
+  maximum: number,
+): number {
+  const match = /^(-?)([0-9]{1,3})(?:\.([0-9]{1,6}))?$/.exec(value.trim());
+  if (!match) throw new TypeError(`${field} must use at most six decimal places.`);
+  const whole = Number(match[2]);
+  const fraction = Number((match[3] ?? "").padEnd(6, "0") || 0);
+  const scaled = (match[1] === "-" ? -1 : 1) * (whole * 1_000_000 + fraction);
+  if (!Number.isSafeInteger(scaled) || scaled < minimum || scaled > maximum) {
+    throw new RangeError(`${field} is outside its valid range.`);
+  }
+  return scaled === 0 ? 0 : scaled;
+}
+
 function coordinate(value: number, field: string, minimum: number, maximum: number): number {
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new DeliveryValidationError(

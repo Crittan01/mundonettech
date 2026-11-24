@@ -56,7 +56,7 @@ function signedEvent(options = {}) {
 }
 
 function provider(fetchImpl) {
-  return new WompiPaymentProvider(credentials, { fetchImpl, timeoutMs: 50 });
+  return new WompiPaymentProvider(credentials, { fetchImpl, timeoutMs: 100 });
 }
 
 function operation() {
@@ -66,6 +66,31 @@ function operation() {
     externalCaptureId: "1292-1602113476-10985",
     amountCents: 150000n,
     reason: "Reverso validado",
+  };
+}
+
+function oversizedResponse({ chunked, status }) {
+  let cancelled = false;
+  let pulls = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      if (chunked && pulls <= 2) {
+        controller.enqueue(new Uint8Array(600_000));
+      } else if (!chunked && pulls === 1) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      }
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  return {
+    response: new Response(body, {
+      status,
+      ...(chunked ? {} : { headers: { "content-length": "1000001" } }),
+    }),
+    cancelled: () => cancelled,
   };
 }
 
@@ -330,6 +355,34 @@ describe("F3.3 — Wompi API refunds, voids and synchronization", () => {
     assert.equal(transaction.amountCents, 150000n);
     assert.equal(transaction.status, "APPROVED");
   });
+
+  const operations = [
+    {
+      name: "transaction lookup",
+      status: 200,
+      execute: (gateway) => gateway.getTransaction(operation().externalCaptureId),
+    },
+    { name: "refund", status: 201, execute: (gateway) => gateway.refund(operation()) },
+    { name: "void", status: 200, execute: (gateway) => gateway.void(operation()) },
+  ];
+  for (const operationUnderTest of operations) {
+    for (const chunked of [true, false]) {
+      it(`cancels an oversized ${chunked ? "chunked" : "declared-length"} ${operationUnderTest.name} response without retrying`, async () => {
+        const fixture = oversizedResponse({ chunked, status: operationUnderTest.status });
+        let calls = 0;
+        const gateway = provider(async () => {
+          calls += 1;
+          return fixture.response;
+        });
+        await assert.rejects(
+          operationUnderTest.execute(gateway),
+          (error) => error instanceof PaymentProviderError && error.code === "INVALID_RESPONSE",
+        );
+        assert.equal(calls, 1);
+        assert.equal(fixture.cancelled(), true);
+      });
+    }
+  }
 });
 
 describe("F3.3 — truthful local provider semantics", () => {

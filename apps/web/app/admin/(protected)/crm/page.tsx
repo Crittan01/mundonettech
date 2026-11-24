@@ -19,6 +19,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { single } from "@/lib/admin-search-params";
 import { crmMergeService, crmService } from "@/lib/crm";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
@@ -30,18 +32,12 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const selectClass =
-  "h-11 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const querySchema = z.object({
   q: z.string().trim().max(320).optional(),
   status: z.enum(["ACTIVE", "MERGED", "ANONYMIZED"]).optional(),
   tasks: z.enum(["all", "mine"]).optional(),
   cursor: z.string().uuid().optional(),
 });
-
-function single(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
 
 export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">) {
   const session = await requireAdminPage("crm:read");
@@ -123,28 +119,28 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
           </div>
           <div className="space-y-2">
             <Label htmlFor="crm-status">Estado</Label>
-            <select
+            <Select
               id="crm-status"
               name="status"
-              className={selectClass}
+              fullWidth={false}
               defaultValue={query.status ?? "ACTIVE"}
             >
               <option value="ACTIVE">Activos</option>
               <option value="MERGED">Fusionados</option>
               <option value="ANONYMIZED">Anonimizados</option>
-            </select>
+            </Select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="crm-tasks">Cola de tareas</Label>
-            <select
+            <Select
               id="crm-tasks"
               name="tasks"
-              className={selectClass}
+              fullWidth={false}
               defaultValue={query.tasks ?? "all"}
             >
               <option value="all">Todas las abiertas</option>
               <option value="mine">Asignadas a mí</option>
-            </select>
+            </Select>
           </div>
           <Button type="submit" variant="outline">
             Filtrar

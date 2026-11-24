@@ -13,6 +13,7 @@ import {
   OperationsService,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
+import { databaseNow, recordAdminAction } from "../packages/db/dist/primitives.js";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
 
 let harness;
@@ -116,6 +117,57 @@ after(async () => {
 });
 
 describe("CRM 360 production behavior", () => {
+  it("reads the authoritative PG17 clock through client and transaction executors", async () => {
+    const clientNow = await databaseNow(db);
+    assert.ok(clientNow instanceof Date);
+    assert.ok(Math.abs(clientNow.getTime() - Date.now()) < 10_000);
+    await db.$transaction(async (tx) => {
+      const transactionNow = await databaseNow(tx);
+      const rows = await tx.$queryRaw`SELECT CURRENT_TIMESTAMP AS now`;
+      assert.ok(transactionNow instanceof Date);
+      assert.equal(transactionNow.getTime(), rows[0].now.getTime());
+    });
+  });
+
+  it("persists shared audit hashes and request IDs while PG17 derives selfDealing", async () => {
+    const requestId = randomUUID();
+    const generatedTargetId = randomUUID();
+    const ipHash = Uint8Array.from(Array.from({ length: 32 }, (_, index) => index));
+    const userAgentHash = Uint8Array.from(Array.from({ length: 32 }, (_, index) => index + 32));
+    await db.$transaction(async (tx) => {
+      await recordAdminAction(
+        tx,
+        { actorAdminUserId: adminId, ipHash, userAgentHash, requestId },
+        "CRM_PRIMITIVE_AUDIT",
+        "AdminUser",
+        adminId,
+        { verified: true },
+      );
+      await recordAdminAction(
+        tx,
+        { actorAdminUserId: adminId, ipHash, userAgentHash: null },
+        "CRM_PRIMITIVE_AUDIT_GENERATED",
+        "Contact",
+        generatedTargetId,
+      );
+    });
+    const persisted = await db.adminActionLog.findFirstOrThrow({ where: { requestId } });
+    assert.equal(persisted.targetAdminUserId, adminId);
+    assert.equal(persisted.selfDealing, true);
+    assert.deepEqual(Uint8Array.from(persisted.ipHash), ipHash);
+    assert.deepEqual(Uint8Array.from(persisted.userAgentHash), userAgentHash);
+    assert.deepEqual(persisted.metadata, { verified: true });
+    const generated = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "CRM_PRIMITIVE_AUDIT_GENERATED", targetId: generatedTargetId },
+    });
+    assert.match(
+      generated.requestId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    assert.equal(generated.userAgentHash, null);
+    assert.equal(generated.selfDealing, false);
+  });
+
   it("persists organizations, masked contacts, verification, activities and tasks", async () => {
     const organization = await crm.createOrganization(
       { legalName: "Comercializadora Andina", commercialName: "Andina", taxId: "901.234.567-8" },
@@ -413,6 +465,46 @@ describe("CRM 360 production behavior", () => {
         audit,
       ),
       (error) => error instanceof CrmError && error.code === "CONFLICT",
+    );
+  });
+
+  it("keeps manual CRM task guards distinct from self-service cancellation", async () => {
+    const contact = await createContact();
+    const activity = await crm.addActivity(
+      { contactId: contact.id, kind: "NOTE", body: "No debe redactarse tras un guard fallido." },
+      audit,
+    );
+    const task = await crm.createTask(
+      { contactId: contact.id, title: "Obligación CRM abierta", dueAt: future() },
+      supportAudit,
+    );
+    const currentContact = await db.contact.findUniqueOrThrow({ where: { id: contact.id } });
+    await assert.rejects(
+      retention.suppress(
+        {
+          contactId: contact.id,
+          expectedVersion: currentContact.version,
+          reason: "DATA_SUBJECT_REQUEST",
+          privacyPolicyVersion: "1.0.0",
+        },
+        audit,
+      ),
+      (error) =>
+        error instanceof CrmError &&
+        error.code === "CONFLICT" &&
+        error.message.includes("Resolve open CRM tasks"),
+    );
+    const persistedTask = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+    assert.equal(persistedTask.status, "PENDING");
+    assert.equal(persistedTask.version, task.version);
+    assert.equal(persistedTask.redactedAt, null);
+    assert.equal(
+      (await db.contact.findUniqueOrThrow({ where: { id: contact.id } })).status,
+      "ACTIVE",
+    );
+    assert.equal(
+      (await db.contactActivity.findUniqueOrThrow({ where: { id: activity.id } })).redactedAt,
+      null,
     );
   });
 

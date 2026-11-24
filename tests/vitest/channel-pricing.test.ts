@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   calculateMercadoLibreOfferPrice,
   ChannelPricingError,
+  maxSignedBigInt,
   mercadoLibreCopDeadZoneEndCents,
   mercadoLibreCopFreeShippingThresholdCents,
 } from "../../packages/core/dist/index.js";
@@ -80,6 +81,21 @@ describe("Mercado Libre COP offer pricing", () => {
       { mode: "FORMULA" as const, targetNetCents: 1n, ...fees, commissionBps: 5_001 },
     ]) {
       expect(() => calculateMercadoLibreOfferPrice(input)).toThrow(ChannelPricingError);
+    }
+  });
+
+  it("rejects formula targets at and immediately below INT8 when commission gross-up overflows", () => {
+    const commissionOnly = { commissionBps: 1_000, fixedFeeCents: 0n, shippingCostCents: 0n };
+    for (const targetNetCents of [maxSignedBigInt, maxSignedBigInt - 1n]) {
+      expect(() =>
+        calculateMercadoLibreOfferPrice({
+          mode: "FORMULA",
+          targetNetCents,
+          ...commissionOnly,
+        }),
+      ).toThrowError(
+        expect.objectContaining<Partial<ChannelPricingError>>({ code: "MONEY_OVERFLOW" }),
+      );
     }
   });
 

@@ -22,7 +22,7 @@ import {
   type ActionState,
 } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
-import { createCmsMediaStorage } from "@/lib/media-storage";
+import { createMediaStorage } from "@/lib/media-storage";
 import {
   AdminAuthorizationError,
   getAdminSession,
@@ -127,6 +127,8 @@ function pageInput(formData: FormData) {
 
 function invalidateCms(options: { pageId?: string; slugs?: readonly (string | undefined)[] } = {}) {
   updateTag("cms");
+  updateTag("seo");
+  updateTag("sitemap");
   for (const slug of new Set(options.slugs ?? [])) {
     if (slug) updateTag(`cms:page:${slug}`);
   }
@@ -436,7 +438,6 @@ export async function saveStoreSettingsAction(
       },
       audit(session, request),
     );
-    updateTag("store-settings");
     revalidatePath("/admin/configuracion");
     return actionSuccess(
       `Configuración guardada para ${settings.currency} y ${settings.timeZone}.`,
@@ -451,10 +452,10 @@ export async function uploadCmsMediaAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
-  let storage: ReturnType<typeof createCmsMediaStorage> | null = null;
+  let storage: ReturnType<typeof createMediaStorage> | null = null;
   try {
     const { session, request } = await authorize("content:write");
-    storage = createCmsMediaStorage();
+    storage = createMediaStorage();
     const file = formData.get("file");
     if (!(file instanceof File) || file.size === 0) {
       throw new CmsValidationError("An image file is required.");

@@ -19,6 +19,28 @@ export function compareStrings(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+interface SellableVariant {
+  readonly status: string;
+  readonly deletedAt: Date | null;
+  readonly product: {
+    readonly status: string;
+    readonly deletedAt: Date | null;
+    readonly brand: { readonly deletedAt: Date | null };
+    readonly category: { readonly deletedAt: Date | null };
+  };
+}
+
+export function isSellableVariant(variant: SellableVariant): boolean {
+  return (
+    variant.status === "ACTIVE" &&
+    variant.deletedAt === null &&
+    variant.product.status === "ACTIVE" &&
+    variant.product.deletedAt === null &&
+    variant.product.brand.deletedAt === null &&
+    variant.product.category.deletedAt === null
+  );
+}
+
 function canonicalJsonValue(value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();
   if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item));

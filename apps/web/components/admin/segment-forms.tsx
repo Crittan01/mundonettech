@@ -2,12 +2,17 @@
 
 import { useActionState } from "react";
 
-import { rfmClassLabels, type CustomerSegmentDefinition } from "@mundonettech/core";
+import {
+  formatCopCentsForInput,
+  rfmClassLabels,
+  type CustomerSegmentDefinition,
+} from "@mundonettech/core";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { initialActionState } from "@/lib/action-state";
 import {
@@ -16,9 +21,6 @@ import {
   transitionSegmentAction,
   updateSegmentAction,
 } from "@/lib/actions/admin-lifecycle";
-
-const fieldClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 const emptyDefinition: CustomerSegmentDefinition = {
   minFrequency: null,
@@ -29,10 +31,6 @@ const emptyDefinition: CustomerSegmentDefinition = {
   lastPurchaseOlderThanDays: null,
   rfmClass: null,
 };
-
-function wholeCop(cents: string | null): string {
-  return cents === null ? "" : (BigInt(cents) / 100n).toString();
-}
 
 function NumberField({
   id,
@@ -103,10 +101,9 @@ export function SegmentEditorForm({
         </div>
         <div className="space-y-2">
           <Label htmlFor={`${prefix}-rfm`}>Clase RFM</Label>
-          <select
+          <Select
             id={`${prefix}-rfm`}
             name="rfmClass"
-            className={fieldClass}
             defaultValue={values?.rfmClass ?? definition.rfmClass ?? ""}
           >
             <option value="">Cualquier clase</option>
@@ -115,7 +112,7 @@ export function SegmentEditorForm({
                 {label}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
       </div>
       <div className="space-y-2">
@@ -144,19 +141,19 @@ export function SegmentEditorForm({
         />
       </fieldset>
       <fieldset className="grid gap-4 rounded-lg border border-border p-4 sm:grid-cols-2">
-        <legend className="px-1 text-sm font-medium">LTV neto en pesos enteros COP</legend>
+        <legend className="px-1 text-sm font-medium">LTV neto en COP</legend>
         <div className="space-y-2">
           <Label htmlFor={`${prefix}-min-ltv`}>Mínimo</Label>
           <Input
             id={`${prefix}-min-ltv`}
             name="minNetLtvCop"
-            type="number"
-            min={0}
-            step={1}
+            inputMode="decimal"
+            pattern="[0-9]+([.,][0-9]{1,2})?"
+            maxLength={22}
             defaultValue={
               values !== undefined
                 ? (values.minNetLtvCop ?? "")
-                : wholeCop(definition.minNetLtvCents)
+                : formatCopCentsForInput(definition.minNetLtvCents)
             }
             placeholder="Sin mínimo"
           />
@@ -166,13 +163,13 @@ export function SegmentEditorForm({
           <Input
             id={`${prefix}-max-ltv`}
             name="maxNetLtvCop"
-            type="number"
-            min={0}
-            step={1}
+            inputMode="decimal"
+            pattern="[0-9]+([.,][0-9]{1,2})?"
+            maxLength={22}
             defaultValue={
               values !== undefined
                 ? (values.maxNetLtvCop ?? "")
-                : wholeCop(definition.maxNetLtvCents)
+                : formatCopCentsForInput(definition.maxNetLtvCents)
             }
             placeholder="Sin máximo"
           />

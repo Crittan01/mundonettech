@@ -6,6 +6,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { initialActionState } from "@/lib/action-state";
 import {
@@ -24,9 +25,6 @@ import {
   updateCrmTaskAction,
   verifyCrmContactAction,
 } from "@/lib/actions/admin-crm";
-
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 function Field({
   id,
@@ -219,10 +217,9 @@ export function CrmContactForm({
       ) : null}
       <div className="space-y-2 sm:col-span-2">
         <Label htmlFor={`${prefix}-organization`}>Organización</Label>
-        <select
+        <Select
           id={`${prefix}-organization`}
           name="organizationId"
-          className={selectClass}
           defaultValue={state.values?.organizationId ?? contact?.organizationId ?? ""}
           disabled={pending}
         >
@@ -232,7 +229,7 @@ export function CrmContactForm({
               {organization.legalName}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <Field
         id={`${prefix}-given`}
@@ -296,18 +293,18 @@ export function CrmVerificationForm({
       <input type="hidden" name="expectedVersion" value={version} />
       <div className="space-y-2">
         <Label htmlFor="verification-level">Nivel a verificar</Label>
-        <select id="verification-level" name="level" className={selectClass} disabled={pending}>
+        <Select id="verification-level" name="level" disabled={pending}>
           <option value="SINGLE_CHANNEL_VERIFIED">Un canal</option>
           <option value="DUAL_CHANNEL_VERIFIED">Correo y teléfono</option>
           <option value="IDENTITY_VERIFIED">Identidad documental</option>
-        </select>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor="verification-channel">Canal, si es individual</Label>
-        <select id="verification-channel" name="channel" className={selectClass} disabled={pending}>
+        <Select id="verification-channel" name="channel" disabled={pending}>
           <option value="EMAIL">Correo</option>
           <option value="PHONE">Teléfono</option>
-        </select>
+        </Select>
       </div>
       <div className="sm:col-span-2">
         <Field
@@ -426,12 +423,12 @@ export function CrmActivityForm({ contactId }: { contactId: string }) {
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="activity-kind">Tipo</Label>
-          <select id="activity-kind" name="kind" className={selectClass} disabled={pending}>
+          <Select id="activity-kind" name="kind" disabled={pending}>
             <option value="NOTE">Nota</option>
             <option value="CALL">Llamada</option>
             <option value="EMAIL">Correo</option>
             <option value="MEETING">Reunión</option>
-          </select>
+          </Select>
         </div>
         <Field
           id="activity-subject"
@@ -523,10 +520,9 @@ export function CrmTaskForm({
       />
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-assignee`}>Responsable</Label>
-        <select
+        <Select
           id={`${prefix}-assignee`}
           name="assignedToAdminUserId"
-          className={selectClass}
           defaultValue={state.values?.assignedToAdminUserId ?? task?.assignedToAdminUserId ?? ""}
           disabled={pending}
         >
@@ -536,14 +532,13 @@ export function CrmTaskForm({
               {assignee.displayName}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-priority`}>Prioridad</Label>
-        <select
+        <Select
           id={`${prefix}-priority`}
           name="priority"
-          className={selectClass}
           defaultValue={state.values?.priority ?? task?.priority ?? "NORMAL"}
           disabled={pending}
         >
@@ -551,15 +546,14 @@ export function CrmTaskForm({
           <option value="NORMAL">Normal</option>
           <option value="HIGH">Alta</option>
           <option value="URGENT">Urgente</option>
-        </select>
+        </Select>
       </div>
       {task ? (
         <div className="space-y-2">
           <Label htmlFor={`${prefix}-status`}>Estado</Label>
-          <select
+          <Select
             id={`${prefix}-status`}
             name="status"
-            className={selectClass}
             defaultValue={state.values?.status ?? task.status}
             disabled={pending}
           >
@@ -567,7 +561,7 @@ export function CrmTaskForm({
             <option value="IN_PROGRESS">En curso</option>
             <option value="COMPLETED">Completada</option>
             <option value="CANCELLED">Cancelada</option>
-          </select>
+          </Select>
         </div>
       ) : null}
       <div className="sm:col-span-2">
@@ -590,11 +584,11 @@ export function CrmSuppressionForm({ contactId, version }: { contactId: string; 
       <input type="hidden" name="expectedVersion" value={version} />
       <div className="space-y-2">
         <Label htmlFor="suppression-reason">Fundamento de supresión</Label>
-        <select id="suppression-reason" name="reason" className={selectClass} disabled={pending}>
+        <Select id="suppression-reason" name="reason" disabled={pending}>
           <option value="DATA_SUBJECT_REQUEST">Solicitud del titular</option>
           <option value="RETENTION_EXPIRED">Retención vencida</option>
           <option value="OPERATIONAL_REVIEW">Revisión operativa</option>
-        </select>
+        </Select>
       </div>
       <Field
         id="suppression-confirmation"

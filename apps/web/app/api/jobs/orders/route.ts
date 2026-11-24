@@ -1,7 +1,10 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-
-import { hasAdminPermission } from "@mundonettech/core";
-import { OperationsService, OrderLifecycleService } from "@mundonettech/db";
+import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
+import {
+  OperationsService,
+  OrderLifecycleService,
+  purgeExpiredIdempotencyKeys,
+} from "@mundonettech/db";
+import { revalidateTag } from "next/cache";
 import { z } from "zod";
 
 import { b2bService } from "@/lib/b2b";
@@ -22,12 +25,6 @@ export async function GET() {
     { error: "Method not allowed." },
     { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } },
   );
-}
-
-function matchesSecret(provided: string, expected: string): boolean {
-  const left = createHash("sha256").update(provided).digest();
-  const right = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(left, right);
 }
 
 export async function POST(request: Request) {
@@ -55,20 +52,35 @@ export async function POST(request: Request) {
   }
   const service = new OrderLifecycleService(db);
   const abandoned = await service.captureAbandonedCarts();
-  const reservations = await service.releaseExpiredOrderReservations();
+  let reservations: Awaited<ReturnType<OrderLifecycleService["releaseExpiredOrderReservations"]>>;
+  try {
+    reservations = await service.releaseExpiredOrderReservations();
+    if (reservations.releasedOrders > 0) revalidateTag("catalog:inventory", { expire: 0 });
+  } catch (error) {
+    revalidateTag("catalog:inventory", { expire: 0 });
+    throw error;
+  }
   const partialPaymentReviews = await service.flagExpiredPartialPaymentReviews();
   const fiscalWatch = await financeService().refreshFiscalWatch();
   const expiredProposals = await b2bService(db).expireDueProposals();
   const lifecycle = await lifecycleService(db).runScheduledWork(100);
   const security = await getRequestSecurityContext();
-  const crmRetention = await crmRetentionService(db).runDue(
-    { privacyPolicyVersion: crmPrivacyPolicyVersion! },
-    {
-      actorAdminUserId: actor.id,
-      ipHash: security.ipHash,
-      userAgentHash: security.userAgentHash,
-    },
-  );
+  let crmRetention: Awaited<ReturnType<ReturnType<typeof crmRetentionService>["runDue"]>>;
+  try {
+    crmRetention = await crmRetentionService(db).runDue(
+      { privacyPolicyVersion: crmPrivacyPolicyVersion! },
+      {
+        actorAdminUserId: actor.id,
+        ipHash: security.ipHash,
+        userAgentHash: security.userAgentHash,
+      },
+    );
+    if (crmRetention.suppressed.length > 0) revalidateTag("reviews", { expire: 0 });
+  } catch (error) {
+    revalidateTag("reviews", { expire: 0 });
+    throw error;
+  }
+  const purgedIdempotencyKeys = await purgeExpiredIdempotencyKeys(db, { limit: 500 });
   await new OperationsService(db).synchronizeNotifications();
   return Response.json(
     {
@@ -77,6 +89,7 @@ export async function POST(request: Request) {
       partialPaymentReviews,
       expiredProposals,
       lifecycle,
+      purgedIdempotencyKeys,
       crmRetention: {
         scanned: crmRetention.scanned,
         suppressed: crmRetention.suppressed.length,

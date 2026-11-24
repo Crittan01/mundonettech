@@ -1,5 +1,6 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 
+import { maxSignedBigInt } from "@mundonettech/core";
 import {
   acquireOperationLocks,
   compareStrings,
@@ -11,11 +12,11 @@ import {
   recordDailyFunnelCounters,
   type Order,
   type PaymentAttempt,
-  type PrismaClient,
   type StoreCreditAccount,
   type StoreCreditEntryType,
 } from "@mundonettech/db";
 
+import { databaseTimestamp, integrationDigest, uuidPattern } from "./integration-utils.js";
 import {
   PaymentAuthorizationError,
   PaymentConflictError,
@@ -26,13 +27,9 @@ import {
 } from "./payment-types.js";
 
 export type PaymentTransaction = Prisma.TransactionClient;
-export type PaymentDatabase = PrismaClient;
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f][0-9a-f]{2}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const keyPattern = /^[A-Za-z0-9._:-]{3,128}$/;
 const financialRoles = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"]);
-const maxMoney = 9_223_372_036_854_775_807n;
 
 export function assertPaymentUuid(value: string, field: string): string {
   if (typeof value !== "string" || !uuidPattern.test(value)) {
@@ -53,7 +50,7 @@ export function assertPaymentMoney(
   field = "amountCents",
   allowZero = false,
 ): bigint {
-  if (typeof value !== "bigint" || value < (allowZero ? 0n : 1n) || value > maxMoney) {
+  if (typeof value !== "bigint" || value < (allowZero ? 0n : 1n) || value > maxSignedBigInt) {
     throw new PaymentValidationError(
       `${field} must fit a ${allowZero ? "non-negative" : "positive"} signed BIGINT.`,
     );
@@ -83,26 +80,8 @@ export function paymentHash(value: Uint8Array, field: string): Uint8Array<ArrayB
   return Uint8Array.from(value);
 }
 
-function canonical(value: unknown): unknown {
-  if (typeof value === "bigint") return value.toString();
-  if (value instanceof Uint8Array) return Buffer.from(value).toString("base64");
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(canonical);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => compareStrings(left, right))
-        .map(([key, entry]) => [key, canonical(entry)]),
-    );
-  }
-  return value;
-}
-
 export function paymentDigest(value: unknown): Uint8Array<ArrayBuffer> {
-  return createHash("sha256")
-    .update(JSON.stringify(canonical(value)), "utf8")
-    .digest();
+  return integrationDigest(value);
 }
 
 export function equalHash(left: Uint8Array, right: Uint8Array): boolean {
@@ -110,11 +89,10 @@ export function equalHash(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 export async function databaseNow(tx: PaymentTransaction): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
+  return databaseTimestamp(tx);
 }
 
-export function validatePaymentAudit(audit: PaymentAuditContext): {
+function validatePaymentAudit(audit: PaymentAuditContext): {
   actorAdminUserId: string;
   ipHash: Uint8Array<ArrayBuffer>;
   userAgentHash: Uint8Array<ArrayBuffer> | null;

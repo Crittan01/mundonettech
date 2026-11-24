@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import type { AdminPermission } from "@mundonettech/core";
 import { AccountError, CrmError } from "@mundonettech/db";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
 import {
@@ -364,6 +364,7 @@ export async function suppressCrmContactAction(_previous: ActionState, formData:
       },
       await audit("crm:suppress"),
     );
+    if (!result.replayed && result.customers.length > 0) updateTag("reviews");
     return {
       message: result.replayed
         ? "La supresión ya estaba aplicada."

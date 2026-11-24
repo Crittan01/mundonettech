@@ -118,7 +118,7 @@ export const crmSuppressionReasonLabels = {
   OPERATIONAL_REVIEW: "Revisión operativa",
 } as const;
 
-export const crmMatchReasonLabels: Readonly<Record<string, string>> = {
+const crmMatchReasonLabels: Readonly<Record<string, string>> = {
   EMAIL_EXACT: "Correo idéntico",
   PHONE_EXACT: "Teléfono idéntico",
   DOCUMENT_EXACT: "Documento idéntico",

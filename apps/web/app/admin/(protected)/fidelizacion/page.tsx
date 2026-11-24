@@ -6,6 +6,7 @@ import {
   referralStatusLabels,
 } from "@mundonettech/core";
 
+import { EmptyState } from "@/components/admin/empty-state";
 import { growthService } from "@/lib/growth";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -22,14 +23,6 @@ const abandonedStatusLabels = {
   RECOVERED: "Recuperado",
   EXPIRED: "Vencido",
 } as const;
-
-function EmptyState({ children }: { readonly children: string }) {
-  return (
-    <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-      {children}
-    </p>
-  );
-}
 
 export default async function GrowthAdminPage() {
   const session = await requireAdminPage("crm:read");

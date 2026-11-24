@@ -394,18 +394,6 @@ export class WompiWebhookService {
               },
             });
             await refreshOrderPaymentStatus(tx, order.id);
-            await writePaymentOutbox(tx, {
-              eventType: "payment.wompi.succeeded.v1",
-              aggregateType: "PaymentAttempt",
-              aggregateId: attempt.id,
-              deduplicationKey: `payment-attempt:${attempt.id}:wompi-succeeded:v1`,
-              payload: {
-                attemptId: attempt.id,
-                orderId: order.id,
-                amountCents: attempt.amountCents.toString(),
-                externalId: transaction.id,
-              },
-            });
           }
           return finish("PROCESSED");
         }

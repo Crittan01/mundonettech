@@ -1,19 +1,12 @@
 import { formatCopCents, hasAdminPermission, maskEmail, maskIdentifier } from "@mundonettech/core";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { FiscalOperationForm } from "@/components/admin/fiscal-operation-forms";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Facturación electrónica DIAN" };
-
-function Empty({ children }: { children: string }) {
-  return (
-    <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-      {children}
-    </p>
-  );
-}
 
 export default async function InvoicesPage() {
   const session = await requireAdminPage("invoices:read");

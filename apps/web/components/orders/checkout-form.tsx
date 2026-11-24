@@ -8,6 +8,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { confirmCheckoutAction, quoteLocalDeliveryAction } from "@/lib/actions/checkout";
 import { initialActionState } from "@/lib/action-state";
 import type { StorefrontCheckoutPreview } from "@/lib/checkout";
@@ -19,9 +20,6 @@ const steps = [
 ] as const;
 
 const initialFlexQuoteState = { status: "idle", message: "", quotes: [] } as const;
-
-const selectClass =
-  "flex h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export function CheckoutForm({
   preview,
@@ -319,10 +317,10 @@ export function CheckoutForm({
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-document-type">Tipo de documento</Label>
-              <select
+              <Select
                 id="checkout-document-type"
                 name="buyerDocumentType"
-                className={selectClass}
+                className="flex py-2"
                 defaultValue={field("buyerDocumentType", "13")}
                 required={method !== "CLICK_COLLECT" || preview.taxRegime === "RESPONSABLE_IVA"}
               >
@@ -336,7 +334,7 @@ export function CheckoutForm({
                 <option value="21">Carné de extranjería</option>
                 <option value="50">NIT de otro país</option>
                 <option value="91">NUIP</option>
-              </select>
+              </Select>
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-document-number">Número de documento</Label>
@@ -357,17 +355,17 @@ export function CheckoutForm({
             {preview.taxRegime === "RESPONSABLE_IVA" ? (
               <div className="space-y-2 sm:col-span-2">
                 <Label htmlFor="checkout-buyer-tax-regime">Régimen de IVA del comprador</Label>
-                <select
+                <Select
                   id="checkout-buyer-tax-regime"
                   name="buyerTaxRegime"
-                  className={selectClass}
+                  className="flex py-2"
                   defaultValue={field("buyerTaxRegime")}
                   required
                 >
                   <option value="">Selecciona el régimen</option>
                   <option value="NO_RESPONSABLE_IVA">No responsable de IVA</option>
                   <option value="RESPONSABLE_IVA">Responsable de IVA</option>
-                </select>
+                </Select>
               </div>
             ) : null}
           </div>
@@ -378,10 +376,10 @@ export function CheckoutForm({
           >
             <div className="space-y-2">
               <Label htmlFor="checkout-department">Departamento</Label>
-              <select
+              <Select
                 id="checkout-department"
                 name="departmentCode"
-                className={selectClass}
+                className="flex py-2"
                 value={departmentCode}
                 onChange={(event) => {
                   setDepartmentCode(event.target.value);
@@ -396,14 +394,14 @@ export function CheckoutForm({
                     {department.name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-municipality">Municipio o territorio</Label>
-              <select
+              <Select
                 id="checkout-municipality"
                 name="municipalityCode"
-                className={selectClass}
+                className="flex py-2"
                 key={departmentCode}
                 value={municipalityCode}
                 onChange={(event) => {
@@ -418,7 +416,7 @@ export function CheckoutForm({
                     {municipality.name} · {municipality.code}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <div className="space-y-2 sm:col-span-2">
               <Label htmlFor="checkout-address">Dirección</Label>
@@ -744,12 +742,12 @@ export function CheckoutForm({
             {paymentMethod === "WOMPI" && preview.paymentMethods.wompiAccounts.length > 1 ? (
               <div className="space-y-2">
                 <Label htmlFor="wompi-credential">Cuenta Wompi</Label>
-                <select
+                <Select
                   id="wompi-credential"
                   name="wompiCredentialId"
                   value={wompiCredentialId}
                   onChange={(event) => setWompiCredentialId(event.target.value)}
-                  className={selectClass}
+                  className="flex py-2"
                   required
                 >
                   {preview.paymentMethods.wompiAccounts.map((account) => (
@@ -757,7 +755,7 @@ export function CheckoutForm({
                       {account.accountName}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             ) : (
               <input type="hidden" name="wompiCredentialId" value={wompiCredentialId} />

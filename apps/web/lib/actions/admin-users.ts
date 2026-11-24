@@ -2,7 +2,6 @@
 
 import {
   canAssignAdminRole,
-  canManageAdministrator,
   isAdminRole,
   normalizeEmail,
   OutboundEmailDisabledError,
@@ -115,7 +114,7 @@ export async function updateAdministratorAction(
       const target = await tx.adminUser.findUnique({ where: { id: parsed.data.targetId } });
       if (!target || target.deletedAt || !isAdminRole(target.role))
         throw new OperationFailure("El administrador no existe.");
-      if (!canManageAdministrator(session.profile.role, target.role))
+      if (!canAssignAdminRole(session.profile.role, target.role))
         throw new OperationFailure(
           "No puedes administrar una cuenta de tu mismo anillo o superior.",
         );

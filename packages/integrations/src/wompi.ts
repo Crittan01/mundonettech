@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 import { IntegrationEnvironment } from "@mundonettech/db";
 
+import { fetchWithLimit, IntegrationTransportError } from "./integration-http.js";
 import {
   PaymentProviderError,
   PaymentValidationError,
@@ -347,10 +348,17 @@ export class WompiPaymentProvider implements PaymentProvider {
   readonly code = "WOMPI" as const;
   private readonly apiOrigin: string;
 
+  private readonly timeoutMs: number;
+
   constructor(
     private readonly credentials: WompiCredentials,
     private readonly options: { fetchImpl?: FetchImplementation; timeoutMs?: number } = {},
   ) {
+    const timeoutMs = options.timeoutMs ?? 10_000;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) {
+      throw new PaymentValidationError("Wompi timeoutMs must be an integer between 100 and 60000.");
+    }
+    this.timeoutMs = timeoutMs;
     this.apiOrigin =
       credentials.mode === "prod" ? "https://production.wompi.co" : "https://sandbox.wompi.co";
   }
@@ -366,26 +374,23 @@ export class WompiPaymentProvider implements PaymentProvider {
   ): Promise<unknown> {
     if (!/^\/v1\/[A-Za-z0-9/_-]+$/.test(path))
       throw new PaymentValidationError("Invalid Wompi API path.");
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 10_000);
     try {
-      const response = await (this.options.fetchImpl ?? fetch)(`${this.apiOrigin}${path}`, {
-        ...init,
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${this.credentials.privateKey}`,
-          ...(init.body ? { "Content-Type": "application/json" } : {}),
-          ...init.headers,
+      const response = await fetchWithLimit({
+        url: `${this.apiOrigin}${path}`,
+        init: {
+          ...init,
+          redirect: "error",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${this.credentials.privateKey}`,
+            ...(init.body ? { "Content-Type": "application/json" } : {}),
+            ...init.headers,
+          },
         },
-        signal: controller.signal,
+        fetchImpl: this.options.fetchImpl ?? fetch,
+        timeoutMs: this.timeoutMs,
+        maximumBytes: maximumResponseBytes,
       });
-      const body = await response.text();
-      if (Buffer.byteLength(body, "utf8") > maximumResponseBytes) {
-        throw new PaymentProviderError(
-          "Wompi response exceeds the resource limit.",
-          "INVALID_RESPONSE",
-        );
-      }
       if (!expectedStatuses.includes(response.status)) {
         throw new PaymentProviderError(
           `Wompi rejected the operation with HTTP ${response.status}.`,
@@ -393,18 +398,22 @@ export class WompiPaymentProvider implements PaymentProvider {
         );
       }
       try {
-        return JSON.parse(body) as unknown;
+        return JSON.parse(response.body) as unknown;
       } catch {
         throw new PaymentProviderError("Wompi returned malformed JSON.", "INVALID_RESPONSE");
       }
     } catch (error) {
       if (error instanceof PaymentProviderError) throw error;
+      if (error instanceof IntegrationTransportError && error.code === "RESPONSE_TOO_LARGE") {
+        throw new PaymentProviderError(
+          "Wompi response exceeds the resource limit.",
+          "INVALID_RESPONSE",
+        );
+      }
       throw new PaymentProviderError(
         "Wompi operation outcome is uncertain and must be reconciled before retrying.",
         "NETWORK_UNCERTAIN",
       );
-    } finally {
-      clearTimeout(timeout);
     }
   }
 

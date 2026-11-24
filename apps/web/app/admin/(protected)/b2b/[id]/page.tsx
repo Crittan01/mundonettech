@@ -21,6 +21,7 @@ import {
   B2bProposalBuilder,
   B2bProposalLifecycleForms,
 } from "@/components/admin/b2b-proposal-forms";
+import { bogotaInputValue } from "@/lib/admin-pricing-presenters";
 import { b2bService } from "@/lib/b2b";
 import { getDatabase } from "@/lib/db";
 import { getIntegrationCredentialVault } from "@/lib/integrations";
@@ -36,22 +37,9 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const inputFormatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "America/Bogota",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
 
 function defaultExpiry(): string {
-  const value = new Date(Date.now() + 7 * 86_400_000);
-  const parts = Object.fromEntries(
-    inputFormatter.formatToParts(value).map((part) => [part.type, part.value]),
-  );
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+  return bogotaInputValue(new Date(Date.now() + 7 * 86_400_000));
 }
 
 function copilotOutput(value: unknown) {

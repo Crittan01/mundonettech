@@ -1,7 +1,7 @@
 import { hasAdminPermission, isAdminRole, maskName, type AdminRoleValue } from "@mundonettech/core";
 
 import type { Prisma, PrismaClient } from "./generated/client.js";
-import { assertUuid } from "./inventory-shared.js";
+import { acquireOperationLocks, assertUuid } from "./inventory-shared.js";
 import type {
   OperationalNotification,
   OperationsPermissions,
@@ -129,6 +129,63 @@ function notificationView(record: {
 export class OperationsService {
   constructor(private readonly db: PrismaClient) {}
 
+  async openLatePaymentReview(input: {
+    attemptId: string;
+    orderId: string;
+    eventKey: string;
+  }): Promise<void> {
+    assertUuid(input.attemptId, "attemptId");
+    assertUuid(input.orderId, "orderId");
+    if (!/^[0-9a-f]{64}$/.test(input.eventKey)) {
+      throw new TypeError("eventKey must be a lowercase SHA-256 hex digest.");
+    }
+    await this.db.$transaction(async (tx) => {
+      await acquireOperationLocks(tx, [
+        `order-payment:${input.orderId}`,
+        "operations-notifications",
+      ]);
+      const orders = await tx.$queryRaw<Array<{ id: string; orderNumber: string }>>`
+        SELECT "id", "orderNumber" FROM "Order" WHERE "id" = ${input.orderId}::uuid FOR UPDATE
+      `;
+      const order = orders[0];
+      if (!order) throw new Error("Late payment review order not found.");
+      const attempts = await tx.$queryRaw<Array<{ id: string; orderId: string; provider: string }>>`
+        SELECT "id", "orderId", "provider"::text AS provider
+        FROM "PaymentAttempt" WHERE "id" = ${input.attemptId}::uuid FOR UPDATE
+      `;
+      const attempt = attempts[0];
+      if (!attempt || attempt.orderId !== order.id || attempt.provider !== "WOMPI") {
+        throw new Error("Late payment review attempt does not match the order.");
+      }
+      const evidence = await tx.paymentWebhookEvent.findUnique({
+        where: { provider_eventKey: { provider: "WOMPI", eventKey: input.eventKey } },
+        select: { attemptId: true, status: true, errorCode: true },
+      });
+      if (
+        evidence?.attemptId !== attempt.id ||
+        evidence.status !== "IGNORED" ||
+        !["LATE_APPROVAL_REVIEW", "ORDER_CANCELLED_REVIEW"].includes(evidence.errorCode ?? "")
+      ) {
+        throw new Error("Late payment review requires persisted Wompi evidence.");
+      }
+      const values = {
+        category: "payments.review",
+        severity: "CRITICAL",
+        title: `Pago tardío por revisar ${order.orderNumber}`,
+        message:
+          "Wompi reportó un resultado sobre un intento no disponible o un pedido cancelado. Concilia antes de capturar o ajustar inventario.",
+        href: `/admin/pedidos/${order.id}`,
+        entityType: "PaymentAttempt",
+        entityId: attempt.id,
+      } as const;
+      await tx.notification.upsert({
+        where: { deduplicationKey: `payment-late-review:${attempt.id}` },
+        create: { deduplicationKey: `payment-late-review:${attempt.id}`, ...values },
+        update: { resolvedAt: null },
+      });
+    });
+  }
+
   async synchronizeNotifications(): Promise<void> {
     await this.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"operations-notifications"}, 0))`;
@@ -181,6 +238,20 @@ export class OperationsService {
         FROM "PaymentAttempt" attempts
         JOIN "Order" orders ON orders."id" = attempts."orderId"
         WHERE attempts."provider" = 'BANK_TRANSFER' AND attempts."status" IN ('PENDING', 'PROCESSING')
+        UNION ALL
+        SELECT 'payment-late-review:' || attempts."id", 'payments.review', 'CRITICAL',
+          'Pago tardío por revisar ' || orders."orderNumber",
+          'Wompi reportó un resultado sobre un intento no disponible o un pedido cancelado. Concilia antes de capturar o ajustar inventario.',
+          '/admin/pedidos/' || orders."id", 'PaymentAttempt', attempts."id"::text
+        FROM "PaymentAttempt" attempts
+        JOIN "Order" orders ON orders."id" = attempts."orderId"
+        WHERE attempts."provider" = 'WOMPI'
+          AND EXISTS (
+            SELECT 1 FROM "PaymentWebhookEvent" late_events
+            WHERE late_events."attemptId" = attempts."id"
+              AND late_events."status" = 'IGNORED'
+              AND late_events."errorCode" IN ('LATE_APPROVAL_REVIEW', 'ORDER_CANCELLED_REVIEW')
+          )
         UNION ALL
         SELECT 'return-pending:' || returns."id", 'postsale.returns', 'WARNING',
           'Devolución por gestionar ' || orders."orderNumber",

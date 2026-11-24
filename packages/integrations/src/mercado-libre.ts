@@ -3,8 +3,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./integration-http.js";
 
 export const mercadoLibreAuthorizationUrl = "https://auth.mercadolibre.com.co/authorization";
-export const mercadoLibreTokenUrl = "https://api.mercadolibre.com/oauth/token";
-export const mercadoLibreScopes = ["offline_access", "read", "write"] as const;
+const mercadoLibreTokenUrl = "https://api.mercadolibre.com/oauth/token";
+const mercadoLibreScopes = ["offline_access", "read", "write"] as const;
 export const mercadoLibreCallbackPath = "/api/channels/mercado-libre/oauth/callback";
 
 export function resolveMercadoLibreOAuthCookiePolicy(env: {
@@ -29,8 +29,7 @@ export function resolveMercadoLibreOAuthCookiePolicy(env: {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 export type MercadoLibreProviderErrorCode =
   | "INVALID_INPUT"
@@ -562,11 +561,5 @@ export class MercadoLibreOAuthClient {
       if (error instanceof IntegrationTransportError) return false;
       throw error;
     }
-  }
-}
-
-export function assertMercadoLibreUuid(value: string): void {
-  if (!uuidPattern.test(value)) {
-    throw new MercadoLibreProviderError("INVALID_INPUT", null, "A canonical UUID is required.");
   }
 }

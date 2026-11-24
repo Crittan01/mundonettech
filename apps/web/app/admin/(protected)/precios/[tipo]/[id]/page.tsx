@@ -26,10 +26,9 @@ export default async function EditPricingPage({
   params,
   searchParams,
 }: PageProps<"/admin/precios/[tipo]/[id]">) {
-  const [{ tipo }, query] = await Promise.all([params, searchParams]);
+  const [{ tipo, id }, query] = await Promise.all([params, searchParams]);
   const session = await requireAdminPage("pricing:read");
   const type = types.includes(tipo as PricingType) ? (tipo as PricingType) : null;
-  const { id } = await params;
   if (!type || !z.string().uuid().safeParse(id).success) notFound();
   const service = new PricingService(getDatabase());
   const [wholesale, coupon, bundle] = await Promise.all([

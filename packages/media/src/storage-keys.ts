@@ -26,7 +26,7 @@ export function normalizeStoragePrefix(prefix: string): string {
   return normalizeStorageKey(trimmed);
 }
 
-export function contentHash(input: Uint8Array): string {
+function contentHash(input: Uint8Array): string {
   return createHash("sha256").update(input).digest("hex");
 }
 

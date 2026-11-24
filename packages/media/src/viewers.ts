@@ -1,9 +1,4 @@
-export {
-  buildPictureSources,
-  buildSpinFrames,
-  isSafeMediaUrl,
-  isSafeSrcSet,
-} from "./responsive-sources.js";
+export { buildPictureSources, buildSpinFrames } from "./responsive-sources.js";
 export type {
   PictureSource,
   PictureSourceSet,

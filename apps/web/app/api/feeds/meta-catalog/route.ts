@@ -6,7 +6,7 @@ export async function GET() {
     headers: {
       "content-type": "text/csv; charset=utf-8",
       "content-disposition": 'inline; filename="meta-catalog.csv"',
-      "cache-control": "public, max-age=0, s-maxage=300, stale-while-revalidate=3600",
+      "cache-control": "no-store",
       "x-content-type-options": "nosniff",
       "x-robots-tag": "noindex",
       "x-meta-catalog-items": String(feed.accepted),

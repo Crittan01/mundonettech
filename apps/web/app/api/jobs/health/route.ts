@@ -1,5 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-
+import { matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
 import { OperationalHealthService, OperationsService } from "@mundonettech/db";
 
 import { getDatabase } from "@/lib/db";
@@ -10,12 +9,6 @@ const headers = {
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
-
-function matchesSecret(provided: string, expected: string): boolean {
-  const left = createHash("sha256").update(provided).digest();
-  const right = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(left, right);
-}
 
 export async function GET() {
   return Response.json(

@@ -8,6 +8,15 @@ import {
   type CatalogProductBaseInput,
   type CatalogVariantInput,
 } from "@mundonettech/db";
+import {
+  ProductMediaConflictError,
+  ProductMediaNotFoundError,
+  ProductMediaService,
+  ProductMediaValidationError,
+  productMediaLimits,
+  type ProductMediaAudit,
+  type ProductMediaTargetInput,
+} from "@mundonettech/media";
 import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -20,8 +29,16 @@ import {
   type ActionState,
 } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
-import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
-import { getRequestSecurityContext } from "@/lib/security/request-context";
+import { createMediaStorage } from "@/lib/media-storage";
+import {
+  AdminAuthorizationError,
+  getAdminSession,
+  type AdminSession,
+} from "@/lib/security/admin-auth";
+import {
+  getRequestSecurityContext,
+  type RequestSecurityContext,
+} from "@/lib/security/request-context";
 
 const baseSchema = z.object({
   slug: z.string().trim().min(1).max(160),
@@ -190,14 +207,19 @@ function invalidateCatalog(options: {
   productId: string;
   slug?: string;
   previousSlug?: string;
+  includeReviews?: boolean;
 }): void {
   updateTag("catalog");
   updateTag("catalog:search");
   updateTag("catalog:compare");
   updateTag("catalog:cms-grid");
-  if (options.slug) updateTag(`catalog:product:${options.slug}`);
+  if (options.slug) {
+    updateTag(`catalog:product:${options.slug}`);
+    if (options.includeReviews) updateTag(`reviews:${options.slug}`);
+  }
   if (options.previousSlug && options.previousSlug !== options.slug) {
     updateTag(`catalog:product:${options.previousSlug}`);
+    if (options.includeReviews) updateTag(`reviews:${options.previousSlug}`);
   }
   revalidatePath("/admin/catalogo");
   revalidatePath(`/admin/catalogo/${options.productId}`);
@@ -258,6 +280,7 @@ export async function updateCatalogProductAction(
       productId,
       slug: updated.slug,
       previousSlug: updated.previousSlug,
+      includeReviews: true,
     });
     return actionSuccess("Producto actualizado y cambio registrado en auditoría.");
   } catch (error) {
@@ -435,4 +458,246 @@ export async function removeCatalogCompatibilityAction(
   } catch (error) {
     return mutationMessage(error, values);
   }
+}
+
+const mediaTargetSchema = z.object({
+  productId: z.string().uuid(),
+  variantId: z.string().uuid().nullable(),
+  altText: z.string().trim().min(1).max(250),
+});
+
+function mediaTargetInput(formData: FormData): ProductMediaTargetInput {
+  const rawVariant = formString(formData, "variantId");
+  return mediaTargetSchema.parse({
+    productId: formString(formData, "productId"),
+    variantId: rawVariant || null,
+    altText: formString(formData, "altText"),
+  });
+}
+
+async function authorizeMediaMutation(): Promise<{
+  session: AdminSession;
+  request: RequestSecurityContext;
+}> {
+  const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+  return { session, request: await getRequestSecurityContext() };
+}
+
+function mediaAudit(session: AdminSession, request: RequestSecurityContext): ProductMediaAudit {
+  return {
+    actorAdminUserId: session.profile.id,
+    ipHash: request.ipHash,
+    userAgentHash: request.userAgentHash,
+  };
+}
+
+function requiredMediaFile(formData: FormData, field: string, maximum: number): File {
+  const file = formData.get(field);
+  if (!(file instanceof File) || file.size === 0 || file.size > maximum) {
+    throw new ProductMediaValidationError(`${field} exceeds its file contract.`);
+  }
+  return file;
+}
+
+function optionalMediaFile(formData: FormData, field: string, maximum: number): File | undefined {
+  const file = formData.get(field);
+  if (file === null || (file instanceof File && file.size === 0 && !file.name)) return undefined;
+  return requiredMediaFile(formData, field, maximum);
+}
+
+async function mediaBytes(file: File): Promise<Uint8Array> {
+  return new Uint8Array(await file.arrayBuffer());
+}
+
+function mediaMutationError(error: unknown, values: Record<string, string>): ActionState {
+  if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
+    return actionError("Confirma tu autenticador antes de modificar los medios.", values);
+  }
+  if (error instanceof AdminAuthorizationError) {
+    return actionError("Tu sesión no está autorizada para modificar el catálogo.", values);
+  }
+  if (error instanceof ProductMediaNotFoundError) {
+    return actionError(
+      "El producto, la variante o el medio ya no están disponibles. Recarga la página.",
+      values,
+    );
+  }
+  if (error instanceof ProductMediaConflictError) {
+    return actionError(
+      "El contenido ya está asociado a otro medio activo incompatible. Recarga y revisa el listado.",
+      values,
+    );
+  }
+  if (error instanceof ProductMediaValidationError || error instanceof z.ZodError) {
+    if (error instanceof Error && /between 2 and 120/i.test(error.message)) {
+      return actionError("La secuencia 360° debe contener entre 2 y 120 imágenes.", values);
+    }
+    if (error instanceof Error && /aggregate byte limit/i.test(error.message)) {
+      return actionError(
+        "Las imágenes de la secuencia no pueden superar 100 MiB en total.",
+        values,
+      );
+    }
+    if (error instanceof Error && /position/i.test(error.message)) {
+      return actionError("La posición debe estar dentro del rango de medios activos.", values);
+    }
+    if (error instanceof Error && /Alt text/i.test(error.message)) {
+      return actionError(
+        "Escribe un texto alternativo descriptivo, sin HTML ni caracteres de control.",
+        values,
+      );
+    }
+    return actionError(
+      "Revisa los archivos y sus límites: imagen 20 MiB, GLB 50 MiB y USDZ 25 MiB. Vuelve a seleccionarlos antes de reintentar.",
+      values,
+    );
+  }
+  if (error instanceof Error && error.message.includes("R2 endpoint")) {
+    return actionError(
+      "El almacenamiento R2 no está configurado en este ambiente. Contacta al administrador.",
+      values,
+    );
+  }
+  return actionError(
+    "No pudimos procesar o almacenar el medio. Verifica que sea un archivo válido y vuelve a seleccionarlo; tus demás campos se conservan.",
+    values,
+  );
+}
+
+export async function uploadCatalogMediaAction(
+  _previous: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const values = formSnapshot(formData);
+  let storage: ReturnType<typeof createMediaStorage> | null = null;
+  try {
+    const { session, request } = await authorizeMediaMutation();
+    const target = mediaTargetInput(formData);
+    const mediaType = formString(formData, "mediaType");
+    storage = createMediaStorage();
+    const service = new ProductMediaService(getDatabase(), storage);
+    const result =
+      mediaType === "IMAGE"
+        ? await service.uploadImage(
+            {
+              ...target,
+              bytes: await mediaBytes(
+                requiredMediaFile(formData, "file", productMediaLimits.imageBytes),
+              ),
+            },
+            mediaAudit(session, request),
+          )
+        : mediaType === "SPIN_360"
+          ? await (async () => {
+              const entries = formData.getAll("frames");
+              if (
+                entries.length < productMediaLimits.spinMinFrames ||
+                entries.length > productMediaLimits.spinMaxFrames
+              ) {
+                throw new ProductMediaValidationError(
+                  "SPIN_360 requires between 2 and 120 frames.",
+                );
+              }
+              let total = 0;
+              const files = entries.map((entry) => {
+                if (
+                  !(entry instanceof File) ||
+                  entry.size === 0 ||
+                  entry.size > productMediaLimits.spinFrameBytes
+                ) {
+                  throw new ProductMediaValidationError(
+                    "Every SPIN_360 frame must be a valid file.",
+                  );
+                }
+                const file = entry;
+                total += file.size;
+                if (total > productMediaLimits.spinTotalBytes) {
+                  throw new ProductMediaValidationError(
+                    "SPIN_360 exceeds the aggregate byte limit.",
+                  );
+                }
+                return file;
+              });
+              return service.uploadSpin360(
+                { ...target, frames: await Promise.all(files.map(mediaBytes)) },
+                mediaAudit(session, request),
+              );
+            })()
+          : mediaType === "MODEL_3D"
+            ? await (async () => {
+                const usdzFile = optionalMediaFile(formData, "usdz", productMediaLimits.usdzBytes);
+                return service.uploadModel3d(
+                  {
+                    ...target,
+                    glb: await mediaBytes(
+                      requiredMediaFile(formData, "glb", productMediaLimits.glbBytes),
+                    ),
+                    ...(usdzFile ? { usdz: await mediaBytes(usdzFile) } : {}),
+                  },
+                  mediaAudit(session, request),
+                );
+              })()
+            : (() => {
+                throw new ProductMediaValidationError("Unsupported media type.");
+              })();
+    if (!result.reused) invalidateCatalog({ productId: target.productId, slug: result.slug });
+    return actionSuccess(
+      result.reused
+        ? "El mismo contenido ya estaba asociado; se reutilizó sin duplicar el registro."
+        : "Medio validado, almacenado en R2 y publicado en la ficha del producto.",
+    );
+  } catch (error) {
+    return mediaMutationError(error, values);
+  } finally {
+    await storage?.destroy();
+  }
+}
+
+export async function updateCatalogMediaAction(
+  _previous: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const values = formSnapshot(formData);
+  try {
+    const { session, request } = await authorizeMediaMutation();
+    const productId = formString(formData, "productId");
+    const mediaId = formString(formData, "mediaId");
+    const position = formString(formData, "position");
+    if (!/^[0-9]+$/.test(position)) {
+      throw new ProductMediaValidationError("Invalid position.");
+    }
+    const result = await new ProductMediaService(getDatabase(), null).update(
+      z.string().uuid().parse(productId),
+      z.string().uuid().parse(mediaId),
+      {
+        altText: formString(formData, "altText").trim(),
+        position: Number(position),
+      },
+      mediaAudit(session, request),
+    );
+    invalidateCatalog({ productId, slug: result.slug });
+    return actionSuccess("Texto alternativo y orden actualizados en el catálogo.");
+  } catch (error) {
+    return mediaMutationError(error, values);
+  }
+}
+
+export async function archiveCatalogMediaAction(
+  _previous: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const values = formSnapshot(formData);
+  const productId = formString(formData, "productId");
+  try {
+    const { session, request } = await authorizeMediaMutation();
+    const result = await new ProductMediaService(getDatabase(), null).archive(
+      z.string().uuid().parse(productId),
+      z.string().uuid().parse(formString(formData, "mediaId")),
+      mediaAudit(session, request),
+    );
+    invalidateCatalog({ productId, slug: result.slug });
+  } catch (error) {
+    return mediaMutationError(error, values);
+  }
+  redirect(`/admin/catalogo/${productId}?mediaArchived=1#admin-product-media`);
 }

@@ -1,3 +1,4 @@
+import { inspectImageMagic } from "./image-safety.js";
 import { processImageSafely, type ImageDerivative } from "./sharp-safe.js";
 import { validateGlb, validateUsdz } from "./model-safety.js";
 import { R2MediaStorage, type StoredObject } from "./r2-storage.js";
@@ -9,11 +10,20 @@ export interface StoredImageDerivative extends StoredObject {
   height: number;
 }
 
+export interface PipelineStorageOptions {
+  readonly cleanup?: (keys: readonly string[]) => Promise<void>;
+}
+
 async function removeObjects(
   storage: R2MediaStorage,
   objects: readonly { key: string }[],
+  cleanup?: (keys: readonly string[]) => Promise<void>,
 ): Promise<void> {
   if (objects.length === 0) return;
+  if (cleanup) {
+    await cleanup(objects.map((object) => object.key));
+    return;
+  }
   const results = await Promise.allSettled(objects.map((object) => storage.delete(object.key)));
   if (results.some((result) => result.status === "rejected")) {
     throw new Error("Failed to clean all partial media uploads.");
@@ -24,9 +34,10 @@ async function failWithCleanup(
   storage: R2MediaStorage,
   objects: readonly { key: string }[],
   error: unknown,
+  cleanup?: (keys: readonly string[]) => Promise<void>,
 ): Promise<never> {
   try {
-    await removeObjects(storage, objects);
+    await removeObjects(storage, objects, cleanup);
   } catch (cleanupError) {
     const causes =
       error instanceof AggregateError ? [...error.errors, cleanupError] : [error, cleanupError];
@@ -40,6 +51,7 @@ export async function storeImageDerivatives(
   input: Uint8Array,
   prefix: string,
   widths?: readonly number[],
+  options: PipelineStorageOptions = {},
 ): Promise<StoredImageDerivative[]> {
   const safePrefix = normalizeStoragePrefix(prefix);
   const processed = await processImageSafely(input, { ...(widths ? { widths } : {}) });
@@ -59,7 +71,7 @@ export async function storeImageDerivatives(
       });
     }
   } catch (error) {
-    return failWithCleanup(storage, stored, error);
+    return failWithCleanup(storage, stored, error, options.cleanup);
   }
   return stored;
 }
@@ -77,10 +89,14 @@ export async function storeSpin360(
   frames: readonly Uint8Array[],
   prefix: string,
   widths?: readonly number[],
+  options: PipelineStorageOptions = {},
 ): Promise<{ frame: number; derivatives: StoredImageDerivative[] }[]> {
   const safePrefix = normalizeStoragePrefix(prefix);
   if (frames.length < 2 || frames.length > 120) {
     throw new RangeError("SPIN_360 requires between 2 and 120 frames.");
+  }
+  for (const frame of frames) {
+    inspectImageMagic(frame);
   }
   const completed: { frame: number; derivatives: StoredImageDerivative[] }[] = [];
   try {
@@ -91,6 +107,7 @@ export async function storeSpin360(
         frame,
         `${safePrefix}/frame-${String(index + 1).padStart(3, "0")}`,
         widths,
+        options,
       );
       completed.push({ frame: index, derivatives });
     }
@@ -99,6 +116,7 @@ export async function storeSpin360(
       storage,
       completed.flatMap((frame) => frame.derivatives),
       error,
+      options.cleanup,
     );
   }
   return completed;

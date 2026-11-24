@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { single } from "@/lib/admin-search-params";
 import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { parseFinanceRange } from "@/lib/finance-params";
@@ -19,10 +20,6 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
-
-function single(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
 
 function percentage(bps: number | null): string {
   return bps === null ? "Sin base" : `${numberFormatter.format(bps / 100)} %`;

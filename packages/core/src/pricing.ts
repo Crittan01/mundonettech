@@ -2,7 +2,7 @@ import { roundDivHalfUp } from "./inventory.js";
 
 export const maxSignedBigInt = 9_223_372_036_854_775_807n;
 export const maxCartLines = 200;
-export const maxCartLineQuantity = 1_000_000;
+const maxCartLineQuantity = 1_000_000;
 
 export type WholesaleScope = "GLOBAL" | "CATEGORY" | "PRODUCT" | "VARIANT";
 export type CouponDiscountType = "PERCENTAGE" | "FIXED_AMOUNT";

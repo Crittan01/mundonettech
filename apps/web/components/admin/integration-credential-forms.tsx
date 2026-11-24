@@ -58,7 +58,6 @@ function SecretField({
 export function WompiCredentialWizard({ environment }: { environment: string }) {
   const [state, action, pending] = useActionState(createWompiCredentialAction, initialActionState);
   const [step, setStep] = useState(1);
-  const [localError, setLocalError] = useState("");
   const [dismissSuccess, setDismissSuccess] = useState(false);
   const sections = useRef<Record<number, HTMLFieldSetElement | null>>({});
   const form = useRef<HTMLFormElement>(null);
@@ -73,7 +72,6 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
         return;
       }
     }
-    setLocalError("");
     setStep((current) => Math.min(3, current + 1));
   }
 
@@ -220,11 +218,6 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
           <span>Confirmo que las llaves pertenecen a la cuenta y al ambiente seleccionados.</span>
         </label>
       </fieldset>
-      {localError ? (
-        <p role="alert" className="text-sm text-destructive">
-          {localError}
-        </p>
-      ) : null}
       <FormMessage state={state} />
       <div className="flex flex-wrap justify-between gap-3">
         <Button

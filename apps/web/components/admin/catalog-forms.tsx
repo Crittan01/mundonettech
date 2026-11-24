@@ -7,6 +7,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { initialActionState } from "@/lib/action-state";
 import {
   createCatalogProductAction,
@@ -45,7 +46,6 @@ type ProductDefaults = Omit<CatalogProductBaseInput, "trackSerial"> & {
 
 const textareaClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
-const selectClass = "h-11 w-full rounded-md border border-input bg-background px-3 text-sm";
 
 function TextField({
   id,
@@ -190,16 +190,16 @@ function VariantFields({
       />
       <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-status`}>Estado</Label>
-        <select
+        <Select
           key={`${idPrefix}-status-${statusDefault}`}
           id={`${idPrefix}-status`}
           name="status"
           defaultValue={statusDefault}
-          className={selectClass}
+          focusRing={false}
         >
           <option value="ACTIVE">Activa</option>
           <option value="INACTIVE">Inactiva</option>
-        </select>
+        </Select>
       </div>
       <label className="flex min-h-11 items-center gap-3 self-end text-sm font-medium">
         <input
@@ -309,13 +309,13 @@ function ProductBaseFields({
       </div>
       <div className="space-y-2">
         <Label htmlFor="product-brand">Marca</Label>
-        <select
+        <Select
           key={`product-brand-${brandDefault}`}
           id="product-brand"
           name="brandId"
           defaultValue={brandDefault}
           required
-          className={selectClass}
+          focusRing={false}
         >
           <option value="" disabled>
             Selecciona una marca
@@ -325,17 +325,17 @@ function ProductBaseFields({
               {brand.name}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor="product-category">Categoría</Label>
-        <select
+        <Select
           key={`product-category-${categoryDefault}`}
           id="product-category"
           name="categoryId"
           defaultValue={categoryDefault}
           required
-          className={selectClass}
+          focusRing={false}
         >
           <option value="" disabled>
             Selecciona una categoría
@@ -346,17 +346,17 @@ function ProductBaseFields({
               {category.name}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor="product-tax">Grupo tributario</Label>
-        <select
+        <Select
           key={`product-tax-${taxDefault}`}
           id="product-tax"
           name="taxGroupId"
           defaultValue={taxDefault}
           required
-          className={selectClass}
+          focusRing={false}
         >
           <option value="" disabled>
             Selecciona un grupo
@@ -366,48 +366,48 @@ function ProductBaseFields({
               {group.code} · {group.name}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor="product-status">Estado</Label>
-        <select
+        <Select
           key={`product-status-${statusDefault}`}
           id="product-status"
           name="status"
           defaultValue={statusDefault}
-          className={selectClass}
+          focusRing={false}
         >
           <option value="DRAFT">Borrador</option>
           <option value="ACTIVE">Activo</option>
           <option value="ARCHIVED">Archivado</option>
-        </select>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor="product-authenticity">Autenticidad</Label>
-        <select
+        <Select
           key={`product-authenticity-${authenticityDefault}`}
           id="product-authenticity"
           name="authenticity"
           defaultValue={authenticityDefault}
-          className={selectClass}
+          focusRing={false}
         >
           <option value="ORIGINAL">Original</option>
           <option value="CERTIFIED_COMPATIBLE">Compatible certificado</option>
           <option value="OEM">OEM</option>
-        </select>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor="product-retract">Política de retracto</Label>
-        <select
+        <Select
           key={`product-retract-${retractDefault}`}
           id="product-retract"
           name="retractPolicy"
           defaultValue={retractDefault}
-          className={selectClass}
+          focusRing={false}
         >
           <option value="STANDARD">Estándar</option>
           <option value="LEGAL_EXCEPTION_REVIEW">Revisión de excepción legal</option>
-        </select>
+        </Select>
       </div>
       <TextField
         id="product-warranty"
@@ -498,13 +498,13 @@ export function CatalogAttributeForm({
       <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
         <div className="space-y-2">
           <Label htmlFor={`${idPrefix}-attribute`}>Atributo</Label>
-          <select
+          <Select
             key={`${idPrefix}-attribute-${selectedAttribute}`}
             id={`${idPrefix}-attribute`}
             name="attributeId"
             defaultValue={selectedAttribute}
             required
-            className={selectClass}
+            focusRing={false}
           >
             <option value="" disabled>
               Selecciona un atributo
@@ -515,7 +515,7 @@ export function CatalogAttributeForm({
                 {attribute.unit ? ` (${attribute.unit})` : ""} · {attribute.valueType}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`${idPrefix}-value`}>Valor</Label>
@@ -588,13 +588,13 @@ export function CatalogCompatibilityForm({
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="space-y-2">
           <Label htmlFor="compat-device">Dispositivo</Label>
-          <select
+          <Select
             key={`compat-device-${deviceDefault}`}
             id="compat-device"
             name="deviceId"
             defaultValue={deviceDefault}
             required
-            className={selectClass}
+            focusRing={false}
           >
             <option value="" disabled>
               Selecciona un dispositivo
@@ -605,21 +605,21 @@ export function CatalogCompatibilityForm({
                 {device.generation ? ` (${device.generation})` : ""}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="compat-fit">Ajuste</Label>
-          <select
+          <Select
             key={`compat-fit-${fitDefault}`}
             id="compat-fit"
             name="fit"
             defaultValue={fitDefault}
-            className={selectClass}
+            focusRing={false}
           >
             <option value="EXACT">Compatibilidad directa</option>
             <option value="ADAPTER">Requiere adaptador</option>
             <option value="NOT_COMPATIBLE">No compatible</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="compat-notes">Notas (opcional)</Label>

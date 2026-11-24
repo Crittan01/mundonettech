@@ -500,3 +500,10 @@ model UrlRedirect {
   @@index([active, deletedAt])
   @@map("UrlRedirect")
 }
+
+model UrlRedirectCacheState {
+  id      String @id @default(dbgenerated("'00000000-0000-0000-0000-000000000001'::uuid")) @db.Uuid
+  version BigInt @default(0)
+
+  @@map("UrlRedirectCacheState")
+}

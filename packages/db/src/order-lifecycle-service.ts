@@ -5,9 +5,10 @@ import {
   inInventoryTransaction,
 } from "./inventory-shared.js";
 import type { StockMovementInput } from "./inventory-shared.js";
+import { databaseNow } from "./primitives.js";
 import { releaseStock } from "./stock.js";
 
-export class OrderLifecycleError extends Error {
+class OrderLifecycleError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "OrderLifecycleError";
@@ -35,13 +36,6 @@ function boundedInteger(value: number, field: string, minimum: number, maximum: 
     throw new RangeError(`${field} must be an integer between ${minimum} and ${maximum}.`);
   }
   return value;
-}
-
-async function databaseNow(
-  tx: Parameters<Parameters<typeof inInventoryTransaction>[1]>[0],
-): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
 }
 
 export class OrderLifecycleService {
@@ -279,20 +273,6 @@ export class OrderLifecycleService {
             where: { id: attempt.id },
             data: { status: "EXPIRED", completedAt: now },
           });
-          await tx.domainOutbox.create({
-            data: {
-              eventType: "payment.attempt.expired.v1",
-              aggregateType: "PaymentAttempt",
-              aggregateId: attempt.id,
-              deduplicationKey: `payment-attempt:${attempt.id}:expired:v1`,
-              payload: {
-                attemptId: attempt.id,
-                orderId: order.id,
-                provider: attempt.provider,
-                expiredAt: now.toISOString(),
-              },
-            },
-          });
         }
         await tx.codReconciliation.updateMany({
           where: { paymentAttempt: { orderId: order.id }, status: "PENDING_COLLECTION" },
@@ -387,22 +367,6 @@ export class OrderLifecycleService {
           await tx.paymentAttempt.update({
             where: { id: attempt.id },
             data: { status: "EXPIRED", completedAt: now },
-          });
-          await tx.domainOutbox.upsert({
-            where: { deduplicationKey: `payment-attempt:${attempt.id}:expired:v1` },
-            create: {
-              eventType: "payment.attempt.expired.v1",
-              aggregateType: "PaymentAttempt",
-              aggregateId: attempt.id,
-              deduplicationKey: `payment-attempt:${attempt.id}:expired:v1`,
-              payload: {
-                attemptId: attempt.id,
-                orderId: order.id,
-                provider: attempt.provider,
-                expiredAt: now.toISOString(),
-              },
-            },
-            update: {},
           });
         }
         await tx.codReconciliation.updateMany({

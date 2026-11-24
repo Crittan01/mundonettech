@@ -3,12 +3,12 @@
 import Link from "next/link";
 import { useActionState, useState } from "react";
 
-import { FormMessage } from "@/components/auth/form-message";
+import { FieldErrors, FormMessage } from "@/components/auth/form-message";
 import { TurnstileField } from "@/components/auth/turnstile-field";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 import {
   registerCustomerAction,
   requestCustomerOtpAction,
@@ -22,7 +22,18 @@ interface SecurityProps {
   nonce: string;
 }
 
-function EmailInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function EmailInput({
+  value,
+  onChange,
+  state,
+  errorId,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  state: ActionState;
+  errorId: string;
+}) {
+  const errors = state.fieldErrors?.email;
   return (
     <div className="space-y-2">
       <Label htmlFor="email">Correo electrónico</Label>
@@ -35,12 +46,20 @@ function EmailInput({ value, onChange }: { value: string; onChange: (value: stri
         required
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        aria-describedby={errors?.length ? errorId : undefined}
+        aria-invalid={errors?.length ? true : undefined}
       />
+      <FieldErrors id={errorId} messages={errors} />
     </div>
   );
 }
 
-function PasswordFields() {
+function PasswordFields({ state, idPrefix }: { state: ActionState; idPrefix: string }) {
+  const passwordErrors = state.fieldErrors?.password;
+  const confirmationErrors = state.fieldErrors?.confirmation;
+  const passwordHelpId = `${idPrefix}-password-help`;
+  const passwordErrorId = `${idPrefix}-password-error`;
+  const confirmationErrorId = `${idPrefix}-confirmation-error`;
   return (
     <>
       <div className="space-y-2">
@@ -53,11 +72,13 @@ function PasswordFields() {
           minLength={12}
           maxLength={128}
           required
-          aria-describedby="password-help"
+          aria-describedby={`${passwordHelpId}${passwordErrors?.length ? ` ${passwordErrorId}` : ""}`}
+          aria-invalid={passwordErrors?.length ? true : undefined}
         />
-        <p id="password-help" className="text-xs leading-5 text-muted-foreground">
+        <p id={passwordHelpId} className="text-xs leading-5 text-muted-foreground">
           Usa 12 a 128 caracteres, con mayúscula, minúscula, número y símbolo.
         </p>
+        <FieldErrors id={passwordErrorId} messages={passwordErrors} />
       </div>
       <div className="space-y-2">
         <Label htmlFor="confirmation">Confirma la contraseña</Label>
@@ -69,7 +90,10 @@ function PasswordFields() {
           minLength={12}
           maxLength={128}
           required
+          aria-describedby={confirmationErrors?.length ? confirmationErrorId : undefined}
+          aria-invalid={confirmationErrors?.length ? true : undefined}
         />
+        <FieldErrors id={confirmationErrorId} messages={confirmationErrors} />
       </div>
     </>
   );
@@ -80,8 +104,13 @@ export function RegistrationForm({ siteKey, nonce }: SecurityProps) {
   const [email, setEmail] = useState("");
   return (
     <form action={action} className="space-y-5">
-      <EmailInput value={email} onChange={setEmail} />
-      <PasswordFields />
+      <EmailInput
+        value={email}
+        onChange={setEmail}
+        state={state}
+        errorId="registration-email-error"
+      />
+      <PasswordFields state={state} idPrefix="registration" />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_register" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
@@ -104,7 +133,7 @@ export function CustomerLoginForm({ siteKey, nonce }: SecurityProps) {
   const [email, setEmail] = useState("");
   return (
     <form action={action} className="space-y-5">
-      <EmailInput value={email} onChange={setEmail} />
+      <EmailInput value={email} onChange={setEmail} state={state} errorId="login-email-error" />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_login" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
@@ -130,7 +159,12 @@ export function RecoveryRequestForm({ siteKey, nonce }: SecurityProps) {
   const [email, setEmail] = useState("");
   return (
     <form action={action} className="space-y-5">
-      <EmailInput value={email} onChange={setEmail} />
+      <EmailInput
+        value={email}
+        onChange={setEmail}
+        state={state}
+        errorId="recovery-request-email-error"
+      />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_recovery" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
@@ -158,7 +192,12 @@ export function OtpVerificationForm({
   const [email, setEmail] = useState(defaultEmail);
   return (
     <form action={action} className="space-y-5">
-      <EmailInput value={email} onChange={setEmail} />
+      <EmailInput
+        value={email}
+        onChange={setEmail}
+        state={state}
+        errorId="verification-email-error"
+      />
       <input type="hidden" name="mode" value={mode} />
       <div className="space-y-2">
         <Label htmlFor="code">Código de seis dígitos</Label>
@@ -191,7 +230,12 @@ export function PasswordResetForm({
   const [email, setEmail] = useState(defaultEmail);
   return (
     <form action={action} className="space-y-5">
-      <EmailInput value={email} onChange={setEmail} />
+      <EmailInput
+        value={email}
+        onChange={setEmail}
+        state={state}
+        errorId="recovery-reset-email-error"
+      />
       <div className="space-y-2">
         <Label htmlFor="code">Código de recuperación</Label>
         <Input
@@ -204,7 +248,7 @@ export function PasswordResetForm({
           required
         />
       </div>
-      <PasswordFields />
+      <PasswordFields state={state} idPrefix="recovery-reset" />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_reset" state={state} />
       <FormMessage state={state} />
       <Button type="submit" className="w-full" disabled={pending}>

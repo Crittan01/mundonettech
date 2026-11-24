@@ -8,6 +8,9 @@ import {
   crmNow,
   crmRetentionMonths,
   crmVersion,
+  redactCrmActivitiesInTransaction,
+  redactCrmMergeHistoryInTransaction,
+  redactCrmOpportunitiesInTransaction,
   type CrmAudit,
 } from "./crm-shared.js";
 
@@ -155,14 +158,7 @@ export class CrmRetentionService {
         anonymizedCustomers.push(customerId);
       }
       const now = await crmNow(tx);
-      await tx.contactActivity.updateMany({
-        where: { contactId: { in: lineageIds }, redactedAt: null },
-        data: {
-          subject: null,
-          body: "[contenido suprimido por retención]",
-          redactedAt: now,
-        },
-      });
+      await redactCrmActivitiesInTransaction(tx, lineageIds, now);
       await tx.task.updateMany({
         where: { contactId: { in: lineageIds }, redactedAt: null },
         data: {
@@ -171,64 +167,18 @@ export class CrmRetentionService {
           redactedAt: now,
         },
       });
-      const mergeHistory = await tx.identityMergeCandidate.findMany({
-        where: {
-          status: { in: ["MERGED", "REVERSED"] },
-          OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
-        },
-        select: { id: true },
-      });
-      for (const candidate of mergeHistory) {
-        await tx.identityMergeCandidate.update({
-          where: { id: candidate.id },
-          data: {
-            sourceSnapshot: { redacted: true },
-            targetSnapshot: { redacted: true },
-            movedIdentityIds: [],
-            retiredIdentityIds: [],
-            movedActivityIds: [],
-            movedTaskIds: [],
-            movedOpportunityIds: [],
-            resolutionNote: "[contenido suprimido por retención]",
-            version: { increment: 1 },
-          },
-        });
-      }
+      const redactedMergeCount = await redactCrmMergeHistoryInTransaction(tx, lineageIds);
       await tx.identityMergeCandidate.updateMany({
         where: {
           status: "REJECTED",
           OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
         },
-        data: { resolutionNote: "[contenido suprimido por retención]" },
+        data: {
+          resolutionNote: "[contenido suprimido por retención]",
+          version: { increment: 1 },
+        },
       });
-      const opportunities = await tx.opportunity.findMany({
-        where: { contactId: { in: lineageIds }, anonymizedAt: null },
-        select: { id: true },
-      });
-      const opportunityIds = opportunities.map((opportunity) => opportunity.id);
-      if (opportunityIds.length > 0) {
-        await tx.opportunity.updateMany({
-          where: { id: { in: opportunityIds } },
-          data: {
-            requirements: "[contenido suprimido por retención]",
-            acceptanceIpHash: null,
-            acceptanceUserAgentHash: null,
-            anonymizedAt: now,
-          },
-        });
-        await tx.opportunityProposal.updateMany({
-          where: { opportunityId: { in: opportunityIds }, anonymizedAt: null },
-          data: {
-            commercialNotes: null,
-            signerName: null,
-            signerDocumentType: null,
-            signerDocumentNumber: null,
-            acceptanceIpHash: null,
-            acceptanceUserAgentHash: null,
-            anonymizedAt: now,
-          },
-        });
-      }
+      await redactCrmOpportunitiesInTransaction(tx, lineageIds, now);
       for (const contact of contacts) {
         if (contact.status === "ANONYMIZED") continue;
         await tx.contact.update({
@@ -256,7 +206,7 @@ export class CrmRetentionService {
         reason: input.reason,
         lineageCount: contacts.length,
         anonymizedCustomerCount: anonymizedCustomers.length,
-        redactedMergeCount: mergeHistory.length,
+        redactedMergeCount,
       });
       return {
         contactId: requested.id,

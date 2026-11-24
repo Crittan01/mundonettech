@@ -5,6 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { createTimeoutToken } from "../packages/core/dist/index.js";
 import { createDatabaseClient } from "../packages/db/dist/index.js";
+import { createPublishedReviewFixtures } from "../tests/helpers/public-review-fixture.mjs";
 import {
   createSupabaseFixtureSession,
   encodeSupabaseFixtureCookie,
@@ -188,6 +189,17 @@ test.beforeAll(async () => {
   const variant = await db.productVariant.findFirstOrThrow({
     where: { sku: "LENOVO-X1C-G12-U7-16-512", deletedAt: null },
     include: { product: true },
+  });
+  const reviewCreatedAt = Date.now();
+  await createPublishedReviewFixtures(db, {
+    customerId: erasableCustomer.id,
+    moderatedByAdminUserId: admin.id,
+    productSlug: variant.product.slug,
+    reviews: Array.from({ length: 11 }, (_, index) => ({
+      authorDisplayName: `Nombre privado ${runSuffix}`,
+      title: `Reseña privada ${runSuffix} ${index + 1}`,
+      createdAt: new Date(reviewCreatedAt - index * 1_000),
+    })),
   });
   const location = await db.stockLocation.create({
     data: {
@@ -433,7 +445,10 @@ test("admin moderates RMA, reviews and support with recent MFA and publishes onl
   await expect(reviewCard).toContainText("PUBLISHED");
   await page.goto(`/producto/${order.productSlug}#resenas`);
   await expect(page.getByRole("heading", { name: "Compra verificada E2E" })).toBeVisible();
-  await expect(page.getByText("5/5")).toBeVisible();
+  const publicReviewCard = page
+    .locator("#resenas article")
+    .filter({ hasText: "Compra verificada E2E" });
+  await expect(publicReviewCard.getByText("5/5", { exact: true })).toBeVisible();
   await expectAccessible(page);
 
   await page.goto(`/producto/${order.productSlug}?reviewCursor=not-a-valid-uuid#resenas`);
@@ -461,6 +476,26 @@ test("admin moderates RMA, reviews and support with recent MFA and publishes onl
 test("customer account validates bad cursors and anonymizes irreversibly with clean session sign-out", async ({
   page,
 }) => {
+  test.setTimeout(90_000);
+  const review = await db.review.findFirstOrThrow({
+    where: { requesterCustomerId: erasableCustomer.id },
+    select: { product: { select: { slug: true } } },
+  });
+  const productPath = `/producto/${review.product.slug}`;
+  const privateName = `Nombre privado ${runSuffix}`;
+  await expect
+    .poll(async () => {
+      const response = await page.request.get(productPath);
+      return (await response.text()).includes(privateName);
+    })
+    .toBe(true);
+  await page.goto(`${productPath}#resenas`);
+  await expect(page.locator("#resenas").getByText(privateName).first()).toBeVisible();
+  const cursorPath = await page.getByRole("link", { name: "Ver más reseñas" }).getAttribute("href");
+  expect(cursorPath).toContain("reviewCursor=");
+  await page.goto(cursorPath!);
+  await expect(page.locator("#resenas").getByText(privateName).first()).toBeVisible();
+
   await authenticate(page, erasableCustomer, "customer");
   await page.goto(`/mi-cuenta/pedidos?cursor=${randomUUID()}`);
   await expect(page.locator("main").getByRole("alert")).toContainText(
@@ -491,4 +526,106 @@ test("customer account validates bad cursors and anonymizes irreversibly with cl
   await page.goto(`/pedido/${erasableOrderToken}`);
   await page.getByRole("button", { name: "Enviar código de acceso" }).click();
   await expect(page.getByLabel("Código de seis dígitos")).toBeDisabled();
+
+  for (const path of [`${productPath}#resenas`, cursorPath!]) {
+    await page.goto(path);
+    await expect(page.locator("#resenas").getByText("Cliente verificado").first()).toBeVisible();
+    await expect(page.locator("#resenas").getByText(privateName)).toHaveCount(0);
+  }
+});
+
+test("review pagination preserves only the validated non-default variant", async ({ page }) => {
+  const suffix = randomUUID().slice(0, 8);
+  const productSlug = `resenas-paginadas-${suffix}`;
+  const secondarySku = `E2E-REVIEW-SECONDARY-${suffix.toUpperCase()}`;
+  const template = await db.product.findFirstOrThrow({
+    where: { status: "ACTIVE", deletedAt: null },
+    select: { brandId: true, categoryId: true, taxGroupId: true },
+  });
+  const createdProduct = await db.product.create({
+    data: {
+      slug: productSlug,
+      name: `Producto con reseñas paginadas ${suffix}`,
+      brandId: template.brandId,
+      categoryId: template.categoryId,
+      taxGroupId: template.taxGroupId,
+      status: "ACTIVE",
+      authenticity: "ORIGINAL",
+      warrantyMonths: 12,
+      trackSerial: false,
+      variants: {
+        create: [
+          {
+            sku: `E2E-REVIEW-PRIMARY-${suffix.toUpperCase()}`,
+            isDefault: true,
+            status: "ACTIVE",
+            priceCents: 45_000_000n,
+            costCents: 30_000_000n,
+            weightGrams: 200,
+            lengthMillimeters: 100,
+            widthMillimeters: 80,
+            heightMillimeters: 40,
+          },
+          {
+            sku: secondarySku,
+            isDefault: false,
+            status: "ACTIVE",
+            priceCents: 52_000_000n,
+            costCents: 35_000_000n,
+            weightGrams: 210,
+            lengthMillimeters: 100,
+            widthMillimeters: 80,
+            heightMillimeters: 40,
+          },
+        ],
+      },
+    },
+    include: { variants: true },
+  });
+  const secondaryVariant = createdProduct.variants.find((variant) => variant.sku === secondarySku)!;
+  const reviewCreatedAt = Date.now();
+  await createPublishedReviewFixtures(db, {
+    customerId: customer.id,
+    moderatedByAdminUserId: admin.id,
+    productSlug,
+    reviews: Array.from({ length: 11 }, (_, index) => ({
+      authorDisplayName: "Comprador verificado E2E",
+      rating: 4,
+      title: `Reseña paginada ${index}`,
+      body: `Contenido verificado de la reseña número ${index} para comprobar la paginación.`,
+      createdAt: new Date(reviewCreatedAt - index * 1000),
+    })),
+  });
+
+  await page.goto(
+    `/producto/${productSlug}?variant=${secondaryVariant.id}&queryArbitraria=descartada#resenas`,
+  );
+  const selectedVariantDetails = page.locator("dl").filter({ hasText: "SKU:" }).first();
+  await expect(selectedVariantDetails).toContainText(secondarySku);
+  await expect(page.getByRole("button", { name: secondarySku, exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.locator("#resenas > ol > li")).toHaveCount(10);
+  const moreReviews = page.getByRole("link", { name: "Ver más reseñas" });
+  const href = await moreReviews.getAttribute("href");
+  expect(href).toBeTruthy();
+  const nextUrl = new URL(href!, "http://127.0.0.1:4110");
+  expect(nextUrl.searchParams.get("variant")).toBe(secondaryVariant.id);
+  expect(nextUrl.searchParams.get("reviewCursor")).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(nextUrl.searchParams.get("queryArbitraria")).toBeNull();
+  expect([...nextUrl.searchParams.keys()].sort()).toEqual(["reviewCursor", "variant"]);
+
+  await moreReviews.click();
+  await expect(page).toHaveURL(
+    new RegExp(`/producto/${productSlug}\\?variant=${secondaryVariant.id}&reviewCursor=`),
+  );
+  await expect(page.locator("#resenas > ol > li")).toHaveCount(1);
+  await expect(page.getByRole("heading", { name: "Reseña paginada 10" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Reseña paginada 0" })).toHaveCount(0);
+  await expect(selectedVariantDetails).toContainText(secondarySku);
+  await expect(page.getByRole("button", { name: secondarySku, exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });

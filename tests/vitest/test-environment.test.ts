@@ -98,12 +98,19 @@ describe("F0.5 — production database, Supabase endpoint, and outbound email gu
         MERCADO_LIBRE_API_URL: "https://api.mercadolibre.com",
       }),
     ).toThrow();
+    expect(() =>
+      assertSafeTestEnvironment({
+        ...safeEnvironment,
+        META_CAPI_API_URL: "https://graph.facebook.com/v24.0",
+      }),
+    ).toThrow(/META_CAPI_API_URL/);
     expect(
       assertSafeTestEnvironment({
         ...safeEnvironment,
         R2_ENDPOINT: "http://127.0.0.1:4555",
         R2_BUCKET: "media-test",
         MERCADO_LIBRE_API_URL: "http://127.0.0.1:54420",
+        META_CAPI_API_URL: "http://127.0.0.1:54420/meta-capi",
       }).database,
     ).toBe("postgres");
   });

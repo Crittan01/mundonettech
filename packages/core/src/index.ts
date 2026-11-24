@@ -2,9 +2,7 @@ export {
   adminNavigation,
   adminRing,
   adminRoles,
-  assertAdminPermission,
   canAssignAdminRole,
-  canManageAdministrator,
   hasAdminPermission,
   isAdminRole,
 } from "./rbac.js";
@@ -29,7 +27,6 @@ export {
   OutboundEmailDisabledError,
 } from "./outbound-email.js";
 export {
-  normalizeGs1,
   isValidGs1,
   isValidCommercialGtin,
   isValidEan,
@@ -46,8 +43,6 @@ export {
   isRedirectStatus,
   isReservedRedirectSource,
   isReservedRedirectTarget,
-  reservedRedirectSourcePrefixes,
-  reservedRedirectTargetPrefixes,
 } from "./url-redirect.js";
 export type { RedirectEdge } from "./url-redirect.js";
 export { normalizeAttributeValue, assertCatalogMoney } from "./catalog-values.js";
@@ -74,7 +69,13 @@ export {
   serializeCsv,
 } from "./csv.js";
 export type { CsvCell, CsvParseOptions, CsvRow, InventoryStockCsvRow } from "./csv.js";
-export { formatCopCents, formatSignedCopCents, parseWholeCopToCents } from "./money.js";
+export {
+  formatCopCents,
+  formatCopCentsForInput,
+  formatSignedCopCents,
+  parseDecimalCopToCents,
+  parseWholeCopToCents,
+} from "./money.js";
 export { assertReceiptBalanced, calculateOrderTaxes } from "./order-tax.js";
 export type {
   CalculatedOrderTaxLine,
@@ -93,7 +94,6 @@ export {
   assertMoney,
   calculateCartPricing,
   maxCartLines,
-  maxCartLineQuantity,
   maxSignedBigInt,
   normalizeCouponCode,
   normalizePromotionSlug,
@@ -139,9 +139,11 @@ export {
   assertDeliveryPolygon,
   DeliveryValidationError,
   localDeliveryPromise,
+  parseCoordinateE6,
   pointInDeliveryPolygon,
 } from "./delivery.js";
 export type { DeliveryPoint } from "./delivery.js";
+export { matchesSecretTimingSafe } from "./secrets.js";
 export {
   assertCrmRetentionMonths,
   contactPairKey,
@@ -149,7 +151,6 @@ export {
   crmActivityKindLabels,
   crmContactStatusLabels,
   crmIdentityKindLabels,
-  crmMatchReasonLabels,
   crmSuppressionReasonLabels,
   crmTaskPriorityLabels,
   crmTaskStatusLabels,
@@ -180,7 +181,6 @@ export {
   loyaltyReferralPoints,
   loyaltyTxnTypeLabels,
   normalizeReferralCode,
-  referralCodeLength,
   referralRejectionReasonLabels,
   referralStatusLabels,
 } from "./growth.js";

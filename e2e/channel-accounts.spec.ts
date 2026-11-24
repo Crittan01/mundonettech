@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 
 import { expect, test, type Page } from "@playwright/test";
 import pg from "pg";
@@ -152,7 +152,7 @@ test.afterAll(async () => {
 test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revocation work end to end", async ({
   page,
 }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(300_000);
   await interceptAuthorization(page);
   await authenticateAdmin(page, admin, 900);
   await page.goto("/admin/canales");
@@ -465,13 +465,58 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
     data: notificationBody,
   });
   expect(webhook.status()).toBe(202);
-  const ingested = await page.request.post("/api/jobs/channels", {
+  const channelProduct = await db.product.findUniqueOrThrow({ where: { id: catalog.productId } });
+  const expectChannelAvailability = async (available: number) => {
+    const response = await page.request.get(`/producto/${channelProduct.slug}`);
+    expect(response.status()).toBe(200);
+    expect(await response.text()).toContain(
+      `${available} ${available === 1 ? "unidad disponible" : "unidades disponibles"} para compra`,
+    );
+  };
+  await expectChannelAvailability(7);
+  const faultId = randomUUID().replaceAll("-", "");
+  const faultFunction = `e2e_expire_channel_claim_${faultId}`;
+  const faultTrigger = `${faultFunction}_trigger`;
+  await db.$executeRawUnsafe(`
+    CREATE FUNCTION "${faultFunction}"() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW."action" = 'CHANNEL_ORDER_STOCK_RESERVED' THEN
+        UPDATE "DomainOutbox"
+        SET "claimExpiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 second'
+        WHERE "eventType" = 'channel.resource.sync.requested.v1'
+          AND "claimedBy" IS NOT NULL AND "processedAt" IS NULL;
+      END IF;
+      RETURN NEW;
+    END;
+    $$
+  `);
+  await db.$executeRawUnsafe(`
+    CREATE TRIGGER "${faultTrigger}" AFTER INSERT ON "AdminActionLog"
+    FOR EACH ROW EXECUTE FUNCTION "${faultFunction}"()
+  `);
+  try {
+    const ingested = await page.request.post("/api/jobs/channels", {
+      headers: { authorization: `Bearer ${channelCronSecret}` },
+    });
+    expect(ingested.status()).toBe(200);
+    const ingestionResult = await ingested.json();
+    expect(ingestionResult.ingestion.claimed).toBe(1);
+    expect(ingestionResult.ingestion.completed).toBe(0);
+    expect(ingestionResult.ingestion.retries).toBe(1);
+    expect(ingestionResult.ingestion.failed).toBe(0);
+    await expectChannelAvailability(5);
+  } finally {
+    await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${faultTrigger}" ON "AdminActionLog"`);
+    await db.$executeRawUnsafe(`DROP FUNCTION IF EXISTS "${faultFunction}"()`);
+  }
+  const replayedIngestion = await page.request.post("/api/jobs/channels", {
     headers: { authorization: `Bearer ${channelCronSecret}` },
   });
-  expect(ingested.status()).toBe(200);
-  const ingestionResult = await ingested.json();
-  expect(ingestionResult.ingestion.completed).toBe(1);
-  expect(ingestionResult.ingestion.failed).toBe(0);
+  expect(replayedIngestion.status()).toBe(200);
+  const replayedResult = await replayedIngestion.json();
+  expect(replayedResult.ingestion.claimed).toBe(1);
+  expect(replayedResult.ingestion.completed).toBe(1);
+  expect(replayedResult.ingestion.failed).toBe(0);
   const channelOrder = await db.channelOrder.findUniqueOrThrow({
     where: {
       accountId_externalOrderId: { accountId, externalOrderId: String(externalOrderId) },
@@ -559,6 +604,101 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
     .analyze();
   expect(orderAxe.violations).toEqual([]);
 
+  const createStockReviewOrder = (options: {
+    externalOrderId: string;
+    stockError: "INSUFFICIENT_STOCK" | "STOCK_ORIGIN_AMBIGUOUS";
+    withLocation: boolean;
+  }) =>
+    db.channelOrder.create({
+      data: {
+        accountId,
+        listingId: draft.id,
+        offerId: published.offers[0]!.id,
+        variantId: catalog.variantId,
+        stockLocationId: options.withLocation ? reservedStock.locationId : null,
+        externalOrderId: options.externalOrderId,
+        externalItemId: published.offers[0]!.externalItemId!,
+        externalUserProductId: stockSynced.externalUserProductId,
+        sellerSku: catalog.sku,
+        remoteStatus: "paid",
+        status: "PAID",
+        stockStatus: "REVIEW_REQUIRED",
+        stockError: options.stockError,
+        quantity: 1,
+        unitPriceCents: 70_000n,
+        grossAmountCents: 70_000n,
+        paidAmountCents: 70_000n,
+        sourceHash: randomBytes(32),
+        externalCreatedAt: new Date(),
+        externalUpdatedAt: new Date(),
+      },
+    });
+
+  const retryExternalId = String(3_100_000_000 + Math.floor(Math.random() * 1_000_000));
+  const retryOrder = await createStockReviewOrder({
+    externalOrderId: retryExternalId,
+    stockError: "INSUFFICIENT_STOCK",
+    withLocation: true,
+  });
+  await expectChannelAvailability(5);
+  await page.goto("/admin/canales");
+  const retryCard = page
+    .locator("li")
+    .filter({ hasText: `Pedido ${retryExternalId}` })
+    .first();
+  await retryCard.getByRole("button", { name: "Reevaluar stock", exact: true }).click();
+  await expect
+    .poll(
+      async () =>
+        (await db.channelOrder.findUniqueOrThrow({ where: { id: retryOrder.id } })).stockStatus,
+    )
+    .toBe("RESERVED");
+  await expect(retryCard).toContainText("Reservado");
+  await expectChannelAvailability(4);
+
+  const alternateLocation = await db.stockLocation.create({
+    data: {
+      code: `E2E-ALT-${randomUUID().slice(0, 8).toUpperCase()}`,
+      name: "Origen alterno E2E",
+      type: "LOCAL_MAIN",
+    },
+  });
+  await db.stockLevel.create({
+    data: {
+      locationId: alternateLocation.id,
+      variantId: catalog.variantId,
+      onHand: 0,
+      committed: 0,
+      safetyStock: 0,
+      weightedAvgCostCents: 0n,
+    },
+  });
+  const assignExternalId = String(3_200_000_000 + Math.floor(Math.random() * 1_000_000));
+  const assignOrder = await createStockReviewOrder({
+    externalOrderId: assignExternalId,
+    stockError: "STOCK_ORIGIN_AMBIGUOUS",
+    withLocation: false,
+  });
+  await expectChannelAvailability(4);
+  await page.goto("/admin/canales");
+  const assignCard = page
+    .locator("li")
+    .filter({ hasText: `Pedido ${assignExternalId}` })
+    .first();
+  await assignCard.getByText("Asignar bodega de origen", { exact: true }).click();
+  await assignCard.getByLabel("Bodega compatible").selectOption(reservedStock.locationId);
+  await assignCard
+    .getByRole("button", { name: "Confirmar bodega y reservar", exact: true })
+    .click();
+  await expect
+    .poll(
+      async () =>
+        (await db.channelOrder.findUniqueOrThrow({ where: { id: assignOrder.id } })).stockStatus,
+    )
+    .toBe("RESERVED");
+  await expect(assignCard).toContainText("Reservado");
+  await expectChannelAvailability(3);
+
   await page.getByText(`Desvincular ${accountLabel}`, { exact: true }).click();
   await page.getByLabel("Escribe DESVINCULAR para confirmar").fill("DESVINCULAR");
   await page.getByRole("button", { name: "Desvincular cuenta", exact: true }).click();
@@ -594,4 +734,135 @@ test("finance role can inspect channel descriptors without mutation controls", a
   ).toBeVisible();
   await expect(page.getByText(/Descontado por despacho/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Sincronizar pedido y envío" })).toHaveCount(0);
+});
+
+async function createChannelOfferFixture(mode: "FORMULA" | "MANUAL") {
+  const suffix = randomUUID().slice(0, 8);
+  const label = `Canal importes ${suffix}`;
+  const familyName = `Oferta importes ${suffix}`;
+  const formula = mode === "FORMULA";
+  const credential = await db.integrationCredential.create({
+    data: {
+      provider: "mercado-libre",
+      environment: "LOCAL",
+      accountName: label,
+      keyVersion: 1,
+      nonce: randomBytes(12),
+      ciphertext: randomBytes(32),
+      authTag: randomBytes(16),
+      createdByAdminUserId: admin.id,
+    },
+  });
+  const account = await db.channelAccount.create({
+    data: {
+      provider: "MERCADO_LIBRE",
+      siteId: "MCO",
+      environment: "LOCAL",
+      credentialId: credential.id,
+      externalAccountId: String(9_000_000_000_000 + Math.floor(Math.random() * 1_000_000)),
+      label,
+      status: "ACTIVE",
+      scopes: ["offline_access", "read", "write"],
+      tokenExpiresAt: new Date(Date.now() + 3_600_000),
+      createdByAdminUserId: admin.id,
+    },
+  });
+  const listing = await db.channelListing.create({
+    data: {
+      accountId: account.id,
+      variantId: catalog.variantId,
+      externalCategoryId: "MCO12345",
+      familyName,
+      sourceHash: randomBytes(32),
+      localQuantity: 8,
+      createdByAdminUserId: admin.id,
+      offers: {
+        create: {
+          listingTypeId: "gold_special",
+          logisticType: "CROSS_DOCKING",
+          pricingMode: mode,
+          targetNetCents: formula ? 12345n : null,
+          manualPriceCents: formula ? null : 12300n,
+          commissionBps: formula ? 1000 : 0,
+          fixedFeeCents: formula ? 12345n : 0n,
+          shippingCostCents: formula ? 12345n : 0n,
+          priceCents: formula ? 27500n : 12300n,
+          commissionAmountCents: formula ? 2750n : 0n,
+          fixedFeeAppliedCents: formula ? 12345n : 0n,
+          shippingAppliedCents: 0n,
+          netProceedsCents: formula ? 12405n : 12300n,
+          stockQuantity: 8,
+          sourceHash: randomBytes(32),
+        },
+      },
+    },
+    include: { offers: true },
+  });
+  return { familyName, offerId: listing.offers[0]!.id };
+}
+
+test("channel offer editor preserves exact cents on an unchanged save", async ({ page }) => {
+  const { familyName, offerId } = await createChannelOfferFixture("FORMULA");
+  await authenticateAdmin(page, admin);
+  await page.goto("/admin/canales");
+  const card = page
+    .locator("li")
+    .filter({ has: page.getByRole("heading", { name: familyName, exact: true }) });
+  const editor = card.locator("details").filter({ hasText: "Editar precio y tarifas" });
+  await editor.locator("summary").click();
+  await expect(editor.getByLabel("Neto objetivo por unidad (COP)")).toHaveValue("123.45");
+  await expect(editor.getByLabel("Cargo fijo bajo $60.000 (COP)")).toHaveValue("123.45");
+  await expect(editor.getByLabel("Flete asumido desde $60.000 (COP)")).toHaveValue("123.45");
+  await editor.getByRole("button", { name: "Guardar y programar precio" }).click();
+  await expect(page.getByText(/Precio y condiciones actualizados/)).toBeVisible();
+
+  const saved = await db.channelOffer.findUniqueOrThrow({ where: { id: offerId } });
+  expect(saved.targetNetCents).toBe(12345n);
+  expect(saved.fixedFeeCents).toBe(12345n);
+  expect(saved.shippingCostCents).toBe(12345n);
+  expect(saved.targetNetCents).not.toBe(12300n);
+  expect(saved.fixedFeeCents).not.toBe(12300n);
+  expect(saved.shippingCostCents).not.toBe(12300n);
+
+  await page.reload();
+  await expect(editor.getByLabel("Neto objetivo por unidad (COP)")).toHaveValue("123.45");
+  await expect(editor.getByLabel("Cargo fijo bajo $60.000 (COP)")).toHaveValue("123.45");
+  await expect(editor.getByLabel("Flete asumido desde $60.000 (COP)")).toHaveValue("123.45");
+});
+
+test("manual channel price accepts whole COP and rejects decimals without mutation", async ({
+  page,
+}) => {
+  const { familyName, offerId } = await createChannelOfferFixture("MANUAL");
+  await authenticateAdmin(page, admin);
+  await page.goto("/admin/canales");
+  const card = page
+    .locator("li")
+    .filter({ has: page.getByRole("heading", { name: familyName, exact: true }) });
+  const editor = card.locator("details").filter({ hasText: "Editar precio y tarifas" });
+  await editor.locator("summary").click();
+  const priceInput = editor.getByLabel("Precio de venta (COP, pesos enteros)", { exact: true });
+  await expect(priceInput).toHaveAttribute("type", "number");
+  await expect(priceInput).toHaveAttribute("inputmode", "numeric");
+  await expect(priceInput).toHaveAttribute("step", "1");
+  await expect(priceInput).toHaveValue("123");
+  await editor.getByRole("button", { name: "Guardar y programar precio" }).click();
+  await expect(page.getByText(/Precio y condiciones actualizados/)).toBeVisible();
+  const saved = await db.channelOffer.findUniqueOrThrow({ where: { id: offerId } });
+  expect(saved.manualPriceCents).toBe(12300n);
+  expect(saved.priceCents).toBe(12300n);
+
+  await page.reload();
+  await editor.locator("summary").click();
+  await priceInput.fill("123.45");
+  await editor.locator("form").evaluate((form: HTMLFormElement) => {
+    form.noValidate = true;
+  });
+  await editor.getByRole("button", { name: "Guardar y programar precio" }).click();
+  await expect(editor.getByRole("alert")).toContainText("Revisa categoría, precios");
+  await expect(priceInput).toHaveValue("123.45");
+  const rejected = await db.channelOffer.findUniqueOrThrow({ where: { id: offerId } });
+  expect(rejected.manualPriceCents).toBe(12300n);
+  expect(rejected.priceCents).toBe(12300n);
+  expect(rejected.version).toBe(saved.version);
 });

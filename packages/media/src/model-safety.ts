@@ -5,7 +5,7 @@ import yauzl from "yauzl";
 
 import { inspectImageMagic } from "./image-safety.js";
 
-export interface GltfDocument {
+interface GltfDocument {
   asset?: { version?: unknown; minVersion?: unknown };
   extensionsRequired?: unknown;
   buffers?: Array<{ byteLength: number; uri?: string }>;
@@ -166,15 +166,28 @@ export function validateGlb(input: Uint8Array): ModelSafetyResult {
     }
   }
 
+  const expectedGlbImageFormat: Record<string, "png" | "jpeg" | "webp"> = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/webp": "webp",
+  };
+
   for (const image of document.images ?? []) {
     if (
       typeof image !== "object" ||
       image === null ||
       image.bufferView === undefined ||
+      !Number.isSafeInteger(image.bufferView) ||
       !views[image.bufferView] ||
-      !["image/png", "image/jpeg", "image/webp"].includes(image.mimeType ?? "")
+      !(image.mimeType && expectedGlbImageFormat[image.mimeType])
     ) {
       throw new Error("GLB images must use an embedded PNG/JPEG/WebP buffer view.");
+    }
+    const view = views[image.bufferView]!;
+    const start = view.byteOffset ?? 0;
+    const magic = inspectImageMagic(binary.subarray(start, start + view.byteLength));
+    if (magic.format !== expectedGlbImageFormat[image.mimeType]) {
+      throw new Error("GLB embedded image magic bytes do not match declared MIME type.");
     }
   }
   return { kind: "glb", byteSize: buffer.length };
@@ -323,6 +336,7 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
         total += entry.uncompressedSize;
         if (total > 100 * 1024 * 1024) throw new Error("USDZ uncompressed byte budget exceeded.");
 
+        const maxHeaderSampleBytes = 65_536;
         let actual = 0;
         const headerSample: Buffer[] = [];
         let sampledBytes = 0;
@@ -332,8 +346,8 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
           new Writable({
             write(chunk: Buffer, _encoding, callback) {
               actual += chunk.length;
-              if (sampledBytes < 512) {
-                const slice = chunk.subarray(0, 512 - sampledBytes);
+              if (sampledBytes < maxHeaderSampleBytes) {
+                const slice = chunk.subarray(0, maxHeaderSampleBytes - sampledBytes);
                 headerSample.push(Buffer.from(slice));
                 sampledBytes += slice.length;
               }

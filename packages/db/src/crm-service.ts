@@ -16,6 +16,7 @@ import type {
   PrismaClient,
 } from "./generated/client.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
+import { databaseNow } from "./primitives.js";
 import { maskCrmContact, maskCrmIdentity, maskCrmOrganization } from "./crm-presenters.js";
 import {
   CrmError,
@@ -946,8 +947,8 @@ export class CrmService {
       !options.status || options.status === "OPEN"
         ? { status: { in: ["PENDING", "IN_PROGRESS"] } }
         : { status: options.status };
-    const [nowRows, tasks] = await Promise.all([
-      this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`,
+    const [currentTime, tasks] = await Promise.all([
+      databaseNow(this.db),
       this.db.task.findMany({
         where: {
           ...statusFilter,
@@ -965,7 +966,7 @@ export class CrmService {
         take: limit,
       }),
     ]);
-    const now = nowRows[0]!.now.getTime();
+    const now = currentTime.getTime();
     return tasks.map((task) => ({
       id: task.id,
       contactId: task.contactId,

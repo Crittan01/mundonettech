@@ -6,6 +6,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { initialActionState } from "@/lib/action-state";
 import {
   archivePricingAction,
@@ -14,7 +15,7 @@ import {
   saveWholesaleTierAction,
 } from "@/lib/actions/admin-pricing";
 
-export interface WholesaleDefaults {
+interface WholesaleDefaults {
   id?: string;
   scope: string;
   target: string;
@@ -23,7 +24,7 @@ export interface WholesaleDefaults {
   active: boolean;
 }
 
-export interface CouponDefaults {
+interface CouponDefaults {
   id?: string;
   code: string;
   name: string;
@@ -41,7 +42,7 @@ export interface CouponDefaults {
   categorySlugs: string;
 }
 
-export interface BundleDefaults {
+interface BundleDefaults {
   id?: string;
   slug: string;
   name: string;
@@ -52,8 +53,6 @@ export interface BundleDefaults {
   items: string;
 }
 
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const textareaClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
@@ -115,18 +114,17 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="wholesale-scope">Alcance</Label>
-          <select
+          <Select
             id="wholesale-scope"
             name="scope"
             value={scope}
             onChange={(event) => setScopeOverride(event.target.value)}
-            className={selectClass}
           >
             <option value="VARIANT">Variante (SKU)</option>
             <option value="PRODUCT">Producto (slug)</option>
             <option value="CATEGORY">Categoría (slug)</option>
             <option value="GLOBAL">Global</option>
-          </select>
+          </Select>
         </div>
         <Field
           id="wholesale-target"
@@ -214,29 +212,22 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
         />
         <div className="space-y-2">
           <Label htmlFor="coupon-type">Tipo de descuento</Label>
-          <select
+          <Select
             id="coupon-type"
             name="discountType"
             value={discountType}
             onChange={(event) => setDiscountTypeOverride(event.target.value)}
-            className={selectClass}
           >
             <option value="PERCENTAGE">Porcentaje</option>
             <option value="FIXED_AMOUNT">Monto fijo</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="coupon-status">Estado</Label>
-          <select
-            key={status}
-            id="coupon-status"
-            name="status"
-            defaultValue={status}
-            className={selectClass}
-          >
+          <Select key={status} id="coupon-status" name="status" defaultValue={status}>
             <option value="DRAFT">Borrador</option>
             <option value="ACTIVE">Activo</option>
-          </select>
+          </Select>
         </div>
         <Field
           id="coupon-start"
@@ -370,16 +361,10 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
         />
         <div className="space-y-2">
           <Label htmlFor="bundle-status">Estado</Label>
-          <select
-            key={status}
-            id="bundle-status"
-            name="status"
-            defaultValue={status}
-            className={selectClass}
-          >
+          <Select key={status} id="bundle-status" name="status" defaultValue={status}>
             <option value="DRAFT">Borrador</option>
             <option value="ACTIVE">Activo</option>
-          </select>
+          </Select>
         </div>
         <Field
           id="bundle-price"

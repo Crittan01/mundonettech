@@ -4,9 +4,9 @@
 
 ## Fotografía ejecutiva
 
-- **Estado:** **Fases 0–6 ✅ (`F0.1`–`F6.4`) · Activo: Auditoría Integral Pre-Calle `A1`–`A10` (`A1` sigue) → `M1`–`M4` · `Fase 7` congelada**.
+- **Estado:** **Fases 0–6 ✅ (`F0.1`–`F6.4`) · Activo: Auditoría Integral Pre-Calle `A1`–`A10` (`A1` ✅, `A2` sigue) → `M1`–`M4` · `Fase 7` congelada**.
 - **Operación:** `mundonettech.co` · `MNT-YYYY-NNNN` · Retail/mayorista tech CO · **`NO_RESPONSABLE_IVA`** (`3.500 UVT`, `ADR-009`).
-- **Inventario real:** `474` archivos (`136` módulos en `packages/*`), `29` páginas Cliente, `43` páginas `/admin`, `22` endpoints HTTP, `131` tablas PG 17 (`2.272` pruebas RLS) y `99` suites (`ADR-001`..`045`).
+- **Inventario real:** `558` fuentes AST (`140` módulos `packages/*`), `29` págs. Cliente, `43` `/admin`, `22` APIs, `132` tablas PG 17 (`2.289` pruebas RLS) y `89` suites (`ADR-001`..`046`).
 
 ## Topología de ambientes
 
@@ -24,5 +24,5 @@
 
 ## Secuencia hacia Producción (`A1`–`A10` → `M1`–`M4` → `Fase 7`)
 
-1. **`A1`–`A10` Auditoría Integral (activa):** 3 cortes estructurales (`A1`–`A3`), 5 cortes espejo `Admin ↔ Cliente` (`A4`–`A8`) y 2 cierres transversales UX/Ops (`A9`–`A10`).
+1. **`A1`–`A10` Auditoría Integral (activa):** `A1` ✅ (AST/caché/medios R2) · siguen `A2`–`A3` estructurales, `A4`–`A8` espejo `Admin ↔ Cliente` y `A9`–`A10` UX/Ops.
 2. **`M1`–`M4` Calle:** rodaje `:4010` + marca (`M1`), `STG` (`M2`), Go-Live `mundonettech.co` (`M3`) y Meta/ML `MCO` (`M4`), habilitando `Fase 7`.

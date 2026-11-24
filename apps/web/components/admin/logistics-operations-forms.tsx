@@ -19,8 +19,6 @@ import {
 } from "@/lib/actions/admin-logistics";
 import { initialActionState } from "@/lib/action-state";
 
-const selectClass = "h-11 rounded-md border border-input bg-background px-3 text-sm";
-
 export function StartPickingForm({ shipmentId }: { shipmentId: string }) {
   const [state, action, pending] = useActionState(startPickingAction, initialActionState);
   return (
@@ -218,7 +216,7 @@ export function LabelOperationForm({
   );
 }
 
-export interface DispatchSerialUnit {
+interface DispatchSerialUnit {
   readonly id: string;
   readonly serial: string;
   readonly imei: string | null;
@@ -226,7 +224,7 @@ export interface DispatchSerialUnit {
   readonly shipmentId: string | null;
 }
 
-export interface DispatchShipmentItem {
+interface DispatchShipmentItem {
   readonly variantId: string;
   readonly title: string;
   readonly quantity: number;
@@ -532,7 +530,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
           type="checkbox"
           name="active"
           defaultChecked={zone?.active ?? true}
-          className={selectClass}
+          className="size-4 accent-primary"
         />
         Zona activa para nuevas cotizaciones
       </label>

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { formatCopCents, hasAdminPermission, maskEmail } from "@mundonettech/core";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import {
   BankTransferConfirmationForm,
   BlockIdentityForm,
@@ -38,14 +39,6 @@ const statusLabels: Record<string, string> = {
   DISCREPANCY: "Con discrepancia",
   PARTIALLY_REFUNDED: "Reembolso parcial",
 };
-
-function Empty({ children }: { children: string }) {
-  return (
-    <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-      {children}
-    </p>
-  );
-}
 
 export default async function PaymentsPage() {
   const session = await requireAdminPage("payments:read");

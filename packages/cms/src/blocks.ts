@@ -126,21 +126,14 @@ export type CmsContent = CmsContentFor<CmsBlockType>;
 export type CmsTokens = Readonly<Record<string, string>>;
 const tokenPattern = /(?<!\{)\{\{\s*([a-z][a-z0-9_.]{0,63})\s*\}\}(?!\})/g;
 
-function visitStrings(
-  value: unknown,
-  visitor: (text: string) => string,
-  path = "content",
-): unknown {
+function visitStrings(value: unknown, visitor: (text: string) => string): unknown {
   if (typeof value === "string") return visitor(value);
   if (Array.isArray(value)) {
-    return value.map((entry, index) => visitStrings(entry, visitor, `${path}[${index}]`));
+    return value.map((entry) => visitStrings(entry, visitor));
   }
   if (typeof value === "object" && value !== null) {
     return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        visitStrings(entry, visitor, `${path}.${key}`),
-      ]),
+      Object.entries(value).map(([key, entry]) => [key, visitStrings(entry, visitor)]),
     );
   }
   return value;

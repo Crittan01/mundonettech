@@ -227,6 +227,9 @@ importers:
       '@google/model-viewer':
         specifier: 4.4.0
         version: 4.4.0(three@0.183.2)
+      '@mundonettech/db':
+        specifier: workspace:*
+        version: link:../db
       next:
         specifier: '>=16.0.0'
         version: 16.4.6(@babel/core@7.29.13)(@opentelemetry/api@1.10.0)(@playwright/test@1.65.1)(@types/node@22.20.5)(react-dom@19.3.1(react@19.3.1))(react@19.3.1)

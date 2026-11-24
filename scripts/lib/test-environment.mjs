@@ -82,6 +82,7 @@ export function assertSafeTestEnvironment(
     ["R2_BACKUP_ENDPOINT", env.R2_BACKUP_ENDPOINT],
     ["MERCADO_LIBRE_TOKEN_URL", env.MERCADO_LIBRE_TOKEN_URL],
     ["MERCADO_LIBRE_API_URL", env.MERCADO_LIBRE_API_URL],
+    ["META_CAPI_API_URL", env.META_CAPI_API_URL],
   ]) {
     if (!value?.trim()) continue;
     let r2Url;

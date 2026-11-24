@@ -5,6 +5,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { createTimeoutToken } from "../packages/core/dist/index.js";
 import { createDatabaseClient } from "../packages/db/dist/index.js";
+import { createPublishedReviewFixtures } from "../tests/helpers/public-review-fixture.mjs";
 import {
   createSupabaseFixtureSession,
   encodeSupabaseFixtureCookie,
@@ -85,6 +86,85 @@ async function createContact(page: Page, phone: string) {
   await section.getByLabel(/Teléfono/).fill(phone);
   await section.getByRole("button", { name: "Crear contacto" }).click();
   await expect(page.getByText(/Contacto creado/)).toBeVisible();
+}
+
+async function createCustomerReview(contactId: string, authorDisplayName: string) {
+  const customer = await db.customer.create({
+    data: {
+      email: `review-privacy-${randomUUID()}@example.test`,
+      givenName: "Privacidad",
+      familyName: "E2E",
+      status: "ACTIVE",
+    },
+  });
+  await db.contact.update({ where: { id: contactId }, data: { customerId: customer.id } });
+  const template = await db.product.findFirstOrThrow({
+    where: { status: "ACTIVE", deletedAt: null },
+    select: { brandId: true, categoryId: true, taxGroupId: true },
+  });
+  const suffix = randomUUID().replaceAll("-", "");
+  const product = await db.product.create({
+    data: {
+      slug: `privacidad-${suffix}`,
+      name: `Producto de privacidad ${suffix.slice(0, 8)}`,
+      brandId: template.brandId,
+      categoryId: template.categoryId,
+      taxGroupId: template.taxGroupId,
+      status: "ACTIVE",
+      authenticity: "ORIGINAL",
+      warrantyMonths: 12,
+      trackSerial: false,
+      variants: {
+        create: {
+          sku: `E2E-PRIVACY-${suffix.toUpperCase()}`,
+          isDefault: true,
+          status: "ACTIVE",
+          priceCents: 100_000n,
+          costCents: 60_000n,
+          weightGrams: 100,
+          lengthMillimeters: 100,
+          widthMillimeters: 80,
+          heightMillimeters: 40,
+        },
+      },
+    },
+  });
+  await createPublishedReviewFixtures(db, {
+    customerId: customer.id,
+    moderatedByAdminUserId: admin.id,
+    productSlug: product.slug,
+    reviews: [
+      {
+        authorDisplayName,
+        title: `Privacidad pública ${randomUUID().slice(0, 8)}`,
+        createdAt: new Date(),
+      },
+    ],
+  });
+  return { customer, productSlug: product.slug, productPath: `/producto/${product.slug}` };
+}
+
+async function createReplayReview(productSlug: string, title: string) {
+  const customer = await db.customer.create({
+    data: {
+      email: `review-replay-${randomUUID()}@example.test`,
+      givenName: "Replay",
+      familyName: "E2E",
+      status: "ACTIVE",
+    },
+  });
+  await createPublishedReviewFixtures(db, {
+    customerId: customer.id,
+    moderatedByAdminUserId: admin.id,
+    productSlug,
+    reviews: [
+      {
+        authorDisplayName: "Comprador adicional E2E",
+        title,
+        createdAt: new Date(),
+      },
+    ],
+  });
 }
 
 async function crmCandidate(status: "PENDING" | "MERGED") {
@@ -244,14 +324,57 @@ test("CRM 360 works end to end with MFA, reversible merge, retention and accessi
     page.getByRole("heading", { name: "Revisión CRM E2E · Completada · Normal" }),
   ).toBeVisible();
 
+  const privateName = `Nombre CRM privado ${randomUUID().slice(0, 8)}`;
+  const reviewFixture = await createCustomerReview(candidate.targetContactId, privateName);
+  await expect
+    .poll(async () => {
+      const response = await page.request.get(reviewFixture.productPath);
+      return (await response.text()).includes(privateName);
+    })
+    .toBe(true);
+
+  const actionRequestPromise = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      Boolean(request.headers()["next-action"]) &&
+      (request.postData()?.includes(candidate.targetContactId) ?? false),
+  );
   await page.getByLabel("Escribe SUPRIMIR CONTACTO").fill("SUPRIMIR CONTACTO");
   await page.getByRole("button", { name: "Suprimir con MFA" }).click();
+  const actionRequest = await actionRequestPromise;
   await expect(page.getByText(/Anonimizado/).first()).toBeVisible();
   expect(await page.content()).not.toContain(email);
   const suppressed = await db.contact.findMany({
     where: { id: { in: [candidate.sourceContactId, candidate.targetContactId] } },
   });
   expect(suppressed.every((contact) => contact.status === "ANONYMIZED")).toBe(true);
+  expect(
+    (await db.customer.findUniqueOrThrow({ where: { id: reviewFixture.customer.id } })).status,
+  ).toBe("ANONYMIZED");
+  const anonymizedReview = await page.request.get(reviewFixture.productPath);
+  const anonymizedHtml = await anonymizedReview.text();
+  expect(anonymizedHtml).toContain("Cliente verificado");
+  expect(anonymizedHtml).not.toContain(privateName);
+
+  const replayMarker = `Marcador de replay ${randomUUID().slice(0, 8)}`;
+  await createReplayReview(reviewFixture.productSlug, replayMarker);
+  const actionHeaders = actionRequest.headers();
+  const actionBody = actionRequest.postDataBuffer();
+  expect(actionBody).not.toBeNull();
+  const replay = await page.request.post(actionRequest.url(), {
+    headers: {
+      "content-type": actionHeaders["content-type"]!,
+      "next-action": actionHeaders["next-action"]!,
+      origin: new URL(actionRequest.url()).origin,
+    },
+    data: actionBody!,
+  });
+  expect(replay.status()).toBe(200);
+  expect(await replay.text()).toContain("La supresión ya estaba aplicada.");
+  const replayedReview = await page.request.get(reviewFixture.productPath);
+  const replayedHtml = await replayedReview.text();
+  expect(replayedHtml).toContain("Cliente verificado");
+  expect(replayedHtml).not.toContain(replayMarker);
 
   await authenticateAdmin(page, supportAdmin);
   await page.goto("/admin/crm");
@@ -276,6 +399,14 @@ test("order scheduler executes authenticated CRM retention and reports only coun
       retentionReviewAt: new Date(Date.now() + 60_000),
     },
   });
+  const privateName = `Nombre job privado ${randomUUID().slice(0, 8)}`;
+  const reviewFixture = await createCustomerReview(contact.id, privateName);
+  await expect
+    .poll(async () => {
+      const response = await page.request.get(reviewFixture.productPath);
+      return (await response.text()).includes(privateName);
+    })
+    .toBe(true);
   await db.$executeRaw`
     UPDATE "Contact" SET "retentionReviewAt" = "createdAt" + INTERVAL '1 microsecond'
     WHERE "id" = ${contact.id}::uuid
@@ -294,4 +425,21 @@ test("order scheduler executes authenticated CRM retention and reports only coun
   expect((await db.contact.findUniqueOrThrow({ where: { id: contact.id } })).status).toBe(
     "ANONYMIZED",
   );
+  const anonymizedReview = await page.request.get(reviewFixture.productPath);
+  const anonymizedHtml = await anonymizedReview.text();
+  expect(anonymizedHtml).toContain("Cliente verificado");
+  expect(anonymizedHtml).not.toContain(privateName);
+
+  const replayMarker = `Marcador de job repetido ${randomUUID().slice(0, 8)}`;
+  await createReplayReview(reviewFixture.productSlug, replayMarker);
+  const replay = await page.request.post("/api/jobs/orders", {
+    headers: { Authorization: `Bearer ${secret}` },
+  });
+  expect(replay.status()).toBe(200);
+  const replayBody = await replay.json();
+  expect(replayBody.crmRetention.suppressed).toBe(0);
+  const replayedReview = await page.request.get(reviewFixture.productPath);
+  const replayedHtml = await replayedReview.text();
+  expect(replayedHtml).toContain("Cliente verificado");
+  expect(replayedHtml).not.toContain(replayMarker);
 });

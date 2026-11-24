@@ -12,10 +12,15 @@ type PublicReviewsData = Awaited<ReturnType<typeof getPublicReviews>>;
 export function ProductReviews({
   slug,
   reviews,
+  variantId,
 }: {
   readonly slug: string;
   readonly reviews: PublicReviewsData;
+  readonly variantId: string | undefined;
 }) {
+  const nextQuery = new URLSearchParams();
+  if (variantId) nextQuery.set("variant", variantId);
+  if (reviews.nextCursor) nextQuery.set("reviewCursor", reviews.nextCursor);
   return (
     <section aria-labelledby="reviews-public-title" id="resenas" className="space-y-5">
       <div>
@@ -49,7 +54,7 @@ export function ProductReviews({
       ) : null}
       {reviews.nextCursor ? (
         <Link
-          href={`/producto/${slug}?reviewCursor=${reviews.nextCursor}#resenas`}
+          href={`/producto/${slug}?${nextQuery.toString()}#resenas`}
           className="inline-block rounded-md border border-input px-4 py-2 text-sm font-medium"
         >
           Ver más reseñas

@@ -38,7 +38,7 @@ import {
   inInventoryTransaction,
   type StockMovementInput,
 } from "./inventory-shared.js";
-import { acquireIdempotencyKey, completeIdempotencyKey } from "./primitives.js";
+import { acquireIdempotencyKey, completeIdempotencyKey, databaseNow } from "./primitives.js";
 import { reserveStock } from "./stock.js";
 import { recordDailyFunnelCounters } from "./funnel-service.js";
 import type {
@@ -57,14 +57,6 @@ export class OrderValidationError extends Error {
   override readonly name = "OrderValidationError" as const;
 
   constructor(message: string) {
-    super(message);
-  }
-}
-
-export class OrderNotFoundError extends Error {
-  override readonly name = "OrderNotFoundError" as const;
-
-  constructor(message = "Order not found.") {
     super(message);
   }
 }
@@ -278,11 +270,6 @@ function validateSettings(settings: CheckoutDefaults): RuntimeSettings {
     throw new OrderValidationError("Click & Collect setting must be boolean.");
   }
   return settings;
-}
-
-async function databaseNow(tx: Prisma.TransactionClient): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
 }
 
 async function lockedSettings(

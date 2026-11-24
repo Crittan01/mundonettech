@@ -17,7 +17,7 @@
 ## 2. Fase Activa — Auditoría Integral Pre-Calle (`A1`–`A10`, 0-supuestos)
 
 - `[x]` ✅ **Fases 0–6 en CI (`F0.1`–`F6.4`, `ADR-001`..`045`):** `474` archivos, `29` págs. Cliente, `43` págs. Admin, `22` APIs, `131` tablas PG 17 y `99` suites.
-- `[ ]` **`A1` — Grafo AST, Código Muerto y Caché (`audit/a1-ast-wiring-cache`):** barrer el 100 % de `exports`, tipos, helpers, componentes y env vars (`config/`, `packages/*`, `apps/web`); eliminar código muerto/duplicado; sumar guarda AST en `make check`; certificar paridad 1:1 `cacheTag` ↔ `updateTag`/`revalidateTag`.
+- `[x]` ✅ **`A1` — Grafo AST, Código Muerto y Caché (`ADR-046`):** `guard:ast` en `make check` (`558` fuentes, `2.784` exports, `23` familias caché, `94` env vars), `ProductMediaService` R2, generación `UrlRedirectCacheState` y paridad 1:1 certificadas.
 - `[ ]` **`A2` — Seguridad Zero-Trust (`audit/a2-security-rbac-mfa-pii`):** inventariar el 100 % de `"use server"`, `22` `route.ts` y `proxy.ts`: sesión, RBAC (8 roles), `aal2`, `requireRecentMfa` (`≤ 10 min`), CSRF/Origin, HMAC *timing-safe*, rate limits, `AdminActionLog` (`selfDealing`) y 0-PII/0-`WAC` en payloads RSC y logs.
 - `[ ]` **`A3` — Esquema PG 17, Índices y Concurrencia (`audit/a3-db-constraints-locks`):** cruzar los `11` `.prisma` ↔ SQL ↔ `pg_catalog`: `CHECK >= 0` en todos los `BigInt`/stocks, índices parciales `WHERE "deletedAt" IS NULL`, índices en FKs calientes, `ON DELETE`, cobertura `rls-matrix` y orden léxico de locks (Retail/Asistida/B2B/ML, cero `40P01`).
 - `[ ]` **`A4` — Espejo Admin ↔ Cliente: Catálogo, Media 360°/3D, WAC, Precios y CMS/SEO (`audit/a4-catalog-media-cms`):** cruzar `/admin/{catalogo,precios,contenido,configuracion}` ↔ `/`, `/productos`, `/categoria`, `/marca`, `/producto`, `/comparar`, `/pagina`, `/ayuda`, `/legal`, `/sitemap*`: toda mutación Admin refleja al instante en Cliente/JSON-LD sin caché obsoleta.
@@ -33,6 +33,6 @@
 
 ## 3. Handoff
 
-- **Siguiente:** **`A1`** (`audit/a1-ast-wiring-cache` desde `develop`; congelado `feat/f7-*`).
-- **Leer:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md` y `docs/DECISIONS.md`.
-- **Cierre dual `A1`:** Implementador audita con subagentes `config/`, `packages/*` y `apps/web`, elimina código muerto, valida paridad 1:1 `cacheTag`, suma guarda AST en `make check` y entrega en `[R]` con `make check && pnpm test && pnpm build` en verde; Auditor reaudita al 100 %, certifica `[x]` y fusiona en `develop`.
+- **Siguiente:** **Implementador `A2`** (`audit/a2-security-rbac-mfa-pii`, desde `develop` limpio; congelado `feat/f7-*`).
+- **Leer:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` y `docs/SECURITY.md`.
+- **Alcance `A2`:** inventariar y blindar el 100 % de `"use server"`, `22` `route.ts` y `proxy.ts` (RBAC 8 roles, `aal2`, step-up `≤ 10 min`, CSRF/Origin, HMAC *timing-safe*, rate limits, `AdminActionLog`/`selfDealing` y 0-PII/0-`WAC` en RSC/logs), entregar en `[R]` con `make check && pnpm test && pnpm build` en verde.
