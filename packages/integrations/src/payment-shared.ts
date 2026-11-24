@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
+import { maxSignedBigInt } from "@mundonettech/core";
 import {
   acquireOperationLocks,
   compareStrings,
@@ -15,7 +16,7 @@ import {
   type StoreCreditEntryType,
 } from "@mundonettech/db";
 
-import { integrationDigest } from "./integration-utils.js";
+import { databaseTimestamp, integrationDigest, uuidPattern } from "./integration-utils.js";
 import {
   PaymentAuthorizationError,
   PaymentConflictError,
@@ -27,11 +28,8 @@ import {
 
 export type PaymentTransaction = Prisma.TransactionClient;
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f][0-9a-f]{2}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const keyPattern = /^[A-Za-z0-9._:-]{3,128}$/;
 const financialRoles = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"]);
-const maxMoney = 9_223_372_036_854_775_807n;
 
 export function assertPaymentUuid(value: string, field: string): string {
   if (typeof value !== "string" || !uuidPattern.test(value)) {
@@ -52,7 +50,7 @@ export function assertPaymentMoney(
   field = "amountCents",
   allowZero = false,
 ): bigint {
-  if (typeof value !== "bigint" || value < (allowZero ? 0n : 1n) || value > maxMoney) {
+  if (typeof value !== "bigint" || value < (allowZero ? 0n : 1n) || value > maxSignedBigInt) {
     throw new PaymentValidationError(
       `${field} must fit a ${allowZero ? "non-negative" : "positive"} signed BIGINT.`,
     );
@@ -91,8 +89,7 @@ export function equalHash(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 export async function databaseNow(tx: PaymentTransaction): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
+  return databaseTimestamp(tx);
 }
 
 function validatePaymentAudit(audit: PaymentAuditContext): {

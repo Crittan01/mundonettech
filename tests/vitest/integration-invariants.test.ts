@@ -72,6 +72,12 @@ describe("A1 — historical integration hashes", () => {
     expect(() => canonicalJson({ value: Number.POSITIVE_INFINITY })).toThrow(/Non-finite/);
     expect(() => canonicalJson(undefined)).toThrow(/Unsupported/);
     expect(() => canonicalJson({ value: () => true })).toThrow(/Unsupported/);
+    expect(canonicalJson({ "10": "a", "2": "b", "-1": "d", a: "c" })).toBe(
+      '{"-1":"d","10":"a","2":"b","a":"c"}',
+    );
+    const digest = integrationDigest({ "10": "a", "2": "b", "-1": "d", a: "c" });
+    expect(digest.byteOffset).toBe(0);
+    expect(digest.buffer.byteLength).toBe(32);
   });
 });
 

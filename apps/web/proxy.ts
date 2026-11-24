@@ -16,6 +16,8 @@ import {
 } from "@/lib/security/session-policy";
 
 const helpArticlePaths = new Set(helpArticles.map((article) => `/ayuda/${article.slug}`));
+const staticRedirectBypassPattern =
+  /^\/(?:favicon\.ico|manifest\.webmanifest|apple-touch-icon(?:\.[^/]+)?|icon(?:\.[^/]+)?|opengraph-image(?:\.[^/]+)?|twitter-image(?:\.[^/]+)?)$|\.(?:ico|png|jpe?g|webp|avif|gif|svg|woff2?|css|js|mjs|map)$/i;
 
 function securityPolicy(
   supabaseUrl: string,
@@ -94,12 +96,18 @@ export async function proxy(request: NextRequest) {
   const isLiveEditRequest =
     request.nextUrl.pathname.startsWith("/pagina/") &&
     request.nextUrl.searchParams.getAll("liveEdit").includes("1");
-  if (isSafeNavigationMethod && !request.headers.has("next-action") && !isLiveEditRequest) {
+  if (
+    isSafeNavigationMethod &&
+    !request.headers.has("next-action") &&
+    !isLiveEditRequest &&
+    !staticRedirectBypassPattern.test(request.nextUrl.pathname)
+  ) {
     const persistedRedirect = await resolveCachedUrlRedirect(request.nextUrl.pathname);
     if (persistedRedirect) {
       const destination = request.nextUrl.clone();
       destination.pathname = persistedRedirect.toPath;
       const redirect = NextResponse.redirect(destination, persistedRedirect.statusCode);
+      redirect.headers.set("Cache-Control", "public, max-age=0, must-revalidate");
       applyHeaders(redirect, csp, isDevelopment);
       return redirect;
     }

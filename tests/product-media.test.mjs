@@ -477,4 +477,57 @@ describe("ProductMedia compensation and immutable history", () => {
     );
     assert.ok(spinKeys.every((key) => objects.has(key)));
   });
+
+  it("rejects missing targets, cross-product mutations, negative positions and already-archived media", async () => {
+    await assert.rejects(
+      service.uploadImage(
+        { productId: randomUUID(), bytes: createPng(32, 24), altText: "Missing product" },
+        audit,
+      ),
+      /Product not found/,
+    );
+    const otherProduct = await db.product.create({
+      data: {
+        slug: `other-media-${randomUUID().slice(0, 8)}`,
+        name: "Other Media Product",
+        brandId: fixture.brandId,
+        categoryId: fixture.categoryId,
+        taxGroupId: fixture.taxGroupId,
+        authenticity: "ORIGINAL",
+        status: "ACTIVE",
+      },
+      select: { id: true },
+    });
+    const uploaded = await service.uploadImage(
+      { productId: fixture.productId, bytes: createPng(48, 30), altText: "Negative checks" },
+      audit,
+    );
+    await assert.rejects(
+      service.update(
+        fixture.productId,
+        uploaded.media.id,
+        { altText: "Bad pos", position: -1 },
+        audit,
+      ),
+      ProductMediaValidationError,
+    );
+    await assert.rejects(
+      service.update(
+        otherProduct.id,
+        uploaded.media.id,
+        { altText: "Cross product", position: 0 },
+        audit,
+      ),
+      ProductMediaNotFoundError,
+    );
+    await assert.rejects(
+      service.archive(otherProduct.id, uploaded.media.id, audit),
+      ProductMediaNotFoundError,
+    );
+    await service.archive(fixture.productId, uploaded.media.id, audit);
+    await assert.rejects(
+      service.archive(fixture.productId, uploaded.media.id, audit),
+      ProductMediaNotFoundError,
+    );
+  });
 });

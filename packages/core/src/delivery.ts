@@ -24,7 +24,7 @@ export function parseCoordinateE6(
   if (!Number.isSafeInteger(scaled) || scaled < minimum || scaled > maximum) {
     throw new RangeError(`${field} is outside its valid range.`);
   }
-  return scaled;
+  return scaled === 0 ? 0 : scaled;
 }
 
 function coordinate(value: number, field: string, minimum: number, maximum: number): number {

@@ -195,7 +195,10 @@ test("customer registration and recovery connect server field errors to their co
   });
   await new Promise<void>((resolve, reject) => {
     turnstile.once("error", reject);
-    turnstile.listen(54427, "127.0.0.1", resolve);
+    turnstile.listen(54427, "127.0.0.1", () => {
+      turnstile.off("error", reject);
+      resolve();
+    });
   });
 
   async function passChallenge(action: string) {
@@ -321,6 +324,7 @@ test("customer registration and recovery connect server field errors to their co
       "true",
     );
   } finally {
+    turnstile.closeAllConnections();
     await new Promise<void>((resolve, reject) => {
       turnstile.close((error) => (error ? reject(error) : resolve()));
     });

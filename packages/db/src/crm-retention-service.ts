@@ -173,7 +173,10 @@ export class CrmRetentionService {
           status: "REJECTED",
           OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
         },
-        data: { resolutionNote: "[contenido suprimido por retención]" },
+        data: {
+          resolutionNote: "[contenido suprimido por retención]",
+          version: { increment: 1 },
+        },
       });
       await redactCrmOpportunitiesInTransaction(tx, lineageIds, now);
       for (const contact of contacts) {

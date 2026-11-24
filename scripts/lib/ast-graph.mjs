@@ -5,16 +5,13 @@ import ts from "typescript";
 const sourcePattern = /\.(?:[cm]?[jt]sx?)$/i;
 const productionPattern = /^(?:config|packages|apps\/web)\//;
 const scannedPattern = /^(?:config|packages|apps\/web|scripts|tests|e2e)\//;
+const runtimePlatformEnvironmentKeys = new Set(["NODE_ENV", "NEXT_PHASE", "VERCEL", "VERCEL_ENV"]);
+const toolingPlatformEnvironmentKeys = new Set(["CI", "PATH"]);
 const platformEnvironmentKeys = new Set([
-  "NODE_ENV",
-  "NEXT_PHASE",
-  "VERCEL",
-  "VERCEL_ENV",
-  "CI",
-  "PATH",
+  ...runtimePlatformEnvironmentKeys,
+  ...toolingPlatformEnvironmentKeys,
 ]);
 const documentedTestEnvironmentKeys = new Set([
-  "EMAIL_SEND_DISABLED",
   "TEST_DATABASE_URL",
   "TEST_DB_PORT",
   "TEST_DB_CONTAINER",
@@ -22,10 +19,6 @@ const documentedTestEnvironmentKeys = new Set([
   "K6_BINARY",
   "RECOVERY_DEBUG",
   "WEB_VERIFY_URL",
-  "MERCADO_LIBRE_TOKEN_URL",
-  "MERCADO_LIBRE_API_URL",
-  "META_CAPI_API_URL",
-  "TURNSTILE_VERIFY_ENDPOINT",
 ]);
 const nextRouteFiles = new Set([
   "page",
@@ -47,13 +40,7 @@ const nextRouteFiles = new Set([
   "opengraph-image",
   "twitter-image",
 ]);
-const nextCommonExports = new Set([
-  "default",
-  "metadata",
-  "generateMetadata",
-  "generateStaticParams",
-  "generateViewport",
-  "viewport",
+const nextSegmentConfigExports = [
   "dynamic",
   "dynamicParams",
   "revalidate",
@@ -62,13 +49,28 @@ const nextCommonExports = new Set([
   "preferredRegion",
   "maxDuration",
   "experimental_ppr",
+];
+const nextCommonExports = new Set([
+  "default",
+  "metadata",
+  "generateMetadata",
+  "generateStaticParams",
+  "generateViewport",
+  "viewport",
+  ...nextSegmentConfigExports,
+]);
+const nextImageFiles = new Set(["icon", "apple-icon", "opengraph-image", "twitter-image"]);
+const nextImageExports = new Set([
+  "default",
   "alt",
   "size",
   "contentType",
   "generateImageMetadata",
+  ...nextSegmentConfigExports,
 ]);
+const nextSitemapExports = new Set(["default", "generateSitemaps", ...nextSegmentConfigExports]);
 const nextRouteExports = new Set([
-  ...nextCommonExports,
+  ...nextSegmentConfigExports,
   "GET",
   "POST",
   "PUT",
@@ -254,12 +256,6 @@ function enclosingFunction(node) {
   return null;
 }
 
-function calleeName(call) {
-  if (ts.isIdentifier(call.expression)) return call.expression.text;
-  if (ts.isPropertyAccessExpression(call.expression)) return call.expression.name.text;
-  return null;
-}
-
 function diagnostic(root, file, sourceFile, node, category, message) {
   const position = node && sourceFile ? node.getStart(sourceFile) : 0;
   const line = sourceFile ? sourceFile.getLineAndCharacterOfPosition(position).line + 1 : 1;
@@ -271,10 +267,18 @@ function diagnostic(root, file, sourceFile, node, category, message) {
   };
 }
 
+function hasUseCacheDirective(body) {
+  return (
+    hasDirective(body, "use cache") ||
+    hasDirective(body, "use cache: remote") ||
+    hasDirective(body, "use cache: private")
+  );
+}
+
 function isSourceFileInScope(relative) {
   return (
     sourcePattern.test(relative) &&
-    !relative.endsWith(".d.ts") &&
+    !/\.d\.[cm]?ts$/i.test(relative) &&
     !/(?:^|\/)(?:dist|generated|node_modules|\.next|\.turbo)(?:\/|$)/.test(relative) &&
     (scannedPattern.test(relative) ||
       /^(?:playwright|vitest|eslint|prettier)\.config\.[cm]?[jt]s$/.test(relative))
@@ -344,6 +348,7 @@ export function auditProject(
     exceptions = cacheExceptions,
     entrypoints = publicApiEntrypoints,
     packageExports = publicPackageExports,
+    checkStaleExceptions = false,
   } = {},
 ) {
   const root = slash(host.root ?? process.cwd());
@@ -409,7 +414,16 @@ export function auditProject(
     for (const file of mapped) {
       if (sourceFiles.has(file)) return file;
     }
-    for (const index of ["index.ts", "index.tsx", "index.mts", "index.cts", "index.js"]) {
+    for (const index of [
+      "index.ts",
+      "index.tsx",
+      "index.mts",
+      "index.cts",
+      "index.js",
+      "index.jsx",
+      "index.mjs",
+      "index.cjs",
+    ]) {
       const file = path.posix.join(normalized, index);
       if (sourceFiles.has(file)) return file;
     }
@@ -419,7 +433,7 @@ export function auditProject(
   function sourceVariants(candidate) {
     const normalized = slash(path.normalize(candidate));
     const variants = [normalized];
-    if (normalized.includes("/dist/")) variants.push(normalized.replace("/dist/", "/src/"));
+    if (normalized.includes("/dist/")) variants.push(normalized.replaceAll("/dist/", "/src/"));
     const configDist = `${slash(path.join(root, "config"))}/dist/`;
     if (normalized.startsWith(configDist)) {
       variants.push(normalized.replace(configDist, `${slash(path.join(root, "config"))}/`));
@@ -665,6 +679,7 @@ export function auditProject(
                 : localSymbol,
               sourceModule,
               sourceName: specifier ? localName.text : null,
+              sourceSpecifier: specifier ?? null,
             });
           }
         } else if (statement.exportClause && ts.isNamespaceExport(statement.exportClause)) {
@@ -676,6 +691,7 @@ export function auditProject(
             targetSymbol: moduleExportsSymbol(moduleRecord, name),
             sourceModule,
             sourceName: "*namespace",
+            sourceSpecifier: specifier ?? null,
           });
         }
         continue;
@@ -742,7 +758,7 @@ export function auditProject(
       }
       const specifier = staticText(statement.moduleSpecifier);
       const sourceModule = modules.get(resolveModule(specifier, moduleRecord.file));
-      if (!sourceModule) continue;
+      if (!sourceModule?.symbol) continue;
       const sourceExports = checker.getExportsOfModule(sourceModule.symbol);
       for (const symbol of sourceExports) {
         if (symbol.name === "default" || moduleRecord.exportsByName.has(symbol.name)) continue;
@@ -753,6 +769,7 @@ export function auditProject(
           targetSymbol: symbol,
           sourceModule,
           sourceName: symbol.name,
+          sourceSpecifier: specifier ?? null,
         });
       }
     }
@@ -906,9 +923,18 @@ export function auditProject(
     queueSymbol(symbol);
   }
 
-  function namespaceImport(symbol) {
+  function namespaceImport(symbol, seen = new Set()) {
+    if (!symbol || seen.has(symbol)) return null;
+    seen.add(symbol);
     const imported = importDetails(symbol);
-    return imported?.namespace ? imported.moduleRecord : null;
+    if (!imported?.moduleRecord) return null;
+    if (imported.namespace) return imported.moduleRecord;
+    if (imported.name) {
+      for (const record of exportRecords(imported.moduleRecord, imported.name)) {
+        if (record.sourceName === "*namespace" && record.sourceModule) return record.sourceModule;
+      }
+    }
+    return null;
   }
 
   function queueModule(file) {
@@ -935,17 +961,22 @@ export function auditProject(
     }
     if (
       current &&
-      ts.isCallExpression(current) &&
-      ts.isPropertyAccessExpression(current.expression) &&
-      current.expression.name.text === "then"
+      ts.isPropertyAccessExpression(current) &&
+      current.name.text === "then" &&
+      ts.isCallExpression(current.parent) &&
+      current.parent.expression === current
     ) {
-      const callback = current.arguments[0];
+      const callback = current.parent.arguments[0];
       const parameter =
         callback && isFunctionLikeDeclaration(callback) ? callback.parameters[0] : null;
       if (parameter && ts.isObjectBindingPattern(parameter.name)) {
         for (const element of parameter.name.elements) {
           if (ts.isBindingElement(element) && ts.isIdentifier(element.name)) {
-            queueNamedExport(targetModule, element.name.text);
+            const importedName =
+              element.propertyName && ts.isIdentifier(element.propertyName)
+                ? element.propertyName.text
+                : element.name.text;
+            queueNamedExport(targetModule, importedName);
           }
         }
       }
@@ -1080,7 +1111,10 @@ export function auditProject(
     if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) return;
     if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
-        if (declaration.initializer) scanNode(declaration.initializer, declaration.initializer);
+        if (!declaration.initializer) continue;
+        const unwrapped = unwrapExpression(declaration.initializer);
+        if (ts.isArrowFunction(unwrapped) || ts.isFunctionExpression(unwrapped)) continue;
+        scanNode(declaration.initializer, declaration.initializer);
       }
       return;
     }
@@ -1132,7 +1166,14 @@ export function auditProject(
     if (appRouteMatch) {
       const base = path.posix.basename(relative).replace(sourcePattern, "");
       if (nextRouteFiles.has(base)) {
-        const names = base === "route" ? nextRouteExports : nextCommonExports;
+        const names =
+          base === "route"
+            ? nextRouteExports
+            : base === "sitemap"
+              ? nextSitemapExports
+              : nextImageFiles.has(base)
+                ? nextImageExports
+                : nextCommonExports;
         for (const name of names) queueNamedExport(moduleRecord, name);
         queueModule(moduleRecord.file);
       }
@@ -1201,9 +1242,29 @@ export function auditProject(
 
   for (const moduleRecord of modules.values()) {
     if (!productionPattern.test(displayPath(root, moduleRecord.file))) continue;
+    if (moduleRecord.exports.length === 0 && !moduleRecord.evaluated) {
+      diagnostics.push(
+        diagnostic(
+          root,
+          moduleRecord.file,
+          moduleRecord.sourceFile,
+          moduleRecord.sourceFile,
+          "dead-file",
+          "unreachable module has no exports and is never evaluated.",
+        ),
+      );
+      continue;
+    }
     for (const record of moduleRecord.exports) {
       if (record.live || hasUnconsumedOrigin(record)) continue;
-      if (record.sourceName && !record.sourceModule) continue;
+      if (
+        record.sourceName &&
+        !record.sourceModule &&
+        record.sourceSpecifier &&
+        /(?:^|\/)generated\//.test(record.sourceSpecifier)
+      ) {
+        continue;
+      }
       const declarationReachable = symbolQueued.has(resolveAlias(record.targetSymbol));
       const finding = declarationReachable ? "unnecessary" : "dead";
       const kinds = exportKinds(record).join("+");
@@ -1237,6 +1298,26 @@ export function auditProject(
             ),
           );
         }
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === "Object" &&
+          ["keys", "values", "entries"].includes(node.expression.name.text) &&
+          node.arguments[0] &&
+          ts.isIdentifier(node.arguments[0]) &&
+          namespaceImport(checker.getSymbolAtLocation(node.arguments[0]))
+        ) {
+          diagnostics.push(
+            diagnostic(
+              root,
+              moduleRecord.file,
+              moduleRecord.sourceFile,
+              node,
+              "reflection",
+              `Object.${node.expression.name.text} over a module namespace cannot be resolved; no exports were assumed live.`,
+            ),
+          );
+        }
       }
       if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression)) {
         const namespace = namespaceImport(checker.getSymbolAtLocation(node.expression));
@@ -1253,13 +1334,48 @@ export function auditProject(
           );
         }
       }
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isObjectBindingPattern(node.name) &&
+        node.initializer &&
+        ts.isIdentifier(unwrapExpression(node.initializer)) &&
+        namespaceImport(checker.getSymbolAtLocation(unwrapExpression(node.initializer)))
+      ) {
+        for (const element of node.name.elements) {
+          if (
+            ts.isBindingElement(element) &&
+            element.propertyName &&
+            ts.isComputedPropertyName(element.propertyName)
+          ) {
+            diagnostics.push(
+              diagnostic(
+                root,
+                moduleRecord.file,
+                moduleRecord.sourceFile,
+                element,
+                "reflection",
+                "computed namespace destructuring cannot be resolved; no exports were assumed live.",
+              ),
+            );
+          }
+        }
+      }
       ts.forEachChild(node, visit);
     };
     visit(moduleRecord.sourceFile);
   }
 
   const cycles = findCycles(modules);
-  const cache = analyzeCache({ root, modules, diagnostics, exceptions });
+  const cache = analyzeCache({
+    root,
+    modules,
+    checker,
+    symbolQueued,
+    resolveAlias,
+    diagnostics,
+    exceptions,
+    checkStaleExceptions,
+  });
   const environment = analyzeEnvironment({ root, modules, checker, diagnostics, host, allFiles });
 
   return {
@@ -1348,7 +1464,102 @@ function mappedTagFamily(expression) {
   return returns.length === 1 && returns[0].expression ? tagFamily(returns[0].expression) : null;
 }
 
-function analyzeCache({ root, modules, diagnostics, exceptions }) {
+const nextCacheFunctions = new Set(["cacheTag", "updateTag", "revalidateTag", "cacheLife"]);
+
+function nextCacheBindings(sourceFile) {
+  const direct = new Map();
+  const namespaces = new Set();
+  const otherImports = new Set();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement) || !statement.importClause) continue;
+    const specifier = staticText(statement.moduleSpecifier);
+    const bindings = statement.importClause.namedBindings;
+    if (specifier === "next/cache") {
+      if (bindings && ts.isNamedImports(bindings)) {
+        for (const element of bindings.elements) {
+          const imported = (element.propertyName ?? element.name).text;
+          if (nextCacheFunctions.has(imported)) direct.set(element.name.text, imported);
+        }
+      } else if (bindings && ts.isNamespaceImport(bindings)) {
+        namespaces.add(bindings.name.text);
+      }
+    } else if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) otherImports.add(element.name.text);
+    } else if (bindings && ts.isNamespaceImport(bindings)) {
+      otherImports.add(bindings.name.text);
+    }
+  }
+  return { direct, namespaces, otherImports };
+}
+
+function resolveNextCacheCall(call, bindings) {
+  if (ts.isIdentifier(call.expression)) {
+    const text = call.expression.text;
+    if (bindings.direct.has(text)) return bindings.direct.get(text);
+    if (!bindings.otherImports.has(text) && nextCacheFunctions.has(text)) return text;
+    return null;
+  }
+  if (
+    ts.isPropertyAccessExpression(call.expression) &&
+    ts.isIdentifier(call.expression.expression) &&
+    bindings.namespaces.has(call.expression.expression.text) &&
+    nextCacheFunctions.has(call.expression.name.text)
+  ) {
+    return call.expression.name.text;
+  }
+  return null;
+}
+
+function isValidRevalidateProfile(argument) {
+  if (!argument) return false;
+  const expr = unwrapExpression(argument);
+  if (expr.kind === ts.SyntaxKind.NullKeyword) return false;
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return false;
+  if (ts.isVoidExpression(expr)) return false;
+  const literal = staticText(expr);
+  if (literal !== null) return literal.trim().length > 0;
+  if (ts.isObjectLiteralExpression(expr)) {
+    return expr.properties.some(
+      (property) =>
+        ts.isPropertyAssignment(property) &&
+        ((ts.isIdentifier(property.name) && property.name.text === "expire") ||
+          staticText(property.name) === "expire") &&
+        ts.isNumericLiteral(unwrapExpression(property.initializer)),
+    );
+  }
+  return true;
+}
+
+function isDeadNonExportedFunction(owner, checker, symbolQueued, resolveAlias) {
+  if (!owner) return false;
+  let rootDecl = owner;
+  if (
+    ts.isVariableDeclaration(owner.parent) &&
+    ts.isVariableStatement(owner.parent.parent.parent)
+  ) {
+    rootDecl = owner.parent.parent.parent;
+  }
+  if (rootDecl.parent && !ts.isSourceFile(rootDecl.parent)) return false;
+  const modifiers = ts.canHaveModifiers(rootDecl) ? ts.getModifiers(rootDecl) : undefined;
+  if (modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) return false;
+  const nameNode = ts.isVariableStatement(rootDecl)
+    ? rootDecl.declarationList.declarations[0]?.name
+    : owner.name;
+  if (!nameNode || !ts.isIdentifier(nameNode)) return false;
+  const symbol = resolveAlias(checker.getSymbolAtLocation(nameNode));
+  return Boolean(symbol && !symbolQueued.has(symbol));
+}
+
+function analyzeCache({
+  root,
+  modules,
+  checker,
+  symbolQueued,
+  resolveAlias,
+  diagnostics,
+  exceptions,
+  checkStaleExceptions = false,
+}) {
   const cacheCalls = [];
   const invalidationCalls = [];
   const cacheFamilies = new Map();
@@ -1358,15 +1569,37 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
     const relative = displayPath(root, moduleRecord.file);
     if (!productionPattern.test(relative)) continue;
     const fileUsesServer = hasDirective(moduleRecord.sourceFile, "use server");
+    const fileUsesCache = hasUseCacheDirective(moduleRecord.sourceFile);
+    const isRouteHandler = /^apps\/web\/(?:src\/)?app\/.*\/route\.[cm]?[jt]sx?$/.test(relative);
+    const bindings = nextCacheBindings(moduleRecord.sourceFile);
+    const useCacheFunctions = new Map();
     const visit = (node) => {
+      if (isFunctionLikeDeclaration(node) && node.body && hasUseCacheDirective(node.body)) {
+        useCacheFunctions.set(node, { hasTag: false });
+      }
       if (ts.isCallExpression(node)) {
-        const name = calleeName(node);
+        const name = resolveNextCacheCall(node, bindings);
         if (name === "cacheTag" || name === "updateTag" || name === "revalidateTag") {
           const owner = enclosingFunction(node);
           const callsite = `${relative}:${owner ? functionName(owner) : "module"}`;
           const record = { name, node, moduleRecord, callsite, families: [], owner };
           const tagArguments =
             name === "revalidateTag" ? node.arguments.slice(0, 1) : [...node.arguments];
+          const deadInvalidator =
+            name !== "cacheTag" &&
+            isDeadNonExportedFunction(owner, checker, symbolQueued, resolveAlias);
+          if (deadInvalidator) {
+            diagnostics.push(
+              diagnostic(
+                root,
+                moduleRecord.file,
+                moduleRecord.sourceFile,
+                node,
+                "cache-dead",
+                `${name} inside unreachable non-exported function "${functionName(owner)}" does not satisfy cache parity.`,
+              ),
+            );
+          }
           if (tagArguments.length === 0) {
             diagnostics.push(
               diagnostic(
@@ -1396,14 +1629,17 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
               );
             } else {
               record.families.push(family);
-              const registry = name === "cacheTag" ? cacheFamilies : invalidationFamilies;
-              if (!registry.has(family)) registry.set(family, []);
-              registry.get(family).push(record);
+              if (!deadInvalidator) {
+                const registry = name === "cacheTag" ? cacheFamilies : invalidationFamilies;
+                if (!registry.has(family)) registry.set(family, []);
+                registry.get(family).push(record);
+              }
             }
           }
           if (name === "cacheTag") {
             cacheCalls.push(record);
-            if (!owner || !hasDirective(owner.body, "use cache")) {
+            if (owner && useCacheFunctions.has(owner)) useCacheFunctions.get(owner).hasTag = true;
+            if (!fileUsesCache && (!owner || !hasUseCacheDirective(owner.body))) {
               diagnostics.push(
                 diagnostic(
                   root,
@@ -1417,7 +1653,8 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
             }
           } else {
             invalidationCalls.push(record);
-            if (name === "updateTag" && !fileUsesServer) {
+            const ownerUsesServer = owner?.body && hasDirective(owner.body, "use server");
+            if (name === "updateTag" && (isRouteHandler || (!fileUsesServer && !ownerUsesServer))) {
               diagnostics.push(
                 diagnostic(
                   root,
@@ -1425,11 +1662,14 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
                   moduleRecord.sourceFile,
                   node,
                   "cache-directive",
-                  'updateTag is only allowed in a file with a "use server" prologue.',
+                  'updateTag is only allowed in a Server Action with a "use server" prologue.',
                 ),
               );
             }
-            if (name === "revalidateTag" && node.arguments.length < 2) {
+            if (
+              name === "revalidateTag" &&
+              (node.arguments.length < 2 || !isValidRevalidateProfile(node.arguments[1]))
+            ) {
               diagnostics.push(
                 diagnostic(
                   root,
@@ -1437,7 +1677,7 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
                   moduleRecord.sourceFile,
                   node,
                   "cache-profile",
-                  "revalidateTag requires an explicit second cache profile argument.",
+                  "revalidateTag requires an explicit valid second cache profile argument.",
                 ),
               );
             }
@@ -1447,10 +1687,25 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
       ts.forEachChild(node, visit);
     };
     visit(moduleRecord.sourceFile);
+    for (const [fnNode, info] of useCacheFunctions) {
+      if (!info.hasTag) {
+        diagnostics.push(
+          diagnostic(
+            root,
+            moduleRecord.file,
+            moduleRecord.sourceFile,
+            fnNode,
+            "cache-directive",
+            '"use cache" function must declare at least one cacheTag(...).',
+          ),
+        );
+      }
+    }
   }
 
+  const matchedExceptions = new Set();
   function exceptionFor(record, family) {
-    return exceptions.find((exception) => {
+    const matched = exceptions.find((exception) => {
       if (exception.tag !== family || exception.callsite !== record.callsite) return false;
       if (!exception.requiresFamily) return true;
       return cacheCalls.some(
@@ -1459,6 +1714,8 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
           candidate.families.includes(exception.requiresFamily),
       );
     });
+    if (matched) matchedExceptions.add(matched);
+    return matched;
   }
 
   for (const [family, records] of cacheFamilies) {
@@ -1493,6 +1750,17 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
       );
     }
   }
+  if (checkStaleExceptions) {
+    for (const exception of exceptions) {
+      if (matchedExceptions.has(exception)) continue;
+      diagnostics.push({
+        category: "cache-exception-stale",
+        file: "scripts/lib/ast-graph.mjs",
+        line: 1,
+        message: `scripts/lib/ast-graph.mjs:1: stale cache exception "${exception.tag}" at "${exception.callsite}" no longer matches an uninvalidated cacheTag.`,
+      });
+    }
+  }
 
   return {
     cacheCalls: cacheCalls.length,
@@ -1502,13 +1770,63 @@ function analyzeCache({ root, modules, diagnostics, exceptions }) {
   };
 }
 
-function isProcessEnv(node) {
-  return (
+function isProcessReference(node) {
+  if (ts.isIdentifier(node) && node.text === "process") return true;
+  if (
     ts.isPropertyAccessExpression(node) &&
     ts.isIdentifier(node.expression) &&
-    node.expression.text === "process" &&
+    node.expression.text === "globalThis" &&
+    node.name.text === "process"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isProcessEnv(node) {
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    isProcessReference(node.expression) &&
     node.name.text === "env"
-  );
+  ) {
+    return true;
+  }
+  if (
+    ts.isElementAccessExpression(node) &&
+    isProcessReference(node.expression) &&
+    staticText(node.argumentExpression) === "env"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function resolveCallableDeclaration(symbol) {
+  for (const declaration of symbol?.declarations ?? []) {
+    if (isFunctionLikeDeclaration(declaration)) return declaration;
+    if (ts.isVariableDeclaration(declaration) && declaration.initializer) {
+      const unwrapped = unwrapExpression(declaration.initializer);
+      if (isFunctionLikeDeclaration(unwrapped)) return unwrapped;
+    }
+  }
+  return null;
+}
+
+function functionReturnsEnvironment(declaration, isEnvironmentExpression) {
+  if (!declaration?.body) return false;
+  if (!ts.isBlock(declaration.body)) return isEnvironmentExpression(declaration.body);
+  let found = false;
+  const visit = (node) => {
+    if (found) return;
+    if (isFunctionLikeDeclaration(node) && node !== declaration) return;
+    if (ts.isReturnStatement(node) && node.expression && isEnvironmentExpression(node.expression)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(declaration.body);
+  return found;
 }
 
 function unwrapExpression(node) {
@@ -1544,15 +1862,43 @@ function isPureWrite(node) {
 
 function analyzeEnvironment({ root, modules, checker, diagnostics, host, allFiles }) {
   const environmentSymbols = new Set();
+  const environmentParameters = new Set();
+  const environmentReturningFunctions = new Set();
   const declarations = [];
+  const assignments = [];
   const calls = [];
+  const functionDeclarations = [];
 
   for (const moduleRecord of modules.values()) {
+    for (const statement of moduleRecord.sourceFile.statements) {
+      if (ts.isImportDeclaration(statement) && statement.importClause) {
+        const specifier = staticText(statement.moduleSpecifier);
+        if (specifier === "node:process" || specifier === "process") {
+          const bindings = statement.importClause.namedBindings;
+          if (bindings && ts.isNamedImports(bindings)) {
+            for (const element of bindings.elements) {
+              if ((element.propertyName ?? element.name).text === "env") {
+                const symbol = checker.getSymbolAtLocation(element.name);
+                if (symbol) environmentSymbols.add(symbol);
+              }
+            }
+          }
+        }
+      }
+    }
     const visit = (node) => {
       if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isBindingElement(node)) {
         declarations.push(node);
       }
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left)
+      ) {
+        assignments.push(node);
+      }
       if (ts.isCallExpression(node)) calls.push(node);
+      if (isFunctionLikeDeclaration(node)) functionDeclarations.push(node);
       ts.forEachChild(node, visit);
     };
     visit(moduleRecord.sourceFile);
@@ -1563,6 +1909,12 @@ function analyzeEnvironment({ root, modules, checker, diagnostics, host, allFile
     if (!node) return false;
     if (isProcessEnv(node)) return true;
     if (ts.isIdentifier(node)) return environmentSymbols.has(checker.getSymbolAtLocation(node));
+    if (ts.isCallExpression(node)) {
+      let symbol = checker.getSymbolAtLocation(node.expression);
+      if (symbol?.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+      const decl = resolveCallableDeclaration(symbol);
+      if (decl && environmentReturningFunctions.has(decl)) return true;
+    }
     if (ts.isBinaryExpression(node)) {
       return isEnvironmentExpression(node.left) || isEnvironmentExpression(node.right);
     }
@@ -1586,36 +1938,71 @@ function analyzeEnvironment({ root, modules, checker, diagnostics, host, allFile
   function markDeclaration(declaration) {
     if (declaration.name && ts.isIdentifier(declaration.name)) {
       addEnvironmentSymbol(declaration.name);
+    } else if (ts.isParameter(declaration) && ts.isObjectBindingPattern(declaration.name)) {
+      environmentParameters.add(declaration);
     }
   }
 
   let changed = true;
   while (changed) {
-    const before = environmentSymbols.size;
+    const before =
+      environmentSymbols.size + environmentParameters.size + environmentReturningFunctions.size;
     for (const declaration of declarations) {
       if (declaration.initializer && isEnvironmentExpression(declaration.initializer)) {
         markDeclaration(declaration);
+      }
+      if (
+        ts.isVariableDeclaration(declaration) &&
+        ts.isObjectBindingPattern(declaration.name) &&
+        declaration.initializer &&
+        isProcessReference(unwrapExpression(declaration.initializer))
+      ) {
+        for (const element of declaration.name.elements) {
+          if (!ts.isBindingElement(element)) continue;
+          if (environmentKeyName(element) === "env" && ts.isIdentifier(element.name)) {
+            addEnvironmentSymbol(element.name);
+          }
+        }
+      }
+    }
+    for (const assignment of assignments) {
+      if (isEnvironmentExpression(assignment.right)) {
+        addEnvironmentSymbol(assignment.left);
+      }
+    }
+    for (const fnDecl of functionDeclarations) {
+      if (
+        !environmentReturningFunctions.has(fnDecl) &&
+        functionReturnsEnvironment(fnDecl, isEnvironmentExpression)
+      ) {
+        environmentReturningFunctions.add(fnDecl);
       }
     }
     for (const call of calls) {
       let symbol = checker.getSymbolAtLocation(call.expression);
       if (symbol?.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
-      const declaration = symbol?.declarations?.find(isFunctionLikeDeclaration);
+      const declaration = resolveCallableDeclaration(symbol);
       if (!declaration) continue;
       call.arguments.forEach((argument, index) => {
         const parameter = declaration.parameters[index];
         if (!parameter) return;
-        const parameterName = ts.isIdentifier(parameter.name) ? parameter.name.text : "env";
+        const parameterName = ts.isIdentifier(parameter.name) ? parameter.name.text : null;
+        const directEnvironment = isEnvironmentExpression(argument);
         const environmentArgument =
-          isEnvironmentExpression(argument) ||
-          (ts.isObjectLiteralExpression(unwrapExpression(argument)) &&
+          directEnvironment ||
+          (parameterName !== null &&
+            ts.isObjectLiteralExpression(unwrapExpression(argument)) &&
             /^(?:env|environment)$/i.test(parameterName));
         if (environmentArgument && ts.isIdentifier(parameter.name)) {
           addEnvironmentSymbol(parameter.name);
+        } else if (directEnvironment && ts.isObjectBindingPattern(parameter.name)) {
+          environmentParameters.add(parameter);
         }
       });
     }
-    changed = environmentSymbols.size !== before;
+    changed =
+      environmentSymbols.size + environmentParameters.size + environmentReturningFunctions.size !==
+      before;
   }
 
   const reads = new Map();
@@ -1733,9 +2120,27 @@ function analyzeEnvironment({ root, modules, checker, diagnostics, host, allFile
           }
         }
       } else if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.InKeyword &&
+        isEnvironmentExpression(node.right)
+      ) {
+        const literal = staticText(node.left);
+        if (literal !== null) addRead(literal, moduleRecord, node);
+      } else if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) &&
+        ((node.expression.expression.text === "Object" && node.expression.name.text === "hasOwn") ||
+          (node.expression.expression.text === "Reflect" && node.expression.name.text === "get")) &&
+        node.arguments.length >= 2 &&
+        isEnvironmentExpression(node.arguments[0])
+      ) {
+        const literal = staticText(node.arguments[1]);
+        if (literal !== null) addRead(literal, moduleRecord, node);
+      } else if (
         ts.isParameter(node) &&
         ts.isObjectBindingPattern(node.name) &&
-        environmentSymbols.has(checker.getSymbolAtLocation(node.name))
+        environmentParameters.has(node)
       ) {
         for (const element of node.name.elements) {
           if (!ts.isBindingElement(element)) continue;
@@ -1750,41 +2155,49 @@ function analyzeEnvironment({ root, modules, checker, diagnostics, host, allFile
 
   let envExample = "";
   if (allFiles.includes(".env.example")) envExample = host.readFile(".env.example");
-  const declared = new Set();
-  for (const line of envExample.split(/\r\n|\r|\n/)) {
+  const declared = new Map();
+  envExample.split(/\r\n|\r|\n/).forEach((line, index) => {
     const match = /^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=/.exec(line);
-    if (match) declared.add(match[1]);
-  }
+    if (match && !declared.has(match[1])) declared.set(match[1], index + 1);
+  });
 
   for (const [key, locations] of reads) {
-    if (
-      declared.has(key) ||
-      platformEnvironmentKeys.has(key) ||
-      documentedTestEnvironmentKeys.has(key)
-    ) {
+    if (declared.has(key) || runtimePlatformEnvironmentKeys.has(key)) {
       continue;
     }
-    const location = locations[0];
+    const disallowed = locations.find((location) => {
+      const isProduction = productionPattern.test(location.file);
+      if (isProduction) return true;
+      return !toolingPlatformEnvironmentKeys.has(key) && !documentedTestEnvironmentKeys.has(key);
+    });
+    if (!disallowed) continue;
     diagnostics.push({
       category: "environment-missing",
-      file: location.file,
-      line: location.line,
-      message: `${location.file}:${location.line}: environment key "${key}" is read but not declared in .env.example.`,
+      file: disallowed.file,
+      line: disallowed.line,
+      message: `${disallowed.file}:${disallowed.line}: environment key "${key}" is read but not declared in .env.example.`,
     });
   }
-  for (const key of declared) {
-    if (reads.has(key)) continue;
+  const nonTestReads = new Set(
+    [...reads.entries()]
+      .filter(([, locations]) =>
+        locations.some((location) => !/^(?:tests|e2e)\//.test(location.file)),
+      )
+      .map(([key]) => key),
+  );
+  for (const [key, line] of declared) {
+    if (nonTestReads.has(key)) continue;
     diagnostics.push({
       category: "environment-orphan",
       file: ".env.example",
-      line: 1,
-      message: `.env.example:1: declared environment key "${key}" has no static read in production, tests, e2e, scripts or operational CLIs.`,
+      line,
+      message: `.env.example:${line}: declared environment key "${key}" has no static read in production, scripts or operational CLIs.`,
     });
   }
 
   return {
     reads: [...reads.keys()].sort(),
-    declared: [...declared].sort(),
+    declared: [...declared.keys()].sort(),
     platform: [...platformEnvironmentKeys].sort(),
     documentedTests: [...documentedTestEnvironmentKeys].sort(),
   };

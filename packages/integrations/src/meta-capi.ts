@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import { IntegrationEnvironment } from "@mundonettech/db";
 
 import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./integration-http.js";
@@ -15,7 +13,7 @@ import {
 
 const metaCapiGraphApiBaseUrl = "https://graph.facebook.com/v24.0";
 
-const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const tracePattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 export type MetaCapiErrorCode =
@@ -204,10 +202,6 @@ export function buildMetaCapiPurchaseRequest(options: {
     body,
     requestHash: integrationDigest({ requestUrl, body }),
   };
-}
-
-export function hashMetaCapiRequest(requestUrl: string, body: string): Uint8Array<ArrayBuffer> {
-  return createHash("sha256").update(JSON.stringify({ body, requestUrl })).digest();
 }
 
 export interface MetaConversionsApiClientOptions {

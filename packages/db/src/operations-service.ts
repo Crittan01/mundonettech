@@ -140,7 +140,10 @@ export class OperationsService {
       throw new TypeError("eventKey must be a lowercase SHA-256 hex digest.");
     }
     await this.db.$transaction(async (tx) => {
-      await acquireOperationLocks(tx, [`order-payment:${input.orderId}`]);
+      await acquireOperationLocks(tx, [
+        `order-payment:${input.orderId}`,
+        "operations-notifications",
+      ]);
       const orders = await tx.$queryRaw<Array<{ id: string; orderNumber: string }>>`
         SELECT "id", "orderNumber" FROM "Order" WHERE "id" = ${input.orderId}::uuid FOR UPDATE
       `;
@@ -178,7 +181,7 @@ export class OperationsService {
       await tx.notification.upsert({
         where: { deduplicationKey: `payment-late-review:${attempt.id}` },
         create: { deduplicationKey: `payment-late-review:${attempt.id}`, ...values },
-        update: { ...values, resolvedAt: null },
+        update: { resolvedAt: null },
       });
     });
   }

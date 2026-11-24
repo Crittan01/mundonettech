@@ -14,7 +14,7 @@ export function selectStyles({
   focusRing = true,
 }: SelectStyleOptions = {}): string {
   return cn(
-    "rounded-md border border-input bg-background px-3 text-sm",
+    "rounded-md border border-input bg-background px-3 text-sm disabled:cursor-not-allowed disabled:opacity-50",
     compact ? "h-10" : "h-11",
     fullWidth && "w-full",
     focusRing && "outline-none focus-visible:ring-2 focus-visible:ring-ring",

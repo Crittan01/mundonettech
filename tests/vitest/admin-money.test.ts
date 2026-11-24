@@ -32,6 +32,7 @@ describe("Admin COP input conversion", () => {
       ["123.4", "12340"],
       ["123,45", "12345"],
       ["123.45", "12345"],
+      [" 123.45 ", "12345"],
       ["000123.45", "12345"],
       ["92233720368547758.07", maximumCents],
     ] as const;
@@ -64,6 +65,7 @@ describe("Admin COP input conversion", () => {
     ];
     for (const value of invalid) expect(() => parseDecimalCopToCents(value)).toThrow();
     expect(() => formatCopCentsForInput("-1")).toThrow(RangeError);
+    expect(() => formatCopCentsForInput("   ")).toThrow(TypeError);
     expect(() => formatCopCentsForInput("9223372036854775808")).toThrow(RangeError);
   });
 

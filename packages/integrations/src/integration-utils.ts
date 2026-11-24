@@ -57,44 +57,55 @@ interface IntegrationCanonicalizationOptions {
   readonly strict?: boolean;
 }
 
-function canonical(value: unknown, strict: boolean): unknown {
-  if (typeof value === "bigint") return value.toString();
-  if (!strict && value instanceof Uint8Array) return Buffer.from(value).toString("base64");
-  if (!strict && value instanceof Date) return value.toISOString();
+function serializeCanonical(value: unknown, strict: boolean): string {
+  if (typeof value === "bigint") return JSON.stringify(value.toString());
+  if (!strict && value instanceof Uint8Array) {
+    return JSON.stringify(Buffer.from(value).toString("base64"));
+  }
+  if (!strict && value instanceof Date) return JSON.stringify(value.toISOString());
   if (strict && typeof value === "number" && !Number.isFinite(value)) {
     throw new TypeError("Non-finite numbers are not canonical JSON.");
   }
-  if (Array.isArray(value)) return value.map((entry) => canonical(entry, strict));
+  if (Array.isArray(value)) {
+    return `[${value
+      .map((entry) =>
+        !strict && (entry === undefined || typeof entry === "function" || typeof entry === "symbol")
+          ? "null"
+          : serializeCanonical(entry, strict),
+      )
+      .join(",")}]`;
+  }
   if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, entry]) => [key, canonical(entry, strict)]),
-    );
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${serializeCanonical(entry, strict)}`);
+    return `{${entries.join(",")}}`;
   }
   if (strict && (value === undefined || typeof value === "function" || typeof value === "symbol")) {
     throw new TypeError("Unsupported value in integration payload.");
   }
-  return value;
-}
-
-export function canonicalIntegrationJson(
-  value: unknown,
-  options: IntegrationCanonicalizationOptions = {},
-): string {
-  const serialized = JSON.stringify(canonical(value, options.strict === true));
+  const serialized = JSON.stringify(value);
   if (serialized === undefined) {
     throw new TypeError("Integration payload must be JSON serializable.");
   }
   return serialized;
 }
 
+export function canonicalIntegrationJson(
+  value: unknown,
+  options: IntegrationCanonicalizationOptions = {},
+): string {
+  return serializeCanonical(value, options.strict === true);
+}
+
 export function integrationDigest(
   value: unknown,
   options: IntegrationCanonicalizationOptions = {},
 ): Uint8Array<ArrayBuffer> {
-  return createHash("sha256").update(canonicalIntegrationJson(value, options), "utf8").digest();
+  return Uint8Array.from(
+    createHash("sha256").update(canonicalIntegrationJson(value, options), "utf8").digest(),
+  );
 }
 
 export function centsToDecimal(value: bigint): string {
@@ -113,7 +124,7 @@ export function publicHttpsUrl(value: string, field: string, maximumPathLength =
   } catch {
     throw new TypeError(`${field} must be an absolute URL.`);
   }
-  const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
   if (
     (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
     url.username ||

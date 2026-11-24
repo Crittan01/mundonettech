@@ -62,14 +62,19 @@ async function ProductReviewsSlot({
   slug,
   initialReviews,
   searchParams,
-  variantId,
+  variantIds,
 }: {
   readonly slug: string;
   readonly initialReviews: Awaited<ReturnType<typeof getPublicReviews>>;
   readonly searchParams: PageProps<"/producto/[slug]">["searchParams"];
-  readonly variantId: string | undefined;
+  readonly variantIds: readonly string[];
 }) {
   const query = await searchParams;
+  const rawVariantId = Array.isArray(query.variant) ? query.variant[0] : query.variant;
+  const variantId =
+    typeof rawVariantId === "string" && variantIds.includes(rawVariantId)
+      ? rawVariantId
+      : undefined;
   const rawReviewCursor = Array.isArray(query.reviewCursor)
     ? query.reviewCursor[0]
     : query.reviewCursor;
@@ -87,13 +92,6 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
   const { slug } = await params;
   const product = await getCatalogProduct(slug);
   if (!product) notFound();
-  const query = await searchParams;
-  const rawVariantId = Array.isArray(query.variant) ? query.variant[0] : query.variant;
-  const variantId =
-    typeof rawVariantId === "string" &&
-    product.variants.some((variant) => variant.id === rawVariantId)
-      ? rawVariantId
-      : undefined;
   const [related, reviews] = await Promise.all([
     searchCatalog({
       categorySlug: product.category.slug,
@@ -101,7 +99,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
       pageSize: 3,
       sort: "newest",
     }),
-    getPublicReviews(slug),
+    getPublicReviews(product.slug),
   ]);
   const mediaOrigin = getPublicMediaOrigin();
   const reviewSummary =
@@ -329,10 +327,10 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
         }
       >
         <ProductReviewsSlot
-          slug={slug}
+          slug={product.slug}
           initialReviews={reviews}
           searchParams={searchParams}
-          variantId={variantId}
+          variantIds={product.variants.map((variant) => variant.id)}
         />
       </Suspense>
 

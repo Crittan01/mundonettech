@@ -234,7 +234,6 @@ export class UrlRedirectService {
           statusCode: created.statusCode,
           active: created.active,
         });
-        await advanceUrlRedirectGeneration(tx);
         return created;
       });
     } catch (error) {
@@ -270,7 +269,6 @@ export class UrlRedirectService {
             active: updated.active,
           },
         });
-        await advanceUrlRedirectGeneration(tx);
         return updated;
       });
     } catch (error) {
@@ -302,7 +300,6 @@ export class UrlRedirectService {
           previousActive: existing.active,
           active,
         });
-        await advanceUrlRedirectGeneration(tx);
         return updated;
       });
     } catch (error) {
@@ -325,7 +322,6 @@ export class UrlRedirectService {
         fromPath: existing.fromPath,
         toPath: existing.toPath,
       });
-      await advanceUrlRedirectGeneration(tx);
       return updated;
     });
   }
@@ -410,7 +406,8 @@ export class CachedUrlRedirectResolver {
   }
 
   private async getEdges(): Promise<ReadonlyMap<string, CachedRedirectEdge>> {
-    for (;;) {
+    const maxAttempts = 8;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const generation = await this.readGeneration();
       if (this.snapshot?.generation === generation) return this.snapshot.edges;
       const existingPending = this.pending;
@@ -438,6 +435,9 @@ export class CachedUrlRedirectResolver {
         if (this.pending === pending) this.pending = undefined;
       }
     }
+    throw new UrlRedirectGenerationChangedError(
+      "URL redirect graph changed repeatedly during cache refresh.",
+    );
   }
 
   async resolve(path: string): Promise<{

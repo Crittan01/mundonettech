@@ -403,6 +403,28 @@ describe("A1 — shared redirect cache generation across independent processes",
         ]),
         (error) => error.code === "23514",
       );
+      const beforeRegress = await currentGeneration();
+      if (beforeRegress > 0n) {
+        await assert.rejects(
+          client.query(`UPDATE "UrlRedirectCacheState" SET "version" = $1 WHERE "id" = $2`, [
+            (beforeRegress - 1n).toString(),
+            cacheStateId,
+          ]),
+          (error) => error.code === "23514",
+        );
+      }
+      const directSource = `/sql-direct-${randomUUID()}`;
+      const beforeDirect = await currentGeneration();
+      await client.query(
+        `INSERT INTO "UrlRedirect" ("fromPath", "toPath", "statusCode", "active") VALUES ($1, '/productos', 308, true)`,
+        [directSource],
+      );
+      assert.equal(await currentGeneration(), beforeDirect + 1n);
+      assert.deepEqual(await cacheB.resolve(directSource), {
+        toPath: "/productos",
+        statusCode: 308,
+        hops: 1,
+      });
       await assert.rejects(
         client.query(`INSERT INTO "UrlRedirectCacheState" ("id") VALUES ($1)`, [randomUUID()]),
         (error) => error.code === "23514",

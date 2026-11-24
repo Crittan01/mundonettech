@@ -54,11 +54,19 @@ export async function POST(request: Request) {
     userAgentHash: security.userAgentHash,
   };
   const result = await channelAccountService(db).refreshDueAccounts(audit);
-  const ingestion = await channelOrderService(db).processResourceEvents(
-    { ...audit, requestId: randomUUID() },
-    { limit: 10 },
-  );
-  if (ingestion.claimed > 0) revalidateTag("catalog:inventory", { expire: 0 });
+  let ingestion: Awaited<
+    ReturnType<ReturnType<typeof channelOrderService>["processResourceEvents"]>
+  >;
+  try {
+    ingestion = await channelOrderService(db).processResourceEvents(
+      { ...audit, requestId: randomUUID() },
+      { limit: 10 },
+    );
+    if (ingestion.claimed > 0) revalidateTag("catalog:inventory", { expire: 0 });
+  } catch (error) {
+    revalidateTag("catalog:inventory", { expire: 0 });
+    throw error;
+  }
   const sync = await channelCatalogService(db).processSyncJobs(
     { ...audit, requestId: randomUUID() },
     { limit: 10 },

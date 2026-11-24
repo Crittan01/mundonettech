@@ -530,7 +530,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
           type="checkbox"
           name="active"
           defaultChecked={zone?.active ?? true}
-          className="h-11 rounded-md border border-input bg-background px-3 text-sm"
+          className="size-4 accent-primary"
         />
         Zona activa para nuevas cotizaciones
       </label>

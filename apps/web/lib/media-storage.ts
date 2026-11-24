@@ -20,7 +20,3 @@ export function createMediaStorage(): R2MediaStorage {
     ...(getPublicMediaOrigin() ? { publicBaseUrl: getPublicMediaOrigin()! } : {}),
   });
 }
-
-export function createCmsMediaStorage(): R2MediaStorage {
-  return createMediaStorage();
-}

@@ -26,6 +26,9 @@ export function formatSignedCopCents(value: string | bigint): string {
 
 export function formatCopCentsForInput(value: string | bigint | null): string {
   if (value === null || value === "") return "";
+  if (typeof value === "string" && !/^-?[0-9]+$/.test(value)) {
+    throw new TypeError("COP cents string must contain only integer digits.");
+  }
   const cents = typeof value === "bigint" ? value : BigInt(value);
   if (cents < 0n || cents > maxSignedBigInt) {
     throw new RangeError("COP cents must fit a non-negative signed BIGINT.");
@@ -46,8 +49,9 @@ export function parseWholeCopToCents(value: string): string {
 
 export function parseDecimalCopToCents(value: string): string {
   if (typeof value !== "string") throw new TypeError("COP amount must be a string.");
-  if (value.length > 22) throw new RangeError("COP amount exceeds BIGINT bounds.");
-  const match = /^([0-9]+)(?:[.,]([0-9]{1,2}))?$/.exec(value);
+  const trimmed = value.trim();
+  if (trimmed.length > 22) throw new RangeError("COP amount exceeds BIGINT bounds.");
+  const match = /^([0-9]+)(?:[.,]([0-9]{1,2}))?$/.exec(trimmed);
   if (!match) throw new TypeError("COP amount must use at most two decimal places.");
   const cents = BigInt(match[1]!) * 100n + BigInt((match[2] ?? "").padEnd(2, "0") || "0");
   if (cents > maxSignedBigInt) throw new RangeError("COP amount exceeds BIGINT bounds.");

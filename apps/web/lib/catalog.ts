@@ -92,9 +92,18 @@ export async function getCatalogProductsBySlugs(slugs: readonly string[]) {
   return readCachedProductList([...new Set(normalized as string[])]);
 }
 
-export async function compareCatalogProducts(slugs: readonly string[]) {
+async function readComparedProducts(slugs: readonly string[]) {
   "use cache";
   cacheLife(catalogLife);
   cacheTag("catalog", "catalog:inventory", "catalog:compare");
   return catalogService().compare(slugs);
+}
+
+export async function compareCatalogProducts(slugs: readonly string[]) {
+  const normalized = [
+    ...new Set(
+      slugs.map((slug) => normalizeCacheSlug(slug)).filter((slug): slug is string => slug !== null),
+    ),
+  ].sort();
+  return readComparedProducts(normalized);
 }

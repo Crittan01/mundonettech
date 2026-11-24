@@ -8,6 +8,7 @@ describe("shared server primitives", () => {
     expect(matchesSecretTimingSafe("same-secret", "same-secret")).toBe(true);
     expect(matchesSecretTimingSafe("provided", "expected")).toBe(false);
     expect(matchesSecretTimingSafe("", "non-empty")).toBe(false);
+    expect(matchesSecretTimingSafe("", "")).toBe(false);
     expect(matchesSecretTimingSafe("a".repeat(4096), "a".repeat(4096))).toBe(true);
   });
 
@@ -17,6 +18,10 @@ describe("shared server primitives", () => {
       -74_123_456,
     );
     expect(parseCoordinateE6("0", "latitudeE6", -90_000_000, 90_000_000)).toBe(0);
+    expect(Object.is(parseCoordinateE6("-0", "latitudeE6", -90_000_000, 90_000_000), 0)).toBe(true);
+    expect(
+      Object.is(parseCoordinateE6("-0.000000", "latitudeE6", -90_000_000, 90_000_000), 0),
+    ).toBe(true);
     expect(() => parseCoordinateE6("4.0000001", "latitudeE6", -90_000_000, 90_000_000)).toThrow(
       TypeError,
     );

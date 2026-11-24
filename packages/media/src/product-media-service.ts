@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 import { Prisma, PrismaClient, type ProductMedia } from "@mundonettech/db";
 
+import { inspectImageMagic } from "./image-safety.js";
+import { validateGlb, validateUsdz } from "./model-safety.js";
 import {
   storeImageDerivatives,
   storeModel3d,
@@ -342,27 +344,36 @@ export class ProductMediaService {
     const storage = this.requireStorage();
     const keys = [...new Set(objectGroups.flatMap((group) => [...group]))];
     if (keys.length === 0) return;
-    await this.db.$transaction(async (tx) => {
-      await tx.$queryRaw`
+    await this.db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`
         SELECT "id" FROM "Product" WHERE "id" = ${productId}::uuid FOR UPDATE
       `;
-      const referenced = await this.referencedKeys(tx, keys);
-      const deletable = objectGroups.flatMap((group) =>
-        group.some((key) => referenced.has(key))
-          ? []
-          : [...new Set(group.filter((key) => !referenced.has(key)))],
-      );
-      const results = await Promise.allSettled(
-        [...new Set(deletable)].map((key) => storage.delete(key)),
-      );
-      const failures = results.filter((result) => result.status === "rejected");
-      if (failures.length > 0) {
-        throw new AggregateError(
-          failures.map((failure) => failure.reason),
-          "Some unreferenced R2 objects could not be removed.",
-        );
-      }
-    });
+        const referenced = await this.referencedKeys(tx, keys);
+        const deletable = [
+          ...new Set(
+            objectGroups.flatMap((group) =>
+              group.some((key) => referenced.has(key))
+                ? []
+                : [...new Set(group.filter((key) => !referenced.has(key)))],
+            ),
+          ),
+        ];
+        const failures: unknown[] = [];
+        const concurrency = 8;
+        for (let index = 0; index < deletable.length; index += concurrency) {
+          const batch = deletable.slice(index, index + concurrency);
+          const results = await Promise.allSettled(batch.map((key) => storage.delete(key)));
+          for (const result of results) {
+            if (result.status === "rejected") failures.push(result.reason);
+          }
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "Some unreferenced R2 objects could not be removed.");
+        }
+      },
+      { maxWait: 10_000, timeout: 30_000 },
+    );
   }
 
   private async failUpload(
@@ -383,11 +394,19 @@ export class ProductMediaService {
     db: DatabaseReader,
     target: NormalizedTarget,
     prepared: PreparedMedia,
-  ): Promise<ProductMedia | null> {
+  ): Promise<{ media: ProductMedia; slug: string } | null> {
     const existing = await db.productMedia.findFirst({
-      where: { storageKey: prepared.storageKey, deletedAt: null },
+      where: {
+        storageKey: prepared.storageKey,
+        deletedAt: null,
+        product: { id: target.productId, deletedAt: null },
+        ...(target.variantId ? { variant: { id: target.variantId, deletedAt: null } } : {}),
+      },
+      include: { product: { select: { slug: true } } },
     });
-    return existing && isSameAsset(existing, target, prepared) ? existing : null;
+    if (!existing || !isSameAsset(existing, target, prepared)) return null;
+    const { product, ...media } = existing;
+    return { media, slug: product.slug };
   }
 
   private async persist(
@@ -443,18 +462,16 @@ export class ProductMediaService {
         return { media: created, slug: product.slug, reused: false };
       });
     } catch (error) {
-      let duplicate: ProductMedia | null = null;
-      try {
-        duplicate = await this.reusableAsset(this.db, target, prepared);
-      } catch {
-        duplicate = null;
-      }
-      if (duplicate) {
-        const product = await this.db.product.findUniqueOrThrow({
-          where: { id: target.productId },
-          select: { slug: true },
-        });
-        return { media: duplicate, slug: product.slug, reused: true };
+      if (hasErrorCode(error, "P2002")) {
+        let duplicate: { media: ProductMedia; slug: string } | null = null;
+        try {
+          duplicate = await this.reusableAsset(this.db, target, prepared);
+        } catch {
+          duplicate = null;
+        }
+        if (duplicate) {
+          return { media: duplicate.media, slug: duplicate.slug, reused: true };
+        }
       }
       const persistenceError = hasErrorCode(error, "P2002")
         ? new ProductMediaConflictError()
@@ -480,7 +497,13 @@ export class ProductMediaService {
     validateBytes(input.bytes, productMediaLimits.imageBytes, "Image bytes");
     await this.assertTargetExists(target);
     const storage = this.requireStorage();
-    const stored = await storeImageDerivatives(storage, input.bytes, targetPrefix(target, "image"));
+    const stored = await storeImageDerivatives(
+      storage,
+      input.bytes,
+      targetPrefix(target, "image"),
+      undefined,
+      { cleanup: (keys) => this.compensate(target.productId, [keys]) },
+    );
     const objectGroups = [stored.map((item) => item.key)];
     let primary: StoredImageDerivative;
     try {
@@ -527,6 +550,7 @@ export class ProductMediaService {
     let totalBytes = 0;
     for (const frame of input.frames) {
       validateBytes(frame, productMediaLimits.spinFrameBytes, "SPIN_360 frame bytes");
+      inspectImageMagic(frame);
       totalBytes += frame.byteLength;
       if (totalBytes > productMediaLimits.spinTotalBytes) {
         throw new ProductMediaValidationError("SPIN_360 exceeds the aggregate byte limit.");
@@ -535,7 +559,9 @@ export class ProductMediaService {
     await this.assertTargetExists(target);
     const storage = this.requireStorage();
     const prefix = `${targetPrefix(target, "spin")}-${spinDigest(input.frames)}`;
-    const stored = await storeSpin360(storage, input.frames, prefix);
+    const stored = await storeSpin360(storage, input.frames, prefix, undefined, {
+      cleanup: (keys) => this.compensate(target.productId, [keys]),
+    });
     const objectGroups = stored.map((frame) => frame.derivatives.map((item) => item.key));
     let primary: StoredImageDerivative;
     try {
@@ -582,6 +608,8 @@ export class ProductMediaService {
     validateAudit(audit);
     validateBytes(input.glb, productMediaLimits.glbBytes, "GLB bytes");
     if (input.usdz) validateBytes(input.usdz, productMediaLimits.usdzBytes, "USDZ bytes");
+    validateGlb(input.glb);
+    if (input.usdz) await validateUsdz(input.usdz);
     await this.assertTargetExists(target);
     const storage = this.requireStorage();
     const prefix = targetPrefix(target, "model");

@@ -6,7 +6,6 @@ import { buildMetaCatalogCsv, type MerchantFeedItem } from "../../packages/core/
 import { IntegrationEnvironment } from "../../packages/db/dist/index.js";
 import {
   buildMetaCapiPurchaseRequest,
-  hashMetaCapiRequest,
   MetaCapiError,
   MetaConversionsApiClient,
   metaCapiEventsUrl,
@@ -189,7 +188,9 @@ describe("F6.4 — Meta CAPI credentials and sealed purchase request", () => {
     expect(first.body).toBe(second.body);
     expect(first.requestHash).toEqual(second.requestHash);
     expect(Buffer.from(first.requestHash).toString("hex")).toBe(
-      Buffer.from(hashMetaCapiRequest(first.requestUrl, first.body)).toString("hex"),
+      createHash("sha256")
+        .update(JSON.stringify({ body: first.body, requestUrl: first.requestUrl }), "utf8")
+        .digest("hex"),
     );
     expect(first.body).toContain('"event_id":"purchase:123e4567-e89b-42d3-a456-426614174000"');
     expect(first.body).toContain('"event_time":1795464930');

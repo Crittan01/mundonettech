@@ -22,6 +22,8 @@ let server: Server;
 let product: { id: string; slug: string };
 let writer: { id: string; authUserId: string; email: string };
 let reader: { id: string; authUserId: string; email: string };
+const runSuffix = randomUUID().slice(0, 8);
+const sharedSpinAlt = `Recorrido 360 E2E ${runSuffix}`;
 
 async function authenticateAdmin(
   page: Page,
@@ -150,6 +152,16 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  if (db && product) {
+    await db.productMedia.updateMany({
+      where: {
+        productId: product.id,
+        altText: { contains: runSuffix },
+        deletedAt: null,
+      },
+      data: { deletedAt: new Date() },
+    });
+  }
   await db?.$disconnect();
   if (server) {
     server.closeAllConnections();
@@ -164,11 +176,10 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
     page,
   }) => {
     test.setTimeout(120_000);
-    const suffix = randomUUID().slice(0, 8);
-    const imageAlt = `Imagen frontal E2E ${suffix}`;
-    const updatedAlt = `Imagen actualizada E2E ${suffix}`;
-    const spinAlt = `Recorrido 360 E2E ${suffix}`;
-    const modelAlt = `Modelo 3D E2E ${suffix}`;
+    const imageAlt = `Imagen frontal E2E ${runSuffix}`;
+    const updatedAlt = `Imagen actualizada E2E ${runSuffix}`;
+    const spinAlt = sharedSpinAlt;
+    const modelAlt = `Modelo 3D E2E ${runSuffix}`;
     const uploadForm = page.getByRole("form", { name: "Añadir medio del producto" });
 
     await authenticateAdmin(page, writer);
@@ -288,9 +299,30 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
       .analyze();
     expect(accessibility.violations).toEqual([]);
 
+    await authenticateAdmin(page, writer);
+    await page.goto(`/admin/catalogo/${product.id}`);
+    const svgUploadForm = page.getByRole("form", { name: "Añadir medio del producto" });
+    await svgUploadForm
+      .getByLabel("Texto alternativo", { exact: true })
+      .fill(`SVG bloqueado ${runSuffix}`);
+    await svgUploadForm.getByLabel("Imagen JPEG, PNG, WebP, HEIC o AVIF").setInputFiles({
+      name: "malicious.svg",
+      mimeType: "image/svg+xml",
+      buffer: Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+      ),
+    });
+    await svgUploadForm.getByRole("button", { name: "Procesar y publicar medio" }).click();
+    await expect(page.getByText(/No pudimos procesar o almacenar el medio/)).toBeVisible();
+    expect(
+      await db.productMedia.count({
+        where: { productId: product.id, altText: `SVG bloqueado ${runSuffix}` },
+      }),
+    ).toBe(0);
+
     await authenticateAdmin(page, writer, 900);
     await page.goto(`/admin/catalogo/${product.id}`);
-    const spinCard = page.getByRole("listitem").filter({ hasText: "Recorrido 360 E2E" });
+    const spinCard = page.getByRole("listitem", { name: new RegExp(sharedSpinAlt) });
     const spinAlt = await spinCard.getByLabel("Texto alternativo").inputValue();
     await spinCard.getByLabel("Texto alternativo").fill(`${spinAlt} bloqueado`);
     await spinCard.getByRole("button", { name: "Guardar texto y orden" }).click();

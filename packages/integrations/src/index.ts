@@ -136,7 +136,6 @@ export { DomainEventWorker } from "./domain-event-worker.js";
 export type { DomainEventBatchResult, DomainEventWorkerOptions } from "./domain-event-worker.js";
 export {
   buildMetaCapiPurchaseRequest,
-  hashMetaCapiRequest,
   MetaCapiError,
   MetaConversionsApiClient,
   metaCapiEventsUrl,

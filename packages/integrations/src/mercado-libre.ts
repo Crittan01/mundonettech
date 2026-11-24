@@ -29,7 +29,7 @@ export function resolveMercadoLibreOAuthCookiePolicy(env: {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
-const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 export type MercadoLibreProviderErrorCode =
   | "INVALID_INPUT"

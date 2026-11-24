@@ -6,7 +6,7 @@ import {
 } from "@/components/admin/catalog-media-forms";
 import { ProductMediaGallery } from "@/components/catalog/product-media-gallery";
 
-export type AdminProductMedia = CatalogMedia & {
+type AdminProductMedia = CatalogMedia & {
   readonly status: "PENDING" | "PROCESSING" | "READY" | "FAILED";
   readonly mimeType: string;
   readonly frameCount: number | null;

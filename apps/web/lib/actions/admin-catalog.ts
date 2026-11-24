@@ -207,14 +207,19 @@ function invalidateCatalog(options: {
   productId: string;
   slug?: string;
   previousSlug?: string;
+  includeReviews?: boolean;
 }): void {
   updateTag("catalog");
   updateTag("catalog:search");
   updateTag("catalog:compare");
   updateTag("catalog:cms-grid");
-  if (options.slug) updateTag(`catalog:product:${options.slug}`);
+  if (options.slug) {
+    updateTag(`catalog:product:${options.slug}`);
+    if (options.includeReviews) updateTag(`reviews:${options.slug}`);
+  }
   if (options.previousSlug && options.previousSlug !== options.slug) {
     updateTag(`catalog:product:${options.previousSlug}`);
+    if (options.includeReviews) updateTag(`reviews:${options.previousSlug}`);
   }
   revalidatePath("/admin/catalogo");
   revalidatePath(`/admin/catalogo/${options.productId}`);
@@ -275,6 +280,7 @@ export async function updateCatalogProductAction(
       productId,
       slug: updated.slug,
       previousSlug: updated.previousSlug,
+      includeReviews: true,
     });
     return actionSuccess("Producto actualizado y cambio registrado en auditoría.");
   } catch (error) {
@@ -543,6 +549,12 @@ function mediaMutationError(error: unknown, values: Record<string, string>): Act
     }
     return actionError(
       "Revisa los archivos y sus límites: imagen 20 MiB, GLB 50 MiB y USDZ 25 MiB. Vuelve a seleccionarlos antes de reintentar.",
+      values,
+    );
+  }
+  if (error instanceof Error && error.message.includes("R2 endpoint")) {
+    return actionError(
+      "El almacenamiento R2 no está configurado en este ambiente. Contacta al administrador.",
       values,
     );
   }

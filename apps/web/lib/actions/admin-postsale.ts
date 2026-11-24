@@ -190,6 +190,7 @@ export async function moderateReviewAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   try {
+    const auditContext = await audit("reviews:write");
     const reviewId = z.string().uuid().parse(formString(formData, "reviewId"));
     const review = await getDatabase().review.findUnique({
       where: { id: reviewId },
@@ -202,7 +203,7 @@ export async function moderateReviewAction(
       expectedUpdatedAt: new Date(
         z.string().datetime().parse(formString(formData, "expectedUpdatedAt")),
       ),
-      audit: await audit("reviews:write"),
+      audit: auditContext,
     });
     revalidateAdmin();
     if (review) {

@@ -15,10 +15,14 @@ interface TurnstileVerificationOptions {
 function testVerificationEndpoint(): string | undefined {
   const value = process.env.TURNSTILE_VERIFY_ENDPOINT?.trim();
   if (!value) return undefined;
+  const environment = process.env.INTEGRATION_ENVIRONMENT?.trim().toUpperCase();
+  if (process.env.NODE_ENV === "production" && environment && environment !== "LOCAL") {
+    throw new Error("TURNSTILE_VERIFY_ENDPOINT is only permitted in LOCAL environments.");
+  }
   const url = new URL(value);
   if (
     url.protocol !== "http:" ||
-    !["127.0.0.1", "localhost", "::1"].includes(url.hostname) ||
+    !["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname) ||
     url.username ||
     url.password ||
     url.hash

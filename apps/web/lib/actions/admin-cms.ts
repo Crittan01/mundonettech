@@ -22,7 +22,7 @@ import {
   type ActionState,
 } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
-import { createCmsMediaStorage } from "@/lib/media-storage";
+import { createMediaStorage } from "@/lib/media-storage";
 import {
   AdminAuthorizationError,
   getAdminSession,
@@ -452,10 +452,10 @@ export async function uploadCmsMediaAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
-  let storage: ReturnType<typeof createCmsMediaStorage> | null = null;
+  let storage: ReturnType<typeof createMediaStorage> | null = null;
   try {
     const { session, request } = await authorize("content:write");
-    storage = createCmsMediaStorage();
+    storage = createMediaStorage();
     const file = formData.get("file");
     if (!(file instanceof File) || file.size === 0) {
       throw new CmsValidationError("An image file is required.");

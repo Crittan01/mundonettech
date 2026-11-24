@@ -461,6 +461,7 @@ test("tracks env dot, bracket, destructuring, injected records and credential te
     "INJECTED",
     "WRITE_ONLY",
     "ORPHAN",
+    "EMAIL_SEND_DISABLED",
     "INTEGRATION_CREDENTIAL_KEYS_LOCAL",
     "INTEGRATION_CREDENTIAL_KEYS_STG",
     "INTEGRATION_CREDENTIAL_KEYS_PRD",
@@ -675,4 +676,127 @@ test("scopes public adapter exceptions to their exact package and symbol", async
   );
   assert.match(dead, /packages\/integrations\/src\/email-templates\.ts.*validateEmailTemplate/);
   assert.match(dead, /packages\/other\/src\/index\.ts.*FlexShippingProvider/);
+});
+
+test("blocks adversarial AST, cache, route, reflection and environment guard bypasses", () => {
+  const result = audit(
+    {
+      ".env.example": 'DECLARED="1"\nONLY_TEST_READ="1"\n',
+      "packages/demo/src/dep.ts": "export function secretDeadDep() { return 1; }",
+      "packages/demo/src/live.ts": `
+        import { secretDeadDep } from "./dep.js";
+        export const live = 1;
+        export const deadArrow = () => secretDeadDep();
+      `,
+      "packages/demo/src/orphan.ts": "const unusedOnly = 42; console.log(unusedOnly);",
+      "packages/demo/src/reexport-ext.ts": 'export { z } from "zod";',
+      "packages/demo/src/inner.ts": "export const nsLive = 1; export const nsDead = 2;",
+      "packages/demo/src/barrel.ts": 'export * as innerNs from "./inner.js";',
+      "packages/demo/src/dyn.ts": "export const realExport = 1; export const dynDead = 2;",
+      "apps/web/app/api/demo/route.ts": `
+        import { updateTag, revalidateTag } from "next/cache";
+        export function GET() {
+          updateTag("route-forbidden");
+          revalidateTag("bad-profile", undefined);
+          return new Response("ok");
+        }
+        export default function deadRouteDefault() {}
+      `,
+      "apps/web/lib/cache-bypasses.ts": `
+        import { cacheTag as aliasedTag } from "next/cache";
+        export async function aliasedUncached() {
+          aliasedTag("aliased-tag");
+        }
+        export async function untaggedUseCache() {
+          "use cache";
+          return 1;
+        }
+        function deadNeverCalled() {
+          updateTag("spoofed-dead");
+        }
+        export async function spoofedCache() {
+          "use cache";
+          cacheTag("spoofed-dead");
+        }
+      `,
+      "apps/web/lib/env-bypasses.ts": `
+        import { env as nodeEnv } from "node:process";
+        const readArrow = (e) => e.BYPASS_ARROW;
+        const readDestr = ({ BYPASS_DESTR }) => BYPASS_DESTR;
+        function getEnv() { return process.env; }
+        export function runEnv() {
+          const { env: procEnv } = process;
+          return [
+            process.env.DECLARED,
+            process.env.TEST_DATABASE_URL,
+            readArrow(process.env),
+            readDestr(process.env),
+            getEnv().BYPASS_RETURN,
+            globalThis.process.env.BYPASS_GLOBAL,
+            process["env"].BYPASS_BRACKET,
+            procEnv.BYPASS_PROC_DESTR,
+            nodeEnv.BYPASS_NODE_PROC,
+            "BYPASS_IN" in process.env,
+            Object.hasOwn(process.env, "BYPASS_HAS_OWN"),
+            Reflect.get(process.env, "BYPASS_REFLECT"),
+          ];
+        }
+      `,
+      "apps/web/app/page.tsx": `
+        import { live } from "../../../packages/demo/src/live.js";
+        import { innerNs } from "../../../packages/demo/src/barrel.js";
+        import { runEnv } from "@/lib/env-bypasses";
+        export default async function Page(key: string) {
+          const { [key]: computed } = innerNs;
+          Object.values(innerNs);
+          await import("../../../packages/demo/src/dyn.js").then(({ realExport: renamed }) => renamed);
+          return [live, innerNs.nsLive, computed, runEnv()];
+        }
+      `,
+      "tests/only-test-env.test.mjs": "console.log(process.env.ONLY_TEST_READ);",
+    },
+    {
+      exceptions: [{ tag: "stale-tag", callsite: "apps/web/lib/missing.ts:gone", reason: "stale" }],
+      checkStaleExceptions: true,
+    },
+  );
+
+  const dead = deadExports(result).join("\n");
+  assert.match(dead, /dep\.ts.*dead runtime export "secretDeadDep"/);
+  assert.match(dead, /route\.ts.*dead runtime export "default"/);
+  assert.match(dead, /reexport-ext\.ts.*export "z"/);
+  assert.doesNotMatch(dead, /inner\.ts.*"nsLive"/);
+  assert.match(dead, /inner\.ts.*"nsDead"/);
+  assert.doesNotMatch(dead, /dyn\.ts.*"realExport"/);
+  assert.match(dead, /dyn\.ts.*"dynDead"/);
+
+  assert.equal(findings(result, "dead-file").length, 1);
+  assert.match(messages(result, "dead-file").join("\n"), /orphan\.ts/);
+  assert.equal(findings(result, "reflection").length, 2);
+  assert.equal(findings(result, "cache-dead").length, 1);
+  assert.match(messages(result, "cache-parity").join("\n"), /"spoofed-dead"/);
+  assert.match(messages(result, "cache-parity").join("\n"), /"aliased-tag"/);
+  assert.match(messages(result, "cache-profile").join("\n"), /revalidateTag/);
+  assert.match(messages(result, "cache-directive").join("\n"), /"use cache" function must declare/);
+  assert.match(messages(result, "cache-directive").join("\n"), /route\.ts.*updateTag/);
+  assert.equal(findings(result, "cache-exception-stale").length, 1);
+
+  const missingEnv = messages(result, "environment-missing").join("\n");
+  for (const key of [
+    "TEST_DATABASE_URL",
+    "BYPASS_ARROW",
+    "BYPASS_DESTR",
+    "BYPASS_RETURN",
+    "BYPASS_GLOBAL",
+    "BYPASS_BRACKET",
+    "BYPASS_PROC_DESTR",
+    "BYPASS_NODE_PROC",
+    "BYPASS_IN",
+    "BYPASS_HAS_OWN",
+    "BYPASS_REFLECT",
+  ]) {
+    assert.match(missingEnv, new RegExp(`"${key}"`));
+  }
+  const orphanEnv = messages(result, "environment-orphan").join("\n");
+  assert.match(orphanEnv, /\.env\.example:2:.*"ONLY_TEST_READ"/);
 });

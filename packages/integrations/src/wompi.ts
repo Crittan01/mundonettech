@@ -348,10 +348,17 @@ export class WompiPaymentProvider implements PaymentProvider {
   readonly code = "WOMPI" as const;
   private readonly apiOrigin: string;
 
+  private readonly timeoutMs: number;
+
   constructor(
     private readonly credentials: WompiCredentials,
     private readonly options: { fetchImpl?: FetchImplementation; timeoutMs?: number } = {},
   ) {
+    const timeoutMs = options.timeoutMs ?? 10_000;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) {
+      throw new PaymentValidationError("Wompi timeoutMs must be an integer between 100 and 60000.");
+    }
+    this.timeoutMs = timeoutMs;
     this.apiOrigin =
       credentials.mode === "prod" ? "https://production.wompi.co" : "https://sandbox.wompi.co";
   }
@@ -372,6 +379,7 @@ export class WompiPaymentProvider implements PaymentProvider {
         url: `${this.apiOrigin}${path}`,
         init: {
           ...init,
+          redirect: "error",
           headers: {
             Accept: "application/json",
             Authorization: `Bearer ${this.credentials.privateKey}`,
@@ -380,7 +388,7 @@ export class WompiPaymentProvider implements PaymentProvider {
           },
         },
         fetchImpl: this.options.fetchImpl ?? fetch,
-        timeoutMs: this.options.timeoutMs ?? 10_000,
+        timeoutMs: this.timeoutMs,
         maximumBytes: maximumResponseBytes,
       });
       if (!expectedStatuses.includes(response.status)) {

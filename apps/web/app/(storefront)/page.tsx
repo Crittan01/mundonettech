@@ -11,6 +11,7 @@ export default async function HomePage() {
   cacheLife({ stale: 30, revalidate: 60, expire: 3600 });
   cacheTag("storefront:home");
   cacheTag("catalog");
+  cacheTag("catalog:inventory");
   const latest = await searchCatalog({ pageSize: 4, sort: "newest" });
   return (
     <div className="space-y-14">
