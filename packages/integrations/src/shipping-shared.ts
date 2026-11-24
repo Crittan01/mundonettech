@@ -103,7 +103,7 @@ export async function writeShippingOutbox(
   });
 }
 
-export async function lockShipment(tx: ShippingTransaction, shipmentId: string): Promise<Shipment> {
+async function lockShipment(tx: ShippingTransaction, shipmentId: string): Promise<Shipment> {
   const rows = await tx.$queryRaw<
     Shipment[]
   >`SELECT * FROM "Shipment" WHERE "id" = ${shipmentId}::uuid FOR UPDATE`;
@@ -112,7 +112,7 @@ export async function lockShipment(tx: ShippingTransaction, shipmentId: string):
   return shipment;
 }
 
-export async function lockFulfillment(
+async function lockFulfillment(
   tx: ShippingTransaction,
   shipmentId: string,
 ): Promise<OrderFulfillment> {
@@ -124,10 +124,7 @@ export async function lockFulfillment(
   return fulfillment;
 }
 
-export async function lockPackage(
-  tx: ShippingTransaction,
-  packageId: string,
-): Promise<ShipmentPackage> {
+async function lockPackage(tx: ShippingTransaction, packageId: string): Promise<ShipmentPackage> {
   const rows = await tx.$queryRaw<
     ShipmentPackage[]
   >`SELECT * FROM "ShipmentPackage" WHERE "id" = ${packageId}::uuid FOR UPDATE`;
@@ -161,6 +158,44 @@ export async function assertPaidOrder(
   throw new ShippingConflictError(
     "Only paid orders or open cash-on-delivery orders can enter fulfillment.",
   );
+}
+
+export async function lockShippingHierarchy(
+  tx: ShippingTransaction,
+  options: { orderId: string; shipmentId: string; packageId?: string },
+): Promise<{
+  order: Order;
+  fulfillment: OrderFulfillment;
+  shipment: Shipment;
+  record: ShipmentPackage | null;
+}> {
+  const order = await lockOrder(tx, options.orderId);
+  await assertPaidOrder(tx, order);
+  const fulfillment = await lockFulfillment(tx, options.shipmentId);
+  if (fulfillment.orderId !== order.id || fulfillment.shipmentId !== options.shipmentId) {
+    throw new ShippingConflictError("Order fulfillment hierarchy changed concurrently.");
+  }
+  const shipment = await lockShipment(tx, options.shipmentId);
+  if (shipment.orderId !== order.id) {
+    throw new ShippingConflictError("Shipment hierarchy changed concurrently.");
+  }
+  const record = options.packageId ? await lockPackage(tx, options.packageId) : null;
+  if (record && record.shipmentId !== shipment.id) {
+    throw new ShippingConflictError("Shipment package hierarchy changed concurrently.");
+  }
+  return { order, fulfillment, shipment, record };
+}
+
+export async function lockShipmentPackages(
+  tx: ShippingTransaction,
+  shipmentId: string,
+): Promise<ShipmentPackage[]> {
+  return tx.$queryRaw<ShipmentPackage[]>`
+    SELECT * FROM "ShipmentPackage"
+    WHERE "shipmentId" = ${shipmentId}::uuid
+    ORDER BY "packageNumber", "id"
+    FOR UPDATE
+  `;
 }
 
 export function positiveInteger(value: number, field: string, maximum = 1_000_000_000): number {

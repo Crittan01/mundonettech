@@ -134,7 +134,7 @@ model EmailTemplateOverride {
   createdByAdminUserId String              @db.Uuid
   createdAt            DateTime            @default(now()) @db.Timestamptz(6)
   updatedAt            DateTime            @default(now()) @updatedAt @db.Timestamptz(6)
-  createdBy            AdminUser           @relation(fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
+  createdBy            AdminUser           @relation(fields: [createdByAdminUserId], references: [id], onDelete: Restrict, map: "EmailTemplateOverride_createdBy_fkey")
 
   @@unique([templateKey, locale, version])
   @@index([templateKey, locale, status, version])
@@ -186,7 +186,6 @@ model EmailEvent {
   @@index([orderId, createdAt])
   @@index([customerId, templateKey, createdAt])
   @@index([abandonedCartId, createdAt])
-  @@index([lifecycleMessageId])
   @@map("EmailEvent")
 }
 

@@ -452,6 +452,32 @@ function referenceHash(reference: CartReference): Uint8Array<ArrayBuffer> | null
     : null;
 }
 
+function retryCouponDivergence(): never {
+  const error = new Error("Cart coupon changed before its locks were acquired.") as Error & {
+    code: string;
+  };
+  error.code = "40001";
+  throw error;
+}
+
+async function inCheckoutTransaction<T>(
+  db: PrismaClient,
+  callback: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return inInventoryTransaction(db, async (tx) => {
+    try {
+      return await callback(tx);
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code !== "P2034") throw error;
+      const retry = new Error("Checkout transaction conflict; retrying.", {
+        cause: error,
+      }) as Error & { code: string };
+      retry.code = "40001";
+      throw retry;
+    }
+  });
+}
+
 function receiptHash(
   order: Order,
   receipt: { readonly receiptNumber: string; readonly issuedAt: Date },
@@ -912,7 +938,7 @@ export class OrderService {
     const deliveryNotes = optionalText(input.fulfillment.deliveryNotes, "deliveryNotes", 500);
 
     try {
-      return await inInventoryTransaction(this.db, async (tx) => {
+      return await inCheckoutTransaction(this.db, async (tx) => {
         const acquired = await acquireIdempotencyKey(tx, {
           scope: checkoutScope,
           ...idempotency,
@@ -985,9 +1011,7 @@ export class OrderService {
               >`SELECT * FROM "Cart" WHERE "accessTokenHash" = ${referenceHash(reference)!} FOR UPDATE`;
         const locked = rows[0];
         if (!locked) throw new CartNotFoundError();
-        if (locked.couponId && locked.couponId !== peek?.couponId) {
-          await acquireOperationLocks(tx, [`coupon-redemption:${locked.couponId}`]);
-        }
+        if (locked.couponId !== (peek?.couponId ?? null)) retryCouponDivergence();
         const now = await databaseNow(tx);
         if (locked.status !== "ACTIVE" || locked.expiresAt <= now) {
           throw new CheckoutConflictError("The cart is no longer active or has expired.");

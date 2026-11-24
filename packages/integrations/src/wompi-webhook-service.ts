@@ -309,6 +309,23 @@ export class WompiWebhookService {
             replayed: true,
           };
         }
+        await acquireOperationLocks(tx, [
+          `wompi-webhook:${PaymentProvider.WOMPI}:${event.eventKey}`,
+        ]);
+        webhook = await tx.paymentWebhookEvent.findUnique({
+          where: { provider_eventKey: key },
+        });
+        if (webhook && !matchesPayloadHash(webhook.payloadHash, event.payloadHash)) {
+          throw new WompiWebhookReplayError();
+        }
+        if (webhook?.status === "PROCESSED" || webhook?.status === "IGNORED") {
+          return {
+            eventKey: event.eventKey,
+            status: webhook.status,
+            attemptId: webhook.attemptId,
+            replayed: true,
+          };
+        }
         if (!event.supported || !event.transaction) {
           const now = await databaseNow(tx);
           webhook = webhook
@@ -502,28 +519,55 @@ export class WompiWebhookService {
             const existingVoid = await tx.paymentTransaction.findFirst({
               where: { attemptId: attempt.id, kind: "VOID" },
             });
-            const voidTxn =
-              existingVoid ??
-              (await tx.paymentTransaction.create({
-                data: {
+            if (existingVoid && ["FAILED", "CANCELLED"].includes(existingVoid.status)) {
+              await writePaymentOutbox(tx, {
+                eventType: "payment.late-review-required.v1",
+                aggregateType: "PaymentAttempt",
+                aggregateId: attempt.id,
+                deduplicationKey: `payment-webhook:${event.eventKey}:late-review:v1`,
+                payload: {
                   attemptId: attempt.id,
-                  provider: PaymentProvider.WOMPI,
-                  kind: "VOID",
-                  status: "SUCCEEDED",
-                  amountCents: attempt.amountCents,
-                  externalId: transaction.id,
-                  providerReference: transaction.reference,
-                  requestHash: paymentDigest({ operation: "WOMPI_VOID", attemptId: attempt.id }),
-                  statusMessage: transaction.statusMessage,
-                  completedAt: event.occurredAt,
+                  orderId: order.id,
+                  providerStatus: transaction.status,
+                  localVoidStatus: existingVoid.status,
                 },
-              }));
-            if (voidTxn.status === "SUCCEEDED") {
-              await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, voidTxn.id);
+              });
+              return finish("IGNORED", "VOID_STATE_REVIEW");
             }
-            if (!existingVoid) {
-              await refreshOrderPaymentStatus(tx, order.id);
+            if (existingVoid?.externalId && existingVoid.externalId !== transaction.id) {
+              throw new PaymentConflictError(
+                "The Wompi void is linked to a different external transaction.",
+                "DUPLICATE_REFERENCE",
+              );
             }
+            const voidTxn = existingVoid
+              ? existingVoid.status === "SUCCEEDED"
+                ? existingVoid
+                : await tx.paymentTransaction.update({
+                    where: { id: existingVoid.id },
+                    data: {
+                      status: "SUCCEEDED",
+                      externalId: transaction.id,
+                      statusMessage: transaction.statusMessage,
+                      completedAt: event.occurredAt,
+                    },
+                  })
+              : await tx.paymentTransaction.create({
+                  data: {
+                    attemptId: attempt.id,
+                    provider: PaymentProvider.WOMPI,
+                    kind: "VOID",
+                    status: "SUCCEEDED",
+                    amountCents: attempt.amountCents,
+                    externalId: transaction.id,
+                    providerReference: transaction.reference,
+                    requestHash: paymentDigest({ operation: "WOMPI_VOID", attemptId: attempt.id }),
+                    statusMessage: transaction.statusMessage,
+                    completedAt: event.occurredAt,
+                  },
+                });
+            await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, voidTxn.id);
+            await refreshOrderPaymentStatus(tx, order.id);
           } else if (!["FAILED", "CANCELLED", "EXPIRED"].includes(attempt.status)) {
             if (capture && !["SUCCEEDED", "CANCELLED"].includes(capture.status)) {
               await tx.paymentTransaction.update({

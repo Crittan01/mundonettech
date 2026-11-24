@@ -81,6 +81,7 @@ let cod;
 let blocked;
 let webhooks;
 let vault;
+let wompiCredentialId;
 let adminId;
 let customerEmail;
 let audit;
@@ -100,7 +101,10 @@ async function makeCustomer() {
   return { id, email };
 }
 
-async function makeOrder(customer = { id: catalog.customerId, email: customerEmail }) {
+async function makeOrder(
+  customer = { id: catalog.customerId, email: customerEmail },
+  expectedTotalCents = "100000",
+) {
   const cart = await carts.createStorefrontCart({
     accessTokenHash: hash(),
     customerId: customer.id,
@@ -139,7 +143,7 @@ async function makeOrder(customer = { id: catalog.customerId, email: customerEma
     receiptAccessTokenHash: hash(),
     expectedReviewFingerprint: preview.homeDelivery.reviewFingerprint,
   });
-  assert.equal(result.totalCents, "100000");
+  assert.equal(result.totalCents, expectedTotalCents);
   return result.orderId;
 }
 
@@ -158,9 +162,9 @@ async function requestFullRefund(orderId) {
   return requested.id;
 }
 
-function wompiEvent(attempt, status, occurredAt = new Date()) {
+function wompiEvent(attempt, status, occurredAt = new Date(), externalId = null) {
   const transaction = {
-    id: `trx-${randomUUID()}`,
+    id: externalId ?? `trx-${randomUUID()}`,
     amount_in_cents: Number(attempt.amountCents),
     reference: attempt.reference,
     currency: "COP",
@@ -229,12 +233,13 @@ before(
         serializedKeys: JSON.stringify({ 1: randomBytes(32).toString("base64") }),
       }),
     );
-    await vault.create({
+    const primaryWompiCredential = await vault.create({
       provider: "wompi",
       accountName: "primary-test",
       plaintext: new TextEncoder().encode(JSON.stringify(wompiCredentials)),
       actorAdminUserId: adminId,
     });
+    wompiCredentialId = primaryWompiCredential.id;
     payments = new PaymentService(db, { vault });
     refunds = new PaymentRefundService(db, { vault });
     credits = new StoreCreditService(db);
@@ -833,6 +838,186 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     assert.equal(
       (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
       "REFUNDED",
+    );
+  });
+
+  it("settles an uncertain Wompi void from VOIDED exactly once and replays without moving points or stock", async () => {
+    const variant = await db.productVariant.findUniqueOrThrow({
+      where: { id: catalog.variantId },
+      select: { priceCents: true, compareAtPriceCents: true },
+    });
+    await db.productVariant.update({
+      where: { id: catalog.variantId },
+      data: { priceCents: 10_000_000n, compareAtPriceCents: 10_100_000n },
+    });
+    let orderId;
+    try {
+      orderId = await makeOrder(undefined, "10000000");
+    } finally {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: {
+          priceCents: variant.priceCents,
+          compareAtPriceCents: variant.compareAtPriceCents,
+        },
+      });
+    }
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-void-webhook:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved = wompiEvent(attempt, "APPROVED");
+    await webhooks.process({ body: approved.body, environment: "LOCAL" });
+    assert.equal(
+      (await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } })).loyaltyPoints,
+      1,
+    );
+    const capturedStock = await db.stockLevel.findFirstOrThrow({
+      where: { locationId: inventory.locationId },
+    });
+    const capturedLedgerCount = await db.inventoryLedger.count({ where: { orderId } });
+    assert.equal(
+      await db.inventoryLedger.count({ where: { orderId, entryType: "FULFILLMENT" } }),
+      1,
+    );
+
+    const gateway = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () => {
+        throw new Error("socket closed");
+      },
+    });
+    await assert.rejects(
+      gateway.void(attempt.id, audit),
+      (error) => error instanceof PaymentProviderError && error.code === "NETWORK_UNCERTAIN",
+    );
+    const pending = await db.paymentTransaction.findFirstOrThrow({
+      where: { attemptId: attempt.id, kind: "VOID", status: "PROCESSING" },
+    });
+    const requestHash = Buffer.from(pending.requestHash);
+    const voided = wompiEvent(attempt, "VOIDED", new Date(), approved.externalId);
+    const settled = await webhooks.process({ body: voided.body, environment: "LOCAL" });
+    assert.equal(settled.status, "PROCESSED");
+    assert.equal(settled.replayed, false);
+
+    const succeeded = await db.paymentTransaction.findUniqueOrThrow({ where: { id: pending.id } });
+    assert.equal(succeeded.status, "SUCCEEDED");
+    assert.equal(succeeded.externalId, approved.externalId);
+    assert.ok(succeeded.completedAt);
+    assert.equal(Buffer.from(succeeded.requestHash).equals(requestHash), true);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "REFUNDED",
+    );
+    assert.equal(
+      (await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } })).loyaltyPoints,
+      0,
+    );
+    const loyalty = await db.loyaltyTxn.findMany({
+      where: { orderId, type: { in: ["EARN", "EARN_REVERSAL"] } },
+      orderBy: { type: "asc" },
+    });
+    assert.deepEqual(
+      loyalty.map((entry) => [entry.type, entry.points]),
+      [
+        ["EARN", 1],
+        ["EARN_REVERSAL", -1],
+      ],
+    );
+    assert.equal(loyalty[1].paymentTransactionId, pending.id);
+    const stockAfterVoid = await db.stockLevel.findFirstOrThrow({
+      where: { locationId: inventory.locationId },
+    });
+    assert.equal(stockAfterVoid.onHand, capturedStock.onHand);
+    assert.equal(stockAfterVoid.committed, capturedStock.committed);
+    assert.equal(await db.inventoryLedger.count({ where: { orderId } }), capturedLedgerCount);
+
+    const replay = await webhooks.process({ body: voided.body, environment: "LOCAL" });
+    assert.equal(replay.status, "PROCESSED");
+    assert.equal(replay.replayed, true);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "REFUNDED",
+    );
+    assert.equal(
+      (await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } })).loyaltyPoints,
+      0,
+    );
+    assert.equal(await db.loyaltyTxn.count({ where: { orderId, type: "EARN_REVERSAL" } }), 1);
+    const stockAfterReplay = await db.stockLevel.findFirstOrThrow({
+      where: { locationId: inventory.locationId },
+    });
+    assert.equal(stockAfterReplay.onHand, capturedStock.onHand);
+    assert.equal(stockAfterReplay.committed, capturedStock.committed);
+    assert.equal(await db.inventoryLedger.count({ where: { orderId } }), capturedLedgerCount);
+    assert.equal(
+      await db.inventoryLedger.count({ where: { orderId, entryType: "FULFILLMENT" } }),
+      1,
+    );
+  });
+
+  it("serializes simultaneous Wompi workers and rejects another body with the same event identity", async () => {
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-concurrent:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved = wompiEvent(attempt, "APPROVED");
+    const input = { body: approved.body, environment: "LOCAL" };
+    const results = await Promise.all([webhooks.process(input), webhooks.process(input)]);
+    assert.deepEqual(
+      results.map((result) => result.status),
+      ["PROCESSED", "PROCESSED"],
+    );
+    assert.deepEqual(results.map((result) => result.replayed).sort(), [false, true]);
+    assert.equal(new Set(results.map((result) => result.eventKey)).size, 1);
+    const webhook = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: {
+        provider_eventKey: { provider: PaymentProvider.WOMPI, eventKey: results[0].eventKey },
+      },
+    });
+    assert.equal(webhook.status, "PROCESSED");
+    assert.equal(webhook.attemptId, attempt.id);
+    const captures = await db.paymentTransaction.findMany({
+      where: { attemptId: attempt.id, kind: "CAPTURE" },
+    });
+    assert.equal(captures.length, 1);
+    assert.equal(captures[0].status, "SUCCEEDED");
+    assert.equal(captures[0].externalId, approved.externalId);
+    assert.equal(
+      await db.inventoryLedger.count({ where: { orderId, entryType: "FULFILLMENT" } }),
+      1,
+    );
+
+    const differentPayload = JSON.parse(approved.body);
+    differentPayload.data.transaction.status_message = "Mensaje no firmado diferente";
+    await assert.rejects(
+      webhooks.process({ body: JSON.stringify(differentPayload), environment: "LOCAL" }),
+      (error) => error instanceof PaymentConflictError && error.code === "IDEMPOTENCY_CONFLICT",
+    );
+    const afterConflict = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: { id: webhook.id },
+    });
+    assert.equal(
+      Buffer.from(afterConflict.payloadHash).equals(Buffer.from(webhook.payloadHash)),
+      true,
+    );
+    assert.equal(afterConflict.status, "PROCESSED");
+    assert.equal(
+      await db.paymentTransaction.count({ where: { attemptId: attempt.id, kind: "CAPTURE" } }),
+      1,
+    );
+    assert.equal(
+      await db.inventoryLedger.count({ where: { orderId, entryType: "FULFILLMENT" } }),
+      1,
     );
   });
 

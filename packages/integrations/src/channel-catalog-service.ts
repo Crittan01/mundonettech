@@ -1120,19 +1120,17 @@ export class ChannelCatalogService {
     });
     let recovered = 0;
     for (const candidate of expired) {
+      if (!candidate.claimId) continue;
+      const claimId = candidate.claimId;
       const changed = await this.db.$transaction(async (tx) => {
-        const job = await tx.channelSyncJob.findUnique({ where: { id: candidate.id } });
-        if (
-          !job ||
-          job.status !== "PROCESSING" ||
-          !job.claimExpiresAt ||
-          job.claimExpiresAt > now ||
-          !job.claimId
-        ) {
-          return false;
-        }
-        await tx.channelSyncJob.update({
-          where: { id: job.id },
+        await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${candidate.listingId}::uuid FOR UPDATE`;
+        const updated = await tx.channelSyncJob.updateMany({
+          where: {
+            id: candidate.id,
+            status: "PROCESSING",
+            claimId,
+            claimExpiresAt: { lte: now },
+          },
           data: {
             status: "UNCERTAIN",
             completedAt: now,
@@ -1144,28 +1142,36 @@ export class ChannelCatalogService {
             updatedAt: now,
           },
         });
-        const currentListing = await tx.channelListing.findUniqueOrThrow({
+        if (updated.count !== 1) return false;
+        const job = await tx.channelSyncJob.findUniqueOrThrow({ where: { id: candidate.id } });
+        const listing = await tx.channelListing.findUniqueOrThrow({
           where: { id: job.listingId },
         });
-        const listing = await tx.channelListing.update({
-          where: { id: job.listingId },
-          data: {
-            status: listingStatusAfterFailure(currentListing),
-            lastProviderError: "CLAIM_EXPIRED",
-            syncClaimId: null,
-            syncClaimedAt: null,
-            syncClaimExpiresAt: null,
-            updatedAt: now,
-          },
-        });
+        if (listing.syncClaimId === claimId) {
+          await tx.channelListing.updateMany({
+            where: { id: listing.id, syncClaimId: claimId },
+            data: {
+              status: listingStatusAfterFailure(listing),
+              lastProviderError: "CLAIM_EXPIRED",
+              syncClaimId: null,
+              syncClaimedAt: null,
+              syncClaimExpiresAt: null,
+              updatedAt: now,
+            },
+          });
+        }
         if (job.offerId) {
           await tx.channelOffer.updateMany({
-            where: { id: job.offerId, externalItemId: { not: null }, status: { not: "CLOSED" } },
+            where: {
+              id: job.offerId,
+              externalItemId: { not: null },
+              status: { not: "CLOSED" },
+            },
             data: { status: "RECONCILE_REQUIRED", updatedAt: now },
           });
         }
         await this.audit(tx, audit, "CHANNEL_SYNC_UNCERTAIN", "ChannelSyncJob", job.id, {
-          listingId: listing.id,
+          listingId: job.listingId,
           failureCode: "CLAIM_EXPIRED",
         });
         return true;
@@ -1191,8 +1197,8 @@ export class ChannelCatalogService {
       const claimId = randomUUID();
       const claimed = await this.db.$transaction(async (tx) => {
         const now = await this.now(tx);
-        await tx.$executeRaw`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${candidate.id}::uuid FOR UPDATE`;
         await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${candidate.listingId}::uuid FOR UPDATE`;
+        await tx.$executeRaw`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${candidate.id}::uuid FOR UPDATE`;
         const job = await tx.channelSyncJob.findUnique({
           where: { id: candidate.id },
           include: {
@@ -1213,8 +1219,8 @@ export class ChannelCatalogService {
           where: { listingId: job.listingId, status: "PROCESSING" },
         });
         if (competing > 0) return null;
-        await tx.channelListing.update({
-          where: { id: job.listingId },
+        const listingClaim = await tx.channelListing.updateMany({
+          where: { id: job.listingId, syncClaimId: null },
           data: {
             syncClaimId: claimId,
             syncClaimedAt: now,
@@ -1222,8 +1228,9 @@ export class ChannelCatalogService {
             updatedAt: now,
           },
         });
-        await tx.channelSyncJob.update({
-          where: { id: job.id },
+        if (listingClaim.count !== 1) return null;
+        const jobClaim = await tx.channelSyncJob.updateMany({
+          where: { id: job.id, status: job.status, claimId: null },
           data: {
             status: "PROCESSING",
             attempts: { increment: 1 },
@@ -1235,6 +1242,9 @@ export class ChannelCatalogService {
             updatedAt: now,
           },
         });
+        if (jobClaim.count !== 1) {
+          throw new ChannelCatalogError("CONFLICT", "The channel job claim changed concurrently.");
+        }
         return {
           ...job,
           listing: {
@@ -1557,14 +1567,39 @@ export class ChannelCatalogService {
     job: JobWithRelations,
     result: ExecutionSuccess,
     audit: ChannelAuditContext,
-  ): Promise<void> {
+  ): Promise<"COMPLETED" | "REPLAYED" | "STALE"> {
     const payload = payloadRecord(job);
-    await this.db.$transaction(async (tx) => {
+    return this.db.$transaction(async (tx) => {
       const now = await this.now(tx);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${job.listingId}::uuid FOR UPDATE`;
+      await tx.$executeRaw`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${job.id}::uuid FOR UPDATE`;
       const current = await tx.channelSyncJob.findUnique({ where: { id: job.id } });
-      if (!current || current.status !== "PROCESSING" || current.claimId !== job.claimId) return;
-      await tx.channelSyncJob.update({
-        where: { id: current.id },
+      const listing = await tx.channelListing.findUniqueOrThrow({
+        where: { id: job.listingId },
+        include: { account: true, offers: { orderBy: { createdAt: "asc" } } },
+      });
+      if (
+        current?.status === "SUCCEEDED" &&
+        current.completedAt &&
+        current.failureCode === null &&
+        current.claimId === null &&
+        current.claimedBy === null &&
+        current.claimedAt === null &&
+        current.claimExpiresAt === null &&
+        listing.syncClaimId === null
+      ) {
+        return "REPLAYED" as const;
+      }
+      if (
+        !current ||
+        current.status !== "PROCESSING" ||
+        current.claimId !== job.claimId ||
+        listing.syncClaimId !== job.claimId
+      ) {
+        return "STALE" as const;
+      }
+      const completed = await tx.channelSyncJob.updateMany({
+        where: { id: current.id, status: "PROCESSING", claimId: job.claimId },
         data: {
           status: "SUCCEEDED",
           completedAt: now,
@@ -1576,10 +1611,9 @@ export class ChannelCatalogService {
           updatedAt: now,
         },
       });
-      const listing = await tx.channelListing.findUniqueOrThrow({
-        where: { id: job.listingId },
-        include: { account: true, offers: { orderBy: { createdAt: "asc" } } },
-      });
+      if (completed.count !== 1) {
+        throw new ChannelCatalogError("CONFLICT", "The channel job completion is no longer valid.");
+      }
       const sameVersion = listing.version === payload.listingVersion;
       const rawStatus = sameVersion
         ? result.status
@@ -1594,8 +1628,8 @@ export class ChannelCatalogService {
       const hasLocalOffer = listing.offers.some(
         (candidate) => candidate.logisticType === "CROSS_DOCKING",
       );
-      await tx.channelListing.update({
-        where: { id: listing.id },
+      const listingCompletion = await tx.channelListing.updateMany({
+        where: { id: listing.id, syncClaimId: job.claimId },
         data: {
           ...(result.externalUserProductId && !listing.externalUserProductId
             ? { externalUserProductId: result.externalUserProductId }
@@ -1623,6 +1657,9 @@ export class ChannelCatalogService {
           updatedAt: now,
         },
       });
+      if (listingCompletion.count !== 1) {
+        throw new ChannelCatalogError("CONFLICT", "The channel listing claim is no longer valid.");
+      }
       if (job.kind === "SYNC_CONTENT" || job.kind === "RECONCILE_REMOTE") {
         for (const offer of listing.offers) {
           const attachItemId =
@@ -1685,32 +1722,53 @@ export class ChannelCatalogService {
         kind: job.kind,
         outcome: result.status,
       });
+      return "COMPLETED" as const;
     });
   }
 
   private async revokeAccount(
-    tx: Prisma.TransactionClient,
-    accountId: string,
-    now: Date,
+    snapshot: Pick<ChannelAccount, "id" | "credentialId" | "version">,
   ): Promise<void> {
-    const account = await tx.channelAccount.findUnique({ where: { id: accountId } });
-    if (!account || account.status !== "ACTIVE") return;
-    await tx.integrationCredential.updateMany({
-      where: { id: account.credentialId, revokedAt: null },
-      data: { revokedAt: now, updatedAt: now },
-    });
-    await tx.channelAccount.update({
-      where: { id: account.id },
-      data: {
-        status: "REAUTH_REQUIRED",
-        tokenExpiresAt: null,
-        lastRefreshError: "CHANNEL_API_UNAUTHORIZED",
-        refreshClaimId: null,
-        refreshClaimedAt: null,
-        refreshClaimExpiresAt: null,
-        version: { increment: 1 },
-        updatedAt: now,
-      },
+    await this.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${snapshot.id}::uuid FOR UPDATE`;
+      const now = await this.now(tx);
+      const account = await tx.channelAccount.findUnique({ where: { id: snapshot.id } });
+      if (
+        !account ||
+        account.status !== "ACTIVE" ||
+        account.credentialId !== snapshot.credentialId ||
+        account.version !== snapshot.version
+      ) {
+        return;
+      }
+      await tx.integrationCredential.updateMany({
+        where: { id: snapshot.credentialId, revokedAt: null },
+        data: { revokedAt: now, updatedAt: now },
+      });
+      const revoked = await tx.channelAccount.updateMany({
+        where: {
+          id: snapshot.id,
+          status: "ACTIVE",
+          credentialId: snapshot.credentialId,
+          version: snapshot.version,
+        },
+        data: {
+          status: "REAUTH_REQUIRED",
+          tokenExpiresAt: null,
+          lastRefreshError: "CHANNEL_API_UNAUTHORIZED",
+          refreshClaimId: null,
+          refreshClaimedAt: null,
+          refreshClaimExpiresAt: null,
+          version: { increment: 1 },
+          updatedAt: now,
+        },
+      });
+      if (revoked.count !== 1) {
+        throw new ChannelCatalogError(
+          "CONFLICT",
+          "The channel credential changed during revocation.",
+        );
+      }
     });
   }
 
@@ -1718,15 +1776,36 @@ export class ChannelCatalogService {
     job: JobWithRelations,
     failure: { status: "FAILED" | "UNCERTAIN" | "RETRY_SCHEDULED"; code: string },
     audit: ChannelAuditContext,
-  ): Promise<void> {
-    await this.db.$transaction(async (tx) => {
+  ): Promise<"COMPLETED" | "REPLAYED" | "STALE"> {
+    return this.db.$transaction(async (tx) => {
       const now = await this.now(tx);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${job.listingId}::uuid FOR UPDATE`;
+      await tx.$executeRaw`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${job.id}::uuid FOR UPDATE`;
       const current = await tx.channelSyncJob.findUnique({ where: { id: job.id } });
-      if (!current || current.status !== "PROCESSING" || current.claimId !== job.claimId) return;
-      if (failure.code === "UNAUTHORIZED") await this.revokeAccount(tx, job.listing.accountId, now);
+      const listing = await tx.channelListing.findUniqueOrThrow({ where: { id: job.listingId } });
       const retry = failure.status === "RETRY_SCHEDULED";
-      await tx.channelSyncJob.update({
-        where: { id: current.id },
+      if (
+        current?.status === failure.status &&
+        current.failureCode === failure.code &&
+        current.claimId === null &&
+        current.claimedBy === null &&
+        current.claimedAt === null &&
+        current.claimExpiresAt === null &&
+        (retry ? current.completedAt === null : current.completedAt !== null) &&
+        listing.syncClaimId === null
+      ) {
+        return "REPLAYED" as const;
+      }
+      if (
+        !current ||
+        current.status !== "PROCESSING" ||
+        current.claimId !== job.claimId ||
+        listing.syncClaimId !== job.claimId
+      ) {
+        return "STALE" as const;
+      }
+      const failed = await tx.channelSyncJob.updateMany({
+        where: { id: current.id, status: "PROCESSING", claimId: job.claimId },
         data: {
           status: failure.status,
           ...(retry
@@ -1740,9 +1819,11 @@ export class ChannelCatalogService {
           updatedAt: now,
         },
       });
-      const listing = await tx.channelListing.findUniqueOrThrow({ where: { id: job.listingId } });
-      await tx.channelListing.update({
-        where: { id: listing.id },
+      if (failed.count !== 1) {
+        throw new ChannelCatalogError("CONFLICT", "The channel job failure is no longer valid.");
+      }
+      const listingFailure = await tx.channelListing.updateMany({
+        where: { id: listing.id, syncClaimId: job.claimId },
         data: {
           status: listingStatusAfterFailure(listing),
           lastProviderError: failure.code,
@@ -1752,6 +1833,9 @@ export class ChannelCatalogService {
           updatedAt: now,
         },
       });
+      if (listingFailure.count !== 1) {
+        throw new ChannelCatalogError("CONFLICT", "The channel listing claim is no longer valid.");
+      }
       if (job.offerId) {
         await tx.channelOffer.updateMany({
           where: { id: job.offerId, externalItemId: { not: null }, status: { not: "CLOSED" } },
@@ -1775,6 +1859,7 @@ export class ChannelCatalogService {
           failureCode: failure.code,
         },
       );
+      return "COMPLETED" as const;
     });
   }
 
@@ -1864,8 +1949,11 @@ export class ChannelCatalogService {
           default:
             throw new ChannelCatalogError("CONFLICT", "Unknown channel job kind.");
         }
-        await this.completeJob(job, result, { ...audit, requestId: randomUUID() });
-        succeeded += 1;
+        const completion = await this.completeJob(job, result, {
+          ...audit,
+          requestId: randomUUID(),
+        });
+        if (completion !== "STALE") succeeded += 1;
       } catch (error) {
         const classified = providerFailure(error);
         const retry =
@@ -1875,7 +1963,9 @@ export class ChannelCatalogService {
         const failure = retry
           ? { status: "RETRY_SCHEDULED" as const, code: "VERSION_CONFLICT" }
           : classified;
-        await this.failJob(job, failure, { ...audit, requestId: randomUUID() });
+        if (failure.code === "UNAUTHORIZED") await this.revokeAccount(job.listing.account);
+        const outcome = await this.failJob(job, failure, { ...audit, requestId: randomUUID() });
+        if (outcome === "STALE") continue;
         failures.push({ jobId: job.id, code: failure.code });
         if (failure.status === "RETRY_SCHEDULED") retryScheduled += 1;
         else if (failure.status === "UNCERTAIN") uncertain += 1;

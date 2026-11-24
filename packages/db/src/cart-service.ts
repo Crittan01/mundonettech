@@ -193,6 +193,14 @@ function assertActiveCart(cart: Cart, now: Date): void {
   if (cart.expiresAt <= now) throw new CartStateError("Cart has expired.");
 }
 
+function retryCouponDivergence(): never {
+  const error = new Error("Cart coupon changed before its locks were acquired.") as Error & {
+    code: string;
+  };
+  error.code = "40001";
+  throw error;
+}
+
 function assertAdminMutable(cart: Cart, audit?: PricingMutationAudit): void {
   if (!audit) return;
   if (cart.kind !== "ASSISTED") {
@@ -972,10 +980,8 @@ export class CartService {
         select: { id: true },
       });
       if (!customer) throw new CartValidationError("Customer is not available.");
+      if (cart.couponId !== (peek?.couponId ?? null)) retryCouponDivergence();
       if (cart.customerId === customerId) return this.revalidateLocked(tx, cart.id, now);
-      if (cart.couponId && cart.couponId !== peek?.couponId) {
-        await acquireOperationLocks(tx, [`coupon-redemption:${cart.couponId}`]);
-      }
       const transferred = await transferCouponToCustomer(tx, cart, customerId, cart.expiresAt, now);
       await tx.cart.update({
         where: { id: cart.id },
@@ -1515,9 +1521,7 @@ export class CartService {
           select: { id: true },
         });
         if (!customer) throw new CartValidationError("Customer is not available.");
-        if (cart.couponId && cart.couponId !== peek?.couponId) {
-          await acquireOperationLocks(tx, [`coupon-redemption:${cart.couponId}`]);
-        }
+        if (cart.couponId !== (peek?.couponId ?? null)) retryCouponDivergence();
         const transferred = await transferCouponToCustomer(
           tx,
           cart,

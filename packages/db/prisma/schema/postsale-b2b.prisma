@@ -158,6 +158,7 @@ model ReturnRequestItem {
   units                ReturnRequestUnit[]
 
   @@unique([returnRequestId, shipmentItemId])
+  @@index([shipmentItemId, returnRequestId])
   @@index([orderItemId, returnRequestId])
   @@index([replacementVariantId])
   @@map("ReturnRequestItem")
@@ -173,7 +174,6 @@ model ReturnRequestUnit {
 
   @@unique([returnRequestItemId, serializedUnitId])
   @@index([serializedUnitId])
-  @@index([returnRequestItemId])
   @@map("ReturnRequestUnit")
 }
 
@@ -207,6 +207,7 @@ model WarrantyClaim {
   reviewedBy              AdminUser?          @relation("WarrantyClaimReviewer", fields: [reviewedByAdminUserId], references: [id], onDelete: Restrict)
 
   @@index([orderId, status, createdAt])
+  @@index([orderItemId, status, createdAt])
   @@index([serializedUnitId, status, createdAt])
   @@index([requesterCustomerId, createdAt])
   @@index([requesterGuestSessionId, createdAt])

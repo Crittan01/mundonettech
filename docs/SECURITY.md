@@ -4,7 +4,7 @@
 
 ## 1. Fronteras y modelo de amenazas
 
-La autorización se aplica en servidor en cada página y acción; ocultar navegación nunca concede ni revoca permisos. PostgREST no tiene acceso al esquema `public` (incluso para `service_role`), por lo que el navegador solo usa Supabase Auth, nunca tablas de aplicación.
+La autorización se aplica en servidor en cada página y acción; ocultar navegación nunca concede ni revoca permisos. PostgREST no tiene acceso al esquema `public` (incluso para `service_role`), por lo que el navegador solo usa Supabase Auth, nunca tablas de aplicación. Los tres roles Data API exigen `NOSUPERUSER`; `anon` y `authenticated` siempre son `NOBYPASSRLS`, al igual que `service_role` fuera de Supabase. La excepción `BYPASSRLS` de `service_role` solo se admite cuando Supabase lo declara rol reservado y no permite alterarlo: las 133 tablas fuerzan RLS sin políticas y se revocan todos sus privilegios Data API, incluido `MAINTAIN`. `verifySecurityPosture` compara el inventario estructural exacto y falla ante objetos adicionales, definiciones alteradas, flags no permitidos o grants (`ADR-048`).
 
 | Amenaza STRIDE / OWASP | Controles implementados |
 | --- | --- |

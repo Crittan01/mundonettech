@@ -1240,6 +1240,13 @@ export class ChannelAccountService {
           "The channel changed during disconnection; review it before retrying.",
         );
       }
+      await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "accountId" = ${accountId}::uuid ORDER BY "id" FOR UPDATE`;
+      await tx.$executeRaw`
+        SELECT job."id" FROM "ChannelSyncJob" job
+        JOIN "ChannelListing" listing ON listing."id" = job."listingId"
+        WHERE listing."accountId" = ${accountId}::uuid
+        ORDER BY job."id"
+        FOR UPDATE OF job`;
       const processingAttempt = await tx.channelOAuthAttempt.findFirst({
         where: { accountId, status: "PROCESSING" },
         select: { id: true },

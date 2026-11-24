@@ -156,8 +156,8 @@ model LocalDeliveryZone {
   createdAt                  DateTime   @default(now()) @db.Timestamptz(6)
   updatedAt                  DateTime   @default(now()) @updatedAt @db.Timestamptz(6)
   deletedAt                  DateTime?  @db.Timestamptz(6)
-  createdBy                  AdminUser  @relation("DeliveryZoneCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
-  updatedBy                  AdminUser  @relation("DeliveryZoneUpdater", fields: [updatedByAdminUserId], references: [id], onDelete: Restrict)
+  createdBy                  AdminUser  @relation("DeliveryZoneCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict, map: "LocalDeliveryZone_createdBy_fkey")
+  updatedBy                  AdminUser  @relation("DeliveryZoneUpdater", fields: [updatedByAdminUserId], references: [id], onDelete: Restrict, map: "LocalDeliveryZone_updatedBy_fkey")
   shipments                  Shipment[]
 
   @@index([active, deletedAt])

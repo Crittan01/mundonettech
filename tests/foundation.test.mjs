@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
@@ -19,6 +19,8 @@ import { findGitHygieneViolations } from "../scripts/check-git-hygiene.mjs";
 import { findLanguageViolations } from "../scripts/check-language.mjs";
 import foundationRules from "../scripts/eslint-rules.mjs";
 import { repositoryFiles } from "../scripts/lib/file-utils.mjs";
+import { resolveTestFiles } from "../scripts/run-integration-tests.mjs";
+import { constraintGuaranteesNonNegative } from "../packages/db/dist/verify-security-posture.js";
 
 const repoRoot = process.cwd();
 
@@ -293,6 +295,172 @@ model BadProduct {
       invalidSchema,
     );
     assert.equal(violations.length, 4);
+  });
+
+  it("generalizes soft-delete natural keys without rejecting SQL-only partial indexes", () => {
+    const invalidSchema = `
+model ChannelAsset {
+  id         String    @id @db.Uuid
+  externalId String    @unique
+  storageKey String
+  deletedAt  DateTime? @db.Timestamptz(6)
+
+  @@unique([storageKey])
+}
+`;
+    const violations = findPrismaSchemaViolations(
+      "packages/db/prisma/schema/operations.prisma",
+      invalidSchema,
+    );
+    assert.equal(violations.length, 2);
+    assert.ok(violations.some((message) => message.includes("externalId")));
+    assert.ok(violations.some((message) => message.includes("@@unique")));
+
+    const validSchema = `
+model Contact {
+  id        String    @id @db.Uuid
+  email     String
+  phone     String?
+  deletedAt DateTime? @db.Timestamptz(6)
+}
+
+model SqlOnlyAsset {
+  id         String    @id @db.Uuid
+  externalId String
+  storageKey String
+  deletedAt  DateTime? @db.Timestamptz(6)
+}
+
+model Category {
+  id               String    @id @db.Uuid
+  materializedPath String
+  deletedAt        DateTime? @db.Timestamptz(6)
+
+  @@unique([materializedPath])
+}
+`;
+    assert.deepEqual(
+      findPrismaSchemaViolations("packages/db/prisma/schema/crm.prisma", validSchema),
+      [],
+    );
+  });
+
+  it("rejects relation keys and multiline unique attributes except exact historical exceptions", () => {
+    const cases = [
+      {
+        expected: 1,
+        schema: `model Contact {
+  id String @id
+  customerId String? @unique
+  deletedAt DateTime?
+  customer Customer? @relation(fields: [customerId], references: [id])
+}`,
+      },
+      {
+        expected: 1,
+        schema: `model ContactLink {
+  id String @id
+  customerId String
+  organizationId String
+  deletedAt DateTime?
+  @@unique([customerId, organizationId])
+}`,
+      },
+      {
+        expected: 1,
+        schema: `model ContactLink {
+  id String @id
+  customerId String
+  organizationId String
+  deletedAt DateTime?
+  @@unique(
+    [customerId, organizationId],
+    map: "ContactLink_customer_organization_key"
+  )
+}`,
+      },
+      {
+        expected: 1,
+        schema: `model Contact {
+  id String @id
+  customerId String? @unique
+  deletedAt DateTime?
+  customer Customer? @relation(
+    fields: [customerId],
+    references: [id],
+    onDelete: Restrict
+  )
+}`,
+      },
+      {
+        expected: 0,
+        schema: `model Category {
+  id String @id
+  materializedPath String
+  deletedAt DateTime?
+  @@unique([materializedPath])
+}
+
+model ProductVariant {
+  id String @id
+  productId String
+  deletedAt DateTime?
+  @@unique([id, productId])
+}`,
+      },
+    ];
+
+    for (const testCase of cases) {
+      assert.equal(
+        findPrismaSchemaViolations("packages/db/prisma/schema/crm.prisma", testCase.schema).length,
+        testCase.expected,
+        testCase.schema,
+      );
+    }
+  });
+});
+
+describe("A3 — semantic numeric guards and integration discovery", () => {
+  it("proves non-negativity across every boolean path", () => {
+    const cases = [
+      ["CHECK ((value >= 0))", true],
+      ["CHECK ((value > 0))", true],
+      ["CHECK ((0 <= value))", true],
+      ["CHECK ((0 < value))", true],
+      ["CHECK ((value < 0))", false],
+      ["CHECK ((value IS NULL))", false],
+      ["CHECK ((value IS NULL OR value >= 0))", true],
+      ["CHECK ((value >= 0 OR true))", false],
+      ["CHECK ((value >= 0 AND other > 0))", true],
+      ["CHECK ((value >= 0 OR other > 0))", false],
+      ["CHECK ((value >= 0 OR (value IS NULL AND other)))", true],
+      ["CHECK ((other >= 0))", false],
+    ];
+    for (const [definition, expected] of cases) {
+      assert.equal(constraintGuaranteesNonNegative(definition, "value"), expected, definition);
+    }
+  });
+
+  it("discovers nested integration tests without collecting non-test fixtures", () => {
+    mkdirSync(path.join(repoRoot, "tmp"), { recursive: true });
+    const fixtureRoot = mkdtempSync(path.join(repoRoot, "tmp", "integration-resolver-"));
+    try {
+      mkdirSync(path.join(fixtureRoot, "tests", "nested", "deep"), { recursive: true });
+      writeFileSync(path.join(fixtureRoot, "tests", "root.test.mjs"), "");
+      writeFileSync(path.join(fixtureRoot, "tests", "nested", "deep", "integration.test.mjs"), "");
+      writeFileSync(path.join(fixtureRoot, "tests", "nested", "helper.mjs"), "");
+      writeFileSync(path.join(fixtureRoot, "tests", "nested", "fixture.test.ts"), "");
+      writeFileSync(path.join(fixtureRoot, "tests", "nested", "fake.test.mjs.txt"), "");
+      assert.deepEqual(resolveTestFiles([], fixtureRoot), [
+        "tests/nested/deep/integration.test.mjs",
+        "tests/root.test.mjs",
+      ]);
+      assert.deepEqual(resolveTestFiles(["tests/custom.test.mjs"], fixtureRoot), [
+        "tests/custom.test.mjs",
+      ]);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
   });
 });
 

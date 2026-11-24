@@ -23,6 +23,7 @@ model DomainOutbox {
 
   @@unique([deduplicationKey])
   @@index([processedAt, availableAt, claimExpiresAt])
+  @@index([failedAt, availableAt, claimExpiresAt], map: "DomainOutbox_failedAt_availableAt_idx")
   @@index([aggregateType, aggregateId, occurredAt])
   @@map("DomainOutbox")
 }
@@ -84,7 +85,6 @@ model DailyFunnelMetric {
   updatedAt       DateTime @default(now()) @updatedAt @db.Timestamptz(6)
 
   @@unique([metricDate, source])
-  @@index([metricDate])
   @@map("DailyFunnelMetric")
 }
 
@@ -182,8 +182,6 @@ model RecoveryBucketCheck {
 
   @@unique([backupRunId, bucketName])
   @@unique([disasterRecoveryDrillId, bucketName])
-  @@index([backupRunId])
-  @@index([disasterRecoveryDrillId])
   @@map("RecoveryBucketCheck")
 }
 
@@ -255,7 +253,7 @@ model ChannelAccount {
   shipments             ChannelShipment[]
   ledgerEntries         ChannelLedgerEntry[]
 
-  @@unique([provider, siteId, environment, externalAccountId])
+  @@unique([provider, siteId, environment, externalAccountId], map: "ChannelAccount_provider_siteId_environment_externalAccountId_ke")
   @@index([environment, status, tokenExpiresAt, id])
   @@index([createdByAdminUserId, createdAt])
   @@map("ChannelAccount")
@@ -573,11 +571,11 @@ model ChannelOrder {
   serializedUnits        SerializedUnit[]
 
   @@unique([accountId, externalOrderId])
-  @@index([accountId, status, stockStatus, externalUpdatedAt, id])
+  @@index([accountId, status, stockStatus, externalUpdatedAt, id], map: "ChannelOrder_account_status_stock_updated_idx")
   @@index([packId, externalOrderId])
   @@index([shipmentId, stockStatus])
-  @@index([reconciliationStatus, externalUpdatedAt, id])
-  @@index([variantId, stockLocationId, stockStatus])
+  @@index([reconciliationStatus, externalUpdatedAt, id], map: "ChannelOrder_reconciliation_updated_idx")
+  @@index([variantId, stockLocationId, stockStatus], map: "ChannelOrder_variant_location_stock_idx")
   @@map("ChannelOrder")
 }
 
@@ -606,7 +604,7 @@ model ChannelShipment {
   orders             ChannelOrder[]
 
   @@unique([accountId, externalShipmentId])
-  @@index([accountId, status, externalUpdatedAt, id])
+  @@index([accountId, status, externalUpdatedAt, id], map: "ChannelShipment_account_status_updated_idx")
   @@index([packId, status])
   @@map("ChannelShipment")
 }
@@ -633,10 +631,10 @@ model ChannelLedgerEntry {
   order              ChannelOrder?            @relation(fields: [orderId], references: [id], onDelete: Restrict)
   createdBy          AdminUser?               @relation("ChannelLedgerEntryCreator", fields: [createdByAdminUserId], references: [id], onDelete: Restrict)
 
-  @@index([accountId, occurredAt, id])
-  @@index([orderId, entryType, occurredAt, id])
-  @@index([packId, entryType, occurredAt, id])
-  @@index([externalPaymentId, entryType])
+  @@index([accountId, occurredAt, id], map: "ChannelLedgerEntry_account_occurred_idx")
+  @@index([orderId, entryType, occurredAt, id], map: "ChannelLedgerEntry_order_type_occurred_idx")
+  @@index([packId, entryType, occurredAt, id], map: "ChannelLedgerEntry_pack_type_occurred_idx")
+  @@index([externalPaymentId, entryType], map: "ChannelLedgerEntry_payment_type_idx")
   @@map("ChannelLedgerEntry")
 }
 
@@ -698,11 +696,11 @@ model MetaCapiEvent {
   consent                  Consent               @relation(fields: [consentId], references: [id], onDelete: Restrict)
   reconciledBy             AdminUser?            @relation("MetaCapiReconciler", fields: [reconciledByAdminUserId], references: [id], onDelete: Restrict)
 
-  @@index([status, availableAt, id])
-  @@index([customerId, status])
+  @@index([status, availableAt, id], map: "MetaCapiEvent_status_available_id_idx")
+  @@index([customerId, status], map: "MetaCapiEvent_customer_status_idx")
   @@index([consentId])
-  @@index([claimExpiresAt, status])
+  @@index([claimExpiresAt, status], map: "MetaCapiEvent_claim_expiry_status_idx")
   @@index([environment, status])
-  @@index([reconciledByAdminUserId, createdAt])
+  @@index([reconciledByAdminUserId, createdAt], map: "MetaCapiEvent_reconciler_created_idx")
   @@map("MetaCapiEvent")
 }

@@ -1,0 +1,1084 @@
+import assert from "node:assert/strict";
+import { randomBytes, randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { after, before, describe, it } from "node:test";
+
+import pg from "pg";
+
+import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
+
+const containerName = "a3-database-integrity-test_mundonettech";
+const dataApiRoles = ["anon", "authenticated", "service_role"];
+const migrationUrl = new URL(
+  "../packages/db/prisma/migrations/20261124160000_a3_db_constraints_locks/migration.sql",
+  import.meta.url,
+);
+
+let harness;
+
+before(
+  async () => {
+    harness = await acquireIsolatedTestDatabase({ containerName, port: 54428 });
+  },
+  { timeout: 240_000 },
+);
+
+after(
+  async () => {
+    if (harness) await harness.stop();
+  },
+  { timeout: 30_000 },
+);
+
+async function withRollback(callback) {
+  const client = new pg.Client({ connectionString: harness.databaseUrl });
+  await client.connect();
+  await client.query("BEGIN");
+  try {
+    return await callback(client);
+  } finally {
+    await client.query("ROLLBACK").catch(() => undefined);
+    await client.end();
+  }
+}
+
+async function expectSqlViolation(client, sql, params, code, constraint) {
+  const savepoint = `a3_${randomUUID().replaceAll("-", "")}`;
+  await client.query(`SAVEPOINT ${savepoint}`);
+  let error;
+  try {
+    await client.query(sql, params);
+  } catch (caught) {
+    error = caught;
+  } finally {
+    await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+    await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+  }
+  assert.ok(error, "Expected the SQL statement to fail");
+  assert.equal(error.code, code, error.message);
+  if (constraint) assert.equal(error.constraint, constraint);
+}
+
+async function createCatalogFixture(client) {
+  const suffix = randomUUID();
+  const fixture = {
+    taxGroupId: randomUUID(),
+    brandId: randomUUID(),
+    categoryId: randomUUID(),
+    productId: randomUUID(),
+    variantId: randomUUID(),
+  };
+  await client.query(
+    `INSERT INTO "TaxGroup" ("id", "code", "name", "treatment", "rateBps")
+     VALUES ($1, $2, 'IVA general', 'STANDARD', 1900)`,
+    [fixture.taxGroupId, `A3_${suffix}`],
+  );
+  await client.query(`INSERT INTO "Brand" ("id", "slug", "name") VALUES ($1, $2, 'A3 Brand')`, [
+    fixture.brandId,
+    `a3-brand-${suffix}`,
+  ]);
+  await client.query(
+    `INSERT INTO "Category" ("id", "slug", "name", "materializedPath", "depth")
+     VALUES ($1, $2, 'A3 Category', '/', 0)`,
+    [fixture.categoryId, `a3-category-${suffix}`],
+  );
+  await client.query(
+    `INSERT INTO "Product" (
+       "id", "brandId", "categoryId", "taxGroupId", "slug", "name", "status", "authenticity"
+     ) VALUES ($1, $2, $3, $4, $5, 'A3 Product', 'ACTIVE', 'ORIGINAL')`,
+    [fixture.productId, fixture.brandId, fixture.categoryId, fixture.taxGroupId, `a3-${suffix}`],
+  );
+  await client.query(
+    `INSERT INTO "ProductVariant" (
+       "id", "productId", "sku", "priceCents", "costCents", "weightGrams",
+       "lengthMillimeters", "widthMillimeters", "heightMillimeters", "status"
+     ) VALUES ($1, $2, $3, 100000, 60000, 100, 100, 100, 100, 'ACTIVE')`,
+    [fixture.variantId, fixture.productId, `A3-${suffix.toUpperCase()}`],
+  );
+  return fixture;
+}
+
+async function createLocationWithZeroStock(client, variantId, type = "LOCAL_MAIN") {
+  const locationId = randomUUID();
+  await client.query(
+    `INSERT INTO "StockLocation" ("id", "code", "name", "type") VALUES ($1, $2, $3, $4)`,
+    [locationId, `A3-${randomUUID().slice(0, 12).toUpperCase()}`, "A3 location", type],
+  );
+  if (variantId) {
+    await client.query(
+      `INSERT INTO "StockLevel" (
+         "locationId", "variantId", "onHand", "committed", "safetyStock", "weightedAvgCostCents"
+       ) VALUES ($1, $2, 0, 0, 0, 0)`,
+      [locationId, variantId],
+    );
+  }
+  return locationId;
+}
+
+async function createOrder(client, options = {}) {
+  const id = randomUUID();
+  const orderItemId = randomUUID();
+  const shipmentId = randomUUID();
+  const orderStatus = options.orderStatus ?? "CONFIRMED";
+  const paymentStatus = options.paymentStatus ?? "PAID";
+  const fulfillmentStatus = options.fulfillmentStatus ?? "FULFILLED";
+  const total = 100000;
+  const now = new Date();
+  await client.query(
+    `INSERT INTO "Order" (
+       "id", "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus",
+       "fulfillmentMethod", "clickCollectLocationId", "taxRegime", "subtotalCents",
+       "discountCents", "taxCents", "shippingCents", "totalCents",
+       "confirmedAt", "cancelledAt", "completedAt", "buyerDocumentTypeSnapshot",
+       "buyerDocumentNumberSnapshot", "buyerTaxRegimeSnapshot"
+     ) VALUES (
+       $1, $2, $3::"OrderStatus", $4::"PaymentStatus", $5::"FulfillmentStatus",
+       $6::"OrderFulfillmentMethod", $7, $8::"StoreTaxRegime", $9, 0, 0, 0, $9, $10, $11, $12,
+       $13, $14, $15::"StoreTaxRegime"
+     )`,
+    [
+      id,
+      `A3-${randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`,
+      orderStatus,
+      paymentStatus,
+      fulfillmentStatus,
+      options.clickCollectLocationId ? "CLICK_COLLECT" : null,
+      options.clickCollectLocationId ?? null,
+      options.taxRegime ?? null,
+      total,
+      ["CONFIRMED", "COMPLETED"].includes(orderStatus) ? now : null,
+      orderStatus === "CANCELLED" ? now : null,
+      orderStatus === "COMPLETED" ? now : null,
+      options.taxRegime === "RESPONSABLE_IVA" ? "13" : null,
+      options.taxRegime === "RESPONSABLE_IVA" ? "900123456" : null,
+      options.taxRegime === "RESPONSABLE_IVA" ? "RESPONSABLE_IVA" : null,
+    ],
+  );
+  if (options.variantId) {
+    await client.query(
+      `INSERT INTO "OrderItem" (
+         "id", "orderId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot",
+         "skuSnapshot", "unitPriceCents", "unitCostWacCents", "discountCents", "lineTotalCents", "taxCents"
+       ) VALUES ($1, $2, $3, 1, 'A3 Product', 'a3-product', $4, $5, 60000, 0, $5, 0)`,
+      [orderItemId, id, options.variantId, `A3-${randomUUID()}`, total],
+    );
+  }
+  if (options.shipmentStatus) {
+    const status = options.shipmentStatus;
+    await client.query(
+      `INSERT INTO "Shipment" (
+         "id", "orderId", "originLocationId", "kind", "status", "promisedAt",
+         "readyAt", "shippedAt", "deliveredAt", "cancelledAt"
+       ) VALUES (
+         $1, $2, $3, $4::"ShipmentKind", $5::"ShipmentStatus", CURRENT_TIMESTAMP + INTERVAL '1 day',
+         $6, $7, $8, $9
+       )`,
+      [
+        shipmentId,
+        id,
+        options.originLocationId,
+        options.shipmentKind ?? "DELIVERY",
+        status,
+        ["READY", "SHIPPED", "DELIVERED"].includes(status) ? now : null,
+        ["SHIPPED", "DELIVERED"].includes(status) ? now : null,
+        status === "DELIVERED" ? now : null,
+        status === "CANCELLED" ? now : null,
+      ],
+    );
+  }
+  return { id, orderItemId, shipmentId };
+}
+
+async function archive(client, table, id) {
+  await client.query(`UPDATE "${table}" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [id]);
+}
+
+async function expectArchive(client, table, id, allowed) {
+  const sql = `UPDATE "${table}" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`;
+  if (allowed) {
+    await client.query(sql, [id]);
+    const result = await client.query(`SELECT "deletedAt" FROM "${table}" WHERE "id" = $1`, [id]);
+    assert.ok(result.rows[0].deletedAt instanceof Date);
+  } else {
+    await expectSqlViolation(client, sql, [id], "23514");
+  }
+}
+
+async function createAdmin(client) {
+  const adminUserId = randomUUID();
+  await client.query(
+    `INSERT INTO "AdminUser" ("id", "authUserId", "email", "displayName", "role", "status")
+     VALUES ($1, $2, $3, 'A3 Admin', 'SUPERADMIN', 'ACTIVE')`,
+    [adminUserId, randomUUID(), `a3-${randomUUID()}@example.test`],
+  );
+  return adminUserId;
+}
+
+async function createAdminAndCredential(client) {
+  const adminUserId = await createAdmin(client);
+  const credentialId = randomUUID();
+  await client.query(
+    `INSERT INTO "IntegrationCredential" (
+       "id", "provider", "environment", "accountName", "keyVersion", "nonce",
+       "ciphertext", "authTag", "createdByAdminUserId"
+     ) VALUES ($1, $2, 'LOCAL', 'a3-fiscal', 1, $3, $4, $5, $6)`,
+    [
+      credentialId,
+      `dian-${randomUUID()}`,
+      randomBytes(12),
+      randomBytes(32),
+      randomBytes(16),
+      adminUserId,
+    ],
+  );
+  return { adminUserId, credentialId };
+}
+
+function insertInvoice(client, { orderId, credentialId, number, cufe, accepted = false }) {
+  return client.query(
+    `INSERT INTO "TaxInvoice" (
+       "orderId", "credentialId", "environment", "prefix", "number", "fullNumber", "cufe",
+       "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents",
+       "requestHash", "unsignedXml", "signedXml", "documentHash", "status", "acceptedAt"
+     ) VALUES (
+       $1, $2, 'LOCAL', 'A3', $3::integer, 'A3' || ($3::integer)::text, $4,
+       100000, 0, 0, 0, 100000, $5, '<Invoice/>', $6, $7, $8::"FiscalDocumentStatus", $9
+     )`,
+    [
+      orderId,
+      credentialId,
+      number,
+      cufe,
+      randomBytes(32),
+      accepted ? "<Invoice signed/>" : null,
+      accepted ? randomBytes(32) : null,
+      accepted ? "ACCEPTED" : "DRAFT",
+      accepted ? new Date() : null,
+    ],
+  );
+}
+
+async function createCapture(client, orderId, adminUserId, amount = 100000) {
+  const attemptId = randomUUID();
+  await client.query(
+    `INSERT INTO "PaymentAttempt" (
+       "id", "orderId", "provider", "environment", "status", "idempotencyKey",
+       "requestHash", "reference", "amountCents", "confirmedByAdminUserId", "confirmedAt", "completedAt"
+     ) VALUES (
+       $1, $2, 'BANK_TRANSFER', 'LOCAL', 'SUCCEEDED', $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+     )`,
+    [
+      attemptId,
+      orderId,
+      `a3-capture-${randomUUID()}`,
+      randomBytes(32),
+      `a3ref${randomUUID().replaceAll("-", "").slice(0, 20)}`,
+      amount,
+      adminUserId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO "PaymentTransaction" (
+       "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+     ) VALUES ($1, 'BANK_TRANSFER', 'CAPTURE', 'SUCCEEDED', $2, $3, $4, CURRENT_TIMESTAMP)`,
+    [attemptId, amount, `capture-${randomUUID()}`, randomBytes(32)],
+  );
+  return attemptId;
+}
+
+async function createCompletedRefund(
+  client,
+  { orderId, orderItemId, attemptId, adminUserId, amount },
+) {
+  const refundId = randomUUID();
+  await client.query(
+    `INSERT INTO "OrderRefund" (
+       "id", "orderId", "idempotencyKey", "requestHash", "reason", "status",
+       "subtotalCents", "taxCents", "shippingCents", "totalCents", "requestedByAdminUserId"
+     ) VALUES ($1, $2, $3, $4, 'ADJUSTMENT', 'REQUESTED', $5, 0, 0, $5, $6)`,
+    [refundId, orderId, `a3-refund-${randomUUID()}`, randomBytes(32), amount, adminUserId],
+  );
+  await client.query(
+    `INSERT INTO "OrderRefundItem" (
+       "refundId", "orderItemId", "quantity", "subtotalCents", "taxCents", "totalCents"
+     ) VALUES ($1, $2, 1, $3, 0, $3)`,
+    [refundId, orderItemId, amount],
+  );
+  await client.query(
+    `INSERT INTO "PaymentTransaction" (
+       "attemptId", "refundId", "provider", "kind", "status", "amountCents",
+       "externalId", "requestHash", "completedAt"
+     ) VALUES ($1, $2, 'BANK_TRANSFER', 'REFUND', 'SUCCEEDED', $3, $4, $5, CURRENT_TIMESTAMP)`,
+    [attemptId, refundId, amount, `refund-${randomUUID()}`, randomBytes(32)],
+  );
+  await client.query(`UPDATE "OrderRefund" SET "status" = 'APPROVED' WHERE "id" = $1`, [refundId]);
+  await client.query(`UPDATE "OrderRefund" SET "status" = 'PROCESSING' WHERE "id" = $1`, [
+    refundId,
+  ]);
+  await client.query(
+    `UPDATE "OrderRefund" SET "status" = 'COMPLETED', "processedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+    [refundId],
+  );
+  return refundId;
+}
+
+async function createCancelledRefund(client, { orderId, orderItemId, adminUserId, amount }) {
+  const refundId = randomUUID();
+  await client.query(
+    `INSERT INTO "OrderRefund" (
+       "id", "orderId", "idempotencyKey", "requestHash", "reason", "status",
+       "subtotalCents", "taxCents", "shippingCents", "totalCents", "requestedByAdminUserId"
+     ) VALUES ($1, $2, $3, $4, 'ADJUSTMENT', 'REQUESTED', $5, 0, 0, $5, $6)`,
+    [refundId, orderId, `a3-refund-${randomUUID()}`, randomBytes(32), amount, adminUserId],
+  );
+  await client.query(
+    `INSERT INTO "OrderRefundItem" (
+       "refundId", "orderItemId", "quantity", "subtotalCents", "taxCents", "totalCents"
+     ) VALUES ($1, $2, 1, $3, 0, $3)`,
+    [refundId, orderItemId, amount],
+  );
+  await client.query(`UPDATE "OrderRefund" SET "status" = 'CANCELLED' WHERE "id" = $1`, [refundId]);
+  return refundId;
+}
+
+function insertCreditNote(client, { invoiceId, refundId, credentialId, number, cude }) {
+  return client.query(
+    `INSERT INTO "CreditNote" (
+       "invoiceId", "refundId", "credentialId", "prefix", "number", "fullNumber", "cude",
+       "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents",
+       "reasonCode", "requestHash", "unsignedXml"
+     ) VALUES (
+       $1, $2, $3, 'NC', $4::integer, 'NC' || ($4::integer)::text, $5,
+       10000, 0, 0, 0, 10000, 1, $6, '<CreditNote/>'
+     )`,
+    [invoiceId, refundId, credentialId, number, cude, randomBytes(32)],
+  );
+}
+
+const openOrderCases = [
+  {
+    name: "PENDING orders block regardless of payment and fulfillment",
+    orderStatus: "PENDING",
+    paymentStatus: "PAID",
+    fulfillmentStatus: "FULFILLED",
+    allowed: false,
+  },
+  {
+    name: "unfulfilled CONFIRMED orders block",
+    fulfillmentStatus: "UNFULFILLED",
+    allowed: false,
+  },
+  {
+    name: "UNPAID CONFIRMED orders block",
+    paymentStatus: "UNPAID",
+    allowed: false,
+  },
+  {
+    name: "PARTIALLY_PAID CONFIRMED orders block",
+    paymentStatus: "PARTIALLY_PAID",
+    allowed: false,
+  },
+  {
+    name: "PENDING shipments block",
+    shipmentStatus: "PENDING",
+    allowed: false,
+  },
+  {
+    name: "READY shipments block",
+    shipmentStatus: "READY",
+    allowed: false,
+  },
+  {
+    name: "SHIPPED shipments block",
+    shipmentStatus: "SHIPPED",
+    allowed: false,
+  },
+  {
+    name: "DELIVERED shipments permit archiving",
+    shipmentStatus: "DELIVERED",
+    allowed: true,
+  },
+  {
+    name: "CANCELLED orders permit archiving",
+    orderStatus: "CANCELLED",
+    paymentStatus: "UNPAID",
+    fulfillmentStatus: "CANCELLED",
+    allowed: true,
+  },
+  {
+    name: "COMPLETED orders permit archiving",
+    orderStatus: "COMPLETED",
+    allowed: true,
+  },
+];
+
+describe("A3 — Prisma/SQL index and constraint parity", () => {
+  it("keeps every mapped SQL name, adds hot indexes and removes only redundant indexes", async () => {
+    await withRollback(async (client) => {
+      const version = await client.query("SHOW server_version");
+      assert.match(version.rows[0].server_version, /^17\./);
+      const migration = await client.query(
+        `SELECT finished_at FROM _prisma_migrations
+         WHERE migration_name = '20261124160000_a3_db_constraints_locks' AND rolled_back_at IS NULL`,
+      );
+      assert.ok(migration.rows[0].finished_at instanceof Date);
+
+      const expected = [
+        ["ChannelAccount", "ChannelAccount_provider_siteId_environment_externalAccountId_ke", true],
+        ["ChannelOrder", "ChannelOrder_account_status_stock_updated_idx", false],
+        ["ChannelOrder", "ChannelOrder_reconciliation_updated_idx", false],
+        ["ChannelOrder", "ChannelOrder_variant_location_stock_idx", false],
+        ["ChannelShipment", "ChannelShipment_account_status_updated_idx", false],
+        ["ChannelLedgerEntry", "ChannelLedgerEntry_account_occurred_idx", false],
+        ["ChannelLedgerEntry", "ChannelLedgerEntry_order_type_occurred_idx", false],
+        ["ChannelLedgerEntry", "ChannelLedgerEntry_pack_type_occurred_idx", false],
+        ["ChannelLedgerEntry", "ChannelLedgerEntry_payment_type_idx", false],
+        ["MetaCapiEvent", "MetaCapiEvent_status_available_id_idx", false],
+        ["MetaCapiEvent", "MetaCapiEvent_customer_status_idx", false],
+        ["MetaCapiEvent", "MetaCapiEvent_claim_expiry_status_idx", false],
+        ["MetaCapiEvent", "MetaCapiEvent_reconciler_created_idx", false],
+        ["SerializedUnit", "SerializedUnit_shipmentId_variantId_idx", false],
+        ["DomainOutbox", "DomainOutbox_failedAt_availableAt_idx", false],
+        ["TaxInvoice", "TaxInvoice_cufe_key", true],
+        ["CreditNote", "CreditNote_cude_key", true],
+        ["ReturnRequestItem", "ReturnRequestItem_shipmentItemId_returnRequestId_idx", false],
+        ["WarrantyClaim", "WarrantyClaim_orderItemId_status_createdAt_idx", false],
+        ["ProductAttributeValue", "ProductAttributeValue_attributeId_normalizedValue_idx", false],
+        [
+          "ProductAttributeValue",
+          "ProductAttributeValue_productId_attributeId_normalizedValue_key",
+          true,
+        ],
+        ["EmailEvent", "EmailEvent_lifecycleMessageId_key", true],
+        ["DailyFunnelMetric", "DailyFunnelMetric_metricDate_source_key", true],
+        ["RecoveryBucketCheck", "RecoveryBucketCheck_backupRunId_bucketName_key", true],
+        ["RecoveryBucketCheck", "RecoveryBucketCheck_disasterRecoveryDrillId_bucketName_key", true],
+        ["ReturnRequestUnit", "ReturnRequestUnit_returnRequestItemId_serializedUnitId_key", true],
+      ];
+      const indexes = await client.query(
+        `SELECT table_class.relname AS table_name, index_class.relname AS index_name,
+                index.indisunique AS unique, pg_get_indexdef(index.indexrelid) AS definition
+         FROM pg_index index
+         JOIN pg_class index_class ON index_class.oid = index.indexrelid
+         JOIN pg_class table_class ON table_class.oid = index.indrelid
+         JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
+         WHERE namespace.nspname = 'public' AND index_class.relname = ANY($1::text[])`,
+        [expected.map(([, name]) => name)],
+      );
+      assert.equal(indexes.rowCount, expected.length);
+      for (const [tableName, indexName, unique] of expected) {
+        const row = indexes.rows.find(
+          (candidate) => candidate.table_name === tableName && candidate.index_name === indexName,
+        );
+        assert.ok(row, `${indexName} is missing on ${tableName}`);
+        assert.equal(row.unique, unique, indexName);
+      }
+      assert.match(
+        indexes.rows.find((row) => row.index_name === "DomainOutbox_failedAt_availableAt_idx")
+          .definition,
+        /"failedAt", "availableAt", "claimExpiresAt"/,
+      );
+      assert.match(
+        indexes.rows.find(
+          (row) => row.index_name === "ReturnRequestItem_shipmentItemId_returnRequestId_idx",
+        ).definition,
+        /"shipmentItemId", "returnRequestId"/,
+      );
+      assert.match(
+        indexes.rows.find(
+          (row) => row.index_name === "WarrantyClaim_orderItemId_status_createdAt_idx",
+        ).definition,
+        /"orderItemId", status, "createdAt"/,
+      );
+
+      const removed = [
+        "ProductAttributeValue_product_attribute_normalized_idx",
+        "EmailEvent_lifecycleMessageId_idx",
+        "DailyFunnelMetric_metricDate_idx",
+        "RecoveryBucketCheck_backupRunId_idx",
+        "RecoveryBucketCheck_disasterRecoveryDrillId_idx",
+        "ReturnRequestUnit_returnRequestItemId_idx",
+      ];
+      const redundant = await client.query(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname = ANY($1::text[])`,
+        [removed],
+      );
+      assert.deepEqual(redundant.rows, []);
+
+      const foreignKeys = await client.query(
+        `SELECT conname, confdeltype FROM pg_constraint
+         WHERE conname = ANY($1::text[]) ORDER BY conname`,
+        [
+          [
+            "EmailTemplateOverride_createdBy_fkey",
+            "LocalDeliveryZone_createdBy_fkey",
+            "LocalDeliveryZone_updatedBy_fkey",
+          ],
+        ],
+      );
+      assert.deepEqual(foreignKeys.rows, [
+        { conname: "EmailTemplateOverride_createdBy_fkey", confdeltype: "r" },
+        { conname: "LocalDeliveryZone_createdBy_fkey", confdeltype: "r" },
+        { conname: "LocalDeliveryZone_updatedBy_fkey", confdeltype: "r" },
+      ]);
+    });
+  });
+
+  it("declares the exact Prisma maps without reviving removed index declarations", () => {
+    const schema = [
+      "operations",
+      "inventory",
+      "growth-cms",
+      "payments-shipping",
+      "orders",
+      "postsale-b2b",
+    ].map((name) =>
+      readFileSync(new URL(`../packages/db/prisma/schema/${name}.prisma`, import.meta.url), "utf8"),
+    );
+    const combined = schema.join("\n");
+    const maps = [
+      "ChannelAccount_provider_siteId_environment_externalAccountId_ke",
+      "ChannelOrder_account_status_stock_updated_idx",
+      "ChannelOrder_reconciliation_updated_idx",
+      "ChannelOrder_variant_location_stock_idx",
+      "ChannelShipment_account_status_updated_idx",
+      "ChannelLedgerEntry_account_occurred_idx",
+      "ChannelLedgerEntry_order_type_occurred_idx",
+      "ChannelLedgerEntry_pack_type_occurred_idx",
+      "ChannelLedgerEntry_payment_type_idx",
+      "MetaCapiEvent_status_available_id_idx",
+      "MetaCapiEvent_customer_status_idx",
+      "MetaCapiEvent_claim_expiry_status_idx",
+      "MetaCapiEvent_reconciler_created_idx",
+      "SerializedUnit_shipmentId_variantId_idx",
+      "DomainOutbox_failedAt_availableAt_idx",
+      "EmailTemplateOverride_createdBy_fkey",
+      "LocalDeliveryZone_createdBy_fkey",
+      "LocalDeliveryZone_updatedBy_fkey",
+    ];
+    assert.equal(maps.length, 18);
+    for (const name of maps) assert.ok(combined.includes(`map: "${name}"`), name);
+    assert.match(combined, /cufe\s+String\s+@unique @db\.Char\(96\)/);
+    assert.match(combined, /cude\s+String\s+@unique @db\.Char\(96\)/);
+    assert.match(combined, /@@index\(\[shipmentItemId, returnRequestId\]\)/);
+    assert.match(combined, /@@index\(\[orderItemId, status, createdAt\]\)/);
+    const allSchema = ["catalog", "growth-cms", "operations", "postsale-b2b"]
+      .map((name) =>
+        readFileSync(
+          new URL(`../packages/db/prisma/schema/${name}.prisma`, import.meta.url),
+          "utf8",
+        ),
+      )
+      .join("\n");
+    for (const declaration of [
+      "@@index([lifecycleMessageId])",
+      "@@index([metricDate])",
+      "@@index([backupRunId])",
+      "@@index([disasterRecoveryDrillId])",
+      "@@index([returnRequestItemId])",
+    ]) {
+      assert.equal(allSchema.includes(declaration), false, declaration);
+    }
+    assert.ok(allSchema.includes("@@index([attributeId, normalizedValue])"));
+    assert.equal(/\bGRANT\b/i.test(readFileSync(migrationUrl, "utf8")), false);
+  });
+});
+
+describe("A3 — fiscal uniqueness and deferred document integrity", () => {
+  it("rejects duplicate CUFE values across invoices", async () => {
+    await withRollback(async (client) => {
+      const { credentialId } = await createAdminAndCredential(client);
+      const firstOrder = await createOrder(client, { taxRegime: "RESPONSABLE_IVA" });
+      const secondOrder = await createOrder(client, { taxRegime: "RESPONSABLE_IVA" });
+      const cufe = "a".repeat(96);
+      await insertInvoice(client, {
+        orderId: firstOrder.id,
+        credentialId,
+        number: 1,
+        cufe,
+      });
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "TaxInvoice" (
+           "orderId", "credentialId", "environment", "prefix", "number", "fullNumber", "cufe",
+           "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents",
+           "requestHash", "unsignedXml"
+         ) VALUES ($1, $2, 'LOCAL', 'A3', 2, 'A32', $3, 100000, 0, 0, 0, 100000, $4, '<Invoice/>')`,
+        [secondOrder.id, credentialId, cufe, randomBytes(32)],
+        "23505",
+        "TaxInvoice_cufe_key",
+      );
+      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+    });
+  });
+
+  it("rejects duplicate CUDE values while accepting fully balanced credit notes", async () => {
+    await withRollback(async (client) => {
+      const { adminUserId, credentialId } = await createAdminAndCredential(client);
+      const fixture = await createCatalogFixture(client);
+      const order = await createOrder(client, {
+        taxRegime: "RESPONSABLE_IVA",
+        variantId: fixture.variantId,
+      });
+      const attemptId = await createCapture(client, order.id, adminUserId);
+      const cufe = "b".repeat(96);
+      await insertInvoice(client, {
+        orderId: order.id,
+        credentialId,
+        number: 1,
+        cufe,
+        accepted: true,
+      });
+      const invoice = await client.query(`SELECT "id" FROM "TaxInvoice" WHERE "orderId" = $1`, [
+        order.id,
+      ]);
+      const firstRefund = await createCompletedRefund(client, {
+        orderId: order.id,
+        orderItemId: order.orderItemId,
+        attemptId,
+        adminUserId,
+        amount: 10000,
+      });
+      const secondRefund = await createCancelledRefund(client, {
+        orderId: order.id,
+        orderItemId: order.orderItemId,
+        adminUserId,
+        amount: 10000,
+      });
+      await client.query(
+        `UPDATE "Order" SET "paymentStatus" = 'PARTIALLY_REFUNDED' WHERE "id" = $1`,
+        [order.id],
+      );
+      const cude = "c".repeat(96);
+      await insertCreditNote(client, {
+        invoiceId: invoice.rows[0].id,
+        refundId: firstRefund,
+        credentialId,
+        number: 1,
+        cude,
+      });
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "CreditNote" (
+           "invoiceId", "refundId", "credentialId", "prefix", "number", "fullNumber", "cude",
+           "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents",
+           "reasonCode", "requestHash", "unsignedXml"
+         ) VALUES ($1, $2, $3, 'NC', 2, 'NC2', $4, 10000, 0, 0, 0, 10000, 1, $5, '<CreditNote/>')`,
+        [invoice.rows[0].id, secondRefund, credentialId, cude, randomBytes(32)],
+        "23505",
+        "CreditNote_cude_key",
+      );
+      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+    });
+  });
+});
+
+describe("A3 — internal order lifecycle protection", () => {
+  for (const testCase of openOrderCases) {
+    it(`${testCase.name} for variants and products with zero stock`, async () => {
+      await withRollback(async (client) => {
+        const fixture = await createCatalogFixture(client);
+        const locationId = await createLocationWithZeroStock(client, fixture.variantId);
+        await createOrder(client, {
+          variantId: fixture.variantId,
+          originLocationId: locationId,
+          orderStatus: testCase.orderStatus,
+          paymentStatus: testCase.paymentStatus,
+          fulfillmentStatus: testCase.fulfillmentStatus,
+          shipmentStatus: testCase.shipmentStatus,
+        });
+        const stock = await client.query(
+          `SELECT "onHand", "committed" FROM "StockLevel"
+           WHERE "locationId" = $1 AND "variantId" = $2`,
+          [locationId, fixture.variantId],
+        );
+        assert.deepEqual(stock.rows, [{ onHand: 0, committed: 0 }]);
+        await expectArchive(client, "ProductVariant", fixture.variantId, testCase.allowed);
+        await expectArchive(client, "Product", fixture.productId, testCase.allowed);
+      });
+    });
+  }
+
+  it("permits variant and product archiving after a real shipment closes", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createCatalogFixture(client);
+      const locationId = await createLocationWithZeroStock(client, fixture.variantId);
+      const order = await createOrder(client, {
+        variantId: fixture.variantId,
+        originLocationId: locationId,
+        shipmentStatus: "PENDING",
+      });
+      await expectArchive(client, "ProductVariant", fixture.variantId, false);
+      await expectArchive(client, "Product", fixture.productId, false);
+      await client.query(
+        `UPDATE "Shipment" SET "status" = 'READY', "readyAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [order.shipmentId],
+      );
+      await client.query(
+        `UPDATE "Shipment" SET "status" = 'SHIPPED', "shippedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [order.shipmentId],
+      );
+      await client.query(
+        `UPDATE "Shipment" SET "status" = 'DELIVERED', "deliveredAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [order.shipmentId],
+      );
+      await expectArchive(client, "ProductVariant", fixture.variantId, true);
+      await expectArchive(client, "Product", fixture.productId, true);
+    });
+  });
+});
+
+describe("A3 — stock location lifecycle protection", () => {
+  for (const status of ["PENDING", "READY", "SHIPPED"]) {
+    it(`blocks a zero-stock origin location with a ${status} shipment`, async () => {
+      await withRollback(async (client) => {
+        const fixture = await createCatalogFixture(client);
+        const locationId = await createLocationWithZeroStock(client, fixture.variantId);
+        await createOrder(client, {
+          variantId: fixture.variantId,
+          originLocationId: locationId,
+          shipmentStatus: status,
+        });
+        await expectArchive(client, "StockLocation", locationId, false);
+      });
+    });
+  }
+
+  for (const status of ["DELIVERED", "CANCELLED"]) {
+    it(`permits archiving a zero-stock origin after a ${status} shipment`, async () => {
+      await withRollback(async (client) => {
+        const fixture = await createCatalogFixture(client);
+        const locationId = await createLocationWithZeroStock(client, fixture.variantId);
+        await createOrder(client, {
+          variantId: fixture.variantId,
+          originLocationId: locationId,
+          shipmentStatus: status,
+        });
+        await expectArchive(client, "StockLocation", locationId, true);
+      });
+    });
+  }
+
+  it("blocks open click-and-collect obligations and permits their real closure", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createCatalogFixture(client);
+      const locationId = await createLocationWithZeroStock(
+        client,
+        fixture.variantId,
+        "CLICK_COLLECT",
+      );
+      const open = await createOrder(client, {
+        variantId: fixture.variantId,
+        clickCollectLocationId: locationId,
+        paymentStatus: "UNPAID",
+        fulfillmentStatus: "UNFULFILLED",
+        shipmentKind: "CLICK_COLLECT",
+      });
+      await expectArchive(client, "StockLocation", locationId, false);
+      await client.query(
+        `UPDATE "Order" SET "orderStatus" = 'CANCELLED', "cancelledAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [open.id],
+      );
+      await expectArchive(client, "StockLocation", locationId, true);
+    });
+  });
+
+  it("permits natural soft-delete of an unused location with onHand and committed at zero", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createCatalogFixture(client);
+      const locationId = await createLocationWithZeroStock(client, fixture.variantId);
+      await expectArchive(client, "StockLocation", locationId, true);
+    });
+  });
+});
+
+describe("A3 — role, privilege and future-table hardening", () => {
+  it(
+    "applies the real A3 migration to reserved and unreserved Data API roles idempotently",
+    { timeout: 240_000 },
+    async () => {
+      const scenarios = [
+        {
+          name: "platform-reserved roles are left untouched",
+          reservedRoles: "supabase_admin, service_role*, authenticator*, authenticated*, anon*",
+          insecureAfterMigration: true,
+        },
+        {
+          name: "clean PostgreSQL roles are normalized",
+          reservedRoles: null,
+          insecureAfterMigration: false,
+        },
+      ];
+      const migrationsUrl = new URL("../packages/db/prisma/migrations/", import.meta.url);
+      const lastA2Migration = "20261124150000_a2_audit_security_hardening";
+      const a3Migration = readFileSync(migrationUrl, "utf8");
+      const roleNormalization = a3Migration.match(
+        /DO \$\$\s*DECLARE\s+role_name TEXT;[\s\S]*?\$\$;/,
+      )?.[0];
+      assert.ok(roleNormalization, "A3 role normalization block was not found");
+      const administrator = new pg.Client({ connectionString: harness.databaseUrl });
+      await administrator.connect();
+      try {
+        for (const scenario of scenarios) {
+          const databaseName = `a3_roles_${randomUUID().replaceAll("-", "")}`;
+          const databaseUrl = new URL(harness.databaseUrl);
+          databaseUrl.pathname = `/${databaseName}`;
+          let client;
+          try {
+            await administrator.query(`CREATE DATABASE "${databaseName}"`);
+            client = new pg.Client({ connectionString: databaseUrl.toString() });
+            await client.connect();
+            const a2Migrations = readdirSync(migrationsUrl, { withFileTypes: true })
+              .filter((entry) => entry.isDirectory() && entry.name <= lastA2Migration)
+              .map((entry) => entry.name)
+              .sort();
+            assert.equal(a2Migrations.at(-1), lastA2Migration);
+            for (const migration of a2Migrations) {
+              await client.query(
+                readFileSync(new URL(`${migration}/migration.sql`, migrationsUrl), "utf8"),
+              );
+            }
+            if (scenario.reservedRoles !== null) {
+              await client.query(`SELECT set_config('supautils.reserved_roles', $1, false)`, [
+                scenario.reservedRoles,
+              ]);
+            }
+            for (const role of dataApiRoles) {
+              await client.query(`ALTER ROLE ${role} SUPERUSER BYPASSRLS`);
+            }
+            await client.query(
+              `GRANT MAINTAIN ON ALL TABLES IN SCHEMA public TO PUBLIC, anon, authenticated, service_role`,
+            );
+            const grantedMaintain = await client.query(
+              `SELECT count(*)::integer AS count
+               FROM pg_class relation
+               JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+               CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+               LEFT JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+               WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+                 AND privilege.privilege_type = 'MAINTAIN'
+                 AND (privilege.grantee = 0 OR grantee.rolname = ANY($1::text[]))`,
+              [dataApiRoles],
+            );
+            assert.ok(grantedMaintain.rows[0].count > 0, scenario.name);
+
+            await client.query(a3Migration);
+            await client.query(roleNormalization);
+
+            const roles = await client.query(
+              `SELECT rolname, rolsuper, rolbypassrls FROM pg_roles
+               WHERE rolname = ANY($1::text[]) ORDER BY rolname`,
+              [dataApiRoles],
+            );
+            assert.deepEqual(
+              roles.rows,
+              dataApiRoles.map((rolname) => ({
+                rolname,
+                rolsuper: scenario.insecureAfterMigration,
+                rolbypassrls: scenario.insecureAfterMigration,
+              })),
+              scenario.name,
+            );
+            const privileges = await client.query(
+              `SELECT relation.relname, privilege.grantee, privilege.privilege_type
+               FROM pg_class relation
+               JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+               CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+               LEFT JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+               WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+                 AND (privilege.grantee = 0 OR grantee.rolname = ANY($1::text[]))`,
+              [dataApiRoles],
+            );
+            assert.deepEqual(privileges.rows, [], scenario.name);
+          } finally {
+            if (client) await client.end().catch(() => undefined);
+            await administrator
+              .query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`)
+              .catch(() => undefined);
+          }
+        }
+      } finally {
+        await administrator.end();
+      }
+    },
+  );
+
+  it("leaves no PUBLIC or Data API table privileges, including MAINTAIN", async () => {
+    await withRollback(async (client) => {
+      const privileges = await client.query(
+        `SELECT relation.relname, privilege.grantee, privilege.privilege_type
+         FROM pg_class relation
+         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+         CROSS JOIN LATERAL aclexplode(relation.relacl) privilege
+         LEFT JOIN pg_roles grantee ON grantee.oid = privilege.grantee
+         WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+           AND (privilege.grantee = 0 OR grantee.rolname = ANY($1::text[]))`,
+        [dataApiRoles],
+      );
+      assert.deepEqual(privileges.rows, []);
+      const maintain = await client.query(
+        `SELECT relation.relname, role.rolname
+         FROM pg_class relation
+         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+         CROSS JOIN pg_roles role
+         WHERE namespace.nspname = 'public' AND relation.relkind IN ('r', 'p')
+           AND role.rolname = ANY($1::text[])
+           AND has_table_privilege(role.oid, relation.oid, 'MAINTAIN')`,
+        [dataApiRoles],
+      );
+      assert.deepEqual(maintain.rows, []);
+    });
+  });
+
+  it("revokes MAINTAIN and forces RLS on future tables", async () => {
+    await withRollback(async (client) => {
+      await client.query(`CREATE TABLE "A3FuturePrivilegeProbe" ("id" INTEGER PRIMARY KEY)`);
+      const table = await client.query(
+        `SELECT relation.relrowsecurity, relation.relforcerowsecurity,
+                has_table_privilege('anon', relation.oid, 'MAINTAIN') AS anon_maintain,
+                has_table_privilege('authenticated', relation.oid, 'MAINTAIN') AS auth_maintain,
+                has_table_privilege('service_role', relation.oid, 'MAINTAIN') AS service_maintain
+         FROM pg_class relation
+         WHERE relation.oid = '"A3FuturePrivilegeProbe"'::regclass`,
+      );
+      assert.deepEqual(table.rows, [
+        {
+          relrowsecurity: true,
+          relforcerowsecurity: true,
+          anon_maintain: false,
+          auth_maintain: false,
+          service_maintain: false,
+        },
+      ]);
+      const definition = await client.query(
+        `SELECT pg_get_functiondef('enforce_rls_on_new_table()'::regprocedure) AS definition`,
+      );
+      assert.match(definition.rows[0].definition, /REVOKE MAINTAIN ON TABLE/);
+    });
+  });
+});
+
+describe("A3 — natural soft-delete and referential actions", () => {
+  it("preserves LocalDeliveryZone creator/updater restrictions and active-code soft-delete semantics", async () => {
+    await withRollback(async (client) => {
+      const creator = { adminUserId: await createAdmin(client) };
+      const updater = { adminUserId: await createAdmin(client) };
+      const code = `A3_ZONE_${randomUUID().slice(0, 8).toUpperCase()}`;
+      const insertZone = () =>
+        client.query(
+          `INSERT INTO "LocalDeliveryZone" (
+             "code", "name", "municipalityCodes", "polygon", "baseFeeCents",
+             "cutoffMinutes", "deliveryPromiseMinutes", "createdByAdminUserId", "updatedByAdminUserId"
+           ) VALUES (
+             $1, 'A3 Zone', '["11001"]'::jsonb,
+             '[[4.0,-74.0],[4.1,-74.0],[4.1,-73.9]]'::jsonb,
+             10000, 720, 120, $2, $3
+           ) RETURNING "id"`,
+          [code, creator.adminUserId, updater.adminUserId],
+        );
+      const first = await insertZone();
+      await expectSqlViolation(
+        client,
+        `DELETE FROM "AdminUser" WHERE "id" = $1`,
+        [creator.adminUserId],
+        "23503",
+        "LocalDeliveryZone_createdBy_fkey",
+      );
+      await expectSqlViolation(
+        client,
+        `DELETE FROM "AdminUser" WHERE "id" = $1`,
+        [updater.adminUserId],
+        "23503",
+        "LocalDeliveryZone_updatedBy_fkey",
+      );
+      await archive(client, "LocalDeliveryZone", first.rows[0].id);
+      await insertZone();
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "LocalDeliveryZone" (
+           "code", "name", "municipalityCodes", "polygon", "baseFeeCents",
+           "cutoffMinutes", "deliveryPromiseMinutes", "createdByAdminUserId", "updatedByAdminUserId"
+         ) VALUES (
+           $1, 'Duplicate Zone', '["11001"]'::jsonb,
+           '[[4.0,-74.0],[4.1,-74.0],[4.1,-73.9]]'::jsonb,
+           10000, 720, 120, $2, $2
+         )`,
+        [code, creator.adminUserId],
+        "23505",
+        "LocalDeliveryZone_code_active_key",
+      );
+    });
+  });
+
+  it("enforces EmailTemplateOverride creator FK and natural AdminUser soft-delete recreation", async () => {
+    await withRollback(async (client) => {
+      const adminUserId = randomUUID();
+      const authUserId = randomUUID();
+      const email = `a3-${randomUUID()}@example.test`;
+      await client.query(
+        `INSERT INTO "AdminUser" ("id", "authUserId", "email", "displayName", "role", "status")
+         VALUES ($1, $2, $3, 'A3 Template Admin', 'CMS_EDITOR', 'ACTIVE')`,
+        [adminUserId, authUserId, email],
+      );
+      await client.query(
+        `INSERT INTO "EmailTemplateOverride" (
+           "templateKey", "locale", "version", "subject", "htmlBody", "textBody", "createdByAdminUserId"
+         ) VALUES ('a3.template', 'es-CO', 1, 'A3', '<p>A3</p>', 'A3', $1)`,
+        [adminUserId],
+      );
+      await expectSqlViolation(
+        client,
+        `DELETE FROM "AdminUser" WHERE "id" = $1`,
+        [adminUserId],
+        "23503",
+        "EmailTemplateOverride_createdBy_fkey",
+      );
+      await archive(client, "AdminUser", adminUserId);
+      await client.query(
+        `INSERT INTO "AdminUser" ("authUserId", "email", "displayName", "role", "status")
+         VALUES ($1, $2, 'Recreated Admin', 'CMS_EDITOR', 'ACTIVE')`,
+        [randomUUID(), email],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "AdminUser" ("authUserId", "email", "displayName", "role", "status")
+         VALUES ($1, $2, 'Duplicate Admin', 'CMS_EDITOR', 'ACTIVE')`,
+        [randomUUID(), email],
+        "23505",
+        "AdminUser_email_active_key",
+      );
+    });
+  });
+
+  it("retains ProductAttributeValue composite uniqueness and cascade after removing its redundant index", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createCatalogFixture(client);
+      const attributeId = randomUUID();
+      await client.query(
+        `INSERT INTO "AttributeDefinition" ("id", "key", "name", "valueType")
+         VALUES ($1, $2, 'A3 Attribute', 'TEXT')`,
+        [attributeId, `a3_${randomUUID().replaceAll("-", "_")}`],
+      );
+      await client.query(
+        `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "textValue")
+         VALUES ($1, $2, 'Value')`,
+        [fixture.productId, attributeId],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "ProductAttributeValue" ("productId", "attributeId", "textValue")
+         VALUES ($1, $2, 'Value')`,
+        [fixture.productId, attributeId],
+        "23505",
+        "ProductAttributeValue_productId_attributeId_normalizedValue_key",
+      );
+      await client.query(`DELETE FROM "ProductVariant" WHERE "id" = $1`, [fixture.variantId]);
+      await client.query(`DELETE FROM "Product" WHERE "id" = $1`, [fixture.productId]);
+      const attributes = await client.query(
+        `SELECT count(*)::integer AS count FROM "ProductAttributeValue" WHERE "productId" = $1`,
+        [fixture.productId],
+      );
+      assert.equal(attributes.rows[0].count, 0);
+    });
+  });
+});
