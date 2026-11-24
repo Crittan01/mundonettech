@@ -294,6 +294,16 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   expect(draft.offers[0]?.priceCents).toBe(166700n);
 
   await page.getByRole("button", { name: "Procesar trabajos pendientes" }).click();
+  await expect
+    .poll(async () => {
+      const listing = await db.channelListing.findUniqueOrThrow({
+        where: { id: draft.id },
+        include: { syncJobs: { where: { kind: "PUBLISH" } } },
+      });
+      return listing.syncClaimId === null && listing.syncJobs[0]?.status === "SUCCEEDED";
+    })
+    .toBe(true);
+  await expect(page.getByRole("button", { name: "Procesar trabajos pendientes" })).toBeEnabled();
   await expect(page.getByText(/1 trabajo\(s\) completado/)).toBeVisible();
   const published = await db.channelListing.findUniqueOrThrow({
     where: { id: draft.id },
@@ -315,6 +325,16 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
   await editOfferRegion.getByRole("button", { name: "Guardar y programar precio" }).click();
   await expect(page.getByText(/Precio y condiciones actualizados/)).toBeVisible();
   await page.getByRole("button", { name: "Procesar trabajos pendientes" }).click();
+  await expect
+    .poll(async () => {
+      const listing = await db.channelListing.findUniqueOrThrow({
+        where: { id: draft.id },
+        include: { syncJobs: { where: { kind: "SYNC_PRICE" } } },
+      });
+      return listing.syncClaimId === null && listing.syncJobs[0]?.status === "SUCCEEDED";
+    })
+    .toBe(true);
+  await expect(page.getByRole("button", { name: "Procesar trabajos pendientes" })).toBeEnabled();
   await expect(page.getByText(/1 trabajo\(s\) completado/)).toBeVisible();
   expect(
     (await db.channelOffer.findUniqueOrThrow({ where: { id: published.offers[0]!.id } }))

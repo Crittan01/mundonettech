@@ -14,19 +14,23 @@
 | **Hito 2 — Escala** | **Fase 4B — CRM 360 y Canal B2B** | `F4B.1` `Contact` 360° + duplicados + tareas + retención Hábeas Data · `F4B.2` `PriceList` B2B + `/empresas` → `/propuesta/[token]` `BigInt` → `Order` + Copiloto 0-PII. | `[x]` |
 | **Hito 2** | **Fase 5 — Lealtad, Lifecycle y Observabilidad** | `F5.1` Puntos (reversa `EARN`) + Referidos + Abandonados · `F5.2` Lifecycle + Segmentos Ley 1581 + RFM/LTV · `F5.3` Salud + Alertas + Backups GPG R2 streaming + DR drill + Ayuda v2. | `[x]` |
 | **Hito 2** | **Fase 6 — Omnicanal ML `MCO` + Meta CAPI** | `F6.1` OAuth PKCE · `F6.2` User Products + `x-version` + Full + precios (zona muerta \$60k) · `F6.3` `ChannelPack`/`ChannelOrder` + `ME2`/Flex + conciliación · `F6.4` Meta Catalog + CAPI. | `[x]` |
-| **Hito 3 (Opc.)** | **Fase 7 — WhatsApp + Agente IA** | WhatsApp Cloud API + Agente Gemini TS sobre `packages/core` + Inbox humano con *takeover*. | `[ ]` |
+| **Compuerta Calle** | **Maduración Operativa (`M1`–`M4`)** | `M1` Rodaje `LOCAL` · `M2` Identidad + `STG` · `M3` Go-Live `mundonettech.co` · `M4` Meta/ML vivos. | `[ ]` |
+| **Hito 3 (Diferido)** | **Fase 7 — WhatsApp + Agente IA** | **Congelada hasta `M1`–`M4`:** WhatsApp Cloud API + Gemini TS sobre `packages/core` + Inbox *takeover*. | `[ ]` |
 
 ---
 
-## 2. Fase Activa — Fase 7: WhatsApp + Agente IA (`Hito 3` Opcional)
+## 2. Fase Activa — Maduración Operativa (`M1`–`M4`, requisito previo a `Fase 7`)
 
-- `[x]` ✅ **Fases 0–6 (`F0.1`–`F6.4`):** MFA `aal2`/RLS/Bóveda (`ADR-019`..`022`), Catálogo/Media R2/WAC (`ADR-023`..`026`), CMS v3/Legal CO/SEO (`ADR-027`..`029`), Carrito/Checkout/Pagos/Logística/DIAN (`ADR-030`..`033`), Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse `96–100`/k6/`release:verify` (`ADR-034`..`036`), CRM 360° + B2B/Copiloto 0-PII (`ADR-037`..`038`), Lealtad/Lifecycle/RFM + Salud/Backups GPG R2/DR/Ayuda v2 (`ADR-039`..`041`) y Omnicanal ML `MCO` + Meta Catalog/CAPI (`ADR-042`..`045`; 131 tablas/2.272 casos; Go-Live sujeto a externos).
-- `[ ]` **`F7.1` — WhatsApp Cloud API, Webhooks Firmados y Conversaciones:** credenciales en bóveda `AES-256-GCM` aisladas por ambiente, verificación HMAC-SHA256 + anti-replay, ventana de atención 24 h / plantillas aprobadas, consentimiento Ley 1581 / baja efectiva, outbox 0-PII y persistencia con RLS forzada.
-- `[ ]` **`F7.2` — Agente IA Gemini TS sobre `packages/core`:** herramientas deterministas de catálogo, compatibilidad, stock y estado de pedido verificados sobre servicios de dominio reales (cero invención de precios, existencias o políticas), minimización estricta de PII y trazabilidad de ejecuciones.
-- `[ ]` **`F7.3` — Inbox Humano `/admin/whatsapp` con *Takeover*:** cola multi-operador con transferencia automática/manual IA ↔ humano (*takeover* y devolución), máscara PII server-side, RBAC + step-up MFA, SLA operativo en `/admin/hoy` y auditoría completa.
+- `[x]` ✅ **Fases 0–6 en código/CI (`F0.1`–`F6.4`, `ADR-019`..`045`):** MFA `aal2`/RLS (`131` tablas/`2.272` casos)/Bóveda, Catálogo/Media R2/WAC, CMS/Legal/SEO, Carrito/Checkout/Pagos/Logística/DIAN, Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse/k6/`release:verify`, CRM/B2B, Lealtad/Lifecycle/RFM + Salud/Backups GPG/DR/Ayuda v2 y ML `MCO` + Meta Catalog/CAPI.
+- `[ ]` **`M1` — Rodaje Humano `LOCAL` (`Hito 1` puro):** recorrido manual en `:4010` (móvil/escritorio) de catálogo/medios/stock/seriales reales, compra, pagos, despacho, posventa y finanzas; pulir toda fricción UX/operativa antes de exponer ambientes externos.
+- `[ ]` **`M2` — Identidad y `STG` Core (`Hito 1`):** logo `.svg`/paleta, NIT/razón social/dirección/buzones y revisión jurídica (`config/`, `COMPLIANCE.md`); Supabase `STG` + R2 con **Resend, Wompi y Aveonline** verificados + `pnpm release:verify` (`STG`).
+- `[ ]` **`M3` — Go-Live Core Web (`mundonettech.co` — `Hito 1`):** promoción humana `develop → production`, `release:verify` (`PRD`), primeros pedidos/despachos/reembolsos reales sin incidentes y backups GPG R2 + DR drill (`≤ 36 h`) vivos.
+- `[ ]` **`M4` — Canales Externos (`Hito 2` sobre operación madura):** 1) Merchant + **Meta Catalog/CAPI** con dominio/portafolio verificados en Meta Business (`RELEASE_META_VERIFIED`); 2) **Mercado Libre `MCO`** (`RELEASE_MERCADO_LIBRE_VERIFIED`).
+- `[ ]` **🔒 `Fase 7` (`F7.1`–`F7.3`, bloqueada hasta cerrar `M1`–`M4`):** `F7.1` Cloud API + HMAC + ventana 24 h + Ley 1581 · `F7.2` Agente Gemini TS sobre `packages/core` (`/pagar/[token]`, 0-PII) · `F7.3` Inbox `/admin/whatsapp` con *takeover* y MFA.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Implementador (`F7.1`):** partir de `develop` limpio, crear `feat/f7-1-whatsapp-cloud-api`, construir la integración WhatsApp Cloud API (bóveda por ambiente, webhooks HMAC-SHA256 + outbox 0-PII, ventana 24 h/plantillas, Ley 1581 y modelos con RLS forzada), registrar `ADR-046`, pasar `make check && pnpm test && pnpm build`, marcar `[R]` y relevar al **Auditor** (`Hito 1` y `Hito 2` ya certificados; Go-Live real sujeto a externos).
+- **Gobierno vigente:** **congelado `feat/f7-*`** hasta certificar en calle `M1`–`M4` (catálogo curado, Core vivo y Meta Business verificado).
+- **Siguiente turno — Rodaje Humano `M1`:** levantar `:4010`, recorrer punta a punta comprador y `/admin` sobre el *Core* (`Hito 1`), corregir asperezas reales en ramas `fix/m1-*` con gates en verde y alistar checklist `M2` (`STG`).
