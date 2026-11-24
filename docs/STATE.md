@@ -4,28 +4,25 @@
 
 ## Fotografía ejecutiva
 
-- **Estado:** **Código Fases 0–6 ✅ (`Hito 1` y `Hito 2` certificados en CI) · Activo: Maduración Operativa `M1`–`M4` · `Fase 7` congelada hasta estabilizar operación real**.
+- **Estado:** **Fases 0–6 ✅ (`F0.1`–`F6.4`) · Activo: Auditoría Integral Pre-Calle `A1`–`A10` (`A1` sigue) → `M1`–`M4` · `Fase 7` congelada**.
 - **Operación:** `mundonettech.co` · `MNT-YYYY-NNNN` · Retail/mayorista tech CO · **`NO_RESPONSABLE_IVA`** (`3.500 UVT`, `ADR-009`).
-- **Base:** Next 16 standalone, PG 17 (`131` tablas RLS/`2.272` denegaciones), `BigInt`, bóveda AES-256-GCM, MFA `aal2` + RBAC 8 roles, R2/WAC/IMEI, CMS/legal/SEO, checkout/pagos/logística/DIAN, CRM/B2B, lifecycle, salud/DR, ML `MCO` y Meta Catalog/CAPI (`ADR-042`..`045`).
+- **Inventario real:** `474` archivos (`136` módulos en `packages/*`), `29` páginas Cliente, `43` páginas `/admin`, `22` endpoints HTTP, `131` tablas PG 17 (`2.272` pruebas RLS) y `99` suites (`ADR-001`..`045`).
 
 ## Topología de ambientes
 
 | Ambiente | URL / Puertos | Estado |
 | --- | --- | --- |
 | **LOCAL** | Next `:4010` (`:4110` E2E) · API `:54421` · PG 17 `:54422` (`:54428` tests) · Studio `:54423` · Mailpit `:54424` | Operativo (`F0.1`–`F6.4` ✅) |
-| **STG** | Rama `develop` → Preview + Supabase STG dedicado (secretos aislados de PRD) | Pendiente aprovisionamiento externo |
-| **PRD** | Rama `production` → `https://mundonettech.co` + Supabase PRD + Cloudflare R2 | Bloqueado *fail-closed* (`release:verify`) hasta externos + aprobación humana |
+| **STG** | `develop` → Preview + Supabase STG aislado | Tras `A1`–`A10` + `M1` |
+| **PRD** | `production` → `mundonettech.co` + Supabase PRD + R2 | *Fail-closed* (`release:verify`) hasta `M3` |
 
-## Capacidades operativas construidas
+## Capacidades construidas
 
-- **Fases 0–3 ✅:** fundación Next/PG/RLS/MFA/bóveda, catálogo/media/WAC, CMS/legal/SEO, carrito/checkout `BigInt` + Outbox 0-PII, pagos, Aveonline/Flex, Resend/Svix y DIAN (`ADR-019`..`033`).
-- **Fase 4A ✅:** operación/finanzas, `3.500 UVT`, cuenta/invitados OTP, RMA/seriales, PQR/reseñas y gates OWASP/E2E+axe/Lighthouse/k6 (`ADR-034`..`036`).
-- **Fase 4B ✅:** CRM 360, organizaciones/precios `BigInt`, fusiones MFA, Hábeas Data, B2B `/empresas` → propuesta → `Order` y Copiloto 0-PII (`ADR-037`..`038`).
-- **Fase 5 ✅:** lealtad/referidos, segmentos/journeys/RFM-LTV, salud, backups GPG multipart R2, DR aislado y Ayuda v2 (`ADR-039`..`041`).
-- **Fase 6 ✅:** OAuth PKCE `S256`, User Products/precios/`x-version`/Full y packs/órdenes/`ChannelShipment` ME2/Flex/Full con reserva/descuento serializado y `ChannelLedgerEntry` append-only MFA/RLS (`ADR-042`..`044`); Meta Catalog CSV validado y CAPI `Purchase` con consentimiento `ADVERTISING`, `event_id`, bóveda, purga de hashes (incluidos estados inciertos) y conciliación/descarte MFA (`ADR-045`).
+- **Fases 0–3 ✅:** Next 16/PG 17/RLS/MFA/bóveda, catálogo/media R2/WAC, CMS/legal/SEO, carrito/checkout `BigInt` + Outbox 0-PII, pagos, Aveonline/Flex, Resend/Svix y DIAN.
+- **Fases 4A–4B ✅:** operación/finanzas, `3.500 UVT`, cuenta/invitados OTP, RMA/seriales, PQR/reseñas, gates OWASP/E2E+axe/Lighthouse/k6, CRM 360, B2B y Copiloto 0-PII.
+- **Fases 5–6 ✅:** puntos/referidos, segmentos/journeys/RFM-LTV, salud, backups GPG R2, DR, Ayuda v2, Mercado Libre `MCO` y Meta Catalog/CAPI.
 
-## Secuencia de maduración real (`M1` → `M4`; requisito previo a `Fase 7`)
+## Secuencia hacia Producción (`A1`–`A10` → `M1`–`M4` → `Fase 7`)
 
-1. **`M1` Rodaje `LOCAL` + marca:** recorrido humano completo en `:4010`, catálogo/medios reales y logo `.svg` + paleta (`config/theme.config.ts`).
-2. **`M2`–`M3` Core vivo (`STG` → `PRD`):** NIT/razón social/dirección/buzones y revisión jurídica (`COMPLIANCE.md`); Cloudflare/R2, Supabase STG/PRD, Resend, Wompi, Aveonline (+ DIAN) y `release:verify`.
-3. **`M4` Canales → `Fase 7`:** encender Merchant + Meta Catalog/CAPI (dominio/portafolio verificados en Meta Business) y luego ML `MCO`; recién estabilizado se abre `F7.1`–`F7.3`.
+1. **`A1`–`A10` Auditoría Integral (activa):** 3 cortes estructurales (`A1`–`A3`), 5 cortes espejo `Admin ↔ Cliente` (`A4`–`A8`) y 2 cierres transversales UX/Ops (`A9`–`A10`).
+2. **`M1`–`M4` Calle:** rodaje `:4010` + marca (`M1`), `STG` (`M2`), Go-Live `mundonettech.co` (`M3`) y Meta/ML `MCO` (`M4`), habilitando `Fase 7`.

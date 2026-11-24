@@ -1,36 +1,38 @@
 # Plan Maestro Vivo — MundoNetTech (`mundonettech.co`)
 
-> **Workboard vivo de Nivel 0 (≤ 160 lín.).** Estados: `[ ]` pendiente · `[R]` implementado (en auditoría) · `[x]` certificado. Expande solo la fase activa; compacta fases cerradas a 1 línea `✅`. Detalle en [`ARCHITECTURE.md`](ARCHITECTURE.md).
+> **Workboard Nivel 0 (≤ 160 lín.).** Estados: `[ ]` pendiente · `[R]` en auditoría · `[x]` certificado. Expande solo la fase activa; compacta cerradas a 1 línea `✅`. Arquitectura en [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## 1. Mapa Ejecutivo de Hitos y Fases
 
 | Hito | Fase | Alcance resumido | Estado |
 | --- | --- | --- | :---: |
-| **Hito 1 — Go-Live** | **Fase 0 — Fundación, Seguridad y Shell Admin** | Gobernanza, Next 16, PG 17 `BigInt` + RLS + Bóveda + Outbox, Auth + Admin **MFA `aal2`** + RBAC 8 roles + PII mask y CI/Gates (`F0.1`–`F0.5`). | `[x]` |
-| **Hito 1** | **Fase 1 — Catálogo Tech, Media 360°/3D e Inventario WAC** | Catálogo/Facetas/GS1/Bundles (`F1.1`), `packages/media` R2/360°/3D (`F1.2`), Multi-bodega WAC/CSV (`F1.3`), `CatalogService` `'use cache'`/PDP/Admin (`F1.4`). | `[x]` |
-| **Hito 1** | **Fase 2 — CMS v3, SEO y Legal CO** | CMS Zod + `StoreSettings` + R2 (`F2.1`), `/pagina/[slug]` PPR + Live Edit + SERP (`F2.2`), `packages/legal-co` + `UrlRedirect` + JSON-LD/Sitemap/Merchant XML (`F2.3`). | `[x]` |
-| **Hito 1** | **Fase 3 — Carrito, Checkout, IVA Dual, Pagos y Logística** | `F3.1` Carrito/Mayorista/Bundles/Cupones/`/pagar/[token]` · `F3.2` Checkout DANE + IVA Dual/UVT + `OrderReceipt` + Outbox · `F3.3` Bóveda + Pagos · `F3.4` Aveonline/Flex + Resend/Svix + DIAN. | `[x]` |
-| **Hito 1** | **Fase 4A — Operación, RMA/Seriales y Lanzamiento** | `F4A.1` `/admin/{hoy,dashboard,pedidos,finanzas}` (`OrderRefund`) + `3.500 UVT` · `F4A.2` `/mi-cuenta/*` + `/pedido/[token]` 2FA + RMA (`SerializedUnit`) + PQR SLA + Reseñas · `F4A.3` OWASP + E2E + axe + Lighthouse ≥ 95 + k6 + `release:verify` (**Go-Live** real sujeto a externos). | `[x]` |
-| **Hito 2 — Escala** | **Fase 4B — CRM 360 y Canal B2B** | `F4B.1` `Contact` 360° + duplicados + tareas + retención Hábeas Data · `F4B.2` `PriceList` B2B + `/empresas` → `/propuesta/[token]` `BigInt` → `Order` + Copiloto 0-PII. | `[x]` |
-| **Hito 2** | **Fase 5 — Lealtad, Lifecycle y Observabilidad** | `F5.1` Puntos (reversa `EARN`) + Referidos + Abandonados · `F5.2` Lifecycle + Segmentos Ley 1581 + RFM/LTV · `F5.3` Salud + Alertas + Backups GPG R2 streaming + DR drill + Ayuda v2. | `[x]` |
-| **Hito 2** | **Fase 6 — Omnicanal ML `MCO` + Meta CAPI** | `F6.1` OAuth PKCE · `F6.2` User Products + `x-version` + Full + precios (zona muerta \$60k) · `F6.3` `ChannelPack`/`ChannelOrder` + `ME2`/Flex + conciliación · `F6.4` Meta Catalog + CAPI. | `[x]` |
-| **Compuerta Calle** | **Maduración Operativa (`M1`–`M4`)** | `M1` Rodaje `LOCAL` · `M2` Identidad + `STG` · `M3` Go-Live `mundonettech.co` · `M4` Meta/ML vivos. | `[ ]` |
-| **Hito 3 (Diferido)** | **Fase 7 — WhatsApp + Agente IA** | **Congelada hasta `M1`–`M4`:** WhatsApp Cloud API + Gemini TS sobre `packages/core` + Inbox *takeover*. | `[ ]` |
+| **Hito 1 — Go-Live** | **Fases 0–4A (`F0.1`–`F4A.3`)** | Fundación/RLS/MFA `aal2`/Bóveda, Catálogo/R2/360°/3D/WAC, CMS/Legal/SEO, Checkout/IVA/Pagos/Envíos/DIAN, Operación/`3.500 UVT`/RMA/PQR/Gates. | `[x]` |
+| **Hito 2 — Escala** | **Fases 4B–6 (`F4B.1`–`F6.4`)** | CRM 360 + B2B + Copiloto 0-PII, Lealtad + Lifecycle + Salud/Backups GPG/DR + Ayuda v2, Mercado Libre `MCO` + Meta Catalog/CAPI. | `[x]` |
+| **Compuerta Código** | **Auditoría Integral (`A1`–`A10`)** | 3 cortes estructurales (`A1`–`A3`) + 5 espejos `Admin ↔ Cliente` (`A4`–`A8`) + UX/Ops (`A9`–`A10`), multi-agente 0-supuestos. | `[/]` |
+| **Compuerta Calle** | **Maduración Operativa (`M1`–`M4`)** | `M1` Rodaje `:4010` + marca · `M2` Legal + `STG` · `M3` Go-Live `mundonettech.co` · `M4` Meta/ML `MCO`. | `[ ]` |
+| **Hito 3 (Diferido)** | **Fase 7 — WhatsApp + Agente IA** | **Congelada hasta cerrar `A1`–`A10` y `M1`–`M4`:** Cloud API + Gemini TS (`packages/core`) + Inbox `/admin/whatsapp`. | `[ ]` |
 
 ---
 
-## 2. Fase Activa — Maduración Operativa (`M1`–`M4`, requisito previo a `Fase 7`)
+## 2. Fase Activa — Auditoría Integral Pre-Calle (`A1`–`A10`, 0-supuestos)
 
-- `[x]` ✅ **Fases 0–6 en código/CI (`F0.1`–`F6.4`, `ADR-019`..`045`):** MFA `aal2`/RLS (`131` tablas/`2.272` casos)/Bóveda, Catálogo/Media R2/WAC, CMS/Legal/SEO, Carrito/Checkout/Pagos/Logística/DIAN, Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse/k6/`release:verify`, CRM/B2B, Lealtad/Lifecycle/RFM + Salud/Backups GPG/DR/Ayuda v2 y ML `MCO` + Meta Catalog/CAPI.
-- `[ ]` **`M1` — Rodaje Humano `LOCAL` (`Hito 1` puro):** recorrido manual en `:4010` (móvil/escritorio) de catálogo/medios/stock/seriales reales, compra, pagos, despacho, posventa y finanzas; pulir toda fricción UX/operativa antes de exponer ambientes externos.
-- `[ ]` **`M2` — Identidad y `STG` Core (`Hito 1`):** logo `.svg`/paleta, NIT/razón social/dirección/buzones y revisión jurídica (`config/`, `COMPLIANCE.md`); Supabase `STG` + R2 con **Resend, Wompi y Aveonline** verificados + `pnpm release:verify` (`STG`).
-- `[ ]` **`M3` — Go-Live Core Web (`mundonettech.co` — `Hito 1`):** promoción humana `develop → production`, `release:verify` (`PRD`), primeros pedidos/despachos/reembolsos reales sin incidentes y backups GPG R2 + DR drill (`≤ 36 h`) vivos.
-- `[ ]` **`M4` — Canales Externos (`Hito 2` sobre operación madura):** 1) Merchant + **Meta Catalog/CAPI** con dominio/portafolio verificados en Meta Business (`RELEASE_META_VERIFIED`); 2) **Mercado Libre `MCO`** (`RELEASE_MERCADO_LIBRE_VERIFIED`).
-- `[ ]` **🔒 `Fase 7` (`F7.1`–`F7.3`, bloqueada hasta cerrar `M1`–`M4`):** `F7.1` Cloud API + HMAC + ventana 24 h + Ley 1581 · `F7.2` Agente Gemini TS sobre `packages/core` (`/pagar/[token]`, 0-PII) · `F7.3` Inbox `/admin/whatsapp` con *takeover* y MFA.
+- `[x]` ✅ **Fases 0–6 en CI (`F0.1`–`F6.4`, `ADR-001`..`045`):** `474` archivos, `29` págs. Cliente, `43` págs. Admin, `22` APIs, `131` tablas PG 17 y `99` suites.
+- `[ ]` **`A1` — Grafo AST, Código Muerto y Caché (`audit/a1-ast-wiring-cache`):** barrer el 100 % de `exports`, tipos, helpers, componentes y env vars (`config/`, `packages/*`, `apps/web`); eliminar código muerto/duplicado; sumar guarda AST en `make check`; certificar paridad 1:1 `cacheTag` ↔ `updateTag`/`revalidateTag`.
+- `[ ]` **`A2` — Seguridad Zero-Trust (`audit/a2-security-rbac-mfa-pii`):** inventariar el 100 % de `"use server"`, `22` `route.ts` y `proxy.ts`: sesión, RBAC (8 roles), `aal2`, `requireRecentMfa` (`≤ 10 min`), CSRF/Origin, HMAC *timing-safe*, rate limits, `AdminActionLog` (`selfDealing`) y 0-PII/0-`WAC` en payloads RSC y logs.
+- `[ ]` **`A3` — Esquema PG 17, Índices y Concurrencia (`audit/a3-db-constraints-locks`):** cruzar los `11` `.prisma` ↔ SQL ↔ `pg_catalog`: `CHECK >= 0` en todos los `BigInt`/stocks, índices parciales `WHERE "deletedAt" IS NULL`, índices en FKs calientes, `ON DELETE`, cobertura `rls-matrix` y orden léxico de locks (Retail/Asistida/B2B/ML, cero `40P01`).
+- `[ ]` **`A4` — Espejo Admin ↔ Cliente: Catálogo, Media 360°/3D, WAC, Precios y CMS/SEO (`audit/a4-catalog-media-cms`):** cruzar `/admin/{catalogo,precios,contenido,configuracion}` ↔ `/`, `/productos`, `/categoria`, `/marca`, `/producto`, `/comparar`, `/pagina`, `/ayuda`, `/legal`, `/sitemap*`: toda mutación Admin refleja al instante en Cliente/JSON-LD sin caché obsoleta.
+- `[ ]` **`A5` — Espejo Admin ↔ Cliente: Carrito, Checkout, Venta Asistida, Pagos, Logística y DIAN (`audit/a5-checkout-payments-shipping`):** cruzar `/carrito`, `/checkout`, `/pagar/[token]`, `/recibo/[token]` ↔ `/admin/{venta-asistida,pagos,logistica,pedidos,facturacion}` + Wompi/Aveonline/Flex/Resend/Outbox: `safetyStock`, cupones, IVA dual/UVT, *pick & pack* multi-bulto y recibos/DIAN punta a punta.
+- `[ ]` **`A6` — Espejo Admin ↔ Cliente: Cuenta, Posventa 2FA, RMA/Seriales, PQR, Reseñas y Finanzas (`audit/a6-postsale-rma-finance`):** cruzar `(auth)/*`, `/mi-cuenta/*`, `/pedido/[token]` ↔ `/admin/{hoy,dashboard,posventa,resenas,finanzas}`: retracto (18 festivos CO), garantías/cambios `SerializedUnit` (Serial/IMEI), moderación, `OrderRefund` y cuadre `BigInt` + `3.500 UVT`.
+- `[ ]` **`A7` — Espejo Admin ↔ Cliente: CRM 360, B2B, Lealtad/Referidos y Lifecycle (`audit/a7-crm-b2b-loyalty`):** cruzar `/empresas`, `/propuesta/[token]`, `/mi-cuenta/{beneficios,privacidad}`, `/referido/[code]`, `/email/baja/[token]` ↔ `/admin/{crm,b2b,fidelizacion,segmentos,lifecycle,analitica-rfm,comunicaciones}` + Copiloto 0-PII: `PriceList` → `Order`, reversa `EARN`, anti-`selfDealing` y supresión Ley 1581 / RFC 8058.
+- `[ ]` **`A8` — Espejo Omnicanal ↔ Core: Mercado Libre `MCO`, Meta CAPI y Bóveda (`audit/a8-omnichannel-vault`):** cruzar `/admin/{integraciones,canales}`, OAuth/webhook ML, `/api/feeds/{google-merchant,meta-catalog}`, `/api/metrics/funnel` ↔ stock `x-version`, cancelaciones/`ChannelLedgerEntry`, revocación `ADVERTISING` sobre CAPI y feeds sin datos sintéticos.
+- `[ ]` **`A9` — Navegación, UX, Estados Reales, A11y y Copy (`audit/a9-ux-navigation-a11y`):** revisar las `29` págs. Cliente y `43` págs. Admin: cero rutas fuera de menús ni links rotos, formularios/filtros/paginación reales, `loading`/`empty`/`error`, 100 % tokens semánticos, tuteo `es-CO` y WCAG 2.1 AA móvil/escritorio.
+- `[ ]` **`A10` — Operación, Backups/DR, Docs Nivel 1, CI/Rulesets y Certificación (`audit/a10-ops-dr-ci-certification`):** auditar los 5 `/api/jobs/*`, `backup:create`, `dr:drill`, `release:verify`, `/admin/{salud,usuarios,seguridad,auditoria}`; sincronizar docs Nivel 1 con el código; optimizar `ci.yml` + activar rulesets (`develop`/`production`) y certificar las 8 suites habilitando `M1`.
+- `[ ]` **🔒 Tras `A10`:** `M1` `:4010` + marca → `M2` `STG` → `M3` Go-Live → `M4` Meta/ML → `Fase 7`.
 
 ---
 
-## 3. Handoff para la siguiente sesión
+## 3. Handoff
 
-- **Gobierno vigente:** **congelado `feat/f7-*`** hasta certificar en calle `M1`–`M4` (catálogo curado, Core vivo y Meta Business verificado).
-- **Siguiente turno — Rodaje Humano `M1`:** levantar `:4010`, recorrer punta a punta comprador y `/admin` sobre el *Core* (`Hito 1`), corregir asperezas reales en ramas `fix/m1-*` con gates en verde y alistar checklist `M2` (`STG`).
+- **Siguiente:** **`A1`** (`audit/a1-ast-wiring-cache` desde `develop`; congelado `feat/f7-*`).
+- **Leer:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md` y `docs/DECISIONS.md`.
+- **Cierre dual `A1`:** Implementador audita con subagentes `config/`, `packages/*` y `apps/web`, elimina código muerto, valida paridad 1:1 `cacheTag`, suma guarda AST en `make check` y entrega en `[R]` con `make check && pnpm test && pnpm build` en verde; Auditor reaudita al 100 %, certifica `[x]` y fusiona en `develop`.
