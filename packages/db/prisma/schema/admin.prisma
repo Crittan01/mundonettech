@@ -77,6 +77,7 @@ model AdminUser {
   createdChannelListings    ChannelListing[] @relation("ChannelListingCreator")
   createdChannelSyncJobs    ChannelSyncJob[] @relation("ChannelSyncJobCreator")
   createdChannelLedgerEntries ChannelLedgerEntry[] @relation("ChannelLedgerEntryCreator")
+  reconciledMetaCapiEvents MetaCapiEvent[] @relation("MetaCapiReconciler")
 
   @@index([role, status])
   @@index([createdAt])
@@ -166,6 +167,7 @@ model IntegrationCredential {
   b2bCopilotRuns           OpportunityCopilotRun[]
   channelAccount           ChannelAccount?
   channelOAuthAttempt      ChannelOAuthAttempt?
+  metaCapiEvents           MetaCapiEvent[]
 
   @@index([environment, revokedAt])
   @@index([environment, createdAt, id])

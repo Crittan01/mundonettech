@@ -732,6 +732,7 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
         familyName: "Revocado",
         phoneE164: null,
         marketingEmail: false,
+        advertising: false,
       },
       { ipHash: hash(), userAgentHash: hash() },
     );

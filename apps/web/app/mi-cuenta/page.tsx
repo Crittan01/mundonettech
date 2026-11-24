@@ -11,12 +11,14 @@ export default async function AccountPage() {
   const account = await accountService().getProfile(profile.id);
   const marketingEmail =
     account.consents.find((consent) => consent.purpose === "MARKETING_EMAIL")?.status === "GRANTED";
+  const advertising =
+    account.consents.find((consent) => consent.purpose === "ADVERTISING")?.status === "GRANTED";
   return (
     <main className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold">Mi cuenta</h1>
         <p className="mt-2 text-muted-foreground">
-          Administra tus datos personales y tu autorización de comunicaciones comerciales.
+          Administra tus datos personales y tus autorizaciones comerciales y publicitarias.
         </p>
       </div>
       <dl className="grid gap-4 sm:grid-cols-3">
@@ -43,6 +45,7 @@ export default async function AccountPage() {
             familyName: account.familyName ?? "",
             phoneE164: account.phoneE164 ?? "",
             marketingEmail,
+            advertising,
           }}
         />
       </section>

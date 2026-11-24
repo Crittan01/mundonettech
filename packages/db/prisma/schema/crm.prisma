@@ -216,6 +216,7 @@ enum ConsentPurpose {
   MARKETING_EMAIL
   MARKETING_SMS
   ANALYTICS
+  ADVERTISING
 }
 
 enum ConsentStatus {
@@ -259,6 +260,7 @@ model Customer {
   segmentMemberships        CustomerSegmentMembership[]
   lifecycleEnrollments      LifecycleEnrollment[]
   lifecycleMessages         LifecycleMessage[]
+  metaCapiEvents            MetaCapiEvent[]
 
   @@index([status, createdAt])
   @@index([deletedAt])
@@ -282,6 +284,7 @@ model Consent {
   revokedBy             Consent?                    @relation("ConsentRevocation")
   segmentMemberships    CustomerSegmentMembership[]
   lifecycleEnrollments  LifecycleEnrollment[]
+  metaCapiEvents        MetaCapiEvent[]
 
   @@unique([revokesId])
   @@index([customerId, purpose, occurredAt])

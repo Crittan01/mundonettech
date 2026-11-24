@@ -911,6 +911,19 @@ export function CheckoutForm({
                 . No se activa mercadeo por esta compra.
               </span>
             </label>
+            <label className="flex items-start gap-3 text-sm">
+              <input
+                type="checkbox"
+                name="advertisingAccepted"
+                defaultChecked={values?.advertisingAccepted === "on"}
+                className="mt-1 size-4 accent-primary"
+              />
+              <span>
+                Opcional: autorizo compartir con Meta identificadores seudonimizados y los datos de
+                esta compra para atribución publicitaria. No es necesario para comprar y puedo
+                revocarlo desde mi cuenta.
+              </span>
+            </label>
           </div>
         </section>
 

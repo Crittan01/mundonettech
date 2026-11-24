@@ -15,6 +15,8 @@ import {
   parseDianCredentials,
   parseEmailCredentials,
   parseGeminiCredentials,
+  parseMetaCredentials,
+  MetaCapiError,
 } from "@mundonettech/integrations";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -30,11 +32,12 @@ import { getIntegrationCredentialVault, getIntegrationEnvironment } from "@/lib/
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-const providerSchema = z.enum(["aveonline", "resend", "dian", "gemini"]);
+const providerSchema = z.enum(["aveonline", "resend", "dian", "gemini", "meta"]);
 type OperationalProvider = z.infer<typeof providerSchema>;
 const secretFields = new Set([
   "password",
   "apiKey",
+  "accessToken",
   "svixSecret",
   "unsubscribeSecret",
   "bearerToken",
@@ -86,6 +89,13 @@ function credentialPayload(
       svixSecret: required(formData, "svixSecret"),
       unsubscribeSecret: required(formData, "unsubscribeSecret"),
       apiUrl: required(formData, "apiUrl"),
+    };
+  }
+  if (provider === "meta") {
+    return {
+      pixelId: required(formData, "pixelId"),
+      accessToken: required(formData, "accessToken"),
+      testEventCode: required(formData, "testEventCode") || null,
     };
   }
   if (provider === "gemini") {
@@ -155,6 +165,7 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
     error instanceof EmailProviderError ||
     error instanceof InvoiceProviderError ||
     error instanceof GeminiProviderError ||
+    error instanceof MetaCapiError ||
     error instanceof z.ZodError ||
     error instanceof TypeError ||
     error instanceof RangeError
@@ -190,6 +201,7 @@ async function persist(formData: FormData, rotate: boolean): Promise<ActionState
     if (provider === "aveonline") parseAveonlineCredentials(sealed);
     else if (provider === "resend") parseEmailCredentials(sealed);
     else if (provider === "gemini") parseGeminiCredentials(sealed);
+    else if (provider === "meta") parseMetaCredentials(sealed, environment);
     else parseDianCredentials(sealed, environment);
     const vault = getIntegrationCredentialVault();
     if (rotate) {

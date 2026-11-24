@@ -616,3 +616,70 @@ model ChannelLedgerEntry {
   @@index([externalPaymentId, entryType])
   @@map("ChannelLedgerEntry")
 }
+
+enum MetaCapiEventName {
+  PURCHASE
+}
+
+enum MetaCapiEventStatus {
+  PENDING
+  DISPATCHING
+  SENT
+  SKIPPED
+  FAILED
+  UNCERTAIN
+}
+
+model MetaCapiEvent {
+  id                       String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  eventId                  String                @unique @db.VarChar(128)
+  eventName                MetaCapiEventName
+  status                   MetaCapiEventStatus   @default(PENDING)
+  environment              IntegrationEnvironment
+  credentialId             String                @db.Uuid
+  orderId                  String                @unique @db.Uuid
+  customerId               String                @db.Uuid
+  consentId                String                @db.Uuid
+  pixelId                  String                @db.VarChar(32)
+  requestUrl               String                @db.VarChar(2048)
+  testEventCode            String?               @db.VarChar(100)
+  eventTime                DateTime              @db.Timestamptz(6)
+  eventSourceUrl           String                @db.VarChar(2048)
+  valueCents               BigInt
+  currency                 String                @default("COP") @db.Char(3)
+  contents                 Json                  @db.JsonB
+  requestHash              Bytes                 @db.ByteA
+  externalIdHash           Bytes?                @db.ByteA
+  emailHash                Bytes?                @db.ByteA
+  phoneHash                Bytes?                @db.ByteA
+  attempts                 Int                   @default(0)
+  availableAt              DateTime              @default(now()) @db.Timestamptz(6)
+  claimId                  String?               @db.Uuid
+  claimedBy                String?               @db.VarChar(120)
+  claimedAt                DateTime?             @db.Timestamptz(6)
+  claimExpiresAt           DateTime?             @db.Timestamptz(6)
+  requestStartedAt         DateTime?             @db.Timestamptz(6)
+  sentAt                   DateTime?             @db.Timestamptz(6)
+  completedAt              DateTime?             @db.Timestamptz(6)
+  providerTraceId          String?               @db.VarChar(128)
+  failureCode              String?               @db.VarChar(100)
+  reconciliationReference  String?               @db.VarChar(128)
+  reconciledAt             DateTime?             @db.Timestamptz(6)
+  reconciledByAdminUserId  String?               @db.Uuid
+  version                  Int                   @default(0)
+  createdAt                DateTime              @default(now()) @db.Timestamptz(6)
+  updatedAt                DateTime              @default(now()) @updatedAt @db.Timestamptz(6)
+  credential               IntegrationCredential @relation(fields: [credentialId], references: [id], onDelete: Restrict)
+  order                    Order                 @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  customer                 Customer              @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  consent                  Consent               @relation(fields: [consentId], references: [id], onDelete: Restrict)
+  reconciledBy             AdminUser?            @relation("MetaCapiReconciler", fields: [reconciledByAdminUserId], references: [id], onDelete: Restrict)
+
+  @@index([status, availableAt, id])
+  @@index([customerId, status])
+  @@index([consentId])
+  @@index([claimExpiresAt, status])
+  @@index([environment, status])
+  @@index([reconciledByAdminUserId, createdAt])
+  @@map("MetaCapiEvent")
+}

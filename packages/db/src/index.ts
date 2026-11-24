@@ -40,6 +40,8 @@ export {
   ChannelShipmentStatus,
   ChannelLedgerEntryType,
   ChannelLedgerDirection,
+  MetaCapiEventName,
+  MetaCapiEventStatus,
   Prisma,
   PrismaClient,
 } from "./generated/client.js";
@@ -53,6 +55,7 @@ export type {
   ChannelOrder,
   ChannelShipment,
   ChannelLedgerEntry,
+  MetaCapiEvent,
   AdminActionLog,
   AdminRecoveryCode,
   AdminUser,
@@ -511,6 +514,7 @@ export type {
 } from "./lifecycle-service.js";
 export { SegmentationService } from "./segmentation-service.js";
 export type { CustomerSegmentInput, CustomerSegmentMutation } from "./segmentation-service.js";
+export { cancelPendingMetaCapiForCustomerInTransaction } from "./meta-capi.js";
 export { RfmAnalyticsError, RfmAnalyticsService } from "./rfm-analytics-service.js";
 export type {
   RfmAnalyticsCursor,

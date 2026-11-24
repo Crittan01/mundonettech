@@ -140,6 +140,33 @@ export type {
 export { DomainEventWorker } from "./domain-event-worker.js";
 export type { DomainEventBatchResult, DomainEventWorkerOptions } from "./domain-event-worker.js";
 export { IntegrationTransportError, fetchWithLimit, parseHttpJson } from "./integration-http.js";
+export {
+  buildMetaCapiPurchaseRequest,
+  hashMetaCapiRequest,
+  MetaCapiError,
+  MetaConversionsApiClient,
+  metaCapiEventsUrl,
+  metaCapiGraphApiBaseUrl,
+  parseMetaCredentials,
+} from "./meta-capi.js";
+export type {
+  MetaCapiContent,
+  MetaCapiErrorCode,
+  MetaCapiPurchaseInput,
+  MetaCapiRequest,
+  MetaCapiSendResult,
+  MetaConversionsApiClientOptions,
+  MetaCredentials,
+} from "./meta-capi.js";
+export { MetaCapiService, MetaCapiServiceError } from "./meta-capi-service.js";
+export type {
+  MetaCapiAudit,
+  MetaCapiDispatchResult,
+  MetaCapiEnqueueResult,
+  MetaCapiEventView,
+  MetaCapiServiceErrorCode,
+  MetaCapiServiceOptions,
+} from "./meta-capi-service.js";
 
 export { GuestOrderAccessError, GuestOrderAccessService } from "./guest-order-access-service.js";
 export type {

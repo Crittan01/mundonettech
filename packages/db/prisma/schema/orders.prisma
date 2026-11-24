@@ -146,6 +146,7 @@ model Order {
   sourceProposal              OpportunityProposal?
   loyaltyTxns                 LoyaltyTxn[]
   referral                    Referral?
+  metaCapiEvent               MetaCapiEvent?
 
   @@index([customerId, createdAt])
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])

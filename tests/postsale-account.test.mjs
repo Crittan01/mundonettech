@@ -293,6 +293,7 @@ describe("F4A.2 — account profile, DANE and privacy", () => {
         familyName: "Rodríguez",
         phoneE164: "+573001234567",
         marketingEmail: true,
+        advertising: false,
       },
       context,
     );
@@ -304,6 +305,7 @@ describe("F4A.2 — account profile, DANE and privacy", () => {
         familyName: "Rodríguez",
         phoneE164: "+573001234567",
         marketingEmail: false,
+        advertising: false,
       },
       context,
     );
@@ -970,17 +972,35 @@ describe("F4A.2 — account anonymization and concurrency", () => {
     });
     await accounts.updateProfile(
       customerId,
-      { givenName: "Ciclo", familyName: "Uno", phoneE164: "+573001234567", marketingEmail: true },
+      {
+        givenName: "Ciclo",
+        familyName: "Uno",
+        phoneE164: "+573001234567",
+        marketingEmail: true,
+        advertising: false,
+      },
       context,
     );
     await accounts.updateProfile(
       customerId,
-      { givenName: "Ciclo", familyName: "Dos", phoneE164: "+573001234567", marketingEmail: false },
+      {
+        givenName: "Ciclo",
+        familyName: "Dos",
+        phoneE164: "+573001234567",
+        marketingEmail: false,
+        advertising: false,
+      },
       context,
     );
     await accounts.updateProfile(
       customerId,
-      { givenName: "Ciclo", familyName: "Tres", phoneE164: "+573001234567", marketingEmail: true },
+      {
+        givenName: "Ciclo",
+        familyName: "Tres",
+        phoneE164: "+573001234567",
+        marketingEmail: true,
+        advertising: false,
+      },
       context,
     );
     assert.equal(await accounts.marketingEmailGranted(customerId), true);

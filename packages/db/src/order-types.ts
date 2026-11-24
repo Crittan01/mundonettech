@@ -34,6 +34,7 @@ export interface CheckoutContactInput {
   readonly buyerTaxRegime?: StoreTaxRegimeValue | null;
   readonly termsVersion: string;
   readonly privacyPolicyVersion: string;
+  readonly advertisingAccepted?: boolean;
   readonly acceptanceProofHash: Uint8Array;
   readonly acceptanceIpHash?: Uint8Array | null;
   readonly acceptanceUserAgentHash?: Uint8Array | null;

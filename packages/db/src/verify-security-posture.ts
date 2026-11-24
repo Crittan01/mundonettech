@@ -24,6 +24,7 @@ const requiredTables = [
   "ChannelOrder",
   "ChannelShipment",
   "ChannelLedgerEntry",
+  "MetaCapiEvent",
   "Customer",
   "Consent",
   "Organization",
@@ -392,6 +393,17 @@ const requiredConstraints = [
   "ChannelLedgerEntry_parent_valid",
   "ChannelLedgerEntry_direction_valid",
   "ChannelLedgerEntry_manual_evidence",
+  "MetaCapiEvent_identity_valid",
+  "MetaCapiEvent_money_nonnegative",
+  "MetaCapiEvent_currency_cop",
+  "MetaCapiEvent_contents_valid",
+  "MetaCapiEvent_hashes_length",
+  "MetaCapiEvent_attempts_valid",
+  "MetaCapiEvent_claim_consistent",
+  "MetaCapiEvent_status_consistent",
+  "MetaCapiEvent_failure_code_valid",
+  "MetaCapiEvent_reconciliation_consistent",
+  "MetaCapiEvent_environment_test_valid",
   "Address_identity_valid",
   "GuestOrderChallenge_hashes_length",
   "GuestOrderChallenge_attempts_valid",
@@ -525,6 +537,7 @@ const requiredPartialIndexes = [
   "ChannelOAuthAttempt_one_active_per_account_key",
   "ChannelShipment_packId_key",
   "ChannelShipment_accountId_externalOrderId_single_key",
+  "IntegrationCredential_meta_active_unique",
 ] as const;
 const requiredTotalUniqueIndexes = [
   "ChannelListing_externalUserProductId_key",
@@ -537,6 +550,8 @@ const requiredTotalUniqueIndexes = [
   "ChannelOrder_reservationKey_key",
   "ChannelShipment_accountId_externalShipmentId_key",
   "ChannelLedgerEntry_deduplicationKey_key",
+  "MetaCapiEvent_eventId_key",
+  "MetaCapiEvent_orderId_key",
 ] as const;
 const requiredCatalogIndexes = [
   "Product_searchVector_idx",
@@ -678,6 +693,7 @@ const requiredSecurityTriggers = [
   "ChannelShipment_enforce_state",
   "ChannelOrder_enforce_state",
   "ChannelLedgerEntry_append_only",
+  "MetaCapiEvent_enforce_state",
 ] as const;
 const requiredEventTriggers = [
   "enforce_rls_on_new_table",

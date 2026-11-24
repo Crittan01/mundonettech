@@ -75,6 +75,7 @@ const submissionSchema = z
     deliveryNotes: optionalText(500),
     termsAccepted: z.literal("true"),
     dataProcessingAccepted: z.literal("true"),
+    advertisingAccepted: z.boolean(),
   })
   .superRefine((value, context) => {
     if (value.fulfillmentMethod !== "CLICK_COLLECT") {
@@ -160,6 +161,7 @@ export async function confirmCheckoutAction(
     deliveryNotes: formString(formData, "deliveryNotes"),
     termsAccepted: formString(formData, "termsAccepted"),
     dataProcessingAccepted: formString(formData, "dataProcessingAccepted"),
+    advertisingAccepted: formData.get("advertisingAccepted") === "on",
   });
   if (!parsed.success) {
     return actionError(
@@ -227,6 +229,7 @@ export async function confirmCheckoutAction(
         terms,
         privacy,
         dataProcessing,
+        advertisingAccepted: input.advertisingAccepted,
         reviewFingerprint: input.reviewFingerprint,
         email: input.email,
         recipientName: input.recipientName,
@@ -292,6 +295,7 @@ export async function confirmCheckoutAction(
         buyerTaxRegime: input.buyerTaxRegime || null,
         termsVersion: terms.version,
         privacyPolicyVersion: dataProcessing.version,
+        advertisingAccepted: input.advertisingAccepted,
         acceptanceProofHash,
         acceptanceIpHash: security.ipHash,
         acceptanceUserAgentHash: security.userAgentHash,

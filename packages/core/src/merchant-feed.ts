@@ -12,6 +12,7 @@ export interface MerchantFeedItem {
   readonly brand: string;
   readonly priceCents: string;
   readonly available: boolean;
+  readonly availableQuantity?: number;
   readonly gtin?: string | null;
   readonly ean?: string | null;
   readonly mpn?: string | null;

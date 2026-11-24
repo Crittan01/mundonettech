@@ -7,6 +7,7 @@ import { CrmError, suppressCustomerCrmLineageInTransaction } from "./crm-shared.
 import { GrowthService, marketingEmailConsentGranted } from "./growth-service.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 import { revokeCustomerLifecycleConsentInTransaction } from "./lifecycle-cancellation.js";
+import { cancelPendingMetaCapiForCustomerInTransaction } from "./meta-capi.js";
 
 export type AccountErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION";
 
@@ -30,6 +31,7 @@ export interface ProfileInput {
   readonly familyName: string | null;
   readonly phoneE164: string | null;
   readonly marketingEmail: boolean;
+  readonly advertising: boolean;
 }
 
 export interface AddressInput {
@@ -107,6 +109,12 @@ function profileInput(input: ProfileInput): ProfileInput {
         ? input.marketingEmail
         : (() => {
             throw new AccountError("VALIDATION", "marketingEmail must be boolean.");
+          })(),
+    advertising:
+      typeof input.advertising === "boolean"
+        ? input.advertising
+        : (() => {
+            throw new AccountError("VALIDATION", "advertising must be boolean.");
           })(),
   };
 }
@@ -192,13 +200,23 @@ export class AccountService {
     const audit = this.audit(auditInput);
     return inInventoryTransaction(this.db, async (tx) => {
       const customer = await this.lockActiveCustomer(tx, customerId);
-      const latestConsent = await tx.consent.findFirst({
-        where: { customerId, purpose: "MARKETING_EMAIL" },
-        include: { revokedBy: { select: { id: true } } },
-        orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-      });
+      const [latestConsent, latestAdvertisingConsent] = await Promise.all([
+        tx.consent.findFirst({
+          where: { customerId, purpose: "MARKETING_EMAIL" },
+          include: { revokedBy: { select: { id: true } } },
+          orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+        }),
+        tx.consent.findFirst({
+          where: { customerId, purpose: "ADVERTISING" },
+          include: { revokedBy: { select: { id: true } } },
+          orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+        }),
+      ]);
       const currentlyGranted =
         latestConsent?.status === "GRANTED" && latestConsent.revokedBy === null;
+      const currentlyAdvertisingGranted =
+        latestAdvertisingConsent?.status === "GRANTED" &&
+        latestAdvertisingConsent.revokedBy === null;
       const proofHash = createHash("sha256")
         .update(
           JSON.stringify({
@@ -207,6 +225,7 @@ export class AccountService {
             familyName: values.familyName,
             phoneE164: values.phoneE164,
             marketingEmail: values.marketingEmail,
+            advertising: values.advertising,
             policyVersion: this.options.privacyPolicyVersion,
           }),
         )
@@ -234,9 +253,24 @@ export class AccountService {
           },
         });
       }
+      if (currentlyAdvertisingGranted !== values.advertising) {
+        await tx.consent.create({
+          data: {
+            customerId,
+            purpose: "ADVERTISING",
+            status: values.advertising ? "GRANTED" : "REVOKED",
+            source: "customer-account",
+            policyVersion: this.options.privacyPolicyVersion,
+            proofHash,
+            ipHash: audit.ipHash,
+            userAgentHash: audit.userAgentHash,
+            revokesId: values.advertising ? null : latestAdvertisingConsent!.id,
+          },
+        });
+      }
+      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = nowRows[0]!.now;
       if (!values.marketingEmail) {
-        const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-        const now = nowRows[0]!.now;
         await tx.emailEvent.updateMany({
           where: {
             customerId,
@@ -253,9 +287,12 @@ export class AccountService {
         `;
         await revokeCustomerLifecycleConsentInTransaction(tx, customerId, now);
       }
+      if (!values.advertising) {
+        await cancelPendingMetaCapiForCustomerInTransaction(tx, customerId, now);
+      }
       await tx.$executeRaw`
         INSERT INTO "SecurityEvent" ("customerId", "eventType", "ipHash", "userAgentHash", "metadata", "dedupMinute")
-        VALUES (${customerId}::uuid, 'CUSTOMER_PROFILE_UPDATED', ${audit.ipHash}, ${audit.userAgentHash}, ${JSON.stringify({ marketingEmail: values.marketingEmail })}::jsonb, date_trunc('minute', CURRENT_TIMESTAMP))
+        VALUES (${customerId}::uuid, 'CUSTOMER_PROFILE_UPDATED', ${audit.ipHash}, ${audit.userAgentHash}, ${JSON.stringify({ marketingEmail: values.marketingEmail, advertising: values.advertising })}::jsonb, date_trunc('minute', CURRENT_TIMESTAMP))
         ON CONFLICT ("eventType", "ipHash", "dedupMinute") DO NOTHING
       `;
       return updated;
@@ -535,7 +572,7 @@ export class AccountService {
     const activeConsents = await tx.consent.findMany({
       where: {
         customerId,
-        purpose: { in: ["MARKETING_EMAIL", "MARKETING_SMS", "ANALYTICS"] },
+        purpose: { in: ["MARKETING_EMAIL", "MARKETING_SMS", "ANALYTICS", "ADVERTISING"] },
         status: "GRANTED",
         revokedBy: null,
       },
@@ -555,6 +592,7 @@ export class AccountService {
         },
       });
     }
+    await cancelPendingMetaCapiForCustomerInTransaction(tx, customerId, now);
     await tx.address.deleteMany({ where: { customerId } });
     await tx.wishlistItem.deleteMany({ where: { customerId } });
     await tx.backInStockSubscription.updateMany({

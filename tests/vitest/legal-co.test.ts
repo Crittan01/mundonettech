@@ -31,7 +31,7 @@ describe("F2.3 — eight-versioned Colombian legal documents", () => {
     for (const document of result.documents) {
       expect(document.sections.length).toBeGreaterThanOrEqual(6);
       expect(document.version).toMatch(/^\d+\.\d+\.\d+$/);
-      expect(document.effectiveDate).toBe("2026-11-21");
+      expect(document.effectiveDate).toBe("2026-11-23");
       for (const section of document.sections) {
         expect(section.paragraphs.length).toBeGreaterThan(0);
       }

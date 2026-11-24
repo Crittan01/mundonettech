@@ -23,6 +23,7 @@ const managedCategories = [
   "channels.reauth",
   "channels.sync",
   "channels.orders",
+  "meta.capi",
   "outbox.failed",
 ] as const;
 
@@ -45,7 +46,7 @@ export function canReadNotificationCategory(role: AdminRoleValue, category: stri
   if (category.startsWith("b2b.")) {
     return hasAdminPermission(role, "b2b:read");
   }
-  if (category.startsWith("channels.")) {
+  if (category.startsWith("channels.") || category.startsWith("meta.")) {
     return hasAdminPermission(role, "integrations:read");
   }
   if (category.startsWith("payments.") || category.startsWith("refunds.")) {
@@ -81,7 +82,7 @@ export function notificationWhereForRole(role: AdminRoleValue): Prisma.Notificat
     excludedPrefixes.push("b2b.");
   }
   if (!hasAdminPermission(role, "integrations:read")) {
-    excludedPrefixes.push("channels.");
+    excludedPrefixes.push("channels.", "meta.");
   }
   if (!hasAdminPermission(role, "payments:read")) {
     excludedPrefixes.push("payments.", "refunds.");
@@ -266,6 +267,14 @@ export class OperationsService {
           '/admin/canales', 'ChannelOrder', channel_orders."id"::text
         FROM "ChannelOrder" channel_orders
         WHERE channel_orders."stockStatus" = 'REVIEW_REQUIRED' OR channel_orders."reconciliationStatus" = 'REVIEW_REQUIRED'
+        UNION ALL
+        SELECT 'meta-capi:' || meta_events."id" || ':review', 'meta.capi',
+          CASE WHEN meta_events."status" = 'UNCERTAIN' THEN 'CRITICAL' ELSE 'WARNING' END,
+          'Evento Meta CAPI requiere revisión',
+          left('El despacho se detuvo (' || COALESCE(meta_events."failureCode", 'PROVIDER_UNCERTAIN') || '). Revisa la configuración y concilia antes de reintentar.', 500),
+          '/admin/integraciones', 'MetaCapiEvent', meta_events."id"::text
+        FROM "MetaCapiEvent" meta_events
+        WHERE meta_events."status" IN ('FAILED', 'UNCERTAIN')
         UNION ALL
         SELECT 'outbox-failed:' || outbox."id", 'outbox.failed', 'CRITICAL',
           'Evento de integración fallido',

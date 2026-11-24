@@ -13,7 +13,7 @@
 | **Hito 1** | **Fase 4A — Operación, RMA/Seriales y Lanzamiento** | `F4A.1` `/admin/{hoy,dashboard,pedidos,finanzas}` (`OrderRefund`) + `3.500 UVT` · `F4A.2` `/mi-cuenta/*` + `/pedido/[token]` 2FA + RMA (`SerializedUnit`) + PQR SLA + Reseñas · `F4A.3` OWASP + E2E + axe + Lighthouse ≥ 95 + k6 + `release:verify` (**Go-Live** real sujeto a externos). | `[x]` |
 | **Hito 2 — Escala** | **Fase 4B — CRM 360 y Canal B2B** | `F4B.1` `Contact` 360° + duplicados + tareas + retención Hábeas Data · `F4B.2` `PriceList` B2B + `/empresas` → `/propuesta/[token]` `BigInt` → `Order` + Copiloto 0-PII. | `[x]` |
 | **Hito 2** | **Fase 5 — Lealtad, Lifecycle y Observabilidad** | `F5.1` Puntos (reversa `EARN`) + Referidos + Abandonados · `F5.2` Lifecycle + Segmentos Ley 1581 + RFM/LTV · `F5.3` Salud + Alertas + Backups GPG R2 streaming + DR drill + Ayuda v2. | `[x]` |
-| **Hito 2** | **Fase 6 — Omnicanal ML `MCO` + Meta CAPI** | `F6.1` OAuth PKCE · `F6.2` User Products + `x-version` + Full + precios (zona muerta \$60k) · `F6.3` `ChannelPack`/`ChannelOrder` + `ME2`/Flex + conciliación · `F6.4` Meta Catalog + CAPI. | `[ ]` |
+| **Hito 2** | **Fase 6 — Omnicanal ML `MCO` + Meta CAPI** | `F6.1` OAuth PKCE · `F6.2` User Products + `x-version` + Full + precios (zona muerta \$60k) · `F6.3` `ChannelPack`/`ChannelOrder` + `ME2`/Flex + conciliación · `F6.4` Meta Catalog + CAPI. | `[R]` |
 | **Hito 3 (Opc.)** | **Fase 7 — WhatsApp + Agente IA** | WhatsApp Cloud API + Agente Gemini TS sobre `packages/core` + Inbox humano con *takeover*. | `[ ]` |
 
 ---
@@ -24,10 +24,10 @@
 - `[x]` ✅ **`F6.1` — OAuth PKCE y `ChannelAccount`:** ML `MCO` PKCE `S256` (`__Secure-`), bóveda aislada, renovación fail-closed, `channels.reauth` y `/admin/canales` MFA + RLS (`ADR-042`).
 - `[x]` ✅ **`F6.2` — User Products ML `MCO`, `x-version`, Full y Precios \$60k:** `ChannelListing`/`ChannelOffer` `BigInt`, stock local/Full, jobs y conciliación MFA + RLS (`ADR-043`).
 - `[x]` ✅ **`F6.3` — Packs/órdenes, ME2/Flex/Full y conciliación:** webhooks HMAC + outbox 0-PII, `ChannelPack`/`ChannelOrder`/`ChannelShipment`, reserva/descuento serializado y `ChannelLedgerEntry` `BigInt` append-only + UI MFA/RLS (`ADR-044`; 130 tablas/2.255 casos).
-- `[ ]` **`F6.4` — Meta Catalog Feed + Conversions API (CAPI):** feed de catálogo validado y despacho server-side CAPI deduplicado (`event_id`), sujeto a `Consent` Ley 1581 vigente, bóveda y cero PII no autorizada.
+- `[R]` **`F6.4` — Meta Catalog Feed + Conversions API (CAPI):** CSV por variante con imagen/COP/inventario/GTIN/MPN reales y diagnóstico; `Purchase` server-side deduplicado por orden/`event_id` con request hash, `ADVERTISING` vigente al pago/despacho, bóveda AES-256-GCM, purga de hashes, claims/backoff y conciliación MFA sin reenvío ciego (`ADR-045`; 131 tablas/2.272 casos).
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Implementador (`F6.4`):** partir de `develop` limpio, crear `feat/f6-4-meta-catalog-capi`, implementar Meta Catalog Feed validado y despacho server-side CAPI deduplicado (`event_id`) con `Consent` Ley 1581 vigente, bóveda `AES-256-GCM` y 0-PII, documentar `ADR-045`, pasar `make check && pnpm test && pnpm build`, marcar `[R]` y entregar al Auditor.
+- **Siguiente turno — Auditor/Certificador (`F6.4`):** auditar `git diff develop...HEAD` contra `ARCHITECTURE.md` y `DECISIONS.md` (`ADR-045`), seguridad, RLS/MFA, `BigInt`, privacidad, idempotencia, Next 16, frontera `config/` ↔ `packages/`, completitud anti-demo y pruebas negativas. Ya ejecutados y en verde: `make check`, 154 pruebas unitarias, 279 integración PG17, 2.272 denegaciones RLS (131 tablas), 70 escenarios E2E standalone, OWASP, `pnpm build` y auditoría de dependencias. Reejecutar `make check && pnpm test && pnpm build`, elevar cualquier superficialidad a estándar productivo, marcar `[x]`, actualizar `docs/STATE.md` + Handoff, subir rama, abrir PR, validar CI y fusionar con `--squash --delete-branch`, dejando local limpio en `develop`.

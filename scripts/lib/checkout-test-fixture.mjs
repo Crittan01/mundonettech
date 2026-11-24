@@ -53,13 +53,17 @@ export async function seedCheckoutFixture(
   const orderNumber = `RLS-${suffix}`;
 
   await client.query(
-    `INSERT INTO "DaneDepartment" ("code", "name") VALUES ('00', 'Matriz departamental')`,
+    `INSERT INTO "DaneDepartment" ("code", "name") VALUES ('00', 'Matriz departamental')
+     ON CONFLICT ("code") DO NOTHING`,
   );
   await client.query(
     `INSERT INTO "DaneMunicipality" ("code", "departmentCode", "name", "locationType")
-     VALUES ('00001', '00', 'Matriz municipal', 'Municipio')`,
+     VALUES ('00001', '00', 'Matriz municipal', 'Municipio') ON CONFLICT ("code") DO NOTHING`,
   );
-  await client.query(`INSERT INTO "OrderNumberSequence" ("year", "lastNumber") VALUES (2999, 1)`);
+  await client.query(
+    `INSERT INTO "OrderNumberSequence" ("year", "lastNumber") VALUES (2999, 1)
+     ON CONFLICT ("year") DO NOTHING`,
+  );
   await client.query(
     `INSERT INTO "Order" (
       "id", "orderNumber", "cartId", "customerId", "couponId", "orderStatus", "paymentStatus",
