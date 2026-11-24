@@ -35,7 +35,7 @@ import {
 } from "@/lib/payment-identities";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-async function consumeWompiVerificationQuota(db: PrismaClient, orderId: string): Promise<void> {
+async function consumeWompiIpQuota(db: PrismaClient): Promise<Uint8Array<ArrayBuffer>> {
   const { ipHash } = await getRequestSecurityContext();
   await consumeOperationRateLimit(db, {
     operation: "payments.wompi.verify.ip",
@@ -44,11 +44,27 @@ async function consumeWompiVerificationQuota(db: PrismaClient, orderId: string):
     limit: 20,
     windowSeconds: 60,
   });
+  return ipHash;
+}
+
+async function consumeWompiOrderQuota(
+  db: PrismaClient,
+  orderId: string,
+  ipHash: Uint8Array<ArrayBuffer>,
+): Promise<void> {
   await consumeOperationRateLimit(db, {
     operation: "payments.wompi.verify.order",
     subject: { type: "ORDER", orderId },
     ipHash,
     limit: 5,
+    windowSeconds: 60,
+  });
+  await consumeOperationRateLimit(db, {
+    operation: "payments.wompi.verify.order.global",
+    subject: { type: "ORDER", orderId },
+    ipHash,
+    scope: "subject",
+    limit: 15,
     windowSeconds: 60,
   });
 }
@@ -253,9 +269,10 @@ export async function verifyWompiPaymentAction(
   if (!parsed.success) return actionError("El identificador de transacción Wompi no es válido.");
   const { token, externalId } = parsed.data;
   try {
+    const db = getDatabase();
+    const ipHash = await consumeWompiIpQuota(db);
     const receipt = await orderService().getReceiptByToken(hashCartToken(token));
     if (!receipt) return actionError("El comprobante ya no está disponible.");
-    const db = getDatabase();
     const matchedTx = await db.paymentTransaction.findFirst({
       where: { provider: "WOMPI", externalId },
       select: { attempt: { select: { orderId: true, credentialId: true } } },
@@ -272,7 +289,7 @@ export async function verifyWompiPaymentAction(
       }));
     if (!attempt?.credentialId)
       return actionError("No hay un intento Wompi asociado a este pedido.");
-    await consumeWompiVerificationQuota(db, receipt.orderId);
+    await consumeWompiOrderQuota(db, receipt.orderId, ipHash);
     await wompiWebhookService().synchronize({
       externalId,
       environment: getIntegrationEnvironment(),

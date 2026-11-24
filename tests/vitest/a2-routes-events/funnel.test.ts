@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { hasCanonicalSameOrigin } from "../../../apps/web/lib/security/origin.js";
 import { expectSecurityHeaders, loadRoute, requestWithJson, responseBody } from "./route-loader.js";
 
 const endpoint = "https://shop.example.test/api/metrics/funnel";
@@ -25,6 +26,7 @@ function createFunnelRoute() {
   const route = loadRoute("metrics/funnel", {
     "@mundonettech/db": { FunnelService },
     "@/lib/db": { getDatabase },
+    "@/lib/security/origin": { hasCanonicalSameOrigin },
     "@/lib/security/request-context": { getRequestSecurityContext },
   });
   return { route, recordPublicBatch, getDatabase, getRequestSecurityContext };

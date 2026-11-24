@@ -6,6 +6,7 @@ import {
   lifecycleSingleLineText,
   lifecycleText,
   normalizeCustomerSegmentDefinition,
+  sanitizeAuditValue,
   type AdminPermission,
 } from "@mundonettech/core";
 
@@ -128,7 +129,7 @@ export async function lifecycleLog(
       requestId: audit.requestId ?? null,
       ipHash: auditHash(audit.ipHash, "ipHash"),
       userAgentHash: audit.userAgentHash ? auditHash(audit.userAgentHash, "userAgentHash") : null,
-      metadata,
+      metadata: sanitizeAuditValue(metadata) as Prisma.InputJsonValue,
     },
   });
 }

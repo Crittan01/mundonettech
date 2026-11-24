@@ -1011,7 +1011,16 @@ describe("F4A.2 — account anonymization and concurrency", () => {
     const persistedEmail = await db.emailEvent.findUniqueOrThrow({ where: { id: emailEvent.id } });
     assert.equal(persistedEmail.recipientEmail, customer.email);
     assert.ok(persistedEmail.anonymizedAt);
-    assert.equal(persistedEmail.subjectSnapshot, "Pedido confirmado");
+    assert.equal(persistedEmail.subjectSnapshot, "Notificación anonimizada");
+    assert.equal(
+      persistedEmail.htmlBodySnapshot,
+      "<p>Contenido anonimizado por solicitud de privacidad.</p>",
+    );
+    assert.equal(
+      persistedEmail.textBodySnapshot,
+      "Contenido anonimizado por solicitud de privacidad.",
+    );
+    assert.deepEqual(persistedEmail.variablesSnapshot, {});
     const outbox = await db.domainOutbox.findUniqueOrThrow({
       where: { deduplicationKey: `customer:${customerId}:auth-erasure:v1` },
     });

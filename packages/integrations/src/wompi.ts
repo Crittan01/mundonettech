@@ -263,7 +263,7 @@ export function verifyWompiWebhook(options: {
   if (!timingSafeEqual(expected, supplied)) {
     throw new PaymentValidationError("Wompi webhook signature verification failed.");
   }
-  if (options.headerChecksum) {
+  if (options.headerChecksum !== undefined && options.headerChecksum !== null) {
     const header = checksumBytes(options.headerChecksum);
     if (!timingSafeEqual(header, supplied)) {
       throw new PaymentValidationError("Wompi header and body checksums differ.");
@@ -286,6 +286,16 @@ export function verifyWompiWebhook(options: {
       occurredAt: new Date(timestamp * 1000),
       transaction: null,
     };
+  }
+  const signedProperties = new Set(properties as string[]);
+  if (
+    !["transaction.id", "transaction.status", "transaction.amount_in_cents"].every((required) =>
+      signedProperties.has(required),
+    )
+  ) {
+    throw new PaymentValidationError(
+      "Wompi transaction webhook signature must cover id, status, and amount_in_cents.",
+    );
   }
   const transaction = objectValue(data.transaction);
   if (!transaction)

@@ -323,9 +323,7 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
     });
     await svgUploadForm.getByRole("button", { name: "Procesar y publicar medio" }).click();
     await expect(
-      page.getByText(
-        /No pudimos procesar o almacenar el medio. Vuelve a seleccionar el archivo antes de reintentar/,
-      ),
+      page.getByText(/Revisa los campos y vuelve a seleccionar archivos válidos/),
     ).toBeVisible();
     expect(
       await db.productMedia.count({

@@ -97,10 +97,14 @@ export function assertMoney(value: bigint, field: string, positive = false): big
 }
 
 export function parseMoneyCents(value: string, field: string, positive = false): bigint {
-  if (typeof value !== "string" || !/^[0-9]+$/.test(value.trim())) {
+  if (typeof value !== "string") {
     throw new TypeError(`${field} must contain integer cents.`);
   }
-  return assertMoney(BigInt(value.trim()), field, positive);
+  const trimmed = value.trim();
+  if (!/^[0-9]{1,20}$/.test(trimmed)) {
+    throw new TypeError(`${field} must contain integer cents.`);
+  }
+  return assertMoney(BigInt(trimmed), field, positive);
 }
 
 export function assertCartQuantity(value: number, field = "quantity", positive = true): number {

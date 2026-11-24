@@ -40,7 +40,7 @@ import {
 import { resolveWompiProvider, type WompiResolution } from "./wompi-resolver.js";
 
 export interface PaymentServiceOptions {
-  readonly vault?: IntegrationCredentialVault;
+  readonly vault?: Pick<IntegrationCredentialVault, "reveal">;
   readonly wompi?: { fetchImpl?: typeof fetch; timeoutMs?: number };
 }
 

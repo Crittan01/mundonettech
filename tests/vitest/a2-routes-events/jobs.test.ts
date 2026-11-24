@@ -57,6 +57,7 @@ function createOrdersRoute() {
     deferred: ["92a2f35f-e7fd-4693-bfc4-46f2d0f45918"],
   });
   const purgeExpiredIdempotencyKeys = vi.fn().mockResolvedValue(4);
+  const purgeExpiredOperationRateLimits = vi.fn().mockResolvedValue(2);
   const synchronizeNotifications = vi.fn().mockResolvedValue(undefined);
   const revalidateTag = vi.fn();
   const getRequestSecurityContext = vi.fn().mockResolvedValue({
@@ -77,6 +78,7 @@ function createOrdersRoute() {
       OperationsService,
       OrderLifecycleService,
       purgeExpiredIdempotencyKeys,
+      purgeExpiredOperationRateLimits,
     },
     "next/cache": { revalidateTag },
     "@/lib/b2b": { b2bService: vi.fn(() => ({ expireDueProposals })) },

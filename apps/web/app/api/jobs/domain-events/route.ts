@@ -8,12 +8,25 @@ const headers = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
-export async function GET() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...headers, Allow: "POST" } },
   );
 }
+
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
   const secret = process.env.DOMAIN_WORKER_CRON_SECRET?.trim() ?? "";

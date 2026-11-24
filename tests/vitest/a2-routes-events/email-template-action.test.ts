@@ -65,6 +65,8 @@ function createAction() {
           ...(values ? { values } : {}),
         }),
         actionSuccess: (message: string) => ({ status: "success", message }),
+        formEntries: (form: FormData) =>
+          [...form.entries()].filter(([key]) => !key.startsWith("$ACTION_")),
         formSnapshot: (form: FormData) =>
           Object.fromEntries(
             [...form.entries()].filter(

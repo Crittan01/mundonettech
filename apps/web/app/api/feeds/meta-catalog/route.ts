@@ -14,16 +14,20 @@ function methodNotAllowed(): Response {
 }
 
 export async function GET() {
-  const feed = await getMetaCatalogFeed();
-  return new Response(feed.csv, {
-    headers: {
-      ...headers,
-      "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": 'inline; filename="meta-catalog.csv"',
-      "X-Meta-Catalog-Items": String(feed.accepted),
-      "X-Meta-Catalog-Exclusions": String(feed.issues.length),
-    },
-  });
+  try {
+    const feed = await getMetaCatalogFeed();
+    return new Response(feed.csv, {
+      headers: {
+        ...headers,
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": 'inline; filename="meta-catalog.csv"',
+        "X-Meta-Catalog-Items": String(feed.accepted),
+        "X-Meta-Catalog-Exclusions": String(feed.issues.length),
+      },
+    });
+  } catch {
+    return new Response("Feed unavailable.", { status: 500, headers });
+  }
 }
 
 export const HEAD = methodNotAllowed;

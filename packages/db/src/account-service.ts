@@ -466,6 +466,10 @@ export class AccountService {
             }
           : {}),
       },
+      omit: {
+        acceptanceIpHash: true,
+        acceptanceUserAgentHash: true,
+      },
       include: { items: { select: { id: true, titleSnapshot: true, quantity: true } } },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: limit + 1,
@@ -477,13 +481,24 @@ export class AccountService {
     assertUuid(orderId, "orderId");
     const order = await this.db.order.findFirst({
       where: { id: orderId, customerId },
+      omit: {
+        acceptanceIpHash: true,
+        acceptanceUserAgentHash: true,
+      },
       include: {
         items: {
+          omit: { unitCostWacCents: true },
           include: {
             variant: {
+              omit: { costCents: true },
               include: {
                 product: {
-                  include: { variants: { where: { deletedAt: null, status: "ACTIVE" } } },
+                  include: {
+                    variants: {
+                      where: { deletedAt: null, status: "ACTIVE" },
+                      omit: { costCents: true },
+                    },
+                  },
                 },
               },
             },
@@ -660,9 +675,17 @@ export class AccountService {
     await tx.address.deleteMany({ where: { customerId } });
     await tx.wishlistItem.deleteMany({ where: { customerId } });
     await tx.backInStockSubscription.updateMany({
-      where: { customerId },
+      where: {
+        OR: [{ customerId }, { customerId: null, email: previousEmail }],
+      },
       data: { customerId: null, email: anonymizedEmail, status: "CANCELLED", cancelledAt: now },
     });
+    await tx.$executeRaw`
+      UPDATE "AbandonedCart" SET "contactEmail" = NULL,
+        "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
+        "lastReminderOutcome" = 'SUPPRESSED'
+      WHERE "customerId" IS NULL AND lower("contactEmail") = lower(${previousEmail})
+    `;
     await tx.cart.updateMany({
       where: { customerId, status: "ACTIVE" },
       data: { status: "CANCELLED" },
@@ -723,10 +746,20 @@ export class AccountService {
           { orderId: null, recipientEmail: previousEmail },
         ],
       },
-      data: { recipientEmail: anonymizedEmail, anonymizedAt: now },
+      data: {
+        recipientEmail: anonymizedEmail,
+        subjectSnapshot: "Notificación anonimizada",
+        htmlBodySnapshot: "<p>Contenido anonimizado por solicitud de privacidad.</p>",
+        textBodySnapshot: "Contenido anonimizado por solicitud de privacidad.",
+        variablesSnapshot: {},
+        anonymizedAt: now,
+      },
     });
     await tx.supportTicket.updateMany({
-      where: { requesterCustomerId: customerId, contactEmailSnapshot: { not: anonymizedEmail } },
+      where: {
+        OR: [{ requesterCustomerId: customerId }, { order: { customerId } }],
+        contactEmailSnapshot: { not: anonymizedEmail },
+      },
       data: { contactEmailSnapshot: anonymizedEmail, version: { increment: 1 } },
     });
     const affectedReviews = await tx.review.findMany({

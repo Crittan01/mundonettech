@@ -135,6 +135,7 @@ const requiredTables = [
   "LifecycleStep",
   "LifecycleEnrollment",
   "LifecycleMessage",
+  "OperationRateLimit",
 ] as const;
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
 const nonBypassRoles = ["anon", "authenticated"] as const;
@@ -483,6 +484,12 @@ const requiredConstraints = [
   "LifecycleEnrollment_status_consistent",
   "LifecycleMessage_dispatch_version_nonnegative",
   "LifecycleMessage_status_consistent",
+  "OperationRateLimit_operation_check",
+  "OperationRateLimit_subjectHash_check",
+  "OperationRateLimit_ipHash_check",
+  "OperationRateLimit_ip_subject_check",
+  "OperationRateLimit_count_check",
+  "OperationRateLimit_expiration_check",
 ] as const;
 const requiredPartialIndexes = [
   "AdminUser_email_active_key",
@@ -555,6 +562,7 @@ const requiredTotalUniqueIndexes = [
   "ChannelLedgerEntry_deduplicationKey_key",
   "MetaCapiEvent_eventId_key",
   "MetaCapiEvent_orderId_key",
+  "OperationRateLimit_bucket_key",
 ] as const;
 const requiredCatalogIndexes = [
   "Product_searchVector_idx",

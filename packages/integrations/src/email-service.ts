@@ -918,7 +918,8 @@ export class EmailService {
     });
     if (!event) throw new EmailNotFoundError("Unsubscribe link is no longer available.");
     const actual = createHash("sha256").update(token).digest();
-    if (!timingSafeEqual(actual, Buffer.from(event.unsubscribeTokenHash)))
+    const expected = Buffer.from(event.unsubscribeTokenHash);
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
       throw new EmailValidationError("Unsubscribe token is invalid.");
     return event.topic;
   }

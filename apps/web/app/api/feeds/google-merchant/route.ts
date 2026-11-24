@@ -14,13 +14,17 @@ function methodNotAllowed(): Response {
 }
 
 export async function GET() {
-  const feed = await getGoogleMerchantFeed();
-  return new Response(feed, {
-    headers: {
-      ...headers,
-      "Content-Type": "application/xml; charset=utf-8",
-    },
-  });
+  try {
+    const feed = await getGoogleMerchantFeed();
+    return new Response(feed, {
+      headers: {
+        ...headers,
+        "Content-Type": "application/xml; charset=utf-8",
+      },
+    });
+  } catch {
+    return new Response("Feed unavailable.", { status: 500, headers });
+  }
 }
 
 export const HEAD = methodNotAllowed;

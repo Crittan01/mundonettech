@@ -8,6 +8,7 @@ const privateNoIndexHeaders = {
   "Cache-Control": "private, no-store, max-age=0",
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
+  "Referrer-Policy": "no-referrer",
 } as const;
 
 const orderStatusLabels: Record<OrderStatus, string> = {
@@ -58,7 +59,10 @@ export async function GET(
         { status: 409, headers: privateNoIndexHeaders },
       );
     }
-    throw error;
+    return Response.json(
+      { error: "Receipt download unavailable." },
+      { status: 500, headers: privateNoIndexHeaders },
+    );
   }
   if (!receipt) {
     return Response.json(

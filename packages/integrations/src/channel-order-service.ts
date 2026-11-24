@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import { hasAdminPermission, isAdminRole, type AdminPermission } from "@mundonettech/core";
 import {
@@ -26,7 +26,7 @@ import {
 
 import type { ChannelAuditContext } from "./channel-account-service.js";
 import { decryptIntegrationCredential, type CredentialKeyRing } from "./credential-crypto.js";
-import { canonicalIntegrationJson, integrationDigest } from "./integration-utils.js";
+import { integrationDigest } from "./integration-utils.js";
 import { parseMercadoLibreTokenCredential } from "./mercado-libre.js";
 import {
   MercadoLibreCatalogError,
@@ -444,12 +444,16 @@ export class ChannelOrderService {
       kind: notification.kind,
       externalId: notification.externalId,
     };
+    const payloadDigest = Buffer.from(integrationDigest(payload));
+    const matchesStoredPayload = (stored: unknown): boolean => {
+      const storedDigest = Buffer.from(integrationDigest(stored));
+      return (
+        storedDigest.length === payloadDigest.length && timingSafeEqual(storedDigest, payloadDigest)
+      );
+    };
     const existing = await this.db.domainOutbox.findUnique({ where: { deduplicationKey } });
     if (existing) {
-      if (
-        existing.eventType !== resourceEventType ||
-        canonicalIntegrationJson(existing.payload) !== canonicalIntegrationJson(payload)
-      ) {
+      if (existing.eventType !== resourceEventType || !matchesStoredPayload(existing.payload)) {
         throw new ChannelOrderError(
           "CONFLICT",
           "The notification ID was reused for another resource.",
@@ -470,12 +474,12 @@ export class ChannelOrderService {
       return { eventId: event.id, status: "ENQUEUED" };
     } catch (error) {
       const replay = await this.db.domainOutbox.findUnique({ where: { deduplicationKey } });
-      if (
-        !replay ||
-        replay.eventType !== resourceEventType ||
-        canonicalIntegrationJson(replay.payload) !== canonicalIntegrationJson(payload)
-      ) {
-        throw error;
+      if (!replay) throw error;
+      if (replay.eventType !== resourceEventType || !matchesStoredPayload(replay.payload)) {
+        throw new ChannelOrderError(
+          "CONFLICT",
+          "The notification ID was reused for another resource.",
+        );
       }
       return { eventId: replay.id, status: "REPLAYED" };
     }

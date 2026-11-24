@@ -34,6 +34,9 @@ const harness = vi.hoisted(() => {
 });
 
 vi.mock("server-only", () => ({}));
+vi.mock("@/lib/security/origin", async () => {
+  return import("../../apps/web/lib/security/origin");
+});
 vi.mock("@/lib/admin-media-upload", async () => {
   return import("../../apps/web/lib/admin-media-upload");
 });

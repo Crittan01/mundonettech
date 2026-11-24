@@ -79,13 +79,13 @@ describe("A2 — cuota administrativa persistente y distribuida", () => {
     assert.notEqual(stored.rows[0].subjectHash.toString("utf8"), actorId);
   });
 
-  it("separa operación, actor e IP y lanza un error fail-closed", async () => {
+  it("separa operación y actor, bloquea rotación de IP en ADMIN_USER y lanza error fail-closed", async () => {
     const base = { limit: 1, windowSeconds: 60, actorAdminUserId: randomUUID() };
     assert.equal((await consumeAdminOperationRateLimit(first, options(base))).allowed, true);
     assert.equal(
       (await consumeAdminOperationRateLimit(second, options({ ...base, ipHash: randomBytes(32) })))
         .allowed,
-      true,
+      false,
     );
     assert.equal(
       (
@@ -164,6 +164,21 @@ describe("A2 — cuota administrativa persistente y distribuida", () => {
       (await consumeOperationRateLimit(first, { ...orderOptions, ipHash: randomBytes(32) }))
         .allowed,
       true,
+    );
+    const globalOrderOptions = {
+      operation: "payments.wompi.verify.order.global",
+      subject: { type: "ORDER", orderId: randomUUID() },
+      ipHash,
+      scope: "subject",
+      limit: 1,
+      windowSeconds: 60,
+      throwOnLimit: false,
+    };
+    assert.equal((await consumeOperationRateLimit(first, globalOrderOptions)).allowed, true);
+    assert.equal(
+      (await consumeOperationRateLimit(second, { ...globalOrderOptions, ipHash: randomBytes(32) }))
+        .allowed,
+      false,
     );
 
     const globalResults = [];

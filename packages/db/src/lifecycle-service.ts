@@ -199,12 +199,24 @@ export class LifecycleService {
     lifecycleVersion(input.expectedVersion);
     return inInventoryTransaction(this.db, async (tx) => {
       await lifecycleActor(tx, audit, "crm:write");
-      await acquireOperationLocks(tx, [`lifecycle-journey:${input.journeyId}`]);
+      const peek = await tx.lifecycleJourney.findUnique({
+        where: { id: input.journeyId },
+        select: { segmentId: true },
+      });
+      if (!peek) throw new LifecycleError("NOT_FOUND", "Lifecycle journey not found.");
+      const locks = [
+        `lifecycle-journey:${input.journeyId}`,
+        `customer-segment:${peek.segmentId}`,
+      ].sort();
+      await acquireOperationLocks(tx, locks);
       const current = await tx.lifecycleJourney.findUnique({
         where: { id: input.journeyId },
         include: { steps: { orderBy: { position: "asc" } } },
       });
       if (!current) throw new LifecycleError("NOT_FOUND", "Lifecycle journey not found.");
+      if (current.segmentId !== peek.segmentId) {
+        throw new LifecycleError("CONFLICT", "The journey segment changed concurrently.");
+      }
       if (current.version !== input.expectedVersion || current.status === "ARCHIVED") {
         throw new LifecycleError("CONFLICT", "The journey changed or is already archived.");
       }

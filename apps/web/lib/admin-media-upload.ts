@@ -1,4 +1,5 @@
 import { AdminAuthorizationError } from "@/lib/security/admin-auth";
+import { hasCanonicalSameOrigin } from "@/lib/security/origin";
 
 export const adminMediaUploadLimits = {
   catalogBodyBytes: 101 * 1024 * 1024,
@@ -43,25 +44,7 @@ export function adminMediaMethodNotAllowed(): Response {
 }
 
 export function rejectInvalidAdminUploadOrigin(request: Request): Response | null {
-  const value = request.headers.get("origin");
-  const host = request.headers.get("host");
-  if (!value || !host || value.includes(",") || /[\s/\\@]/.test(host)) {
-    return adminUploadError(403, "invalid_origin");
-  }
-  try {
-    const origin = new URL(value);
-    if (
-      !["http:", "https:"].includes(origin.protocol) ||
-      origin.username ||
-      origin.password ||
-      origin.pathname !== "/" ||
-      origin.search ||
-      origin.hash ||
-      origin.host.toLowerCase() !== host.toLowerCase()
-    ) {
-      return adminUploadError(403, "invalid_origin");
-    }
-  } catch {
+  if (!hasCanonicalSameOrigin(request)) {
     return adminUploadError(403, "invalid_origin");
   }
   return null;
@@ -94,12 +77,59 @@ export type AdminMultipartResult =
   | { readonly ok: true; readonly form: FormData }
   | { readonly ok: false; readonly response: Response };
 
+export interface AdminMultipartLimits {
+  readonly maximumBodyBytes: number;
+  readonly maximumParts?: number;
+  readonly maximumHeaderBytes?: number;
+}
+
+const boundaryMarkerLimit = 220;
+
+function countBoundaryOccurrences(
+  chunk: Uint8Array,
+  marker: Uint8Array,
+  carry: Uint8Array,
+): { count: number; nextCarry: Uint8Array } {
+  const combined = new Uint8Array(carry.byteLength + chunk.byteLength);
+  combined.set(carry, 0);
+  combined.set(chunk, carry.byteLength);
+  let count = 0;
+  const maxStart = combined.byteLength - marker.byteLength;
+  for (let index = 0; index <= maxStart; index += 1) {
+    let matched = true;
+    for (let offset = 0; offset < marker.byteLength; offset += 1) {
+      if (combined[index + offset] !== marker[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      count += 1;
+      index += marker.byteLength - 1;
+    }
+  }
+  const keep = Math.min(marker.byteLength - 1, combined.byteLength);
+  return {
+    count,
+    nextCarry: keep > 0 ? combined.slice(combined.byteLength - keep) : new Uint8Array(0),
+  };
+}
+
 export async function readAdminMultipart(
   request: Request,
-  maximumBodyBytes: number,
+  maximumBodyBytesOrLimits: number | AdminMultipartLimits,
 ): Promise<AdminMultipartResult> {
+  const maximumBodyBytes =
+    typeof maximumBodyBytesOrLimits === "number"
+      ? maximumBodyBytesOrLimits
+      : maximumBodyBytesOrLimits.maximumBodyBytes;
+  const maximumParts =
+    typeof maximumBodyBytesOrLimits === "number"
+      ? 140
+      : (maximumBodyBytesOrLimits.maximumParts ?? 140);
   const contentType = request.headers.get("content-type") ?? "";
-  if (!multipartBoundary(contentType)) {
+  const boundary = multipartBoundary(contentType);
+  if (!boundary || boundary.length > boundaryMarkerLimit) {
     return { ok: false, response: adminUploadError(415, "unsupported_media_type") };
   }
   const rawDeclared = request.headers.get("content-length");
@@ -120,8 +150,12 @@ export async function readAdminMultipart(
     return { ok: false, response: adminUploadError(400, "invalid_upload") };
   }
 
+  const boundaryMarker = new TextEncoder().encode(`--${boundary}`);
   let total = 0;
+  let boundaryCount = 0;
+  let carry: Uint8Array = new Uint8Array(0);
   let exceeded = false;
+  let tooManyParts = false;
   let lengthMismatch = false;
   const limiter = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
@@ -129,6 +163,14 @@ export async function readAdminMultipart(
       if (total > maximumBodyBytes) {
         exceeded = true;
         controller.error(new Error("Multipart body limit exceeded."));
+        return;
+      }
+      const scanned = countBoundaryOccurrences(chunk, boundaryMarker, carry);
+      boundaryCount += scanned.count;
+      carry = scanned.nextCarry;
+      if (boundaryCount > maximumParts + 2) {
+        tooManyParts = true;
+        controller.error(new Error("Multipart part limit exceeded."));
         return;
       }
       controller.enqueue(chunk);
@@ -155,7 +197,7 @@ export async function readAdminMultipart(
     if (exceeded) {
       return { ok: false, response: adminUploadError(413, "payload_too_large") };
     }
-    if (lengthMismatch) {
+    if (tooManyParts || lengthMismatch) {
       return { ok: false, response: adminUploadError(400, "invalid_upload") };
     }
     return { ok: false, response: adminUploadError(400, "invalid_upload") };
@@ -197,6 +239,7 @@ export function requiredAdminUploadFile(
     !(file instanceof File) ||
     file.size === 0 ||
     file.size > maximumBytes ||
+    file.name.length > 255 ||
     /[\u0000\uFFFD]/.test(file.name)
   ) {
     return null;

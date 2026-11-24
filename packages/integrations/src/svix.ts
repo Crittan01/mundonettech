@@ -25,7 +25,8 @@ export function verifySvixWebhook(options: {
     !/^[A-Za-z0-9_-]{3,128}$/.test(options.id) ||
     !options.timestamp ||
     !/^[0-9]{1,13}$/.test(options.timestamp) ||
-    !options.signature
+    !options.signature ||
+    options.signature.length > 2048
   ) {
     throw new EmailValidationError("Svix webhook envelope is invalid.");
   }
@@ -47,13 +48,16 @@ export function verifySvixWebhook(options: {
   const expected = createHmac("sha256", key)
     .update(`${options.id}.${options.timestamp}.${options.body}`, "utf8")
     .digest();
-  const signatures = options.signature
-    .split(" ")
+  const rawEntries = options.signature.trim().split(/\s+/);
+  if (rawEntries.length > 16) {
+    throw new EmailValidationError("Svix webhook signature header has too many entries.");
+  }
+  const signatures = rawEntries
     .map((entry) => entry.split(","))
     .filter((parts) => parts.length === 2 && parts[0] === "v1")
     .map((parts) => parts[1]!);
   const valid = signatures.some((value) => {
-    if (!/^[A-Za-z0-9+/=_-]{32,128}$/.test(value)) return false;
+    if (!/^[A-Za-z0-9+/]{43}=$/.test(value)) return false;
     const candidate = Buffer.from(value, "base64");
     return candidate.length === expected.length && timingSafeEqual(candidate, expected);
   });

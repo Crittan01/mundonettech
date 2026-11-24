@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
-import { hasAdminPermission, normalizeEmail } from "@mundonettech/core";
+import { hasAdminPermission, isAdminRole, normalizeEmail } from "@mundonettech/core";
 import {
   IntegrationEnvironment,
   Prisma,
@@ -742,7 +742,11 @@ export class MetaCapiService {
         where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
         select: { id: true, role: true },
       });
-      if (!actor || !hasAdminPermission(actor.role, "integrations:write")) {
+      if (
+        !actor ||
+        !isAdminRole(actor.role) ||
+        !hasAdminPermission(actor.role, "integrations:write")
+      ) {
         throw new MetaCapiServiceError(
           "UNAUTHORIZED",
           "Active integrations administrator required.",
@@ -822,11 +826,20 @@ export class MetaCapiService {
       throw new MetaCapiServiceError("VALIDATION", "Reconciliation reference is invalid.");
     }
     return this.db.$transaction(async (tx) => {
-      const actor = await tx.adminUser.findFirst({
-        where: { id: input.audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { id: true, role: true },
-      });
-      if (!actor || !hasAdminPermission(actor.role, "integrations:write")) {
+      const actorRows = await tx.$queryRaw<Array<{ id: string; role: string }>>`
+        SELECT "id", "role"::text AS "role"
+        FROM "AdminUser"
+        WHERE "id" = ${input.audit.actorAdminUserId}::uuid
+          AND "status" = 'ACTIVE'
+          AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      const actor = actorRows[0];
+      if (
+        !actor ||
+        !isAdminRole(actor.role) ||
+        !hasAdminPermission(actor.role, "integrations:write")
+      ) {
         throw new MetaCapiServiceError(
           "UNAUTHORIZED",
           "Active integrations administrator required.",
@@ -836,7 +849,9 @@ export class MetaCapiService {
         SELECT * FROM "MetaCapiEvent" WHERE "id" = ${input.metaEventId}::uuid FOR UPDATE
       `;
       const event = rows[0];
-      if (!event) throw new MetaCapiServiceError("NOT_FOUND", "Meta CAPI event not found.");
+      if (!event || event.environment !== this.options.environment) {
+        throw new MetaCapiServiceError("NOT_FOUND", "Meta CAPI event not found.");
+      }
       if (input.resolution === "CONFIRMED_SENT" && event.status !== "UNCERTAIN") {
         throw new MetaCapiServiceError(
           "CONFLICT",

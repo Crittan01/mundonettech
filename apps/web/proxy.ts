@@ -5,6 +5,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { getPublicMediaOrigin, getSessionHmacSecret, getSupabasePublicConfig } from "@/lib/env";
 import { resolveCachedUrlRedirect } from "@/lib/redirects";
+import { hasCanonicalSameOrigin } from "@/lib/security/origin";
 import {
   adminAbsoluteSeconds,
   adminActivityCookie,
@@ -83,39 +84,64 @@ function loginRedirect(request: NextRequest, destination: string, reason: string
   return NextResponse.redirect(url);
 }
 
-function hasSameOriginServerAction(request: NextRequest): boolean {
-  const value = request.headers.get("origin");
-  if (!value) return false;
-  try {
-    const origin = new URL(value);
-    if (
-      !["http:", "https:"].includes(origin.protocol) ||
-      origin.username ||
-      origin.password ||
-      origin.pathname !== "/" ||
-      origin.search ||
-      origin.hash
-    ) {
-      return false;
-    }
-    const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
-    const host = forwardedHost || request.headers.get("host") || request.nextUrl.host;
-    return origin.host === host;
-  } catch {
-    return false;
-  }
+function isPrivateNoStorePath(pathname: string): boolean {
+  return (
+    hasProtectedPathPrefix(pathname, "/admin") ||
+    hasProtectedPathPrefix(pathname, "/mi-cuenta") ||
+    hasPathPrefix(pathname, "/pedido") ||
+    hasPathPrefix(pathname, "/recibo") ||
+    hasPathPrefix(pathname, "/pagar") ||
+    hasPathPrefix(pathname, "/propuesta") ||
+    hasPathPrefix(pathname, "/carrito") ||
+    hasPathPrefix(pathname, "/checkout") ||
+    hasPathPrefix(pathname, "/ingresar") ||
+    hasPathPrefix(pathname, "/registro") ||
+    hasPathPrefix(pathname, "/recuperar") ||
+    hasPathPrefix(pathname, "/verificar-correo")
+  );
+}
+
+function isCapabilityTokenPath(pathname: string): boolean {
+  return (
+    pathname === "/api/channels/mercado-libre/oauth/callback" ||
+    hasPathPrefix(pathname, "/recibo") ||
+    hasPathPrefix(pathname, "/api/recibos") ||
+    hasPathPrefix(pathname, "/pagar") ||
+    hasPathPrefix(pathname, "/propuesta") ||
+    hasPathPrefix(pathname, "/pedido") ||
+    hasPathPrefix(pathname, "/email/baja")
+  );
+}
+
+function isNonApiRouteHandlerPath(pathname: string): boolean {
+  return (
+    pathname === "/sitemap.xml" ||
+    hasPathPrefix(pathname, "/sitemaps") ||
+    hasPathPrefix(pathname, "/referido") ||
+    hasPathPrefix(pathname, "/email/baja") ||
+    hasPathPrefix(pathname, "/admin/finanzas/exportar") ||
+    hasPathPrefix(pathname, "/admin/facturacion/documentos")
+  );
+}
+
+function isServerActionPost(request: NextRequest): boolean {
+  if (request.method !== "POST") return false;
+  if (request.headers.has("next-action")) return true;
+  const pathname = request.nextUrl.pathname;
+  return !hasPathPrefix(pathname, "/api") && !isNonApiRouteHandlerPath(pathname);
 }
 
 export async function proxy(request: NextRequest) {
   const isDevelopment = process.env.NODE_ENV === "development";
+  const isProduction = process.env.NODE_ENV === "production";
   const requestNonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const config = getSupabasePublicConfig();
   const mediaOrigin = getPublicMediaOrigin();
   const csp = securityPolicy(config.url, mediaOrigin, isDevelopment);
+  const serverActionPost = isServerActionPost(request);
   if (
-    request.method === "POST" &&
-    request.headers.has("next-action") &&
-    !hasSameOriginServerAction(request)
+    serverActionPost &&
+    !hasCanonicalSameOrigin(request, { fallbackHost: request.nextUrl.host })
   ) {
     const rejected = new NextResponse(null, {
       status: 403,
@@ -162,6 +188,12 @@ export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request: { headers: requestHeaders } });
 
   const supabase = createServerClient(config.url, config.key, {
+    cookieOptions: {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: "lax",
+      path: "/",
+    },
     cookies: {
       getAll() {
         return request.cookies.getAll();
@@ -174,7 +206,13 @@ export async function proxy(request: NextRequest) {
           response.cookies.set(cookie);
         }
         for (const { name, value, options } of cookiesToSet) {
-          response.cookies.set(name, value, options);
+          response.cookies.set(name, value, {
+            ...options,
+            httpOnly: true,
+            secure: isProduction,
+            sameSite: options?.sameSite ?? "lax",
+            path: options?.path ?? "/",
+          });
         }
       },
     },
@@ -224,7 +262,11 @@ export async function proxy(request: NextRequest) {
     } catch {
       redirectResponse = loginRedirect(request, isAdmin ? "/admin/login" : "/ingresar", "timeout");
       if (token && !isPrefetch) {
-        response.cookies.set(cookieName, "", { ...sessionCookieOptions, maxAge: 0 });
+        response.cookies.set(cookieName, "", {
+          ...sessionCookieOptions,
+          maxAge: 0,
+          expires: new Date(0),
+        });
       }
     }
   } else if (user && pathname.startsWith("/pagina/") && !isPrefetch) {
@@ -246,7 +288,11 @@ export async function proxy(request: NextRequest) {
           });
         }
       } catch {
-        response.cookies.set(adminActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+        response.cookies.set(adminActivityCookie, "", {
+          ...sessionCookieOptions,
+          maxAge: 0,
+          expires: new Date(0),
+        });
       }
     }
   } else if (
@@ -279,7 +325,11 @@ export async function proxy(request: NextRequest) {
           });
         }
       } catch {
-        response.cookies.set(customerActivityCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+        response.cookies.set(customerActivityCookie, "", {
+          ...sessionCookieOptions,
+          maxAge: 0,
+          expires: new Date(0),
+        });
       }
     }
   }
@@ -289,18 +339,20 @@ export async function proxy(request: NextRequest) {
     response = redirectResponse;
   }
   applyHeaders(response, csp, isDevelopment);
-  if (request.headers.has("next-action")) {
+  if (serverActionPost) {
     response.headers.set("Cache-Control", "no-store");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
   }
-  if (pathname === "/api/channels/mercado-libre/oauth/callback") {
-    response.headers.set("Cache-Control", "no-store");
-    response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
-    response.headers.set("Referrer-Policy", "no-referrer");
-  }
-  if (pathname.startsWith("/propuesta/")) {
+  if (isPrivateNoStorePath(pathname)) {
     response.headers.set("Cache-Control", "private, no-store, max-age=0");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
+  if (isCapabilityTokenPath(pathname)) {
+    response.headers.set("Referrer-Policy", "no-referrer");
+    if (pathname === "/api/channels/mercado-libre/oauth/callback") {
+      response.headers.set("Cache-Control", "no-store");
+      response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+    }
   }
   return response;
 }

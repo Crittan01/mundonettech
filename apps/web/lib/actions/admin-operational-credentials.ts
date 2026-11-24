@@ -180,8 +180,8 @@ async function persist(formData: FormData, rotate: boolean): Promise<ActionState
       new TextEncoder().encode(JSON.stringify(credentialPayload(provider, formData))),
     );
     const environment = getIntegrationEnvironment();
-    if (provider === "aveonline") parseAveonlineCredentials(sealed);
-    else if (provider === "resend") parseEmailCredentials(sealed);
+    if (provider === "aveonline") parseAveonlineCredentials(sealed, environment);
+    else if (provider === "resend") parseEmailCredentials(sealed, environment);
     else if (provider === "gemini") parseGeminiCredentials(sealed);
     else if (provider === "meta") parseMetaCredentials(sealed, environment);
     else parseDianCredentials(sealed, environment);

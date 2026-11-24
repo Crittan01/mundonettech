@@ -91,7 +91,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
       </section>
       <section aria-labelledby="order-items" className="space-y-4">
         <h2 id="order-items" className="text-xl font-semibold">
-          Líneas, impuestos y WAC
+          {canReadFinance ? "Líneas, impuestos y WAC" : "Líneas e impuestos"}
         </h2>
         <div className="overflow-x-auto rounded-xl border border-border">
           <table className="w-full min-w-[980px] text-left text-sm">
@@ -387,7 +387,12 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
               key={order.refunds.length}
               orderId={order.id}
               idempotencyKey={`admin-refund:${randomUUID()}`}
-              items={order.items}
+              items={order.items.map(({ id, title, quantity, refundedQuantity }) => ({
+                id,
+                title,
+                quantity,
+                refundedQuantity,
+              }))}
             />
           ) : null}
         </section>

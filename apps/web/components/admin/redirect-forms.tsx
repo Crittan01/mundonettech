@@ -25,7 +25,7 @@ function Fields({
   prefix,
 }: {
   values?: Record<string, string> | undefined;
-  redirect?: UrlRedirect;
+  redirect?: Pick<UrlRedirect, "id" | "fromPath" | "toPath" | "statusCode" | "active">;
   prefix: string;
 }) {
   const fromPath = values?.fromPath ?? redirect?.fromPath ?? "";
@@ -123,7 +123,11 @@ export function CreateRedirectForm() {
   );
 }
 
-export function EditRedirectForm({ redirect }: { redirect: UrlRedirect }) {
+export function EditRedirectForm({
+  redirect,
+}: {
+  redirect: Pick<UrlRedirect, "id" | "fromPath" | "toPath" | "statusCode" | "active">;
+}) {
   return (
     <div className="space-y-3">
       <StatefulForm action={updateUrlRedirectAction} submitLabel="Guardar cambios">

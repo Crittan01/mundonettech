@@ -559,12 +559,37 @@ export class InvoiceService {
 
   private async failInvoice(
     invoiceId: string,
+    workerId: string,
     uncertain: boolean,
     code: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
+      const locked = await tx.$queryRaw<
+        Array<{
+          id: string;
+          orderId: string;
+          fullNumber: string;
+          status: string;
+          claimedBy: string | null;
+        }>
+      >`SELECT "id", "orderId", "fullNumber", "status", "claimedBy" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
+      const current = locked[0];
+      if (!current) throw new InvoiceNotFoundError();
+      if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
+        return {
+          id: current.id,
+          status: current.status as FiscalOperationResult["status"],
+          fullNumber: current.fullNumber,
+          replayed: true,
+        };
+      }
+      if (current.claimedBy !== workerId) {
+        throw new InvoiceConflictError(
+          "Invoice claim ownership changed before failure could be recorded.",
+        );
+      }
       const invoice = await tx.taxInvoice.update({
         where: { id: invoiceId },
         data: {
@@ -667,16 +692,25 @@ export class InvoiceService {
     if (current.status === "UNCERTAIN") {
       const found = await provider.find(current.cufe);
       if (found) return this.acceptInvoice(invoiceId, found, audit);
-      current = await this.db.taxInvoice.update({
-        where: { id: invoiceId },
+      const moved = await this.db.taxInvoice.updateMany({
+        where: { id: invoiceId, status: "UNCERTAIN", claimedBy: workerId },
         data: { status: "TRANSMITTING", transmittedAt: null },
       });
+      if (moved.count !== 1) {
+        throw new InvoiceConflictError("Invoice claim ownership changed during reconciliation.");
+      }
+      current = await this.db.taxInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
     }
-    if (!current.transmittedAt)
-      current = await this.db.taxInvoice.update({
-        where: { id: invoiceId },
+    if (!current.transmittedAt) {
+      const stamped = await this.db.taxInvoice.updateMany({
+        where: { id: invoiceId, status: "TRANSMITTING", claimedBy: workerId },
         data: { transmittedAt: new Date() },
       });
+      if (stamped.count !== 1) {
+        throw new InvoiceConflictError("Invoice claim ownership changed before transmission.");
+      }
+      current = await this.db.taxInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
+    }
     try {
       const result = await provider.transmit({
         documentId: current.id,
@@ -690,7 +724,7 @@ export class InvoiceService {
     } catch (error) {
       if (!(error instanceof InvoiceProviderError)) throw error;
       const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
-      return this.failInvoice(invoiceId, uncertain, error.code, audit);
+      return this.failInvoice(invoiceId, workerId, uncertain, error.code, audit);
     }
   }
 
@@ -760,12 +794,38 @@ export class InvoiceService {
 
   private async failCreditNote(
     creditNoteId: string,
+    workerId: string,
     uncertain: boolean,
     code: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
+      const locked = await tx.$queryRaw<
+        Array<{
+          id: string;
+          invoiceId: string;
+          refundId: string;
+          fullNumber: string;
+          status: string;
+          claimedBy: string | null;
+        }>
+      >`SELECT "id", "invoiceId", "refundId", "fullNumber", "status", "claimedBy" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
+      const current = locked[0];
+      if (!current) throw new InvoiceNotFoundError();
+      if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
+        return {
+          id: current.id,
+          status: current.status as FiscalOperationResult["status"],
+          fullNumber: current.fullNumber,
+          replayed: true,
+        };
+      }
+      if (current.claimedBy !== workerId) {
+        throw new InvoiceConflictError(
+          "Credit note claim ownership changed before failure could be recorded.",
+        );
+      }
       const note = await tx.creditNote.update({
         where: { id: creditNoteId },
         data: {
@@ -865,16 +925,27 @@ export class InvoiceService {
     if (current.status === "UNCERTAIN") {
       const found = await provider.find(current.cude);
       if (found) return this.acceptCreditNote(creditNoteId, found, audit);
-      current = await this.db.creditNote.update({
-        where: { id: creditNoteId },
+      const moved = await this.db.creditNote.updateMany({
+        where: { id: creditNoteId, status: "UNCERTAIN", claimedBy: workerId },
         data: { status: "TRANSMITTING", transmittedAt: null },
       });
+      if (moved.count !== 1) {
+        throw new InvoiceConflictError(
+          "Credit note claim ownership changed during reconciliation.",
+        );
+      }
+      current = await this.db.creditNote.findUniqueOrThrow({ where: { id: creditNoteId } });
     }
-    if (!current.transmittedAt)
-      current = await this.db.creditNote.update({
-        where: { id: creditNoteId },
+    if (!current.transmittedAt) {
+      const stamped = await this.db.creditNote.updateMany({
+        where: { id: creditNoteId, status: "TRANSMITTING", claimedBy: workerId },
         data: { transmittedAt: new Date() },
       });
+      if (stamped.count !== 1) {
+        throw new InvoiceConflictError("Credit note claim ownership changed before transmission.");
+      }
+      current = await this.db.creditNote.findUniqueOrThrow({ where: { id: creditNoteId } });
+    }
     try {
       const result = await provider.transmit({
         documentId: current.id,
@@ -888,7 +959,7 @@ export class InvoiceService {
     } catch (error) {
       if (!(error instanceof InvoiceProviderError)) throw error;
       const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
-      return this.failCreditNote(creditNoteId, uncertain, error.code, audit);
+      return this.failCreditNote(creditNoteId, workerId, uncertain, error.code, audit);
     }
   }
 }

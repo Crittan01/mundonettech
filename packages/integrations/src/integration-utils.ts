@@ -115,7 +115,54 @@ export function centsToDecimal(value: bigint): string {
   return `${whole}.${cents}`;
 }
 
-export function publicHttpsUrl(value: string, field: string, maximumPathLength = 2048): string {
+function isPrivateOrLocalHostname(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  const bare = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
+  if (
+    bare === "localhost" ||
+    bare.endsWith(".localhost") ||
+    bare === "::1" ||
+    bare === "::" ||
+    bare === "0.0.0.0"
+  ) {
+    return true;
+  }
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(bare);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    return false;
+  }
+  if (bare.includes(":")) {
+    if (
+      bare.startsWith("fc") ||
+      bare.startsWith("fd") ||
+      bare.startsWith("fe8") ||
+      bare.startsWith("fe9") ||
+      bare.startsWith("fea") ||
+      bare.startsWith("feb") ||
+      bare.startsWith("::ffff:")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function publicHttpsUrl(
+  value: string,
+  field: string,
+  options:
+    number | { readonly maximumPathLength?: number; readonly allowLoopback?: boolean } = 2048,
+): string {
+  const maximumPathLength =
+    typeof options === "number" ? options : (options.maximumPathLength ?? 2048);
+  const allowLoopback = typeof options === "number" ? true : (options.allowLoopback ?? true);
   if (typeof value !== "string" || value.length > maximumPathLength)
     throw new TypeError(`${field} must be a valid URL.`);
   let url: URL;
@@ -124,14 +171,14 @@ export function publicHttpsUrl(value: string, field: string, maximumPathLength =
   } catch {
     throw new TypeError(`${field} must be an absolute URL.`);
   }
-  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
-  if (
-    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
-    url.username ||
-    url.password ||
-    url.hash
-  ) {
-    throw new TypeError(`${field} requires HTTPS outside loopback and no credentials or fragment.`);
+  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname.toLowerCase());
+  const protocolOk =
+    url.protocol === "https:" || (allowLoopback && url.protocol === "http:" && loopback);
+  const hostBlocked = !allowLoopback && isPrivateOrLocalHostname(url.hostname);
+  if (!protocolOk || hostBlocked || url.username || url.password || url.hash) {
+    throw new TypeError(
+      `${field} requires a public HTTPS URL${allowLoopback ? " (or loopback in LOCAL)" : ""} with no credentials or fragment.`,
+    );
   }
   return url.toString();
 }

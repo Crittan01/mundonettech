@@ -333,7 +333,7 @@ describe("A2 — pagos desde comprobante y titularidad", () => {
       credentialId,
       expectedOrderId: orderId,
     });
-    expect(mocks.consumeRateLimit).toHaveBeenCalledTimes(2);
+    expect(mocks.consumeRateLimit).toHaveBeenCalledTimes(3);
     expect(Math.max(...mocks.consumeRateLimit.mock.invocationCallOrder)).toBeLessThan(
       mocks.synchronize.mock.invocationCallOrder[0]!,
     );
@@ -374,7 +374,7 @@ describe("A2 — pagos desde comprobante y titularidad", () => {
     expect(mocks.synchronize).not.toHaveBeenCalled();
   });
 
-  it("rechaza una referencia persistida de otro pedido sin cuota ni proveedor", async () => {
+  it("rechaza una referencia persistida de otro pedido antes de la cuota por pedido y del proveedor", async () => {
     mocks.transactionFindFirst.mockResolvedValueOnce({
       attempt: { orderId: "99999999-9999-4999-8999-999999999999", credentialId },
     });
@@ -386,7 +386,11 @@ describe("A2 — pagos desde comprobante y titularidad", () => {
 
     expect(result.status).toBe("error");
     expect(mocks.attemptFindFirst).not.toHaveBeenCalled();
-    expect(mocks.consumeRateLimit).not.toHaveBeenCalled();
+    expect(mocks.consumeRateLimit).toHaveBeenCalledTimes(1);
+    expect(mocks.consumeRateLimit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ operation: "payments.wompi.verify.ip" }),
+    );
     expect(mocks.synchronize).not.toHaveBeenCalled();
   });
 

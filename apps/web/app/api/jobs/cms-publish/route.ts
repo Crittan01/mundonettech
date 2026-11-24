@@ -14,12 +14,25 @@ const noStoreHeaders = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
-export async function GET() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } },
   );
 }
+
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
   const secret = process.env.CMS_CRON_SECRET?.trim() ?? "";

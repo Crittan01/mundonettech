@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { cmsBlockTypes, parseCmsBlock, renderCmsBlock } from "../../../packages/cms/dist/index.js";
+import { maskEmail, maskName, sanitizeAuditValue } from "../../../packages/core/dist/index.js";
 import { describe, expect, it, vi } from "vitest";
 
 import { loadTypeScriptModule } from "./route-loader.js";
@@ -263,7 +264,17 @@ function createHarness(
   const loadedModule = loadTypeScriptModule<{
     readonly CmsService: new (database: unknown) => CmsServiceInstance;
   }>(fileURLToPath(new URL("../../../packages/cms/src/cms-service.ts", import.meta.url)), {
-    "@mundonettech/db": { Prisma: {}, PrismaClient: class {} },
+    "@mundonettech/core": { maskEmail, maskName, sanitizeAuditValue },
+    "@mundonettech/db": {
+      Prisma: {},
+      PrismaClient: class {},
+      assertAdminActorInTransaction: vi.fn(async () => ({
+        id: actorId,
+        authUserId: actorId,
+        email: "ops@example.test",
+        role: "OPERATIONS_MANAGER",
+      })),
+    },
     "./blocks.js": { cmsBlockTypes, parseCmsBlock, renderCmsBlock },
   });
   return {

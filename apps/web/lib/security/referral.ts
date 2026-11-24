@@ -26,7 +26,7 @@ export async function consumeReferralPath(): Promise<string | null> {
   const store = await cookies();
   const value = store.get(referralCookie)?.value;
   if (!value) return null;
-  store.set(referralCookie, "", { ...referralCookieOptions, maxAge: 0 });
+  store.set(referralCookie, "", { ...referralCookieOptions, maxAge: 0, expires: new Date(0) });
   try {
     return `/mi-cuenta/beneficios?codigo=${normalizeReferralCode(value)}`;
   } catch {
@@ -36,5 +36,5 @@ export async function consumeReferralPath(): Promise<string | null> {
 
 export async function clearReferralCode(): Promise<void> {
   const store = await cookies();
-  store.set(referralCookie, "", { ...referralCookieOptions, maxAge: 0 });
+  store.set(referralCookie, "", { ...referralCookieOptions, maxAge: 0, expires: new Date(0) });
 }

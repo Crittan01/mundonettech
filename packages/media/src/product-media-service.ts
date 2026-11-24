@@ -506,13 +506,29 @@ export class ProductMediaService {
     validateBytes(input.bytes, productMediaLimits.imageBytes, "Image bytes");
     await this.assertTargetExists(target);
     const storage = this.requireStorage();
-    const stored = await storeImageDerivatives(
-      storage,
-      input.bytes,
-      targetPrefix(target, "image"),
-      undefined,
-      { cleanup: (keys) => this.compensate(target.productId, [keys]) },
-    );
+    let stored;
+    try {
+      stored = await storeImageDerivatives(
+        storage,
+        input.bytes,
+        targetPrefix(target, "image"),
+        undefined,
+        { cleanup: (keys) => this.compensate(target.productId, [keys]) },
+      );
+    } catch (error) {
+      if (error instanceof ProductMediaValidationError) throw error;
+      if (
+        error instanceof TypeError ||
+        error instanceof RangeError ||
+        (error instanceof Error &&
+          /Unsupported|Invalid|SVG|EXIF|pixel|dimension|magic|corrupt|header|ispe/i.test(
+            error.message,
+          ))
+      ) {
+        throw new ProductMediaValidationError(error.message);
+      }
+      throw error;
+    }
     const objectGroups = [stored.map((item) => item.key)];
     let primary: StoredImageDerivative;
     try {
@@ -559,7 +575,13 @@ export class ProductMediaService {
     let totalBytes = 0;
     for (const frame of input.frames) {
       validateBytes(frame, productMediaLimits.spinFrameBytes, "SPIN_360 frame bytes");
-      inspectImageMagic(frame);
+      try {
+        inspectImageMagic(frame);
+      } catch (error) {
+        throw new ProductMediaValidationError(
+          error instanceof Error ? error.message : "Invalid SPIN_360 frame image.",
+        );
+      }
       totalBytes += frame.byteLength;
       if (totalBytes > productMediaLimits.spinTotalBytes) {
         throw new ProductMediaValidationError("SPIN_360 exceeds the aggregate byte limit.");
@@ -617,8 +639,14 @@ export class ProductMediaService {
     validateAudit(audit);
     validateBytes(input.glb, productMediaLimits.glbBytes, "GLB bytes");
     if (input.usdz) validateBytes(input.usdz, productMediaLimits.usdzBytes, "USDZ bytes");
-    validateGlb(input.glb);
-    if (input.usdz) await validateUsdz(input.usdz);
+    try {
+      validateGlb(input.glb);
+      if (input.usdz) await validateUsdz(input.usdz);
+    } catch (error) {
+      throw new ProductMediaValidationError(
+        error instanceof Error ? error.message : "Invalid 3D model asset.",
+      );
+    }
     await this.assertTargetExists(target);
     const storage = this.requireStorage();
     const prefix = targetPrefix(target, "model");

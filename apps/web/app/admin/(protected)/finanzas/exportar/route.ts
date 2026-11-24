@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { z } from "zod";
 
 import { getDatabaseClock } from "@/lib/database-clock";
@@ -5,6 +7,7 @@ import { getDatabase } from "@/lib/db";
 import { parseFinanceRange } from "@/lib/finance-params";
 import { financeService } from "@/lib/finance";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
+import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const headers = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -26,8 +29,9 @@ function singleSearchParam(searchParams: URLSearchParams, key: string): string |
 }
 
 export async function GET(request: Request) {
+  let session;
   try {
-    await getAdminSession({ permission: "finance:read", requireRecentMfa: true });
+    session = await getAdminSession({ permission: "finance:read", requireRecentMfa: true });
   } catch (error) {
     if (error instanceof AdminAuthorizationError) {
       const forbidden = error.code === "FORBIDDEN";
@@ -36,11 +40,12 @@ export async function GET(request: Request) {
         { status: forbidden ? 403 : 401, headers },
       );
     }
-    throw error;
+    return Response.json({ error: "Internal server error." }, { status: 500, headers });
   }
   try {
     const url = new URL(request.url);
-    const now = await getDatabaseClock(getDatabase());
+    const db = getDatabase();
+    const now = await getDatabaseClock(db);
     const defaultYear = Number(
       new Intl.DateTimeFormat("en-CA", { timeZone: "America/Bogota", year: "numeric" }).format(now),
     );
@@ -52,7 +57,25 @@ export async function GET(request: Request) {
       },
       defaultYear,
     );
+    const context = await getRequestSecurityContext();
     const csv = await financeService().exportCsv(range);
+    const rowCount = csv.split(/\r?\n/).filter((line) => line.length > 0).length - 1;
+    await db.adminActionLog.create({
+      data: {
+        actorAdminUserId: session.profile.id,
+        action: "FINANCE_CSV_EXPORTED",
+        targetType: "FinanceReport",
+        targetId: `${range.fromDate}:${range.toDate}`,
+        requestId: randomUUID(),
+        ipHash: context.ipHash,
+        userAgentHash: context.userAgentHash,
+        metadata: {
+          fromDate: range.fromDate,
+          toDate: range.toDate,
+          rowCount: Math.max(0, rowCount),
+        },
+      },
+    });
     return new Response(`\uFEFF${csv}\r\n`, {
       headers: {
         ...headers,
@@ -67,7 +90,7 @@ export async function GET(request: Request) {
         { status: 400, headers },
       );
     }
-    throw error;
+    return Response.json({ error: "Finance export failed." }, { status: 500, headers });
   }
 }
 

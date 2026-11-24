@@ -132,12 +132,12 @@ export function parseDianCredentials(
     const softwarePin = text(record, "softwarePin", 255, 5);
     if (!/^[A-Za-z0-9-]{8,64}$/.test(softwareId))
       throw new InvoiceProviderError("DIAN softwareId is invalid.", "INVALID_CREDENTIAL");
+    const allowLoopback = environment === "LOCAL";
     return {
       bearerToken: text(record, "bearerToken", 4096, 20),
-      providerUrl: publicHttpsUrl(text(record, "providerUrl", 2048), "providerUrl").replace(
-        /\/$/,
-        "",
-      ),
+      providerUrl: publicHttpsUrl(text(record, "providerUrl", 2048), "providerUrl", {
+        allowLoopback,
+      }).replace(/\/$/, ""),
       issuerNit,
       issuerDv,
       issuerLegalName: text(record, "issuerLegalName", 200, 2),

@@ -102,7 +102,6 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
                 <div>
                   <h2 className="font-semibold">{media.originalFilename}</h2>
                   <p className="mt-1 font-mono text-xs text-muted-foreground">ID: {media.id}</p>
-                  <p className="mt-1 text-xs break-all text-muted-foreground">{media.storageKey}</p>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {media.mimeType} · {media.byteSize} bytes · {derivativeCount} derivados ·{" "}
                     {maskEmail(media.createdBy.email)}

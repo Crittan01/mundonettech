@@ -20,7 +20,7 @@ export async function establishGuestOrderSession(
 
 export async function clearGuestOrderSession(): Promise<void> {
   const store = await cookies();
-  store.set(guestOrderCookie, "", { ...sessionCookieOptions, maxAge: 0 });
+  store.set(guestOrderCookie, "", { ...sessionCookieOptions, maxAge: 0, expires: new Date(0) });
 }
 
 export async function getGuestOrderAccess(

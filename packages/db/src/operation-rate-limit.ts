@@ -5,11 +5,14 @@ import { assertUuid } from "./inventory-shared.js";
 import type { DatabaseExecutor } from "./primitives.js";
 
 const operationPattern = /^[a-z][a-z0-9.-]{1,79}$/;
+const globalSubjectIpHash = new Uint8Array(32);
 
 export type OperationRateLimitSubject =
   | { readonly type: "ADMIN_USER"; readonly adminUserId: string }
   | { readonly type: "ORDER"; readonly orderId: string }
   | { readonly type: "IP" };
+
+export type OperationRateLimitScope = "subject" | "subject-ip";
 
 export class OperationRateLimitError extends Error {
   constructor(
@@ -93,12 +96,18 @@ export async function consumeOperationRateLimit(
     ipHash: Uint8Array;
     limit: number;
     windowSeconds: number;
+    scope?: OperationRateLimitScope;
     throwOnLimit?: boolean;
   },
 ): Promise<OperationRateLimitResult> {
   validateOptions(options);
   const verifiedIpHash = hash32(options.ipHash, "ipHash");
   const { subjectType, subjectHash } = subjectIdentity(options.subject, verifiedIpHash);
+  const scope: OperationRateLimitScope =
+    options.subject.type === "IP"
+      ? "subject-ip"
+      : (options.scope ?? (options.subject.type === "ADMIN_USER" ? "subject" : "subject-ip"));
+  const bucketIpHash = scope === "subject" ? globalSubjectIpHash : verifiedIpHash;
   const rows = await db.$queryRaw<
     Array<{ allowed: boolean; retryAfterSeconds: number; remaining: number }>
   >`
@@ -122,7 +131,7 @@ export async function consumeOperationRateLimit(
         "operation", "subjectType", "subjectHash", "ipHash", "windowStartedAt", "count", "expiresAt"
       )
       SELECT ${options.operation}, ${subjectType}::"OperationRateLimitSubjectType", ${subjectHash},
-        ${verifiedIpHash}, "params"."windowStartedAt", 1,
+        ${bucketIpHash}, "params"."windowStartedAt", 1,
         "params"."windowStartedAt" + make_interval(secs => ${options.windowSeconds})
       FROM "params"
       ON CONFLICT ("operation", "subjectType", "subjectHash", "ipHash", "windowStartedAt")

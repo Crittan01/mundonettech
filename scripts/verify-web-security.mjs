@@ -537,7 +537,17 @@ export async function verifyWebSecurity(
     "/propuesta/token-invalido",
     "/recibo/token-invalido",
   ]) {
-    const response = await request(origin, transactionalPath);
+    const isTokenRoute =
+      transactionalPath.startsWith("/pagar/") ||
+      transactionalPath.startsWith("/pedido/") ||
+      transactionalPath.startsWith("/propuesta/") ||
+      transactionalPath.startsWith("/recibo/");
+    const response = await request(
+      origin,
+      transactionalPath,
+      {},
+      isTokenRoute ? { expectedReferrerPolicy: "no-referrer" } : {},
+    );
     if (transactionalPath === "/carrito") {
       requireCondition(response.ok, "Normal GET /carrito without Origin must remain available.");
     }
@@ -546,12 +556,10 @@ export async function verifyWebSecurity(
       (response.headers.get("x-robots-tag") ?? "").includes("noindex") || html.includes("noindex"),
       `${transactionalPath}: transactional surface must carry noindex.`,
     );
-    if (transactionalPath.startsWith("/propuesta/")) {
-      requireCondition(
-        (response.headers.get("cache-control") ?? "").includes("no-store"),
-        `${transactionalPath}: B2B proposal surface must carry no-store.`,
-      );
-    }
+    requireCondition(
+      (response.headers.get("cache-control") ?? "").includes("no-store"),
+      `${transactionalPath}: transactional surface must carry no-store.`,
+    );
   }
 
   for (const sitemapPath of ["/sitemap.xml", "/sitemaps/0.xml"]) {
@@ -586,7 +594,12 @@ export async function verifyWebSecurity(
     "/api/recibos/token-invalido/documentos/invoice/00000000-0000-4000-8000-000000000000",
   ];
   for (const receiptAssetPath of receiptAssetPaths) {
-    const response = await request(origin, receiptAssetPath);
+    const response = await request(
+      origin,
+      receiptAssetPath,
+      {},
+      { expectedReferrerPolicy: "no-referrer" },
+    );
     requireCondition(response.status === 404, `${receiptAssetPath}: invalid token must 404.`);
     verifyNoStoreNoIndexNosniff(response, receiptAssetPath);
   }
@@ -610,13 +623,19 @@ export async function verifyWebSecurity(
     "/api/health/ready",
   ];
   for (const path of getOnlyPaths) {
+    const headerOptions = path.startsWith("/api/recibos/")
+      ? { expectedReferrerPolicy: "no-referrer" }
+      : {};
     for (const method of ["HEAD", "POST", "OPTIONS"]) {
-      await requestMethodNotAllowed(origin, path, method);
+      await requestMethodNotAllowed(origin, path, method, "GET", headerOptions);
     }
   }
 
   const unsubscribePath = "/email/baja/token-invalido";
-  const unsubscribeHeaderOptions = { allowIsolatedNonePolicy: true };
+  const unsubscribeHeaderOptions = {
+    allowIsolatedNonePolicy: true,
+    expectedReferrerPolicy: "no-referrer",
+  };
   const unsubscribeGet = await request(origin, unsubscribePath, {}, unsubscribeHeaderOptions);
   requireCondition(unsubscribeGet.status === 404, "Invalid unsubscribe GET must return 404.");
   verifyNoStoreNoIndexNosniff(unsubscribeGet, `GET ${unsubscribePath}`);
@@ -1017,8 +1036,61 @@ export async function verifyWebSecurity(
     },
   });
   requireCondition(
+    options.status === 405 && options.headers.get("allow") === "POST",
+    "POST-only route OPTIONS must return 405 with Allow: POST.",
+  );
+  verifyNoStoreNoIndexNosniff(options, "OPTIONS /api/metrics/funnel");
+  requireCondition(
     !options.headers.has("access-control-allow-origin"),
     "Cross-site preflight received CORS permission.",
+  );
+
+  for (const postOnlyPath of ["/api/jobs/orders", "/api/webhooks/wompi", "/api/metrics/funnel"]) {
+    for (const method of ["HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+      await requestMethodNotAllowed(origin, postOnlyPath, method, "POST");
+    }
+  }
+
+  const mpaWithoutOrigin = await request(origin, "/carrito", {
+    method: "POST",
+    headers: { "Content-Type": "multipart/form-data; boundary=mpa" },
+    body: `--mpa\r\nContent-Disposition: form-data; name="$ACTION_ID_${syntheticActionId}"\r\n\r\n\r\n--mpa--\r\n`,
+  });
+  await verifyActionCsrfRejection(
+    mpaWithoutOrigin,
+    "MPA multipart Server Action without Next-Action or Origin",
+    [syntheticActionId],
+  );
+
+  const spoofedForwardedHost = await request(origin, "/ingresar", {
+    method: "POST",
+    headers: {
+      "Next-Action": syntheticActionId,
+      "X-Forwarded-Host": "evil.example",
+      Origin: "https://evil.example",
+      "Content-Type": "text/plain;charset=UTF-8",
+    },
+    body: "[]",
+  });
+  await verifyActionCsrfRejection(
+    spoofedForwardedHost,
+    "Server Action with spoofed X-Forwarded-Host",
+    [syntheticActionId, "evil.example"],
+  );
+
+  const trailingSlashOrigin = await request(origin, "/ingresar", {
+    method: "POST",
+    headers: {
+      "Next-Action": syntheticActionId,
+      Origin: `${origin}/`,
+      "Content-Type": "text/plain;charset=UTF-8",
+    },
+    body: "[]",
+  });
+  await verifyActionCsrfRejection(
+    trailingSlashOrigin,
+    "Server Action with non-canonical trailing-slash Origin",
+    [syntheticActionId],
   );
 
   console.log(

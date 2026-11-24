@@ -2,6 +2,7 @@ import { FunnelService } from "@mundonettech/db";
 import { z } from "zod";
 
 import { getDatabase } from "@/lib/db";
+import { hasCanonicalSameOrigin } from "@/lib/security/origin";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const maximumBodyBytes = 16_384;
@@ -59,26 +60,7 @@ function acceptRate(clientKey: string): boolean {
 }
 
 function hasValidOrigin(request: Request): boolean {
-  const value = request.headers.get("origin");
-  const host = request.headers.get("host");
-  if (!value || !host) return false;
-  if (!/^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?$/.test(host)) return false;
-  try {
-    const origin = new URL(value);
-    const loopback = ["127.0.0.1", "localhost", "::1"].includes(origin.hostname);
-    if (
-      origin.origin !== value ||
-      (origin.protocol !== "https:" && !(origin.protocol === "http:" && loopback))
-    ) {
-      return false;
-    }
-    const expected = new URL(`${origin.protocol}//${host}`);
-    return (
-      expected.origin === origin.origin && expected.username === "" && expected.password === ""
-    );
-  } catch {
-    return false;
-  }
+  return hasCanonicalSameOrigin(request);
 }
 
 function declaredBodyLength(request: Request): number {
@@ -118,12 +100,25 @@ async function readBody(request: Request): Promise<string> {
   }
 }
 
-export async function GET() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...headers, Allow: "POST" } },
   );
 }
+
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
   if (!hasValidOrigin(request)) {

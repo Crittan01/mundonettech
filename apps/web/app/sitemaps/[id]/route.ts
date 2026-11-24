@@ -20,18 +20,22 @@ function methodNotAllowed(): Response {
 }
 
 export async function GET(_request: Request, { params }: RouteContext<"/sitemaps/[id]">) {
-  const { id: rawId } = await params;
-  const match = /^(0|[1-9]\d{0,5})\.xml$/.exec(rawId);
-  if (!match) return notFound();
-  const id = Number(match[1]);
-  const partitions = await getSitemapPartitions();
-  if (id >= partitions.length) return notFound();
-  return new Response(buildSitemapUrlSet(partitions[id]!), {
-    headers: {
-      ...headers,
-      "Content-Type": "application/xml; charset=utf-8",
-    },
-  });
+  try {
+    const { id: rawId } = await params;
+    const match = /^(0|[1-9]\d{0,5})\.xml$/.exec(rawId);
+    if (!match) return notFound();
+    const id = Number(match[1]);
+    const partitions = await getSitemapPartitions();
+    if (id >= partitions.length) return notFound();
+    return new Response(buildSitemapUrlSet(partitions[id]!), {
+      headers: {
+        ...headers,
+        "Content-Type": "application/xml; charset=utf-8",
+      },
+    });
+  } catch {
+    return new Response("Sitemap unavailable.", { status: 500, headers });
+  }
 }
 
 export const HEAD = methodNotAllowed;

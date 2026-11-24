@@ -53,7 +53,10 @@ export async function POST(request: Request): Promise<Response> {
   let storage: ReturnType<typeof createMediaStorage> | null = null;
   try {
     const context = await getRequestSecurityContext();
-    const multipart = await readAdminMultipart(request, adminMediaUploadLimits.cmsBodyBytes);
+    const multipart = await readAdminMultipart(request, {
+      maximumBodyBytes: adminMediaUploadLimits.cmsBodyBytes,
+      maximumParts: 5,
+    });
     if (!multipart.ok) return multipart.response;
     const form = multipart.form;
     if (!validAdminUploadKeys(form, allowedFields)) {

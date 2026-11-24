@@ -9,6 +9,7 @@ const headers = {
     "default-src 'none'; style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; manifest-src 'none'",
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
+  "Referrer-Policy": "no-referrer",
 } as const;
 
 function escapeHtml(value: string): string {
@@ -44,7 +45,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ tok
         headers: { ...headers, "Content-Type": "text/plain; charset=utf-8" },
       });
     }
-    throw error;
+    return new Response("Servicio no disponible", {
+      status: 500,
+      headers: { ...headers, "Content-Type": "text/plain; charset=utf-8" },
+    });
   }
 }
 
@@ -108,7 +112,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
   } catch (error) {
     if (error instanceof EmailValidationError || error instanceof EmailNotFoundError)
       return new Response(null, { status: 404, headers });
-    throw error;
+    return new Response(null, { status: 500, headers });
   }
 }
 

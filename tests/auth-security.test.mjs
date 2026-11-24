@@ -125,7 +125,7 @@ describe("F0.4 — RBAC three-ring authorization", () => {
     const currentRoleGuard = action.slice(targetLookup, superadminGuard);
     assert.match(
       currentRoleGuard,
-      /if \(!canAssignAdminRole\(session\.profile\.role, target\.role\)\)/,
+      /if \(!canAssignAdminRole\((?:session\.profile|freshActor)\.role, target\.role\)\)/,
     );
     assert.doesNotMatch(currentRoleGuard, /parsed\.data\.role/);
   });
@@ -268,6 +268,17 @@ describe("F0.4 — PII minimization and password policy", () => {
       assert.equal(sanitized.nested[key], "[redactado]", key);
       assert.equal(JSON.stringify(sanitized).includes("sensitive-marker"), false, key);
     }
+    const sha256 = "a".repeat(64);
+    const cmsDigests = sanitizeAuditValue({
+      titleHash: sha256,
+      contentHash: sha256,
+      seoTitleHash: "not-a-digest",
+      passwordHash: sha256,
+    });
+    assert.equal(cmsDigests.titleHash, sha256);
+    assert.equal(cmsDigests.contentHash, sha256);
+    assert.equal(cmsDigests.seoTitleHash, "[redactado]");
+    assert.equal(cmsDigests.passwordHash, "[redactado]");
   });
 
   it("enforces normalized email and all password dimensions", () => {

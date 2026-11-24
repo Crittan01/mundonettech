@@ -241,6 +241,7 @@ function proxyHarness(options = {}) {
         return options.persistedRedirect ?? null;
       },
     },
+    "@/lib/security/origin": loadTypeScriptModule("apps/web/lib/security/origin.ts", {}),
     "@/lib/security/session-policy": {
       adminAbsoluteSeconds: 43_200,
       adminActivityCookie: "admin_activity",
@@ -304,7 +305,7 @@ describe("A2 proxy security behavior", () => {
       }),
     );
     assert.equal(accepted.status, 200);
-    assert.equal(accepted.headers.get("cache-control"), "no-store");
+    assert.equal(accepted.headers.get("cache-control"), "private, no-store, max-age=0");
     assert.equal(accepted.headers.get("x-robots-tag"), "noindex, nofollow, noarchive");
     assertProxySecurityHeaders(accepted);
 
@@ -500,6 +501,7 @@ function adminSessionHarness(options = {}) {
     "next/server": { connection: async () => undefined },
     "@/lib/db": { getDatabase: () => ({ adminUser: { findFirst: async () => profile } }) },
     "@/lib/env": { getSessionHmacSecret: () => hmacSecret },
+    "@/lib/security/origin": loadTypeScriptModule("apps/web/lib/security/origin.ts", {}),
     "@/lib/security/session-policy": {
       adminActivityCookie: "admin_activity",
       adminIdleSeconds: 1800,
@@ -931,6 +933,22 @@ function adminActionHarness(options = {}) {
       verifyTimeoutToken:
         options.verifyResetToken ?? (() => ({ iat: Math.floor(Date.now() / 1000) - 60 })),
     },
+    "@mundonettech/db": {
+      AdminOperationRateLimitError: class AdminOperationRateLimitError extends Error {
+        constructor(retryAfterSeconds = 60) {
+          super("rate limited");
+          this.retryAfterSeconds = retryAfterSeconds;
+        }
+      },
+      OperationRateLimitError: class OperationRateLimitError extends Error {
+        constructor(retryAfterSeconds = 60) {
+          super("rate limited");
+          this.retryAfterSeconds = retryAfterSeconds;
+        }
+      },
+      consumeAdminOperationRateLimit: spy(async () => ({ allowed: true, remaining: 5 })),
+      consumeOperationRateLimit: spy(async () => ({ allowed: true, remaining: 5 })),
+    },
     "next/cache": { revalidatePath: spy() },
     "next/headers": {
       cookies: async () => ({
@@ -942,6 +960,8 @@ function adminActionHarness(options = {}) {
     "@/lib/action-state": {
       actionError: (message) => ({ status: "error", message }),
       actionSuccess: (message) => ({ status: "success", message }),
+      formEntries: (formData) =>
+        Array.from(formData.entries()).filter(([key]) => !key.startsWith("$ACTION_")),
     },
     "@/lib/db": { getDatabase: () => db },
     "@/lib/env": { getSessionHmacSecret: () => hmacSecret },
@@ -961,6 +981,7 @@ function adminActionHarness(options = {}) {
       regenerateRecoveryCodesInTransaction,
     },
     "@/lib/security/request-context": { getRequestSecurityContext, recordSecurityEvent },
+    "@/lib/security/origin": loadTypeScriptModule("apps/web/lib/security/origin.ts", {}),
     "@/lib/security/session-policy": {
       factorResetCookie: "admin_factor_reset",
       factorResetSeconds: 600,
@@ -1319,12 +1340,31 @@ function adminUsersHarness(options = {}) {
       normalizeEmail: core.normalizeEmail,
       OutboundEmailDisabledError: class OutboundEmailDisabledError extends Error {},
     },
+    "@mundonettech/db": {
+      AdminActorAuthorizationError: class AdminActorAuthorizationError extends Error {},
+      AdminOperationRateLimitError: class AdminOperationRateLimitError extends Error {
+        constructor(retryAfterSeconds = 60) {
+          super("rate limited");
+          this.retryAfterSeconds = retryAfterSeconds;
+        }
+      },
+      assertAdminActorInTransaction: spy(async () => ({
+        id: adminId,
+        authUserId,
+        email: "actor@example.test",
+        role: actorRole,
+      })),
+      consumeAdminOperationRateLimit: spy(async () => ({ allowed: true, remaining: 5 })),
+    },
     "next/cache": { revalidatePath },
     "@/lib/action-state": {
       actionError: (message) => ({ status: "error", message }),
       actionSuccess: (message) => ({ status: "success", message }),
+      formEntries: (formData) =>
+        Array.from(formData.entries()).filter(([key]) => !key.startsWith("$ACTION_")),
     },
     "@/lib/db": { getDatabase: () => ({ $transaction: transaction }) },
+    "@/lib/integrations": { getPublicSiteUrl: () => "https://mundonettech.co" },
     "@/lib/security/admin-auth": {
       AdminAuthorizationError: MockAdminAuthorizationError,
       getAdminSession,
@@ -1651,9 +1691,30 @@ function invitationHarness(options = {}) {
       normalizeEmail: core.normalizeEmail,
       validatePasswordPolicy: core.validatePasswordPolicy,
     },
+    "@mundonettech/db": {
+      OperationRateLimitError: class OperationRateLimitError extends Error {
+        constructor(retryAfterSeconds = 60) {
+          super("rate limited");
+          this.retryAfterSeconds = retryAfterSeconds;
+        }
+      },
+      consumeOperationRateLimit: spy(async () => ({ allowed: true, remaining: 5 })),
+    },
     "next/navigation": { redirect },
-    "@/lib/action-state": { actionError: (message) => ({ status: "error", message }) },
-    "@/lib/db": { getDatabase: () => ({ $transaction: transaction }) },
+    "@/lib/action-state": {
+      actionError: (message) => ({ status: "error", message }),
+      formEntries: (formData) =>
+        Array.from(formData.entries()).filter(([key]) => !key.startsWith("$ACTION_")),
+    },
+    "@/lib/db": {
+      getDatabase: () => ({
+        adminUser: {
+          findFirst: async () =>
+            options.profile === undefined ? { id: adminId } : options.profile,
+        },
+        $transaction: transaction,
+      }),
+    },
     "@/lib/security/activity-cookies": { clearActivityCookies },
     "@/lib/security/hibp": { isPasswordCompromised },
     "@/lib/security/request-context": {
@@ -1768,12 +1829,13 @@ describe("A2 login and invitation compensation edge cases", () => {
     assert.equal(harness.establishAdminActivity.calls.length, 0);
   });
 
-  it("compensates Auth when request security context fails before profile creation", async () => {
+  it("aborts before calling Auth when request security context fails", async () => {
     const harness = adminUsersHarness({ contextError: true });
     const state = await harness.actions.inviteAdministratorAction({}, inviteUserForm());
     assert.equal(state.status, "error");
+    assert.equal(harness.inviteUserByEmail.calls.length, 0);
     assert.equal(harness.transaction.calls.length, 0);
-    assert.equal(harness.deleteUser.calls.length, 1);
+    assert.equal(harness.deleteUser.calls.length, 0);
   });
 
   it("reports an orphaned invite honestly when compensating deletion also fails", async () => {

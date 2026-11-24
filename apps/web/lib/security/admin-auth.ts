@@ -46,7 +46,7 @@ function latestMfaTimestamp(
     .filter((entry): entry is { method: string; timestamp: number } => typeof entry !== "string")
     .filter(
       (entry) =>
-        ["otp", "totp"].includes(entry.method) &&
+        ["totp", "mfa/totp"].includes(entry.method) &&
         Number.isSafeInteger(entry.timestamp) &&
         entry.timestamp > 0,
     )

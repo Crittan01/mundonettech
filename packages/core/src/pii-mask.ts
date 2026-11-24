@@ -79,6 +79,13 @@ const sensitiveAuditKeyWords = new Set([
   "xmls",
 ]);
 const safeOperationalAuditKeys = new Set(["statuscode", "httpstatus"]);
+const safeSha256AuditKeys = new Set([
+  "titlehash",
+  "seotitlehash",
+  "seodescriptionhash",
+  "contenthash",
+]);
+const sha256HexPattern = /^[0-9a-f]{64}$/i;
 
 function auditKeySegments(key: string): string[] {
   return key
@@ -102,6 +109,14 @@ function isSensitiveAuditKey(key: string): boolean {
 
 export function sanitizeAuditValue(value: unknown, key = "", depth = 0): unknown {
   if (key && isSensitiveAuditKey(key)) {
+    const normalized = auditKeySegments(key).join("");
+    if (
+      safeSha256AuditKeys.has(normalized) &&
+      typeof value === "string" &&
+      sha256HexPattern.test(value)
+    ) {
+      return value.toLowerCase();
+    }
     return "[redactado]";
   }
   if (depth > 4) return "[truncado]";

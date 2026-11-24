@@ -8,7 +8,11 @@ import {
   parseWholeCopToCents,
   type AdminPermission,
 } from "@mundonettech/core";
-import { B2bError } from "@mundonettech/db";
+import {
+  AdminOperationRateLimitError,
+  B2bError,
+  consumeAdminOperationRateLimit,
+} from "@mundonettech/db";
 import { B2bCopilotError } from "@mundonettech/integrations";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -41,7 +45,13 @@ async function audit(permission: AdminPermission = "b2b:write") {
   };
 }
 
-function failure(error: unknown, values: Record<string, string>): ActionState {
+function failure(error: unknown, values?: Record<string, string>): ActionState {
+  if (error instanceof AdminOperationRateLimitError) {
+    return actionError(
+      `Demasiadas solicitudes al Copiloto. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
+      values,
+    );
+  }
   if (error instanceof AdminAuthorizationError) {
     return actionError(
       error.code === "MFA_STALE"
@@ -84,7 +94,11 @@ function id(formData: FormData, key: string): string {
 }
 
 function version(formData: FormData, key = "expectedVersion"): number {
-  return z.coerce.number().int().nonnegative().parse(formString(formData, key));
+  const raw = formString(formData, key).trim();
+  if (!/^(?:0|[1-9][0-9]{0,9})$/.test(raw)) {
+    throw new TypeError(`Invalid version field ${key}.`);
+  }
+  return Number(raw);
 }
 
 function text(formData: FormData, key: string, minimum: number, maximum: number): string {
@@ -166,7 +180,9 @@ const b2bSnapshotFields = new Set([
 
 function b2bSnapshot(formData: FormData): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(formSnapshot(formData)).filter(([key]) => b2bSnapshotFields.has(key)),
+    Object.entries(formSnapshot(formData)).filter(
+      ([key, value]) => b2bSnapshotFields.has(key) && value.length <= 256,
+    ),
   );
 }
 
@@ -180,10 +196,10 @@ async function execute(
   try {
     const auditContext = await audit();
     const result = await operation(auditContext);
-    revalidate(result.opportunityId ?? (formString(formData, "opportunityId") || undefined));
+    revalidate(result.opportunityId);
     return actionSuccess(result.message);
   } catch (error) {
-    return failure(error, values);
+    return failure(error, error instanceof AdminAuthorizationError ? undefined : values);
   }
 }
 
@@ -384,9 +400,17 @@ export async function runB2bCopilotAction(_previous: ActionState, formData: Form
   const values = b2bSnapshot(formData);
   try {
     const auditContext = await audit();
+    const db = getDatabase();
+    await consumeAdminOperationRateLimit(db, {
+      operation: "b2b.copilot.run",
+      actorAdminUserId: auditContext.actorAdminUserId,
+      ipHash: auditContext.ipHash,
+      limit: 20,
+      windowSeconds: 60,
+    });
     const opportunityId = id(formData, "opportunityId");
     const credentialId = id(formData, "credentialId");
-    const result = await b2bCopilotService(getDatabase()).run({
+    const result = await b2bCopilotService(db).run({
       opportunityId,
       credentialId,
       requestId: id(formData, "requestId"),
@@ -397,6 +421,9 @@ export async function runB2bCopilotAction(_previous: ActionState, formData: Form
       `${result.replayed ? "Resultado recuperado" : "Clasificación completada"}: prioridad ${copilotPriorityLabels[result.suggestion.priority].toLowerCase()}, ${copilotActionLabels[result.suggestion.nextAction]} (${result.suggestion.confidenceBps / 100}% de confianza).`,
     );
   } catch (error) {
-    return failure(error, { ...values, requestId: randomUUID() });
+    return failure(
+      error,
+      error instanceof AdminAuthorizationError ? undefined : { ...values, requestId: randomUUID() },
+    );
   }
 }

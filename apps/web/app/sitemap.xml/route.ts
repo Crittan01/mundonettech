@@ -17,21 +17,25 @@ function methodNotAllowed(): Response {
 }
 
 export async function GET() {
-  const partitions = await getSitemapPartitions();
-  const body =
-    partitions.length === 1
-      ? buildSitemapUrlSet(partitions[0]!)
-      : buildSitemapIndex(
-          partitions.map((_entry, index) =>
-            new URL(`/sitemaps/${index}.xml`, storeConfig.url).toString(),
-          ),
-        );
-  return new Response(body, {
-    headers: {
-      ...headers,
-      "Content-Type": "application/xml; charset=utf-8",
-    },
-  });
+  try {
+    const partitions = await getSitemapPartitions();
+    const body =
+      partitions.length === 1
+        ? buildSitemapUrlSet(partitions[0]!)
+        : buildSitemapIndex(
+            partitions.map((_entry, index) =>
+              new URL(`/sitemaps/${index}.xml`, storeConfig.url).toString(),
+            ),
+          );
+    return new Response(body, {
+      headers: {
+        ...headers,
+        "Content-Type": "application/xml; charset=utf-8",
+      },
+    });
+  } catch {
+    return new Response("Sitemap unavailable.", { status: 500, headers });
+  }
 }
 
 export const HEAD = methodNotAllowed;

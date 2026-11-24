@@ -161,7 +161,14 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
             </p>
           </div>
           {canWrite ? (
-            <SegmentStateButtons key={`state:${detail.segment.id}`} segment={detail.segment} />
+            <SegmentStateButtons
+              key={`state:${detail.segment.id}`}
+              segment={{
+                id: detail.segment.id,
+                version: detail.segment.version,
+                status: detail.segment.status,
+              }}
+            />
           ) : null}
           {canWrite && detail.segment.status === "DRAFT" ? (
             <div className="rounded-xl border border-border bg-card p-5">

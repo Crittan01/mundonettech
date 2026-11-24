@@ -85,7 +85,10 @@ function collectCallNames(node, localFunctions, visiting = new Set(), calls = ne
           visiting.delete(name);
         }
       } else if (ts.isPropertyAccessExpression(current.expression)) {
-        calls.add(current.expression.name.text);
+        const propertyName = current.expression.name.text;
+        if (propertyName !== "getAdminSession" && propertyName !== "requireRecentMfa") {
+          calls.add(propertyName);
+        }
       }
     }
     ts.forEachChild(current, visit);
@@ -126,9 +129,39 @@ function moduleFunctions(sourceFile) {
     if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-        const initializer = declaration.initializer;
-        if (!isFunctionValue(initializer)) continue;
-        register(declaration.name.text, initializer, exported);
+        if (isFunctionValue(declaration.initializer)) {
+          register(declaration.name.text, declaration.initializer, exported);
+        }
+      }
+    }
+  }
+
+  for (const statement of sourceFile.statements) {
+    const exported = hasModifier(statement, ts.SyntaxKind.ExportKeyword);
+    if (ts.isVariableStatement(statement) && exported) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) {
+          const exportName = declaration.name.text;
+          if (exports.has(exportName)) continue;
+          const initializer = declaration.initializer;
+          if (initializer && ts.isIdentifier(initializer)) {
+            const target = functions.get(initializer.text);
+            if (target) {
+              exports.set(exportName, { name: initializer.text, node: target });
+              continue;
+            }
+          }
+          exports.set(exportName, null);
+        } else if (
+          ts.isObjectBindingPattern(declaration.name) ||
+          ts.isArrayBindingPattern(declaration.name)
+        ) {
+          for (const element of declaration.name.elements) {
+            if (ts.isBindingElement(element) && ts.isIdentifier(element.name)) {
+              exports.set(element.name.text, null);
+            }
+          }
+        }
       }
       continue;
     }
@@ -302,8 +335,8 @@ export function auditSecuritySurface(host, manifest) {
         relative === "apps/web/lib/actions/admin-invitation.ts";
       const recentMfaOptOut = !Array.isArray(requirement) && requirement.recentMfa === false;
       const requiresRecentMfa =
-        relative.startsWith("apps/web/lib/actions/admin-") &&
-        relative.endsWith(".ts") &&
+        ((relative.startsWith("apps/web/lib/actions/admin-") && relative.endsWith(".ts")) ||
+          (relative.startsWith("apps/web/app/admin/") && !routeHandler)) &&
         !adminAuthenticationFlow &&
         !recentMfaOptOut;
       if (requiresRecentMfa) requiredCalls.add("getAdminSession");

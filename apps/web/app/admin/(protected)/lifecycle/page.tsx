@@ -98,7 +98,9 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
             Nuevo journey
           </h2>
           <div className="rounded-xl border border-border bg-card p-5">
-            <JourneyEditorForm segments={segments.items} />
+            <JourneyEditorForm
+              segments={segments.items.map(({ id, name, status }) => ({ id, name, status }))}
+            />
           </div>
         </section>
       ) : null}
@@ -164,13 +166,25 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
               {detail.version}
             </p>
           </div>
-          {canWrite ? <JourneyStateButtons key={`state:${detail.id}`} journey={detail} /> : null}
+          {canWrite ? (
+            <JourneyStateButtons
+              key={`state:${detail.id}`}
+              journey={{ id: detail.id, version: detail.version, status: detail.status }}
+            />
+          ) : null}
           {canWrite && detail.status === "DRAFT" ? (
             <div className="rounded-xl border border-border bg-card p-5">
               <JourneyEditorForm
                 key={`editor:${detail.id}`}
-                journey={detail}
-                segments={segments.items}
+                journey={{
+                  id: detail.id,
+                  name: detail.name,
+                  description: detail.description,
+                  segmentId: detail.segmentId,
+                  version: detail.version,
+                  steps: detail.steps,
+                }}
+                segments={segments.items.map(({ id, name, status }) => ({ id, name, status }))}
               />
             </div>
           ) : (

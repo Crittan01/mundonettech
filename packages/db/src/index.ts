@@ -126,17 +126,20 @@ export type {
 export { exportInventoryStockCsv, importInventoryStockCsv } from "./inventory-csv.js";
 export type { ImportInventoryStockCsvOptions, InventoryCsvImportResult } from "./inventory-csv.js";
 export {
+  AdminActorAuthorizationError,
   acquireIdempotencyKey,
+  assertAdminActorInTransaction,
   claimDomainOutbox,
   claimDomainOutboxEvents,
   completeDomainOutbox,
   completeIdempotencyKey,
   consumeAdminRecoveryCode,
   failDomainOutbox,
+  isAdminSelfDealingCustomer,
   purgeExpiredIdempotencyKeys,
   retryDomainOutbox,
 } from "./primitives.js";
-export type { AcquiredIdempotencyKey, DatabaseExecutor } from "./primitives.js";
+export type { AcquiredIdempotencyKey, DatabaseExecutor, VerifiedAdminActor } from "./primitives.js";
 export {
   CatalogConflictError,
   CatalogNotFoundError,

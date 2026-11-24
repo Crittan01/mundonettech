@@ -1,8 +1,13 @@
+import type { Metadata } from "next";
 import { Suspense, type ReactNode } from "react";
 
 import { AccountNav } from "@/components/account/account-nav";
 
 import AccountLoading from "./loading";
+
+export const metadata: Metadata = {
+  robots: { index: false, follow: false, nocache: true },
+};
 
 export default function CustomerAccountLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (

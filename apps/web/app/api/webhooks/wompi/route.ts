@@ -96,9 +96,22 @@ export async function POST(request: Request): Promise<Response> {
   }
 }
 
-export function GET(): Response {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...headers, Allow: "POST" } },
   );
 }
+
+export function GET(): Response {
+  return methodNotAllowed();
+}
+
+export function HEAD(): Response {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;

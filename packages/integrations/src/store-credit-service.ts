@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { acquireOperationLocks, inInventoryTransaction, type PrismaClient } from "@mundonettech/db";
+import {
+  acquireOperationLocks,
+  inInventoryTransaction,
+  isAdminSelfDealingCustomer,
+  type PrismaClient,
+} from "@mundonettech/db";
 
 import {
   appendStoreCreditEntry,
@@ -70,7 +75,7 @@ export class StoreCreditService {
     });
     return inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`store-credit:${input.customerId}`]);
-      await assertFinancialActor(tx, input.audit.actorAdminUserId);
+      const actor = await assertFinancialActor(tx, input.audit.actorAdminUserId);
       const existing = await tx.storeCreditEntry.findUnique({ where: { operationKey } });
       if (existing) {
         const account = await tx.storeCreditAccount.findUniqueOrThrow({
@@ -109,11 +114,15 @@ export class StoreCreditService {
         reason,
         actorAdminUserId: input.audit.actorAdminUserId,
       });
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: input.customerId,
+      });
       await writePaymentAudit(tx, {
         action: `STORE_CREDIT_${input.type}`,
         targetType: "StoreCreditAccount",
         targetId: account.id,
         audit: input.audit,
+        selfDealing,
         metadata: {
           customerId: input.customerId,
           amountCents: amount.toString(),

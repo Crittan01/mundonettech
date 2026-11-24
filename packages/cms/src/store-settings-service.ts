@@ -24,7 +24,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const ianaTimeZonePattern = /^(?:UTC|[A-Za-z]+(?:\/[A-Za-z0-9_+-]+){1,2})$/;
 
 function cents(value: string, field: string, positive: boolean): bigint {
-  if (typeof value !== "string" || !/^[0-9]+$/.test(value.trim())) {
+  if (typeof value !== "string" || !/^[0-9]{1,20}$/.test(value.trim())) {
     throw new CmsValidationError(`${field} must contain integer cents.`);
   }
   const parsed = BigInt(value.trim());

@@ -11,7 +11,7 @@ export interface WompiResolution {
 
 export async function resolveWompiProvider(options: {
   db: PrismaClient;
-  vault: IntegrationCredentialVault;
+  vault: Pick<IntegrationCredentialVault, "reveal">;
   environment: IntegrationEnvironment;
   credentialId?: string;
   fetchImpl?: typeof fetch;

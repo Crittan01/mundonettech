@@ -116,7 +116,24 @@ export class CmsMediaService {
     const storage = this.storage;
     if (!storage) throw new CmsValidationError("R2 storage is required for uploads.");
 
-    const stored = await storeImageDerivatives(storage, input.bytes, "cms");
+    let stored;
+    try {
+      stored = await storeImageDerivatives(storage, input.bytes, "cms");
+    } catch (error) {
+      if (error instanceof CmsValidationError) throw error;
+      if (error instanceof TypeError || error instanceof RangeError) {
+        throw new CmsValidationError(error.message);
+      }
+      if (
+        error instanceof Error &&
+        /Unsupported|Invalid|SVG|EXIF|pixel|dimension|magic|corrupt|header|ispe/i.test(
+          error.message,
+        )
+      ) {
+        throw new CmsValidationError(error.message);
+      }
+      throw error;
+    }
     const primary =
       [...stored].filter((item) => item.format === "webp").sort((a, b) => b.width - a.width)[0] ??
       stored.at(-1);

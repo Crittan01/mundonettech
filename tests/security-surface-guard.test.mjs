@@ -243,3 +243,45 @@ test("requires recent MFA on every reviewed admin mutation unless explicitly exe
   assert.match(result.diagnostics[1].message, /unsafeAction|unsafeMutation/);
   assert.match(result.diagnostics[1].message, /getAdminSession/);
 });
+
+test("resolves local identifier route aliases, fails closed on wrapped exports, rejects spoofed member calls, and checks admin app actions", () => {
+  const result = audit(
+    {
+      "apps/web/app/api/alias/route.ts": `
+        function methodNotAllowed() { return createMethodNotAllowedResponse(); }
+        function wrap(fn) { return fn; }
+        export const POST = methodNotAllowed;
+        export const PUT = wrap(methodNotAllowed);
+      `,
+      "apps/web/app/admin/example/actions.ts": `
+        "use server";
+        const spoof = {
+          getAdminSession() {},
+          requireRecentMfa() {},
+        };
+        export async function spoofedAdminAction() {
+          spoof.getAdminSession();
+          spoof.requireRecentMfa();
+        }
+      `,
+    },
+    {
+      "apps/web/app/api/alias/route.ts": {
+        POST: { calls: ["createMethodNotAllowedResponse"] },
+        PUT: { calls: ["createMethodNotAllowedResponse"] },
+      },
+      "apps/web/app/admin/example/actions.ts": {
+        spoofedAdminAction: [],
+      },
+    },
+  );
+
+  assert.deepEqual(categories(result), [
+    "security-surface-control",
+    "security-surface-control",
+    "security-surface-resolution",
+  ]);
+  assert.match(result.diagnostics[0].message, /spoofedAdminAction/);
+  assert.match(result.diagnostics[1].message, /spoofedAdminAction/);
+  assert.match(result.diagnostics[2].message, /PUT/);
+});

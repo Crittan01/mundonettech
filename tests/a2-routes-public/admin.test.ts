@@ -10,10 +10,12 @@ const mocks = vi.hoisted(() => {
   }
   return {
     AdminAuthorizationError,
+    adminActionLogCreate: vi.fn(),
     creditNoteFindFirst: vi.fn(),
     exportCsv: vi.fn(),
     getAdminSession: vi.fn(),
     getDatabaseClock: vi.fn(),
+    getRequestSecurityContext: vi.fn(),
     invoiceFindFirst: vi.fn(),
     parseFinanceRange: vi.fn(),
   };
@@ -23,8 +25,12 @@ vi.mock("@/lib/security/admin-auth", () => ({
   AdminAuthorizationError: mocks.AdminAuthorizationError,
   getAdminSession: mocks.getAdminSession,
 }));
+vi.mock("@/lib/security/request-context", () => ({
+  getRequestSecurityContext: mocks.getRequestSecurityContext,
+}));
 vi.mock("@/lib/db", () => ({
   getDatabase: () => ({
+    adminActionLog: { create: mocks.adminActionLogCreate },
     creditNote: { findFirst: mocks.creditNoteFindFirst },
     taxInvoice: { findFirst: mocks.invoiceFindFirst },
   }),
@@ -58,6 +64,11 @@ function financeRequest(query = "from=2026-01-01&to=2026-12-31&year=2026"): Prom
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.getAdminSession.mockResolvedValue({ profile: { id: "admin-id" } });
+  mocks.getRequestSecurityContext.mockResolvedValue({
+    ipHash: new Uint8Array(32),
+    userAgentHash: new Uint8Array(32),
+  });
+  mocks.adminActionLogCreate.mockResolvedValue({ id: "audit-id" });
   mocks.invoiceFindFirst.mockResolvedValue({
     fullNumber: "FAC-2026-1",
     signedXml: "<Invoice><ID>FAC-2026-1</ID></Invoice>",
@@ -219,9 +230,16 @@ describe("admin finance CSV export", () => {
     },
   );
 
-  it("does not disguise unexpected failures as client input errors", async () => {
+  it("returns 500 with sanitized JSON and security headers on unexpected failures", async () => {
     mocks.exportCsv.mockRejectedValue(new Error("private database detail"));
-    await expect(financeRequest()).rejects.toThrow("private database detail");
+    const response = await financeRequest();
+    expect(response.status).toBe(500);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store, max-age=0");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow, noarchive");
+    const text = await response.text();
+    expect(text).toContain("Finance export failed.");
+    expect(text).not.toContain("private database detail");
   });
 
   it("rejects unsupported methods before authentication", async () => {

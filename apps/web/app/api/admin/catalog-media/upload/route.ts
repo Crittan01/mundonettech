@@ -84,7 +84,10 @@ export async function POST(request: Request): Promise<Response> {
   let storage: ReturnType<typeof createMediaStorage> | null = null;
   try {
     const context = await getRequestSecurityContext();
-    const multipart = await readAdminMultipart(request, adminMediaUploadLimits.catalogBodyBytes);
+    const multipart = await readAdminMultipart(request, {
+      maximumBodyBytes: adminMediaUploadLimits.catalogBodyBytes,
+      maximumParts: 130,
+    });
     if (!multipart.ok) return multipart.response;
     const form = multipart.form;
     if (!validAdminUploadKeys(form, allowedFields, "frames")) {
@@ -135,7 +138,12 @@ export async function POST(request: Request): Promise<Response> {
       let total = 0;
       const files: File[] = [];
       for (const entry of entries) {
-        if (!(entry instanceof File) || entry.size === 0) {
+        if (
+          !(entry instanceof File) ||
+          entry.size === 0 ||
+          entry.name.length > 255 ||
+          /[\u0000\uFFFD]/.test(entry.name)
+        ) {
           return adminUploadError(400, "invalid_upload");
         }
         total += entry.size;

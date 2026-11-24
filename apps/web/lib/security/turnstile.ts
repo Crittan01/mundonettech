@@ -40,7 +40,7 @@ export async function verifyTurnstileToken(
     const expectedHostname =
       options.expectedHostname ??
       (process.env.NODE_ENV === "production"
-        ? (process.env.TURNSTILE_EXPECTED_HOSTNAME ?? storeConfig.domain)
+        ? process.env.TURNSTILE_EXPECTED_HOSTNAME?.trim() || storeConfig.domain
         : undefined);
     const endpoint = options.endpoint ?? testVerificationEndpoint();
     await verifyTurnstile(token, {

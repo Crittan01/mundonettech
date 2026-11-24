@@ -1777,6 +1777,7 @@ export class OrderService {
     });
     if (!record) return null;
     const typed = record as ReceiptWithOrder;
+    if (typed.order.anonymizedAt !== null) return null;
     try {
       const expected = receiptHash(
         typed.order,

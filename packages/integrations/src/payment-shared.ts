@@ -111,12 +111,13 @@ function validatePaymentAudit(audit: PaymentAuditContext): {
 export async function assertFinancialActor(
   tx: PaymentTransaction,
   actorAdminUserId: string,
-): Promise<void> {
+): Promise<{ id: string; authUserId: string; email: string; role: string }> {
   const actor = await tx.adminUser.findFirst({
     where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-    select: { role: true },
+    select: { id: true, authUserId: true, email: true, role: true },
   });
   if (!actor || !financialRoles.has(actor.role)) throw new PaymentAuthorizationError();
+  return actor;
 }
 
 export async function writePaymentAudit(
@@ -127,12 +128,14 @@ export async function writePaymentAudit(
     targetId: string;
     audit: PaymentAuditContext;
     metadata?: Prisma.InputJsonObject;
+    selfDealing?: boolean;
   },
 ): Promise<void> {
   const audit = validatePaymentAudit(options.audit);
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,
+      ...(options.selfDealing ? { selfDealing: true } : {}),
       action: options.action,
       targetType: options.targetType,
       targetId: options.targetId,

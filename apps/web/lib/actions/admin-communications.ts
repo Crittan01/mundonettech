@@ -13,6 +13,7 @@ import { z } from "zod";
 import {
   actionError,
   actionSuccess,
+  formEntries,
   formSnapshot,
   formString,
   type ActionState,
@@ -34,7 +35,7 @@ function assertClosedForm(formData: FormData, allowedFields: readonly string[]):
   const shape: Record<string, z.ZodOptional<z.ZodString>> = {};
   const values: Record<string, string> = {};
   for (const field of allowedFields) shape[field] = z.string().optional();
-  for (const [key, value] of formData.entries()) {
+  for (const [key, value] of formEntries(formData)) {
     if (typeof value !== "string" || Object.hasOwn(values, key)) {
       throw new TypeError("Form fields must be unique strings.");
     }

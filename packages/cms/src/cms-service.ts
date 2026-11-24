@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { maskEmail, maskName, sanitizeAuditValue } from "@mundonettech/core";
 import {
+  assertAdminActorInTransaction,
   Prisma,
   PrismaClient,
   type CmsBlockVersion,
@@ -282,6 +284,7 @@ async function audit(
   metadata: Prisma.JsonObject = {},
 ): Promise<void> {
   assertUuid(context.actorAdminUserId, "actorAdminUserId");
+  await assertAdminActorInTransaction(tx, context.actorAdminUserId, "content:write");
   const requestId =
     context.requestId === undefined ? randomUUID() : assertUuid(context.requestId, "requestId");
   await tx.adminActionLog.create({
@@ -293,7 +296,7 @@ async function audit(
       requestId,
       ipHash: context.ipHash ? Uint8Array.from(context.ipHash) : null,
       userAgentHash: context.userAgentHash ? Uint8Array.from(context.userAgentHash) : null,
-      metadata,
+      metadata: sanitizeAuditValue(metadata) as Prisma.InputJsonValue,
     },
   });
 }
@@ -416,7 +419,7 @@ export class CmsService {
 
   async getPage(id: string): Promise<CmsPageDetailRecord | null> {
     if (!uuidPattern.test(id)) return null;
-    return this.db.cmsPage.findFirst({
+    const page = await this.db.cmsPage.findFirst({
       where: { id, deletedAt: null },
       include: {
         blocks: {
@@ -430,6 +433,21 @@ export class CmsService {
         },
       },
     });
+    if (!page) return null;
+    return {
+      ...page,
+      blocks: page.blocks.map((block) => ({
+        ...block,
+        versions: block.versions.map((version) => ({
+          ...version,
+          createdBy: {
+            id: version.createdBy.id,
+            displayName: maskName(version.createdBy.displayName),
+            email: maskEmail(version.createdBy.email),
+          },
+        })),
+      })),
+    };
   }
 
   async createPage(

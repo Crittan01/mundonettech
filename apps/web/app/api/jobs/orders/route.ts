@@ -5,6 +5,7 @@ import {
   OperationsService,
   OrderLifecycleService,
   purgeExpiredIdempotencyKeys,
+  purgeExpiredOperationRateLimits,
 } from "@mundonettech/db";
 import { revalidateTag } from "next/cache";
 import { z } from "zod";
@@ -22,12 +23,25 @@ const noStoreHeaders = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
-export async function GET() {
+function methodNotAllowed(): Response {
   return Response.json(
     { error: "Method not allowed." },
     { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } },
   );
 }
+
+export async function GET() {
+  return methodNotAllowed();
+}
+
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } });
+}
+
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
   const secret = process.env.ORDER_CRON_SECRET?.trim() ?? "";
@@ -54,6 +68,7 @@ export async function POST(request: Request) {
         { status: 403, headers: noStoreHeaders },
       );
     }
+    const security = await getRequestSecurityContext();
     const service = new OrderLifecycleService(db);
     const abandoned = await service.captureAbandonedCarts();
     let reservations: Awaited<ReturnType<OrderLifecycleService["releaseExpiredOrderReservations"]>>;
@@ -68,7 +83,6 @@ export async function POST(request: Request) {
     const fiscalWatch = await financeService().refreshFiscalWatch();
     const expiredProposals = await b2bService(db).expireDueProposals();
     const lifecycle = await lifecycleService(db).runScheduledWork(100);
-    const security = await getRequestSecurityContext();
     let crmRetention: Awaited<ReturnType<ReturnType<typeof crmRetentionService>["runDue"]>>;
     try {
       crmRetention = await crmRetentionService(db).runDue(
@@ -86,6 +100,7 @@ export async function POST(request: Request) {
       throw error;
     }
     const purgedIdempotencyKeys = await purgeExpiredIdempotencyKeys(db, { limit: 500 });
+    const purgedRateLimits = await purgeExpiredOperationRateLimits(db, 500);
     await new OperationsService(db).synchronizeNotifications();
     return Response.json(
       {
@@ -95,6 +110,7 @@ export async function POST(request: Request) {
         expiredProposals,
         lifecycle,
         purgedIdempotencyKeys,
+        purgedRateLimits,
         crmRetention: {
           scanned: crmRetention.scanned,
           suppressed: crmRetention.suppressed.length,

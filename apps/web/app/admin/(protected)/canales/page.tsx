@@ -311,7 +311,10 @@ export default async function ChannelsPage({
               Preparar una publicación
             </summary>
             <div className="mt-5">
-              <ChannelListingCreateForm accounts={activeAccounts} variants={variants} />
+              <ChannelListingCreateForm
+                accounts={activeAccounts.map(({ id, label }) => ({ id, label }))}
+                variants={variants}
+              />
             </div>
           </details>
         ) : null}
