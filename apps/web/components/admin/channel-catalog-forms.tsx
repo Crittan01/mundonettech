@@ -443,7 +443,7 @@ export function ProcessChannelJobsButton() {
       <Button type="submit" variant="outline" disabled={pending}>
         {pending ? "Procesando trabajos…" : "Procesar trabajos pendientes"}
       </Button>
-      <FormMessage state={state} />
+      {pending ? null : <FormMessage state={state} />}
     </form>
   );
 }
