@@ -140,6 +140,7 @@ export async function verifyWebSecurity(
     "/api/health/live",
     "/api/health/ready",
     "/api/feeds/google-merchant",
+    "/api/feeds/meta-catalog",
   ]) {
     const response = await request(origin, routePath);
     requireCondition(response.ok, `${routePath}: unexpected ${response.status}.`);

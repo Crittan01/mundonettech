@@ -26,6 +26,7 @@ export function ProfileForm({
     familyName: string;
     phoneE164: string;
     marketingEmail: boolean;
+    advertising: boolean;
   };
 }) {
   const [state, action, pending] = useActionState(updateProfileAction, initialActionState);
@@ -36,6 +37,9 @@ export function ProfileForm({
   const marketingEmail = errorValues
     ? errorValues.marketingEmail === "on" || errorValues.marketingEmail === "true"
     : initial.marketingEmail;
+  const advertising = errorValues
+    ? errorValues.advertising === "on" || errorValues.advertising === "true"
+    : initial.advertising;
   return (
     <form action={action} className="space-y-5 rounded-xl border border-border bg-card p-6">
       <div className="grid gap-4 sm:grid-cols-2">
@@ -90,6 +94,20 @@ export function ProfileForm({
         <span>
           Autorizo correos comerciales opcionales. Puedo revocar esta autorización en cualquier
           momento; los avisos transaccionales seguirán activos.
+        </span>
+      </label>
+      <label className="flex items-start gap-3 text-sm">
+        <input
+          key={`advertising-${String(advertising)}`}
+          type="checkbox"
+          name="advertising"
+          defaultChecked={advertising}
+          className="mt-1"
+          disabled={pending}
+        />
+        <span>
+          Autorizo compartir con Meta identificadores seudonimizados y datos de mis compras para
+          atribución publicitaria. Es opcional, puedo revocarlo aquí y no condiciona mis compras.
         </span>
       </label>
       <Button type="submit" disabled={pending}>

@@ -24,6 +24,8 @@ import {
 } from "./shipping-types.js";
 import { ShippingService } from "./shipping-service.js";
 import { EmailProviderError, EmailValidationError } from "./email-types.js";
+import type { MetaCapiService } from "./meta-capi-service.js";
+import { MetaCapiServiceError } from "./meta-capi-service.js";
 
 const supportedEvents = [
   "cart.abandoned.v1",
@@ -31,6 +33,7 @@ const supportedEvents = [
   "lifecycle.message.dispatch.v1",
   "order.confirmed.v1",
   "order.payment.paid.v1",
+  "meta.capi.dispatch.v1",
   "order.refund.completed.v1",
   "shipping.fulfillment.created.v1",
   "shipping.label.requested.v1",
@@ -81,6 +84,7 @@ export interface DomainEventWorkerOptions {
   readonly publicSiteUrl: string;
   readonly storeName: string;
   readonly receiptTokenForSubmission: (reference: string) => string;
+  readonly metaCapi?: MetaCapiService;
   readonly eraseAuthUser?: (authUserId: string) => Promise<void>;
   readonly maximumAttempts?: number;
 }
@@ -460,6 +464,14 @@ export class DomainEventWorker {
         return;
       case "order.payment.paid.v1": {
         const orderId = this.id(event, "orderId");
+        const paidAtValue = this.payload(event).paidAt;
+        if (typeof paidAtValue !== "string") {
+          throw new EmailValidationError("Order payment timestamp is missing.");
+        }
+        const paidAt = new Date(paidAtValue);
+        if (Number.isNaN(paidAt.getTime()) || paidAt.toISOString() !== paidAtValue) {
+          throw new EmailValidationError("Order payment timestamp is invalid.");
+        }
         await this.independently([
           () => this.options.shipping.ensureFulfillments(orderId).then(() => undefined),
           () => this.prepareInvoiceIfRequired(orderId),
@@ -470,7 +482,28 @@ export class DomainEventWorker {
               topic: "orders",
               operationId: event.aggregateId,
             }),
+          async () => {
+            await this.options.metaCapi?.enqueuePurchase({ orderId, paidAt });
+          },
         ]);
+        return;
+      }
+      case "meta.capi.dispatch.v1": {
+        if (!this.options.metaCapi) {
+          throw new MetaCapiServiceError("VALIDATION", "Meta CAPI worker is not configured.");
+        }
+        const result = await this.options.metaCapi.dispatch(
+          this.id(event, "metaEventId"),
+          this.options.workerId,
+        );
+        if (
+          (result.status === "PENDING" ||
+            result.status === "IN_FLIGHT" ||
+            result.status === "DEFERRED") &&
+          result.nextAttemptAt
+        ) {
+          throw new RetryableDomainEventError(result.nextAttemptAt);
+        }
         return;
       }
       case "order.refund.completed.v1": {
@@ -615,6 +648,7 @@ export class DomainEventWorker {
       error instanceof ShippingProviderError ||
       error instanceof EmailProviderError ||
       error instanceof InvoiceProviderError ||
+      error instanceof MetaCapiServiceError ||
       error instanceof ShippingConflictError ||
       error instanceof InvoiceConflictError
     )

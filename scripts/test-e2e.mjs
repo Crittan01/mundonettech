@@ -58,11 +58,17 @@ try {
       MEDIA_BASE_URL: "http://127.0.0.1:4110",
       MERCADO_LIBRE_TOKEN_URL: `${mercadoLibreFixture.origin}/oauth/token`,
       MERCADO_LIBRE_API_URL: mercadoLibreFixture.origin,
+      META_CAPI_API_URL: process.env.META_CAPI_API_URL ?? "http://127.0.0.1:54427",
       SESSION_TIMEOUT_SECRET:
         process.env.SESSION_TIMEOUT_SECRET ?? randomBytes(32).toString("base64"),
       SECURITY_EVENT_PEPPER:
         process.env.SECURITY_EVENT_PEPPER ?? randomBytes(32).toString("base64"),
       RECOVERY_CODE_PEPPER: process.env.RECOVERY_CODE_PEPPER ?? randomBytes(32).toString("base64"),
+      INTEGRATION_CREDENTIAL_KEYS_LOCAL:
+        process.env.INTEGRATION_CREDENTIAL_KEYS_LOCAL ??
+        JSON.stringify({ 1: randomBytes(32).toString("base64") }),
+      INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_LOCAL:
+        process.env.INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_LOCAL ?? "1",
     },
   });
   process.exitCode = await new Promise((resolve, reject) => {

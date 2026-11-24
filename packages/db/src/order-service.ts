@@ -873,6 +873,7 @@ export class OrderService {
       buyerTaxRegime: input.contact.buyerTaxRegime ?? null,
       termsVersion: text(input.contact.termsVersion, "termsVersion", 1, 50),
       privacyPolicyVersion: text(input.contact.privacyPolicyVersion, "privacyPolicyVersion", 1, 50),
+      advertisingAccepted: input.contact.advertisingAccepted === true,
       acceptanceProofHash: hash32(input.contact.acceptanceProofHash, "acceptanceProofHash"),
       acceptanceIpHash: optionalHash(input.contact.acceptanceIpHash, "acceptanceIpHash"),
       acceptanceUserAgentHash: optionalHash(
@@ -1251,6 +1252,32 @@ export class OrderService {
             occurredAt: now,
           },
         });
+        if (contact.advertisingAccepted === true) {
+          const advertisingConsent = await tx.consent.findFirst({
+            where: {
+              customerId,
+              purpose: "ADVERTISING",
+              status: "GRANTED",
+              revokedBy: null,
+            },
+            select: { id: true },
+          });
+          if (!advertisingConsent) {
+            await tx.consent.create({
+              data: {
+                customerId,
+                purpose: "ADVERTISING",
+                status: "GRANTED",
+                source: "checkout",
+                policyVersion: contact.privacyPolicyVersion,
+                proofHash: contact.acceptanceProofHash,
+                ipHash: contact.acceptanceIpHash,
+                userAgentHash: contact.acceptanceUserAgentHash,
+                occurredAt: now,
+              },
+            });
+          }
+        }
 
         const allocation = await this.planStock(tx, cart, locationId);
         const orderId = randomUUID();

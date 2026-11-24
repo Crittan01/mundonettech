@@ -5,12 +5,14 @@ import { storeConfig } from "@mundonettech/config/store";
 import { CmsService } from "@mundonettech/cms";
 import {
   buildGoogleMerchantXml,
+  buildMetaCatalogCsv,
   partitionSitemapEntries,
   sitemapEntriesPerFile,
   type MerchantFeedItem,
+  type MetaCatalogFeed,
   type SitemapXmlEntry,
 } from "@mundonettech/core";
-import { CatalogService, type CatalogMedia } from "@mundonettech/db";
+import { CatalogService, type CatalogFeedProduct, type CatalogMedia } from "@mundonettech/db";
 import { cacheLife, cacheTag } from "next/cache";
 
 import { resolveCatalogMediaUrl } from "@/components/catalog/media-url";
@@ -143,13 +145,11 @@ function variantFeedImage(
   );
 }
 
-async function readGoogleMerchantFeed(): Promise<string> {
-  "use cache";
-  cacheLife(seoLife);
-  cacheTag("seo", "merchant-feed", "catalog", "catalog:inventory");
-  const products = await new CatalogService(getDatabase()).getFeedProducts();
-  const origin = getPublicMediaOrigin();
-  const items: MerchantFeedItem[] = products.flatMap((product) => {
+function catalogFeedItems(
+  products: readonly CatalogFeedProduct[],
+  origin: string | null,
+): MerchantFeedItem[] {
+  return products.flatMap((product) => {
     return product.variants.map((variant) => {
       const imageLink = variantFeedImage(product.media, variant.id, origin);
       const optionLabels = variant.options.map((option) => option.label);
@@ -161,12 +161,14 @@ async function readGoogleMerchantFeed(): Promise<string> {
         id: variant.id,
         itemGroupId: product.id,
         title: `${product.name}${optionLabels.length ? ` — ${optionLabels.join(" / ")}` : ""}`,
-        description: product.shortDescription ?? product.description ?? product.name,
+        description:
+          product.shortDescription?.trim() || product.description?.trim() || product.name,
         link: absolute(`/producto/${product.slug}?variant=${encodeURIComponent(variant.id)}`),
         imageLink,
         brand: product.brand.name,
         priceCents: variant.priceCents,
         available: variant.available > 0,
+        availableQuantity: variant.available,
         gtin: variant.gtin,
         ean: variant.ean,
         mpn: variant.mpn,
@@ -178,6 +180,14 @@ async function readGoogleMerchantFeed(): Promise<string> {
       };
     });
   });
+}
+
+async function readGoogleMerchantFeed(): Promise<string> {
+  "use cache";
+  cacheLife(seoLife);
+  cacheTag("seo", "merchant-feed", "catalog", "catalog:inventory");
+  const products = await new CatalogService(getDatabase()).getFeedProducts();
+  const items = catalogFeedItems(products, getPublicMediaOrigin());
   return buildGoogleMerchantXml(
     { title: storeConfig.name, link: storeConfig.url, description: storeConfig.description },
     items,
@@ -186,4 +196,16 @@ async function readGoogleMerchantFeed(): Promise<string> {
 
 export function getGoogleMerchantFeed(): Promise<string> {
   return readGoogleMerchantFeed();
+}
+
+async function readMetaCatalogFeed(): Promise<MetaCatalogFeed> {
+  "use cache";
+  cacheLife(seoLife);
+  cacheTag("seo", "meta-catalog-feed", "catalog", "catalog:inventory");
+  const products = await new CatalogService(getDatabase()).getFeedProducts();
+  return buildMetaCatalogCsv(catalogFeedItems(products, getPublicMediaOrigin()));
+}
+
+export function getMetaCatalogFeed(): Promise<MetaCatalogFeed> {
+  return readMetaCatalogFeed();
 }

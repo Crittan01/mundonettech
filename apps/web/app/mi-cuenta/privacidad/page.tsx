@@ -19,6 +19,7 @@ const purposeLabels: Record<string, string> = {
   MARKETING_EMAIL: "Comunicaciones comerciales por correo",
   MARKETING_SMS: "Comunicaciones comerciales por SMS",
   ANALYTICS: "Analítica opcional",
+  ADVERTISING: "Publicidad y atribución mediante Meta",
 };
 const consentStatusLabels: Record<string, string> = {
   GRANTED: "Otorgado",

@@ -1,7 +1,7 @@
 import { storeConfig } from "./store.config.js";
 
-const effectiveDate = "2026-11-21";
-const version = "1.0.0";
+const effectiveDate = "2026-11-23";
+const version = "1.1.0";
 const law1480 = {
   label: "Ley 1480 de 2011 — Estatuto del Consumidor",
   href: "https://www.secretariasenado.gov.co/senado/basedoc/ley_1480_2011.html",
@@ -166,6 +166,7 @@ export const legalConfig = {
               "Gestionar pedidos, pagos, entregas, devoluciones, garantías y atención al consumidor.",
               "Cumplir deberes contables, tributarios, de protección al consumidor y prevención del fraude.",
               "Enviar comunicaciones comerciales únicamente cuando exista autorización válida y ofrecer siempre una vía de baja.",
+              "Medir la atribución publicitaria mediante Meta Conversions API solo con autorización publicitaria explícita, usando identificadores seudonimizados y datos de compra, sin incluir dirección, documento, IP ni agente de navegador.",
             ],
           },
         ),
@@ -179,6 +180,7 @@ export const legalConfig = {
         ]),
         section("terceros", "Encargados y transferencias", [
           "Podemos usar proveedores de infraestructura, autenticación, pagos, almacenamiento, comunicaciones y logística bajo contratos y controles de confidencialidad y seguridad. Solo reciben la información necesaria para la función contratada.",
+          "Cuando autorizas publicidad, Meta recibe mediante Conversions API hashes de identificadores de contacto, identificador seudonimizado de cliente y datos de la compra para atribución. Puedes revocar esta finalidad desde tu cuenta; la revocación cancela los envíos pendientes.",
           "Una transferencia o transmisión internacional se realiza con las garantías y el fundamento jurídico exigidos por la normativa colombiana. No vendemos tus datos personales.",
         ]),
         section("solicitudes", "Cómo ejercer tus derechos", [
@@ -222,6 +224,7 @@ export const legalConfig = {
               "Clientes: registro, autenticación, checkout, facturación, entrega, posventa, garantías y prevención del fraude.",
               "Administradores: control de acceso, MFA, trazabilidad de acciones, seguridad y cumplimiento de funciones.",
               "Comunicaciones: envío de contenidos o promociones autorizados y gestión de bajas y revocaciones.",
+              "Publicidad opcional: atribución de compras mediante Meta Conversions API con hashes de contacto, identificador seudonimizado, contenidos y valor del pedido; nunca se envían dirección, documento, IP, agente de navegador ni identificadores sin autorización vigente.",
               "Seguridad: detección de abuso, protección de cuentas, investigación de incidentes y respaldo de operaciones.",
               "Cumplimiento: conservación contable, tributaria, contractual y atención de autoridades competentes.",
             ],
@@ -293,9 +296,10 @@ export const legalConfig = {
         ),
         section("terceros", "Proveedores involucrados", [
           "Supabase Auth gestiona autenticación; Cloudflare Turnstile puede validar que un formulario no sea automatizado; Cloudflare R2 entrega activos multimedia. Sus operaciones se limitan a la funcionalidad prestada y pueden estar sujetas a sus propias condiciones y registros técnicos.",
+          "Meta Conversions API opera únicamente entre servidores cuando otorgas autorización publicitaria. No instala el píxel de Meta ni crea cookies publicitarias en tu navegador; recibe solo los hashes y datos de compra descritos en el aviso de privacidad.",
         ]),
         section("no-esenciales", "Cookies analíticas o publicitarias", [
-          "Si en el futuro se incorporan analítica no esencial, personalización o publicidad, informaremos sus finalidades, duración y terceros antes de activarlas y solicitaremos consentimiento cuando sea exigible. Rechazar una cookie no esencial no debe impedir una compra básica.",
+          "Actualmente no instalamos cookies analíticas o publicitarias no esenciales. Si se incorporan en el futuro, informaremos sus finalidades, duración y terceros antes de activarlas y solicitaremos consentimiento cuando sea exigible. Rechazar una cookie no esencial ni la autorización para Meta Conversions API impide una compra básica.",
         ]),
         section("control", "Cómo controlarlas", [
           "Puedes borrar o bloquear cookies desde el navegador. Bloquear las estrictamente necesarias puede impedir el inicio de sesión o la finalización segura de una compra. Las preferencias de marketing pueden revocarse por los enlaces de baja y los canales de privacidad.",

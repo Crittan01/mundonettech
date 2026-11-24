@@ -124,6 +124,8 @@ export {
 export type { JsonLdBreadcrumbItem, JsonLdOffer, JsonLdProduct } from "./structured-data.js";
 export { buildGoogleMerchantXml } from "./merchant-feed.js";
 export type { MerchantFeedItem } from "./merchant-feed.js";
+export { buildMetaCatalogCsv } from "./meta-catalog.js";
+export type { MetaCatalogFeed, MetaCatalogIssue, MetaCatalogIssueCode } from "./meta-catalog.js";
 export {
   buildSitemapIndex,
   buildSitemapUrlSet,

@@ -217,7 +217,7 @@ async function ensureMatrixFixtures(client) {
   const checkout = await seedCheckoutFixture(client, { catalog, inventory, pricing, adminId });
   const payments = await seedPaymentFixture(client, { checkout, catalog, adminId });
   await seedLogisticsFixture(client, { checkout, payments, adminId });
-  await seedOperationsFixture(client, { adminId, catalog });
+  await seedOperationsFixture(client, { adminId, catalog, checkout });
   await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
   const crm = await seedCrmFixture(client, { adminId });
   await seedB2bFixture(client, { adminId, catalog, crm });

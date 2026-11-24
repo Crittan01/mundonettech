@@ -70,7 +70,7 @@ test("legal center renders eight complete documents, footer access, metadata and
     const docResponse = await page.goto(`/legal/${slug}`);
     expect(docResponse?.status()).toBe(200);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-    await expect(page.getByText(/Versión 1\.0\.0 · Vigente desde 2026-11-21/)).toBeVisible();
+    await expect(page.getByText(/Versión 1\.1\.0 · Vigente desde 2026-11-23/)).toBeVisible();
     await expect(page.locator("article section").count()).resolves.toBeGreaterThanOrEqual(6);
     await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
       "href",

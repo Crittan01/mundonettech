@@ -16,6 +16,7 @@ const approvals = [
   "RELEASE_DIAN_PROVIDER_VERIFIED",
   "RELEASE_MERCHANT_CENTER_VERIFIED",
   "RELEASE_MERCADO_LIBRE_VERIFIED",
+  "RELEASE_META_VERIFIED",
   "RELEASE_BACKUP_RESTORE_VERIFIED",
   "RELEASE_SCHEDULERS_VERIFIED",
   "RELEASE_ROLLBACK_APPROVED",
@@ -180,13 +181,14 @@ describe("release configuration gate", () => {
     ]);
   });
 
-  it("requires an authenticated channel scheduler and official OAuth endpoints", () => {
+  it("requires authenticated schedulers and official channel endpoints", () => {
     const checks = validateReleaseConfiguration(
       environment({
         CHANNEL_CRON_SECRET: undefined,
         CHANNEL_JOB_ACTOR_ID: "not-a-uuid",
         MERCADO_LIBRE_TOKEN_URL: "http://127.0.0.1:54420/oauth/token",
         MERCADO_LIBRE_API_URL: "http://127.0.0.1:54420",
+        META_CAPI_API_URL: "http://127.0.0.1:54427",
       }),
     );
     expect(checks.filter((check) => !check.passed).map((check) => check.name)).toEqual(
@@ -195,6 +197,7 @@ describe("release configuration gate", () => {
         "release.channelJobActor",
         "release.mercadoLibreTokenEndpoint",
         "release.mercadoLibreApiEndpoint",
+        "release.metaCapiEndpoint",
       ]),
     );
   });
@@ -272,7 +275,7 @@ describe("release HTTP gate", () => {
       return new Response("ok", { status: 200, headers });
     }) as typeof fetch;
     const checks = await verifyReleaseHttp("https://shop.example.test", fetchImplementation);
-    expect(checks).toHaveLength(16);
+    expect(checks).toHaveLength(17);
     expect(checks.every((check) => check.passed)).toBe(true);
   });
 

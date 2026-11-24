@@ -12,11 +12,12 @@ import {
 } from "@/lib/actions/admin-operational-credentials";
 import { initialActionState } from "@/lib/action-state";
 
-type Provider = "aveonline" | "resend" | "dian" | "gemini";
+type Provider = "aveonline" | "resend" | "dian" | "gemini" | "meta";
 type Field = {
   readonly name: string;
   readonly label: string;
   readonly secret?: boolean;
+  readonly optional?: boolean;
   readonly defaultValue?: string;
   readonly type?: "email" | "number" | "date" | "url";
   readonly section?: string;
@@ -61,6 +62,15 @@ const fields: Record<Provider, readonly Field[]> = {
     },
     { section: "Firmas y baja", name: "svixSecret", label: "Secreto Svix (whsec_…)", secret: true },
     { name: "unsubscribeSecret", label: "Secreto HMAC de baja (base64, ≥32 bytes)", secret: true },
+  ],
+  meta: [
+    { section: "Meta Conversions API", name: "pixelId", label: "ID numérico del píxel" },
+    { name: "accessToken", label: "Token de acceso del sistema de Meta", secret: true },
+    {
+      name: "testEventCode",
+      label: "Código de eventos de prueba (opcional; prohibido en PRD)",
+      optional: true,
+    },
   ],
   gemini: [
     { section: "Copiloto B2B 0-PII", name: "apiKey", label: "Llave API de Gemini", secret: true },
@@ -145,6 +155,7 @@ export function OperationalCredentialForm({
               <option value="resend">Resend</option>
               <option value="dian">Proveedor autorizado DIAN</option>
               <option value="gemini">Gemini para Copiloto B2B</option>
+              <option value="meta">Meta Conversions API</option>
             </select>
           </div>
         ) : null}
@@ -185,7 +196,7 @@ export function OperationalCredentialForm({
                   field.secret ? "" : (state.values?.[field.name] ?? field.defaultValue ?? "")
                 }
                 min={field.type === "number" ? 1 : undefined}
-                required={field.name !== "replyTo"}
+                required={!field.optional && field.name !== "replyTo"}
               />
             </div>
           </div>

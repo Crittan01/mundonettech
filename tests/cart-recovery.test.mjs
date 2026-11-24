@@ -274,7 +274,13 @@ describe("F5.1 — abandoned-cart recovery with privacy enforcement", () => {
     });
     await new AccountService(db, { privacyPolicyVersion: "2026-01" }).updateProfile(
       customer.id,
-      { givenName: "Cliente", familyName: "Recuperación", phoneE164: null, marketingEmail: false },
+      {
+        givenName: "Cliente",
+        familyName: "Recuperación",
+        phoneE164: null,
+        marketingEmail: false,
+        advertising: false,
+      },
       { ipHash: hash(), userAgentHash: hash() },
     );
     await worker.runBatch(10);

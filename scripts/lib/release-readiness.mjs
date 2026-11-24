@@ -12,6 +12,7 @@ const commonApprovals = [
   "RELEASE_DIAN_PROVIDER_VERIFIED",
   "RELEASE_MERCHANT_CENTER_VERIFIED",
   "RELEASE_MERCADO_LIBRE_VERIFIED",
+  "RELEASE_META_VERIFIED",
   "RELEASE_BACKUP_RESTORE_VERIFIED",
   "RELEASE_SCHEDULERS_VERIFIED",
   "RELEASE_ROLLBACK_APPROVED",
@@ -222,6 +223,7 @@ export function validateReleaseConfiguration(environment) {
   );
   check("release.mercadoLibreTokenEndpoint", !environment.MERCADO_LIBRE_TOKEN_URL);
   check("release.mercadoLibreApiEndpoint", !environment.MERCADO_LIBRE_API_URL);
+  check("release.metaCapiEndpoint", !environment.META_CAPI_API_URL);
   check(
     "release.turnstileSiteKey",
     Boolean(environment.NEXT_PUBLIC_TURNSTILE_SITE_KEY) &&
@@ -353,6 +355,7 @@ export async function verifyReleaseHttp(target, fetchImplementation = fetch) {
     ["/robots.txt", 200],
     ["/sitemap.xml", 200],
     ["/api/feeds/google-merchant", 200],
+    ["/api/feeds/meta-catalog", 200],
   ]) {
     try {
       const response = await fetchImplementation(`${origin}${path}`, {

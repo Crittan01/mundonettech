@@ -18,9 +18,10 @@ export const operationsTables = [
   "ChannelOrder",
   "ChannelShipment",
   "ChannelLedgerEntry",
+  "MetaCapiEvent",
 ];
 
-export async function seedOperationsFixture(client, { adminId, catalog }) {
+export async function seedOperationsFixture(client, { adminId, catalog, checkout }) {
   const notificationId = randomUUID();
   await client.query(
     `INSERT INTO "Notification" (
@@ -227,7 +228,49 @@ export async function seedOperationsFixture(client, { adminId, catalog }) {
     ) VALUES ($1, $2, 'SALE_EXPECTED', 'CREDIT', 100000, $3, $4, CURRENT_TIMESTAMP)`,
     [channelAccountId, channelOrderId, `channel-ledger:${channelOrderId}:SALE`, randomBytes(32)],
   );
+  const metaCredentialId = randomUUID();
+  await client.query(
+    `INSERT INTO "IntegrationCredential" (
+      "id", "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+    ) VALUES ($1, 'meta', 'LOCAL', 'matrix-meta', 1, $2, $3, $4, $5)`,
+    [metaCredentialId, randomBytes(12), randomBytes(32), randomBytes(16), adminId],
+  );
+  const metaConsentId = randomUUID();
+  await client.query(
+    `INSERT INTO "Consent" ("id", "customerId", "purpose", "status", "source", "policyVersion", "proofHash", "occurredAt")
+     VALUES ($1, $2, 'ADVERTISING', 'GRANTED', 'rls-matrix', 'v1', $3, CURRENT_TIMESTAMP - INTERVAL '1 hour')`,
+    [metaConsentId, catalog.customerId, randomBytes(32)],
+  );
+  const paidOrder = await client.query(`SELECT "totalCents" FROM "Order" WHERE "id" = $1`, [
+    checkout.orderId,
+  ]);
+  const metaEventId = randomUUID();
+  await client.query(
+    `INSERT INTO "MetaCapiEvent" (
+      "id", "eventId", "eventName", "credentialId", "orderId", "customerId", "consentId", "environment",
+      "pixelId", "requestUrl", "eventTime", "eventSourceUrl", "valueCents", "contents", "requestHash",
+      "externalIdHash", "emailHash", "phoneHash"
+    ) VALUES (
+      $1, $2, 'PURCHASE', $3, $4, $5, $6, 'LOCAL', '123456789012345', 'https://example.test/meta',
+      CURRENT_TIMESTAMP, 'https://example.test/checkout', $7, $8::jsonb, $9, $10, $11, $12
+    )`,
+    [
+      metaEventId,
+      `purchase:${checkout.orderId}`,
+      metaCredentialId,
+      checkout.orderId,
+      catalog.customerId,
+      metaConsentId,
+      paidOrder.rows[0].totalCents,
+      JSON.stringify([{ id: catalog.variantId, quantity: 2 }]),
+      randomBytes(32),
+      randomBytes(32),
+      randomBytes(32),
+      randomBytes(32),
+    ],
+  );
   return {
+    metaEventId,
     notificationId,
     backupRunId,
     drillId,

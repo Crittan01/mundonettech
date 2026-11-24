@@ -25,6 +25,7 @@ const profileSchema = z.object({
   familyName: z.string().trim().max(100),
   phoneE164: z.union([z.literal(""), z.string().regex(/^\+[1-9][0-9]{7,14}$/)]),
   marketingEmail: z.boolean(),
+  advertising: z.boolean(),
 });
 
 const addressSchema = z.object({
@@ -93,6 +94,7 @@ export async function updateProfileAction(
       familyName: formString(formData, "familyName"),
       phoneE164: formString(formData, "phoneE164"),
       marketingEmail: formData.get("marketingEmail") === "on",
+      advertising: formData.get("advertising") === "on",
     });
     const context = await getRequestSecurityContext();
     await accountService().updateProfile(
@@ -102,6 +104,7 @@ export async function updateProfileAction(
         familyName: input.familyName || null,
         phoneE164: input.phoneE164 || null,
         marketingEmail: input.marketingEmail,
+        advertising: input.advertising,
       },
       context,
     );

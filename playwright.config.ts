@@ -46,6 +46,7 @@ const webServerEnv: Record<string, string> = {
   MERCADO_LIBRE_TOKEN_URL:
     process.env.MERCADO_LIBRE_TOKEN_URL ?? "http://127.0.0.1:54420/oauth/token",
   MERCADO_LIBRE_API_URL: process.env.MERCADO_LIBRE_API_URL ?? "http://127.0.0.1:54420",
+  META_CAPI_API_URL: process.env.META_CAPI_API_URL ?? "http://127.0.0.1:54427",
   BANK_TRANSFER_INSTRUCTIONS:
     process.env.BANK_TRANSFER_INSTRUCTIONS ??
     "Cuenta de ahorros 001-00234567-89, banco de pruebas E2E. Usa la referencia del pedido.",

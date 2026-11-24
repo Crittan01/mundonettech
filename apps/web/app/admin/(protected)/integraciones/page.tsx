@@ -1,7 +1,9 @@
-import { hasAdminPermission } from "@mundonettech/core";
+import { hasAdminPermission, type MetaCatalogIssueCode } from "@mundonettech/core";
 import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { MetaCapiDashboard } from "@/components/admin/meta-capi-dashboard";
+import { MetaCatalogRefreshButton } from "@/components/admin/meta-catalog-refresh-button";
 import { OperationalCredentialForm } from "@/components/admin/operational-credential-form";
 import {
   CredentialRotationForm,
@@ -10,7 +12,12 @@ import {
   WompiCredentialWizard,
   type IntegrationCredentialView,
 } from "@/components/admin/integration-credential-forms";
-import { getIntegrationCredentialVault, getIntegrationEnvironment } from "@/lib/integrations";
+import {
+  getIntegrationCredentialVault,
+  getIntegrationEnvironment,
+  metaCapiService,
+} from "@/lib/integrations";
+import { getMetaCatalogFeed } from "@/lib/seo-data";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Integraciones y bóveda" };
@@ -21,13 +28,29 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 
+const feedIssueLabels: Record<MetaCatalogIssueCode, string> = {
+  INVALID_ID: "Identificador de variante inválido",
+  INVALID_GROUP: "Identificador de grupo inválido",
+  INVALID_TITLE: "Título ausente o inválido",
+  INVALID_DESCRIPTION: "Descripción ausente o inválida",
+  INVALID_LINK: "Enlace de producto inválido",
+  MISSING_IMAGE: "Falta una imagen pública real",
+  INVALID_IMAGE: "La imagen no tiene una URL segura",
+  INVALID_BRAND: "Marca ausente o inválida",
+  INVALID_PRICE: "Precio inválido",
+  INVALID_INVENTORY: "Inventario inválido",
+  INVALID_GTIN: "GTIN inválido; se omite el identificador",
+  INVALID_WEIGHT: "Peso logístico inválido",
+};
+
 export default async function IntegrationsPage() {
   const session = await requireAdminPage("integrations:read");
   const environment = getIntegrationEnvironment();
-  const credentials = await getIntegrationCredentialVault().list({
-    includeRevoked: true,
-    limit: 100,
-  });
+  const [credentials, feed, metaEvents] = await Promise.all([
+    getIntegrationCredentialVault().list({ includeRevoked: true, limit: 100 }),
+    getMetaCatalogFeed(),
+    metaCapiService().listEvents(50),
+  ]);
   const canWrite = hasAdminPermission(session.profile.role, "integrations:write");
   const items: IntegrationCredentialView[] = credentials.items.map((credential) => ({
     id: credential.id,
@@ -82,7 +105,7 @@ export default async function IntegrationsPage() {
             className="rounded-xl border border-border bg-card p-5"
           >
             <h2 id="operational-wizard" className="text-xl font-semibold">
-              Conectar logística, correo, facturación o Gemini
+              Conectar logística, correo, facturación, Gemini o Meta
             </h2>
             <p className="mt-2 mb-5 text-sm text-muted-foreground">
               Cada contrato se valida antes de cifrar. El proveedor DIAN debe firmar y transmitir el
@@ -97,6 +120,67 @@ export default async function IntegrationsPage() {
           credenciales.
         </p>
       )}
+      <section
+        aria-labelledby="meta-feed"
+        className="space-y-4 rounded-xl border border-border bg-card p-5"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 id="meta-feed" className="text-xl font-semibold">
+              Meta Catalog Feed
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
+              CSV por variante con precio COP, inventario, enlaces e identificadores reales. Las
+              variantes sin imagen pública no se anuncian; nunca se fabrican datos para
+              completarlas.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Link
+              href="/api/feeds/meta-catalog"
+              target="_blank"
+              className="text-sm text-primary underline"
+            >
+              Abrir feed CSV
+            </Link>
+            {canWrite ? <MetaCatalogRefreshButton /> : null}
+          </div>
+        </div>
+        <p role="status" className="text-sm">
+          {feed.accepted} variantes elegibles · {feed.issues.length} observaciones de validación
+        </p>
+        {feed.issues.length > 0 ? (
+          <details className="rounded-lg bg-secondary/40 p-4 text-sm">
+            <summary className="cursor-pointer font-medium">
+              Revisar observaciones del catálogo
+            </summary>
+            <ul className="mt-3 space-y-2">
+              {feed.issues.map((issue, index) => (
+                <li key={`${issue.id}-${issue.code}-${index}`} className="break-all">
+                  <span className="font-mono text-xs">{issue.id}</span> ·{" "}
+                  {feedIssueLabels[issue.code] ?? issue.code}
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Todas las variantes activas superan la validación.
+          </p>
+        )}
+      </section>
+      <section id="meta-capi" aria-labelledby="meta-capi-title" className="space-y-4">
+        <div>
+          <h2 id="meta-capi-title" className="text-xl font-semibold">
+            Eventos Meta Conversions API
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
+            Purchase se deriva del pago real y usa un event_id único por orden. La revocación
+            cancela pendientes; los resultados inciertos solo continúan tras conciliación con MFA.
+          </p>
+        </div>
+        <MetaCapiDashboard events={metaEvents} canWrite={canWrite} />
+      </section>
       <section aria-labelledby="credential-list" className="space-y-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
@@ -159,7 +243,8 @@ export default async function IntegrationsPage() {
                         ) : credential.provider === "aveonline" ||
                           credential.provider === "resend" ||
                           credential.provider === "dian" ||
-                          credential.provider === "gemini" ? (
+                          credential.provider === "gemini" ||
+                          credential.provider === "meta" ? (
                           <OperationalCredentialForm
                             environment={environment}
                             credential={{

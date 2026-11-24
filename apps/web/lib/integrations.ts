@@ -13,6 +13,7 @@ import {
   GuestOrderAccessService,
   IntegrationCredentialVault,
   InvoiceService,
+  MetaCapiService,
   PaymentRefundService,
   PaymentService,
   ShippingService,
@@ -175,6 +176,18 @@ export function channelOrderService(db: PrismaClient = getDatabase()): ChannelOr
   const apiUrl = process.env.MERCADO_LIBRE_API_URL?.trim();
   return new ChannelOrderService(db, {
     ring: loadCredentialKeyRing(environment),
+    ...(apiUrl ? { apiUrl } : {}),
+    allowLoopback: environment === IntegrationEnvironment.LOCAL,
+  });
+}
+
+export function metaCapiService(db: PrismaClient = getDatabase()): MetaCapiService {
+  const environment = getIntegrationEnvironment();
+  const apiUrl = process.env.META_CAPI_API_URL?.trim();
+  return new MetaCapiService(db, {
+    environment,
+    publicSiteUrl: getPublicSiteUrl(),
+    vault: getIntegrationCredentialVault(),
     ...(apiUrl ? { apiUrl } : {}),
     allowLoopback: environment === IntegrationEnvironment.LOCAL,
   });

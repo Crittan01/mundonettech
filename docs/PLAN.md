@@ -13,21 +13,20 @@
 | **Hito 1** | **Fase 4A — Operación, RMA/Seriales y Lanzamiento** | `F4A.1` `/admin/{hoy,dashboard,pedidos,finanzas}` (`OrderRefund`) + `3.500 UVT` · `F4A.2` `/mi-cuenta/*` + `/pedido/[token]` 2FA + RMA (`SerializedUnit`) + PQR SLA + Reseñas · `F4A.3` OWASP + E2E + axe + Lighthouse ≥ 95 + k6 + `release:verify` (**Go-Live** real sujeto a externos). | `[x]` |
 | **Hito 2 — Escala** | **Fase 4B — CRM 360 y Canal B2B** | `F4B.1` `Contact` 360° + duplicados + tareas + retención Hábeas Data · `F4B.2` `PriceList` B2B + `/empresas` → `/propuesta/[token]` `BigInt` → `Order` + Copiloto 0-PII. | `[x]` |
 | **Hito 2** | **Fase 5 — Lealtad, Lifecycle y Observabilidad** | `F5.1` Puntos (reversa `EARN`) + Referidos + Abandonados · `F5.2` Lifecycle + Segmentos Ley 1581 + RFM/LTV · `F5.3` Salud + Alertas + Backups GPG R2 streaming + DR drill + Ayuda v2. | `[x]` |
-| **Hito 2** | **Fase 6 — Omnicanal ML `MCO` + Meta CAPI** | `F6.1` OAuth PKCE · `F6.2` User Products + `x-version` + Full + precios (zona muerta \$60k) · `F6.3` `ChannelPack`/`ChannelOrder` + `ME2`/Flex + conciliación · `F6.4` Meta Catalog + CAPI. | `[ ]` |
+| **Hito 2** | **Fase 6 — Omnicanal ML `MCO` + Meta CAPI** | `F6.1` OAuth PKCE · `F6.2` User Products + `x-version` + Full + precios (zona muerta \$60k) · `F6.3` `ChannelPack`/`ChannelOrder` + `ME2`/Flex + conciliación · `F6.4` Meta Catalog + CAPI. | `[x]` |
 | **Hito 3 (Opc.)** | **Fase 7 — WhatsApp + Agente IA** | WhatsApp Cloud API + Agente Gemini TS sobre `packages/core` + Inbox humano con *takeover*. | `[ ]` |
 
 ---
 
-## 2. Fase Activa — Fase 6: Omnicanal ML `MCO` + Meta CAPI
+## 2. Fase Activa — Fase 7: WhatsApp + Agente IA (`Hito 3` Opcional)
 
-- `[x]` ✅ **Fases 0–5 (`F0.1`–`F5.3`):** MFA `aal2`/RLS/Bóveda (`ADR-019`..`022`), Catálogo/Media R2/WAC (`ADR-023`..`026`), CMS v3/Legal CO/SEO (`ADR-027`..`029`), Carrito/Checkout/Pagos/Logística/DIAN (`ADR-030`..`033`), Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse `96–100`/k6/`release:verify` (`ADR-034`..`036`), CRM 360° + B2B/Copiloto 0-PII (`ADR-037`..`038`) y Lealtad/Lifecycle/RFM + Salud/Backups GPG R2/DR/Ayuda v2 (`ADR-039`..`041`; Go-Live sujeto a externos).
-- `[x]` ✅ **`F6.1` — OAuth PKCE y `ChannelAccount`:** ML `MCO` PKCE `S256` (`__Secure-`), bóveda aislada, renovación fail-closed, `channels.reauth` y `/admin/canales` MFA + RLS (`ADR-042`).
-- `[x]` ✅ **`F6.2` — User Products ML `MCO`, `x-version`, Full y Precios \$60k:** `ChannelListing`/`ChannelOffer` `BigInt`, stock local/Full, jobs y conciliación MFA + RLS (`ADR-043`).
-- `[x]` ✅ **`F6.3` — Packs/órdenes, ME2/Flex/Full y conciliación:** webhooks HMAC + outbox 0-PII, `ChannelPack`/`ChannelOrder`/`ChannelShipment`, reserva/descuento serializado y `ChannelLedgerEntry` `BigInt` append-only + UI MFA/RLS (`ADR-044`; 130 tablas/2.255 casos).
-- `[ ]` **`F6.4` — Meta Catalog Feed + Conversions API (CAPI):** feed de catálogo validado y despacho server-side CAPI deduplicado (`event_id`), sujeto a `Consent` Ley 1581 vigente, bóveda y cero PII no autorizada.
+- `[x]` ✅ **Fases 0–6 (`F0.1`–`F6.4`):** MFA `aal2`/RLS/Bóveda (`ADR-019`..`022`), Catálogo/Media R2/WAC (`ADR-023`..`026`), CMS v3/Legal CO/SEO (`ADR-027`..`029`), Carrito/Checkout/Pagos/Logística/DIAN (`ADR-030`..`033`), Operación/`3.500 UVT`/RMA/PQR/Reseñas + OWASP/E2E+axe/Lighthouse `96–100`/k6/`release:verify` (`ADR-034`..`036`), CRM 360° + B2B/Copiloto 0-PII (`ADR-037`..`038`), Lealtad/Lifecycle/RFM + Salud/Backups GPG R2/DR/Ayuda v2 (`ADR-039`..`041`) y Omnicanal ML `MCO` + Meta Catalog/CAPI (`ADR-042`..`045`; 131 tablas/2.272 casos; Go-Live sujeto a externos).
+- `[ ]` **`F7.1` — WhatsApp Cloud API, Webhooks Firmados y Conversaciones:** credenciales en bóveda `AES-256-GCM` aisladas por ambiente, verificación HMAC-SHA256 + anti-replay, ventana de atención 24 h / plantillas aprobadas, consentimiento Ley 1581 / baja efectiva, outbox 0-PII y persistencia con RLS forzada.
+- `[ ]` **`F7.2` — Agente IA Gemini TS sobre `packages/core`:** herramientas deterministas de catálogo, compatibilidad, stock y estado de pedido verificados sobre servicios de dominio reales (cero invención de precios, existencias o políticas), minimización estricta de PII y trazabilidad de ejecuciones.
+- `[ ]` **`F7.3` — Inbox Humano `/admin/whatsapp` con *Takeover*:** cola multi-operador con transferencia automática/manual IA ↔ humano (*takeover* y devolución), máscara PII server-side, RBAC + step-up MFA, SLA operativo en `/admin/hoy` y auditoría completa.
 
 ---
 
 ## 3. Handoff para la siguiente sesión
 
-- **Siguiente turno — Implementador (`F6.4`):** partir de `develop` limpio, crear `feat/f6-4-meta-catalog-capi`, implementar Meta Catalog Feed validado y despacho server-side CAPI deduplicado (`event_id`) con `Consent` Ley 1581 vigente, bóveda `AES-256-GCM` y 0-PII, documentar `ADR-045`, pasar `make check && pnpm test && pnpm build`, marcar `[R]` y entregar al Auditor.
+- **Siguiente turno — Implementador (`F7.1`):** partir de `develop` limpio, crear `feat/f7-1-whatsapp-cloud-api`, construir la integración WhatsApp Cloud API (bóveda por ambiente, webhooks HMAC-SHA256 + outbox 0-PII, ventana 24 h/plantillas, Ley 1581 y modelos con RLS forzada), registrar `ADR-046`, pasar `make check && pnpm test && pnpm build`, marcar `[R]` y relevar al **Auditor** (`Hito 1` y `Hito 2` ya certificados; Go-Live real sujeto a externos).

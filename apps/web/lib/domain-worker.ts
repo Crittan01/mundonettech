@@ -12,6 +12,7 @@ import {
   getIntegrationCredentialVault,
   getPublicSiteUrl,
   invoiceService,
+  metaCapiService,
   shippingService,
 } from "@/lib/integrations";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -23,6 +24,7 @@ export function domainEventWorker(): DomainEventWorker {
     shipping: shippingService(db),
     email: emailService(db),
     invoice: invoiceService(db),
+    metaCapi: metaCapiService(db),
     vault: getIntegrationCredentialVault(),
     publicSiteUrl: getPublicSiteUrl(),
     storeName: storeConfig.name,
