@@ -14,6 +14,7 @@ import { CmsSeoPreview } from "@/components/cms/cms-seo-preview";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { initialActionState, type ActionState } from "@/lib/action-state";
 import {
   addCmsBlockAction,
@@ -36,8 +37,6 @@ import {
 type ServerAction = (previous: ActionState, formData: FormData) => Promise<ActionState>;
 const inputClass =
   "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 const blockTypeLabels: Record<CmsBlockType, string> = {
   HERO: "HERO · Portada principal",
@@ -254,10 +253,9 @@ function BlockFields({
     <div className="grid gap-4 sm:grid-cols-[260px_1fr]">
       <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-type`}>Tipo de bloque</Label>
-        <select
+        <Select
           id={`${idPrefix}-type`}
           name="blockType"
-          className={selectClass}
           value={selectedType}
           onChange={(event) => handleTypeChange(event.target.value as CmsBlockType)}
         >
@@ -266,7 +264,7 @@ function BlockFields({
               {blockTypeLabels[type]}
             </option>
           ))}
-        </select>
+        </Select>
         <Button
           type="button"
           variant="ghost"
@@ -529,16 +527,15 @@ export function StoreSettingsForm({ settings }: { settings: StoreSettingsInput }
           <>
             <div className="space-y-2">
               <Label htmlFor="settings-regime">Régimen tributario</Label>
-              <select
+              <Select
                 key={`settings-regime-${regimeDefault}`}
                 id="settings-regime"
                 name="taxRegime"
                 defaultValue={regimeDefault}
-                className={selectClass}
               >
                 <option value="NO_RESPONSABLE_IVA">No responsable de IVA</option>
                 <option value="RESPONSABLE_IVA">Responsable de IVA</option>
-              </select>
+              </Select>
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-threshold">Alerta de ingresos anuales (UVT)</Label>

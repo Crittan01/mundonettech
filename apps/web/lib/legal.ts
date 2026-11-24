@@ -6,6 +6,12 @@ import { cacheLife, cacheTag } from "next/cache";
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+export function getConfiguredLegalDocument(slug: string): LegalDocument {
+  const document = legalConfig.documents.find((candidate) => candidate.slug === slug);
+  if (!document) throw new Error(`Legal document ${slug} is not configured.`);
+  return document;
+}
+
 async function readLegalDocuments(): Promise<LegalDocument[]> {
   "use cache";
   cacheLife("max");

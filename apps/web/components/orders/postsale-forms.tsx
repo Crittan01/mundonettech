@@ -2,11 +2,11 @@
 
 import { useActionState, useState } from "react";
 
-import { selectClass } from "@/components/account/account-forms";
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   createReviewAction,
@@ -88,19 +88,19 @@ export function ReturnRequestForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`return-kind-${channel.orderId}`}>Tipo de solicitud</Label>
-          <select
+          <Select
             id={`return-kind-${channel.orderId}`}
             name="kind"
             value={kind}
             onChange={(event) => setKind(event.target.value as "REFUND" | "EXCHANGE")}
-            className={selectClass}
+            className="disabled:opacity-50"
             disabled={pending}
           >
             <option value="REFUND">Retracto con reembolso</option>
             {deliveries.some((item) => item.replacements.length > 0) ? (
               <option value="EXCHANGE">Cambio de variante</option>
             ) : null}
-          </select>
+          </Select>
         </div>
         <p className="text-sm text-muted-foreground">
           La solicitud se limita a cinco días hábiles desde cada entrega. El reembolso requiere
@@ -155,7 +155,7 @@ export function ReturnRequestForm({
                     <Label htmlFor={`replacement-${delivery.shipmentItemId}`}>
                       Variante de reemplazo
                     </Label>
-                    <select
+                    <Select
                       id={`replacement-${delivery.shipmentItemId}`}
                       value={
                         replacements[delivery.shipmentItemId] ?? delivery.replacements[0]?.id ?? ""
@@ -166,7 +166,7 @@ export function ReturnRequestForm({
                           [delivery.shipmentItemId]: event.target.value,
                         }))
                       }
-                      className={selectClass}
+                      className="disabled:opacity-50"
                       disabled={pending}
                     >
                       {delivery.replacements.map((variant) => (
@@ -174,7 +174,7 @@ export function ReturnRequestForm({
                           {variant.sku}
                         </option>
                       ))}
-                    </select>
+                    </Select>
                   </div>
                 ) : null}
               </div>
@@ -251,10 +251,10 @@ export function WarrantyClaimForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`warranty-unit-${units[0]?.id ?? "none"}`}>Serial o IMEI</Label>
-          <select
+          <Select
             id={`warranty-unit-${units[0]?.id ?? "none"}`}
             name="serializedUnitId"
-            className={selectClass}
+            className="disabled:opacity-50"
             required
             disabled={pending}
           >
@@ -263,21 +263,21 @@ export function WarrantyClaimForm({
                 {unit.label}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`warranty-remedy-${channel.orderId}`}>Remedio solicitado</Label>
-          <select
+          <Select
             id={`warranty-remedy-${channel.orderId}`}
             name="remedy"
-            className={selectClass}
+            className="disabled:opacity-50"
             required
             disabled={pending}
           >
             <option value="REPAIR">Reparación</option>
             <option value="REPLACEMENT">Reemplazo</option>
             <option value="REFUND">Reembolso</option>
-          </select>
+          </Select>
         </div>
       </div>
       <div className="space-y-2">
@@ -320,11 +320,11 @@ export function ReviewForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`rating-${orderItemId}`}>Calificación</Label>
-          <select
+          <Select
             id={`rating-${orderItemId}`}
             name="rating"
             defaultValue="5"
-            className={selectClass}
+            className="disabled:opacity-50"
             required
             disabled={pending}
           >
@@ -333,7 +333,7 @@ export function ReviewForm({
                 {rating} de 5
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`display-name-${orderItemId}`}>Nombre público</Label>
@@ -395,10 +395,10 @@ export function SupportTicketForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`support-kind-${channel.orderId}`}>Tipo de PQR</Label>
-          <select
+          <Select
             id={`support-kind-${channel.orderId}`}
             name="kind"
-            className={selectClass}
+            className="disabled:opacity-50"
             required
             disabled={pending}
           >
@@ -407,7 +407,7 @@ export function SupportTicketForm({
             <option value="CLAIM">Reclamo (15 días hábiles)</option>
             <option value="APPEAL">Recurso (15 días hábiles)</option>
             <option value="SUGGESTION">Sugerencia (10 días hábiles)</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`support-subject-${channel.orderId}`}>Asunto</Label>

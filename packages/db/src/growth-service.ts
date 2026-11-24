@@ -21,7 +21,7 @@ import {
   hasUniqueViolation,
   inInventoryTransaction,
 } from "./inventory-shared.js";
-import type { DatabaseExecutor } from "./primitives.js";
+import { databaseNow, type DatabaseExecutor } from "./primitives.js";
 import { suppressLifecycleCustomerInTransaction } from "./lifecycle-cancellation.js";
 
 export type GrowthErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN";
@@ -52,11 +52,6 @@ interface LoyaltyAppendInput {
 const referralAlphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 const referralCodeAttempts = 8;
 const maximumPoints = 2_147_483_647;
-
-async function databaseNow(tx: DatabaseExecutor): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
-}
 
 function points(value: number, field: string): number {
   if (!Number.isInteger(value) || value === 0 || Math.abs(value) > maximumPoints) {

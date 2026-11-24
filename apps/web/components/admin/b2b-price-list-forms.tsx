@@ -7,6 +7,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   activateB2bPriceListAction,
@@ -29,9 +30,6 @@ export interface B2bPriceListFormView {
   readonly validFromInput: string;
   readonly validToInput: string;
 }
-
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 function PriceListFields({
   record,
@@ -274,10 +272,9 @@ export function B2bOrganizationAssignmentForm({
       <p className="text-sm font-medium">{organization.legalName}</p>
       <div className="space-y-2">
         <Label htmlFor={`org-list-${organization.id}`}>Lista asignada</Label>
-        <select
+        <Select
           id={`org-list-${organization.id}`}
           name="priceListId"
-          className={selectClass}
           value={selectedId}
           onChange={(event) => setSelectedId(event.target.value)}
         >
@@ -287,7 +284,7 @@ export function B2bOrganizationAssignmentForm({
               {list.code} · {list.name}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <Button type="submit" disabled={pending}>
         {pending ? "Guardando…" : "Asignar"}

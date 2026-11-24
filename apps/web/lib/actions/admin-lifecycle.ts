@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { parseWholeCopToCents, rfmClasses } from "@mundonettech/core";
+import { parseDecimalCopToCents, rfmClasses } from "@mundonettech/core";
 import { LifecycleError } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -103,7 +103,7 @@ function optionalInteger(formData: FormData, key: string, minimum: number, maxim
 
 function optionalMoney(formData: FormData, key: string) {
   const value = formString(formData, key).trim();
-  return value ? parseWholeCopToCents(value) : null;
+  return value ? parseDecimalCopToCents(value) : null;
 }
 
 function segmentDefinition(formData: FormData) {

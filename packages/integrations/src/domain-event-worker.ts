@@ -5,6 +5,7 @@ import {
   failDomainOutbox,
   GrowthService,
   LifecycleService,
+  OperationsService,
   retryDomainOutbox,
   type DomainOutbox,
 } from "@mundonettech/db";
@@ -33,6 +34,7 @@ const supportedEvents = [
   "lifecycle.message.dispatch.v1",
   "order.confirmed.v1",
   "order.payment.paid.v1",
+  "payment.late-review-required.v1",
   "meta.capi.dispatch.v1",
   "order.refund.completed.v1",
   "shipping.fulfillment.created.v1",
@@ -486,6 +488,20 @@ export class DomainEventWorker {
             await this.options.metaCapi?.enqueuePurchase({ orderId, paidAt });
           },
         ]);
+        return;
+      }
+      case "payment.late-review-required.v1": {
+        const match = /^payment-webhook:([0-9a-f]{64}):late-review:v1$/.exec(
+          event.deduplicationKey,
+        );
+        if (!match?.[1]) {
+          throw new EmailValidationError("Late payment review event key is invalid.");
+        }
+        await new OperationsService(this.db).openLatePaymentReview({
+          attemptId: this.id(event, "attemptId"),
+          orderId: this.id(event, "orderId"),
+          eventKey: match[1],
+        });
         return;
       }
       case "meta.capi.dispatch.v1": {

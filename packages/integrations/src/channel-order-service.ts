@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { hasAdminPermission, isAdminRole, type AdminPermission } from "@mundonettech/core";
 import {
@@ -26,6 +26,7 @@ import {
 
 import type { ChannelAuditContext } from "./channel-account-service.js";
 import { decryptIntegrationCredential, type CredentialKeyRing } from "./credential-crypto.js";
+import { canonicalIntegrationJson, integrationDigest } from "./integration-utils.js";
 import { parseMercadoLibreTokenCredential } from "./mercado-libre.js";
 import {
   MercadoLibreCatalogError,
@@ -189,28 +190,7 @@ function assertUuid(value: string, field: string): void {
     throw new ChannelOrderError("INVALID_INPUT", `${field} must be a UUID.`);
 }
 
-function canonical(value: unknown): unknown {
-  if (typeof value === "bigint") return value.toString();
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(canonical);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-        .map(([key, entry]) => [key, canonical(entry)]),
-    );
-  }
-  return value;
-}
-
-function digest(value: unknown): Uint8Array<ArrayBuffer> {
-  return Uint8Array.from(
-    createHash("sha256")
-      .update(JSON.stringify(canonical(value)))
-      .digest(),
-  );
-}
+const digest = integrationDigest;
 
 function sourceHash(value: { readonly sourceHash: Uint8Array }): string {
   return Buffer.from(value.sourceHash).toString("hex");
@@ -468,7 +448,7 @@ export class ChannelOrderService {
     if (existing) {
       if (
         existing.eventType !== resourceEventType ||
-        JSON.stringify(canonical(existing.payload)) !== JSON.stringify(canonical(payload))
+        canonicalIntegrationJson(existing.payload) !== canonicalIntegrationJson(payload)
       ) {
         throw new ChannelOrderError(
           "CONFLICT",
@@ -493,7 +473,7 @@ export class ChannelOrderService {
       if (
         !replay ||
         replay.eventType !== resourceEventType ||
-        JSON.stringify(canonical(replay.payload)) !== JSON.stringify(canonical(payload))
+        canonicalIntegrationJson(replay.payload) !== canonicalIntegrationJson(payload)
       ) {
         throw error;
       }

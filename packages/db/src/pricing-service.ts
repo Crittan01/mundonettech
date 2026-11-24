@@ -14,6 +14,7 @@ import {
   hasUniqueViolation,
   inInventoryTransaction,
 } from "./inventory-shared.js";
+import { databaseNow } from "./primitives.js";
 import type {
   BundleInput,
   CouponInput,
@@ -94,11 +95,6 @@ function normalizePage(options: PricingListOptions): { page: number; pageSize: n
 
 function pageResult<T>(items: T[], total: number, page: number, pageSize: number) {
   return { items, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
-}
-
-async function databaseNow(tx: Prisma.TransactionClient): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
 }
 
 async function writeAudit(

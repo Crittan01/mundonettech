@@ -50,7 +50,7 @@ export async function getCatalogProduct(slug: string): Promise<CatalogProductDet
 async function readCachedCategory(slug: string): Promise<CatalogCategory | null> {
   "use cache";
   cacheLife(catalogLife);
-  cacheTag("catalog", `catalog:category:${slug}`);
+  cacheTag("catalog");
   return catalogService().getCategory(slug);
 }
 
@@ -63,7 +63,7 @@ export async function getCatalogCategory(slug: string): Promise<CatalogCategory 
 async function readCachedBrand(slug: string): Promise<CatalogBrand | null> {
   "use cache";
   cacheLife(catalogLife);
-  cacheTag("catalog", `catalog:brand:${slug}`);
+  cacheTag("catalog");
   return catalogService().getBrand(slug);
 }
 

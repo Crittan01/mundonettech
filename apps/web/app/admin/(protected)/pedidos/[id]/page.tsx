@@ -7,6 +7,7 @@ import { notFound } from "next/navigation";
 import { z } from "zod";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import {
   DeliverShipmentForm,
   DispatchShipmentForm,
@@ -27,14 +28,6 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-
-function Empty({ children }: { children: string }) {
-  return (
-    <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-      {children}
-    </p>
-  );
-}
 
 export default async function OrderDetailPage({ params }: PageProps<"/admin/pedidos/[id]">) {
   const [{ id }, session] = await Promise.all([params, requireAdminPage("orders:read")]);

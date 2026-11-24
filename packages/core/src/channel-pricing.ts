@@ -109,7 +109,7 @@ function grossUp(
   const required = add(targetNetCents, fixedCosts);
   const remainingBps = basisPoints - BigInt(input.commissionBps);
   const estimate = ceilDiv(required * basisPoints, remainingBps);
-  if (estimate > maxSignedBigInt || estimate * basisPoints > maxSignedBigInt * basisPoints) {
+  if (estimate > maxSignedBigInt) {
     throw new ChannelPricingError("MONEY_OVERFLOW", "Channel pricing exceeds signed INT8.");
   }
   let candidate = wholeCopCeil(estimate);

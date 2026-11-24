@@ -12,6 +12,7 @@ import { z } from "zod";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { SegmentEditorForm, SegmentStateButtons } from "@/components/admin/segment-forms";
 import { Button } from "@/components/ui/button";
+import { single } from "@/lib/admin-search-params";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 import { segmentationService } from "@/lib/lifecycle";
 
@@ -26,10 +27,6 @@ const querySchema = z.object({
   segmento: z.string().uuid().optional(),
   cursor: z.string().uuid().optional(),
 });
-
-function single(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
 
 export default async function SegmentsPage({ searchParams }: PageProps<"/admin/segmentos">) {
   const session = await requireAdminPage("crm:read");

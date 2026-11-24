@@ -24,7 +24,7 @@ export class RfmAnalyticsError extends Error {
   }
 }
 
-export interface RfmRecord {
+interface RfmRecord {
   readonly customerId: string;
   readonly email: string;
   readonly customerStatus: string;
@@ -39,7 +39,7 @@ export interface RfmRecord {
   readonly rfmClass: string;
 }
 
-export interface RfmAnalyticsCursor {
+interface RfmAnalyticsCursor {
   readonly ltvCents: string;
   readonly customerId: string;
 }

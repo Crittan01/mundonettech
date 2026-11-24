@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   IdempotencyStatus,
   type DomainOutbox,
@@ -10,6 +12,40 @@ export type DatabaseExecutor = PrismaClient | Prisma.TransactionClient;
 
 export interface AcquiredIdempotencyKey extends IdempotencyKey {
   readonly acquired: boolean;
+}
+
+export interface AdminActionAudit {
+  readonly actorAdminUserId: string;
+  readonly ipHash: Uint8Array;
+  readonly userAgentHash: Uint8Array | null;
+  readonly requestId?: string;
+}
+
+export async function databaseNow(db: DatabaseExecutor): Promise<Date> {
+  const rows = await db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+  return rows[0]!.now;
+}
+
+export async function recordAdminAction(
+  tx: Prisma.TransactionClient,
+  audit: AdminActionAudit,
+  action: string,
+  targetType: string,
+  targetId: string,
+  metadata: Prisma.JsonObject = {},
+): Promise<void> {
+  await tx.adminActionLog.create({
+    data: {
+      actorAdminUserId: audit.actorAdminUserId,
+      action,
+      targetType,
+      targetId,
+      requestId: audit.requestId ?? randomUUID(),
+      ipHash: Uint8Array.from(audit.ipHash),
+      userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
+      metadata,
+    },
+  });
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

@@ -8,6 +8,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   adjustChannelOrderLedgerAction,
   assignChannelOrderStockAction,
@@ -16,9 +17,6 @@ import {
   synchronizeChannelOrderAction,
 } from "@/lib/actions/admin-channel-orders";
 import { initialActionState, type ActionState } from "@/lib/action-state";
-
-const selectClass =
-  "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 type OrderAction = (previous: ActionState, formData: FormData) => Promise<ActionState>;
 
@@ -75,18 +73,19 @@ function EvidenceFields({
       </div>
       <div className="space-y-2">
         <Label htmlFor={`reason-${suffix}`}>Motivo de conciliación</Label>
-        <select
+        <Select
           key={`reason-${suffix}-${reasonDefault}`}
           id={`reason-${suffix}`}
           name="reasonCode"
-          className={selectClass}
+          className="flex py-2"
+          compact
           defaultValue={reasonDefault}
           required
         >
           <option value="PROVIDER_SETTLEMENT_MATCH">Liquidación verificada</option>
           <option value="PROVIDER_CORRECTION">Corrección del proveedor</option>
           <option value="FINANCE_MANUAL_REVIEW">Revisión financiera documentada</option>
-        </select>
+        </Select>
       </div>
     </div>
   );
@@ -143,11 +142,12 @@ export function ChannelOrderActions({
                   return (
                     <div className="space-y-2">
                       <Label htmlFor={`location-${order.id}`}>Bodega compatible</Label>
-                      <select
+                      <Select
                         key={`location-${order.id}-${selectedLocation}`}
                         id={`location-${order.id}`}
                         name="locationId"
-                        className={selectClass}
+                        className="flex py-2"
+                        compact
                         defaultValue={selectedLocation}
                         required
                       >
@@ -160,7 +160,7 @@ export function ChannelOrderActions({
                             {location.available} disponibles
                           </option>
                         ))}
-                      </select>
+                      </Select>
                     </div>
                   );
                 }}
@@ -225,17 +225,18 @@ export function ChannelOrderActions({
                         </div>
                         <div className="space-y-2">
                           <Label htmlFor={`direction-${order.id}`}>Dirección</Label>
-                          <select
+                          <Select
                             key={`direction-${order.id}-${directionDefault}`}
                             id={`direction-${order.id}`}
                             name="direction"
-                            className={selectClass}
+                            className="flex py-2"
+                            compact
                             defaultValue={directionDefault}
                             required
                           >
                             <option value="CREDIT">Crédito a favor</option>
                             <option value="DEBIT">Débito en contra</option>
-                          </select>
+                          </Select>
                         </div>
                       </div>
                       <EvidenceFields suffix={`adjust-${order.id}`} values={values} />

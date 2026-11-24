@@ -1,8 +1,7 @@
 "use server";
 
-import { legalConfig } from "@mundonettech/config/legal";
 import { B2bError } from "@mundonettech/db";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
@@ -10,17 +9,13 @@ import { actionError, actionSuccess, formSnapshot, type ActionState } from "@/li
 import { b2bService, hashProposalToken, receiptTokenForProposal, sha256 } from "@/lib/b2b";
 import { orderService } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
+import {
+  optionalTrimmedText as optionalText,
+  phoneInputPattern as phonePattern,
+} from "@/lib/form-validation";
+import { getConfiguredLegalDocument as legalDocument } from "@/lib/legal";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
-
-const optionalText = (maximum: number) =>
-  z
-    .string()
-    .trim()
-    .max(maximum)
-    .transform((value) => value || null);
-const phonePattern =
-  /^(?:\+57[\s()-]*[36][0-9\s()-]{9}|[36][0-9\s()-]{9}|\+[1-9][0-9\s()-]{7,18})$/;
 
 const leadSchema = z.object({
   submissionId: z.string().uuid(),
@@ -65,12 +60,6 @@ const acceptanceSchema = z.object({
   dataProcessingAccepted: z.literal("true"),
   signatureAccepted: z.literal("true"),
 });
-
-function legalDocument(slug: string) {
-  const document = legalConfig.documents.find((candidate) => candidate.slug === slug);
-  if (!document) throw new Error(`Legal document ${slug} is not configured.`);
-  return document;
-}
 
 function publicValues(formData: FormData, secrets: readonly string[]): Record<string, string> {
   const values = formSnapshot(formData);
@@ -254,6 +243,7 @@ export async function acceptB2bProposalAction(
       },
       expectedReviewFingerprint: input.reviewFingerprint,
     });
+    updateTag("catalog:inventory");
     revalidatePath(`/propuesta/${input.token}`);
     revalidatePath(`/admin/b2b/${proposal.opportunityId}`);
     revalidatePath("/admin/b2b");

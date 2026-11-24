@@ -11,3 +11,17 @@ export function FormMessage({ state }: Readonly<{ state: ActionState }>) {
     </p>
   );
 }
+
+export function FieldErrors({
+  id,
+  messages,
+}: Readonly<{ id: string; messages: readonly string[] | undefined }>) {
+  if (!messages?.length) return null;
+  return (
+    <ul id={id} className="space-y-1 text-sm text-destructive">
+      {messages.map((message, index) => (
+        <li key={`${index}-${message}`}>{message}</li>
+      ))}
+    </ul>
+  );
+}

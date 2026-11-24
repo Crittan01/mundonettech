@@ -2,6 +2,7 @@ import { formatCopCents } from "@mundonettech/core";
 import { OperationsService } from "@mundonettech/db";
 import Link from "next/link";
 
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { NotificationReadForm } from "@/components/admin/notification-read-form";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
@@ -31,14 +32,6 @@ const providerLabels: Record<string, string> = {
   BANK_TRANSFER: "Transferencia bancaria",
   COD: "Contraentrega (discrepancia)",
 };
-
-function Empty({ children }: { children: string }) {
-  return (
-    <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-      {children}
-    </p>
-  );
-}
 
 export default async function TodayPage() {
   const session = await requireAdminPage();

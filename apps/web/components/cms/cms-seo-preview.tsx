@@ -4,7 +4,7 @@ import { buildCmsSeo, isValidCmsSeoSlug, type CmsSeoImage } from "@mundonettech/
 import { storeConfig } from "@mundonettech/config/store";
 import Image from "next/image";
 
-export interface CmsSeoPreviewValues {
+interface CmsSeoPreviewValues {
   readonly slug: string;
   readonly title: string;
   readonly seoTitle: string;

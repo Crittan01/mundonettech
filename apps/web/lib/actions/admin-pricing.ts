@@ -83,6 +83,7 @@ function invalidate(): void {
   updateTag("catalog:search");
   updateTag("catalog:compare");
   updateTag("catalog:cms-grid");
+  updateTag("merchant-feed");
   revalidatePath("/admin/precios");
 }
 

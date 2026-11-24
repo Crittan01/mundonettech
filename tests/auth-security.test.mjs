@@ -9,7 +9,6 @@ import {
   adminRing,
   adminRoles,
   canAssignAdminRole,
-  canManageAdministrator,
   createTimeoutToken,
   hasAdminPermission,
   isPasswordCompromised,
@@ -96,16 +95,39 @@ describe("F0.4 — RBAC three-ring authorization", () => {
     }
   });
 
-  it("restricts user administration, audit, and cross-ring privilege assignment", () => {
+  it("restricts user administration and audit", () => {
     assert.equal(hasAdminPermission("CMS_EDITOR", "users:read"), false);
     assert.equal(hasAdminPermission("FULFILLMENT", "audit:read"), false);
     assert.equal(hasAdminPermission("FINANCE_ANALYST", "audit:read"), true);
-    assert.equal(canAssignAdminRole("OPERATIONS_MANAGER", "SUPERADMIN"), false);
-    assert.equal(canAssignAdminRole("OPERATIONS_MANAGER", "OPERATIONS_MANAGER"), false);
-    assert.equal(canAssignAdminRole("OPERATIONS_MANAGER", "STORE_MANAGER"), true);
-    assert.equal(canManageAdministrator("OPERATIONS_MANAGER", "SUPERADMIN"), false);
-    assert.equal(canManageAdministrator("SUPERADMIN", "SUPERADMIN"), true);
-    assert.equal(canAssignAdminRole("CUSTOMER_SUPPORT", "CMS_EDITOR"), false);
+  });
+
+  it("covers the complete actor and target role assignment matrix", () => {
+    for (const actorRole of adminRoles) {
+      for (const targetRole of adminRoles) {
+        const expected =
+          actorRole === "SUPERADMIN" ||
+          (actorRole === "OPERATIONS_MANAGER" && adminRing(targetRole) !== 1);
+        assert.equal(
+          canAssignAdminRole(actorRole, targetRole),
+          expected,
+          `${actorRole} -> ${targetRole}`,
+        );
+      }
+    }
+  });
+
+  it("validates the persisted target role even when an update keeps the same role", () => {
+    const action = readFileSync("apps/web/lib/actions/admin-users.ts", "utf8");
+    const targetLookup = action.indexOf("const target = await tx.adminUser.findUnique");
+    assert.ok(targetLookup >= 0);
+    const superadminGuard = action.indexOf("const removesActiveSuperadmin", targetLookup);
+    assert.ok(superadminGuard > targetLookup);
+    const currentRoleGuard = action.slice(targetLookup, superadminGuard);
+    assert.match(
+      currentRoleGuard,
+      /if \(!canAssignAdminRole\(session\.profile\.role, target\.role\)\)/,
+    );
+    assert.doesNotMatch(currentRoleGuard, /parsed\.data\.role/);
   });
 });
 

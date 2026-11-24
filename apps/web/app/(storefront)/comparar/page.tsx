@@ -7,18 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { compareCatalogProducts, searchCatalog } from "@/lib/catalog";
+import { authenticityLabels } from "@/lib/catalog-presenters";
 import { getPublicMediaOrigin } from "@/lib/env";
 
 export const metadata = {
   title: "Comparador de productos",
   description: "Compara precio, disponibilidad y atributos técnicos de hasta cuatro productos.",
 };
-
-const authenticityLabels = {
-  ORIGINAL: "Original",
-  CERTIFIED_COMPATIBLE: "Compatible certificado",
-  OEM: "OEM",
-} as const;
 
 const retractLabels = {
   STANDARD: "Estándar (Ley 1480)",

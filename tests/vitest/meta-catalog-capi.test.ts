@@ -154,12 +154,24 @@ describe("F6.4 — Meta CAPI credentials and sealed purchase request", () => {
     expect(() =>
       metaCapiEventsUrl("123456789012345", { apiUrl: "https://unexpected.example.co" }),
     ).toThrow(/environment policy/);
+    expect(() =>
+      metaCapiEventsUrl("123456789012345", {
+        apiUrl: "https://unexpected.example.co",
+        allowLoopback: true,
+      }),
+    ).toThrow(/environment policy/);
     expect(
       metaCapiEventsUrl("123456789012345", {
         apiUrl: "http://127.0.0.1:54420",
         allowLoopback: true,
       }),
     ).toBe("http://127.0.0.1:54420/123456789012345/events");
+    expect(
+      metaCapiEventsUrl("123456789012345", {
+        apiUrl: "https://graph.facebook.com/v24.0",
+        allowLoopback: true,
+      }),
+    ).toBe("https://graph.facebook.com/v24.0/123456789012345/events");
   });
 
   it("builds deterministic JSON with raw decimal COP, event_id and only authorized hashes", () => {

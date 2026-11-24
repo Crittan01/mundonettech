@@ -1,5 +1,8 @@
 export class IntegrationTransportError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code: "RESPONSE_TOO_LARGE" | "NETWORK_UNCERTAIN" = "NETWORK_UNCERTAIN",
+  ) {
     super(message);
     this.name = "IntegrationTransportError";
   }
@@ -38,6 +41,7 @@ export async function fetchWithLimit(options: {
       await response.body?.cancel();
       throw new IntegrationTransportError(
         "Provider response exceeds the configured resource limit.",
+        "RESPONSE_TOO_LARGE",
       );
     }
     if (!response.body) return { status: response.status, body: "", headers: response.headers };
@@ -52,6 +56,7 @@ export async function fetchWithLimit(options: {
         await reader.cancel();
         throw new IntegrationTransportError(
           "Provider response exceeds the configured resource limit.",
+          "RESPONSE_TOO_LARGE",
         );
       }
       chunks.push(value);

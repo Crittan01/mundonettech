@@ -26,7 +26,12 @@ import type {
   ProductVariant,
   StoreSettings,
 } from "./generated/client.js";
-import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
+import {
+  acquireOperationLocks,
+  assertUuid,
+  inInventoryTransaction,
+  isSellableVariant,
+} from "./inventory-shared.js";
 import { acquireIdempotencyKey, completeIdempotencyKey } from "./primitives.js";
 import type { CheckoutDefaults } from "./order-types.js";
 import {
@@ -151,14 +156,7 @@ function normalizeSkuValue(value: string): string {
 }
 
 function sellable(variant: VariantForProposal): boolean {
-  return (
-    variant.status === "ACTIVE" &&
-    variant.deletedAt === null &&
-    variant.product.status === "ACTIVE" &&
-    variant.product.deletedAt === null &&
-    variant.product.brand.deletedAt === null &&
-    variant.product.category.deletedAt === null
-  );
+  return isSellableVariant(variant);
 }
 
 function publicUnavailableReason(
@@ -1223,9 +1221,7 @@ export class B2bService {
     });
     if (!record) return null;
     assertProposalIntegrity(record);
-    const now = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`.then(
-      (rows) => rows[0]!.now,
-    );
+    const now = await b2bNow(this.db);
     const unavailableReason = publicUnavailableReason(
       record,
       record.opportunity.currentVersion,

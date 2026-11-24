@@ -137,6 +137,7 @@ export function OperationalCredentialForm({
     );
   }
   const currentFields = fields[provider];
+  const values = state.values?.provider === provider ? state.values : undefined;
   return (
     <form action={action} className="space-y-5">
       {credential ? <input type="hidden" name="credentialId" value={credential.id} /> : null}
@@ -166,7 +167,7 @@ export function OperationalCredentialForm({
           <Input
             id={`operational-account-${credential?.id ?? "new"}`}
             name="accountName"
-            defaultValue={state.values?.accountName ?? credential?.accountName ?? ""}
+            defaultValue={values?.accountName ?? credential?.accountName ?? ""}
             maxLength={120}
             readOnly={Boolean(credential)}
             required
@@ -180,7 +181,7 @@ export function OperationalCredentialForm({
         const heading = field.section && field.section !== currentFields[index - 1]?.section;
         const id = `${provider}-${field.name}-${credential?.id ?? "new"}`;
         return (
-          <div key={field.name}>
+          <div key={`${provider}-${field.name}`}>
             {heading ? (
               <h3 className="border-t border-border pt-4 font-semibold">{field.section}</h3>
             ) : null}
@@ -193,7 +194,7 @@ export function OperationalCredentialForm({
                 autoComplete={field.secret ? "new-password" : "off"}
                 spellCheck={false}
                 defaultValue={
-                  field.secret ? "" : (state.values?.[field.name] ?? field.defaultValue ?? "")
+                  field.secret ? "" : (values?.[field.name] ?? field.defaultValue ?? "")
                 }
                 min={field.type === "number" ? 1 : undefined}
                 required={!field.optional && field.name !== "replyTo"}

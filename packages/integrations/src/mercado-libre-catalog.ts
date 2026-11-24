@@ -1,7 +1,7 @@
 import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./integration-http.js";
 import type { MercadoLibreTokenCredential } from "./mercado-libre.js";
 
-export const mercadoLibreApiUrl = "https://api.mercadolibre.com/";
+const mercadoLibreApiUrl = "https://api.mercadolibre.com/";
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
 const maxResponseBytes = 1_000_000;
 

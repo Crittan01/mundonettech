@@ -13,7 +13,7 @@ import {
   uuidPattern,
 } from "./integration-utils.js";
 
-export const metaCapiGraphApiBaseUrl = "https://graph.facebook.com/v24.0";
+const metaCapiGraphApiBaseUrl = "https://graph.facebook.com/v24.0";
 
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1"]);
 const tracePattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -126,20 +126,14 @@ export function metaCapiEventsUrl(
 ): string {
   parsePixelId(pixelId);
   const base = new URL(options?.apiUrl ?? metaCapiGraphApiBaseUrl);
-  const loopback = loopbackHosts.has(base.hostname);
-  if (options?.apiUrl !== undefined && !options.allowLoopback) {
-    const normalized = base.toString().replace(/\/$/, "");
-    if (normalized !== metaCapiGraphApiBaseUrl) {
-      throw new MetaCapiError(
-        "INVALID_INPUT",
-        "Meta CAPI endpoint violates the environment policy.",
-      );
-    }
-  }
+  const normalized = base.toString().replace(/\/$/, "");
+  const official = base.protocol === "https:" && normalized === metaCapiGraphApiBaseUrl;
+  const loopbackFixture =
+    options?.allowLoopback === true &&
+    loopbackHosts.has(base.hostname) &&
+    ["http:", "https:"].includes(base.protocol);
   if (
-    (base.protocol !== "https:" &&
-      !(base.protocol === "http:" && loopback && options?.allowLoopback)) ||
-    (loopback && !options?.allowLoopback) ||
+    (!official && !loopbackFixture) ||
     base.username ||
     base.password ||
     base.search ||
@@ -147,7 +141,7 @@ export function metaCapiEventsUrl(
   ) {
     throw new MetaCapiError("INVALID_INPUT", "Meta CAPI endpoint violates the environment policy.");
   }
-  return `${base.toString().replace(/\/$/, "")}/${pixelId}/events`;
+  return `${normalized}/${pixelId}/events`;
 }
 
 function sha256Hex(value: Uint8Array, field: string): string {

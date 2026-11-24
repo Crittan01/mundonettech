@@ -8,6 +8,7 @@ import {
 import { LocalDeliveryService } from "@mundonettech/db";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import {
   ArchiveDeliveryZoneForm,
   DeliverShipmentForm,
@@ -41,14 +42,6 @@ const statusLabels: Record<string, string> = {
   READY: "Listo",
   CANCELLED: "Cancelado",
 };
-
-function Empty({ children }: { children: string }) {
-  return (
-    <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-      {children}
-    </p>
-  );
-}
 
 export default async function LogisticsPage() {
   const session = await requireAdminPage("fulfillment:read");

@@ -2,6 +2,7 @@
 
 import { useActionState, useState } from "react";
 
+import { formatCopCentsForInput } from "@mundonettech/core";
 import type {
   ChannelListingView,
   ChannelOfferView,
@@ -12,6 +13,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   addChannelOfferAction,
   createChannelListingAction,
@@ -20,13 +22,6 @@ import {
   updateChannelOfferAction,
 } from "@/lib/actions/admin-channel-catalog";
 import { initialActionState } from "@/lib/action-state";
-
-const selectClass =
-  "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
-
-function wholeCop(cents: string | null): string {
-  return cents ? (BigInt(cents) / 100n).toString() : "";
-}
 
 function OfferFields({
   suffix,
@@ -48,35 +43,38 @@ function OfferFields({
       <div className="grid gap-4 sm:grid-cols-3">
         <div className="space-y-2">
           <Label htmlFor={`pricing-mode-${suffix}`}>Modo de precio</Label>
-          <select
+          <Select
             id={`pricing-mode-${suffix}`}
             name="pricingMode"
-            className={selectClass}
+            compact
+            className="flex py-2"
             value={mode}
             onChange={(event) => setMode(event.target.value as "FORMULA" | "MANUAL")}
           >
             <option value="FORMULA">Fórmula por neto objetivo</option>
             <option value="MANUAL">Manual</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`listing-type-${suffix}`}>Exposición</Label>
-          <select
+          <Select
             id={`listing-type-${suffix}`}
             name="listingTypeId"
-            className={selectClass}
+            compact
+            className="flex py-2"
             defaultValue={value("listingTypeId", offer?.listingTypeId ?? "gold_special")}
           >
             <option value="gold_special">Clásica</option>
             <option value="gold_pro">Premium</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`logistic-${suffix}`}>Logística</Label>
-          <select
+          <Select
             id={`logistic-${suffix}`}
             name="logisticType"
-            className={selectClass}
+            compact
+            className="flex py-2"
             defaultValue={value(
               "logisticType",
               offer?.logisticType ?? (fulfillment ? "FULFILLMENT" : "CROSS_DOCKING"),
@@ -84,7 +82,7 @@ function OfferFields({
           >
             <option value="CROSS_DOCKING">Bodega local / Flex</option>
             <option value="FULFILLMENT">Mercado Libre Full</option>
-          </select>
+          </Select>
         </div>
       </div>
       {mode === "FORMULA" ? (
@@ -93,12 +91,12 @@ function OfferFields({
           <Input
             id={`target-net-${suffix}`}
             name="targetNetCop"
-            inputMode="numeric"
-            pattern="[0-9]+"
-            maxLength={15}
+            inputMode="decimal"
+            pattern="[0-9]+([.,][0-9]{1,2})?"
+            maxLength={22}
             defaultValue={value(
               "targetNetCop",
-              wholeCop(offer?.targetNetCents ?? targetNetCents ?? null),
+              formatCopCentsForInput(offer?.targetNetCents ?? targetNetCents ?? null),
             )}
             required
           />
@@ -109,10 +107,15 @@ function OfferFields({
           <Input
             id={`manual-price-${suffix}`}
             name="manualPriceCop"
+            type="number"
             inputMode="numeric"
-            pattern="[0-9]+"
-            maxLength={15}
-            defaultValue={value("manualPriceCop", wholeCop(offer?.manualPriceCents ?? null))}
+            min={1}
+            step={1}
+            maxLength={22}
+            defaultValue={value(
+              "manualPriceCop",
+              formatCopCentsForInput(offer?.manualPriceCents ?? null),
+            )}
             required
           />
         </div>
@@ -136,11 +139,14 @@ function OfferFields({
           <Input
             id={`fixed-fee-${suffix}`}
             name="fixedFeeCop"
-            inputMode="numeric"
-            pattern="[0-9]+"
-            maxLength={15}
+            inputMode="decimal"
+            pattern="[0-9]+([.,][0-9]{1,2})?"
+            maxLength={22}
             placeholder="0"
-            defaultValue={value("fixedFeeCop", wholeCop(offer?.fixedFeeCents ?? null))}
+            defaultValue={value(
+              "fixedFeeCop",
+              formatCopCentsForInput(offer?.fixedFeeCents ?? null),
+            )}
             required
           />
         </div>
@@ -149,11 +155,14 @@ function OfferFields({
           <Input
             id={`shipping-${suffix}`}
             name="shippingCostCop"
-            inputMode="numeric"
-            pattern="[0-9]+"
-            maxLength={15}
+            inputMode="decimal"
+            pattern="[0-9]+([.,][0-9]{1,2})?"
+            maxLength={22}
             placeholder="0"
-            defaultValue={value("shippingCostCop", wholeCop(offer?.shippingCostCents ?? null))}
+            defaultValue={value(
+              "shippingCostCop",
+              formatCopCentsForInput(offer?.shippingCostCents ?? null),
+            )}
             required
           />
         </div>
@@ -183,10 +192,11 @@ export function ChannelListingCreateForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="listing-account">Cuenta vendedora</Label>
-          <select
+          <Select
             id="listing-account"
             name="accountId"
-            className={selectClass}
+            compact
+            className="flex py-2"
             defaultValue={state.values?.accountId ?? accounts[0]?.id}
             required
           >
@@ -195,14 +205,15 @@ export function ChannelListingCreateForm({
                 {account.label}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="listing-variant">Variante del catálogo</Label>
-          <select
+          <Select
             id="listing-variant"
             name="variantId"
-            className={selectClass}
+            compact
+            className="flex py-2"
             value={variantId}
             onChange={(event) => setVariantId(event.target.value)}
             required
@@ -213,7 +224,7 @@ export function ChannelListingCreateForm({
                 {variant.fullQuantity}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
       </div>
       <div className="grid gap-4 sm:grid-cols-2">

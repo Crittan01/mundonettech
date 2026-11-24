@@ -1,7 +1,7 @@
 "use server";
 
 import { AccountError } from "@mundonettech/db";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
@@ -194,6 +194,7 @@ export async function anonymizeAccountAction(
       .parse(formString(formData, "confirmation"));
     const context = await getRequestSecurityContext();
     await accountService().anonymize(profile.id, confirmation, context);
+    updateTag("reviews");
     const supabase = await createSupabaseServerClient();
     await supabase.auth.signOut();
     await clearActivityCookies();

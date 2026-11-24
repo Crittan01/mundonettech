@@ -252,21 +252,7 @@ export function hasAdminPermission(role: AdminRoleValue, permission: AdminPermis
   return permissions[permission].includes(role);
 }
 
-export function assertAdminPermission(role: AdminRoleValue, permission: AdminPermission): void {
-  if (!hasAdminPermission(role, permission)) {
-    throw new Error("The current administrator is not authorized for this operation.");
-  }
-}
-
 export function canAssignAdminRole(actorRole: AdminRoleValue, targetRole: AdminRoleValue): boolean {
-  if (actorRole === "SUPERADMIN") return true;
-  return actorRole === "OPERATIONS_MANAGER" && adminRing(targetRole) !== 1;
-}
-
-export function canManageAdministrator(
-  actorRole: AdminRoleValue,
-  targetRole: AdminRoleValue,
-): boolean {
   if (actorRole === "SUPERADMIN") return true;
   return actorRole === "OPERATIONS_MANAGER" && adminRing(targetRole) !== 1;
 }

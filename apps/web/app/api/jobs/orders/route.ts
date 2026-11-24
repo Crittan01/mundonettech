@@ -1,7 +1,6 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-
-import { hasAdminPermission } from "@mundonettech/core";
+import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
 import { OperationsService, OrderLifecycleService } from "@mundonettech/db";
+import { revalidateTag } from "next/cache";
 import { z } from "zod";
 
 import { b2bService } from "@/lib/b2b";
@@ -22,12 +21,6 @@ export async function GET() {
     { error: "Method not allowed." },
     { status: 405, headers: { ...noStoreHeaders, Allow: "POST" } },
   );
-}
-
-function matchesSecret(provided: string, expected: string): boolean {
-  const left = createHash("sha256").update(provided).digest();
-  const right = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(left, right);
 }
 
 export async function POST(request: Request) {
@@ -56,6 +49,7 @@ export async function POST(request: Request) {
   const service = new OrderLifecycleService(db);
   const abandoned = await service.captureAbandonedCarts();
   const reservations = await service.releaseExpiredOrderReservations();
+  if (reservations.releasedOrders > 0) revalidateTag("catalog:inventory", { expire: 0 });
   const partialPaymentReviews = await service.flagExpiredPartialPaymentReviews();
   const fiscalWatch = await financeService().refreshFiscalWatch();
   const expiredProposals = await b2bService(db).expireDueProposals();
@@ -69,6 +63,7 @@ export async function POST(request: Request) {
       userAgentHash: security.userAgentHash,
     },
   );
+  if (crmRetention.suppressed.length > 0) revalidateTag("reviews", { expire: 0 });
   await new OperationsService(db).synchronizeNotifications();
   return Response.json(
     {

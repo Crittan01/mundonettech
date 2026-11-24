@@ -232,6 +232,51 @@ test("admin creates, activates and executes a consented lifecycle journey end to
   await expectAccessible(page);
 });
 
+test("segment money thresholds preserve exact cents and empty values on unchanged saves", async ({
+  page,
+}) => {
+  await authenticate(page, admin);
+  const segmentName = `Umbrales exactos ${runSuffix}`;
+  await page.goto("/admin/segmentos");
+  await page.getByLabel("Nombre", { exact: true }).fill(segmentName);
+  await page.getByLabel("Mínimo", { exact: true }).fill("123,45");
+  await page.getByLabel("Máximo", { exact: true }).fill("123,45");
+  await page.getByRole("button", { name: "Crear segmento", exact: true }).click();
+  await expect(page.getByText("Segmento creado en borrador.")).toBeVisible();
+  const created = await db.customerSegment.findFirstOrThrow({ where: { name: segmentName } });
+  expect(created.definition).toMatchObject({
+    minNetLtvCents: "12345",
+    maxNetLtvCents: "12345",
+  });
+
+  await page.goto(`/admin/segmentos?segmento=${created.id}`);
+  const editor = page
+    .locator("form")
+    .filter({ has: page.locator('input[name="segmentId"]') })
+    .filter({ has: page.locator('input[name="minNetLtvCop"]') });
+  await expect(editor.locator('input[name="minNetLtvCop"]')).toHaveValue("123.45");
+  await expect(editor.locator('input[name="maxNetLtvCop"]')).toHaveValue("123.45");
+  await editor.getByRole("button", { name: "Actualizar borrador" }).click();
+  await expect(page.getByText("Segmento actualizado con control de versión.")).toBeVisible();
+  const updated = await db.customerSegment.findUniqueOrThrow({ where: { id: created.id } });
+  expect(updated.definition).toMatchObject({
+    minNetLtvCents: "12345",
+    maxNetLtvCents: "12345",
+  });
+  expect(updated.definition).not.toMatchObject({
+    minNetLtvCents: "12300",
+    maxNetLtvCents: "12300",
+  });
+
+  await page.reload();
+  await editor.locator('input[name="minNetLtvCop"]').fill("");
+  await editor.locator('input[name="maxNetLtvCop"]').fill("");
+  await editor.getByRole("button", { name: "Actualizar borrador" }).click();
+  await expect(page.getByText("Segmento actualizado con control de versión.")).toBeVisible();
+  const emptied = await db.customerSegment.findUniqueOrThrow({ where: { id: created.id } });
+  expect(emptied.definition).toMatchObject({ minNetLtvCents: null, maxNetLtvCents: null });
+});
+
 test("lifecycle and RFM routes stay closed to roles without their permissions", async ({
   page,
 }) => {

@@ -5,7 +5,7 @@ import type { Customer, Prisma, PrismaClient } from "@mundonettech/db";
 
 import { getDatabase } from "@/lib/db";
 
-export async function syncCustomerProfileWithDb(
+async function syncCustomerProfileWithDb(
   db: PrismaClient,
   authUserId: string,
   email: string,

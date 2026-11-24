@@ -1,11 +1,7 @@
 import type { IntegrationCredential, IntegrationEnvironment, PrismaClient } from "@mundonettech/db";
 
 import type { IntegrationCredentialVault } from "./credential-vault.js";
-import {
-  PaymentConflictError,
-  PaymentNotFoundError,
-  type PaymentProviderError,
-} from "./payment-types.js";
+import { PaymentConflictError, PaymentNotFoundError } from "./payment-types.js";
 import { parseWompiCredentials, WompiPaymentProvider } from "./wompi.js";
 
 export interface WompiResolution {
@@ -47,8 +43,6 @@ export async function resolveWompiProvider(options: {
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       }),
     };
-  } catch (error) {
-    throw error as PaymentProviderError;
   } finally {
     plaintext.fill(0);
   }

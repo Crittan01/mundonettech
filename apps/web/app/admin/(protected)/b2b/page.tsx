@@ -20,6 +20,8 @@ import {
 } from "@/components/admin/b2b-price-list-forms";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { bogotaInputValue } from "@/lib/admin-pricing-presenters";
+import { single } from "@/lib/admin-search-params";
 import { b2bService } from "@/lib/b2b";
 import { crmService } from "@/lib/crm";
 import { getDatabase } from "@/lib/db";
@@ -37,27 +39,6 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const inputFormatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "America/Bogota",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-function single(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
-
-function dateTimeInput(value: Date | null): string {
-  if (!value) return "";
-  const parts = Object.fromEntries(
-    inputFormatter.formatToParts(value).map((part) => [part.type, part.value]),
-  );
-  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
-}
 
 function formView(record: {
   id: string;
@@ -76,8 +57,8 @@ function formView(record: {
     description: record.description,
     status: record.status,
     version: record.version,
-    validFromInput: dateTimeInput(record.validFrom),
-    validToInput: dateTimeInput(record.validTo),
+    validFromInput: bogotaInputValue(record.validFrom),
+    validToInput: bogotaInputValue(record.validTo),
   };
 }
 

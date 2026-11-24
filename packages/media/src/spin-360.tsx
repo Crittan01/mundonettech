@@ -3,20 +3,13 @@
 import ImageModule from "next/image.js";
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 
-import {
-  isSafeMediaUrl,
-  isSafeSrcSet,
-  type PictureSource,
-  type SpinFrame,
-} from "./responsive-sources.js";
+import { isSafeMediaUrl, isSafeSrcSet, type SpinFrame } from "./responsive-sources.js";
 
 const Image = (
   typeof ImageModule === "object" && ImageModule !== null && "default" in ImageModule
     ? (ImageModule as { default: unknown }).default
     : ImageModule
 ) as typeof import("next/image").default;
-
-export type { PictureSource, SpinFrame };
 
 function isValidFrame(frame: SpinFrame): boolean {
   if (

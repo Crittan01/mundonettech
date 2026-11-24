@@ -2,6 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 
+import { parseCoordinateE6 as coordinateE6 } from "@mundonettech/core";
 import {
   LocalDeliveryConflictError,
   LocalDeliveryService,
@@ -100,17 +101,6 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
 function cents(value: string): bigint {
   if (!/^[0-9]+$/.test(value)) throw new TypeError("Money must be integer cents.");
   return BigInt(value);
-}
-
-function coordinateE6(value: string, minimum: number, maximum: number): number {
-  const match = /^(-?)([0-9]{1,3})(?:\.([0-9]{1,6}))?$/.exec(value.trim());
-  if (!match) throw new TypeError("Coordinates must use at most six decimal places.");
-  const scaled =
-    (match[1] === "-" ? -1 : 1) *
-    (Number(match[2]) * 1_000_000 + Number((match[3] ?? "").padEnd(6, "0") || 0));
-  if (!Number.isSafeInteger(scaled) || scaled < minimum || scaled > maximum)
-    throw new RangeError("Coordinate is outside its valid range.");
-  return scaled;
 }
 
 const packageSchema = z
@@ -307,8 +297,8 @@ export async function saveDeliveryZoneAction(
       .map((pair) => {
         const [latitude = "", longitude = ""] = pair.split(",");
         return {
-          latitudeE6: coordinateE6(latitude, -90_000_000, 90_000_000),
-          longitudeE6: coordinateE6(longitude, -180_000_000, 180_000_000),
+          latitudeE6: coordinateE6(latitude, "latitudeE6", -90_000_000, 90_000_000),
+          longitudeE6: coordinateE6(longitude, "longitudeE6", -180_000_000, 180_000_000),
         };
       });
     const freeThreshold = formString(formData, "freeShippingThresholdCents");

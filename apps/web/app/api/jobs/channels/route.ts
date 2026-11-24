@@ -1,7 +1,8 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
-import { hasAdminPermission } from "@mundonettech/core";
+import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
 import { OperationsService } from "@mundonettech/db";
+import { revalidateTag } from "next/cache";
 import { z } from "zod";
 
 import { getDatabase } from "@/lib/db";
@@ -17,13 +18,6 @@ const headers = {
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
-
-function matchesSecret(provided: string, expected: string): boolean {
-  return timingSafeEqual(
-    createHash("sha256").update(provided).digest(),
-    createHash("sha256").update(expected).digest(),
-  );
-}
 
 export async function GET() {
   return Response.json(
@@ -64,6 +58,7 @@ export async function POST(request: Request) {
     { ...audit, requestId: randomUUID() },
     { limit: 10 },
   );
+  if (ingestion.claimed > 0) revalidateTag("catalog:inventory", { expire: 0 });
   const sync = await channelCatalogService(db).processSyncJobs(
     { ...audit, requestId: randomUUID() },
     { limit: 10 },

@@ -24,13 +24,6 @@ export class LocalDeliveryConflictError extends Error {
   }
 }
 
-export class LocalDeliveryNotFoundError extends Error {
-  constructor(message = "Local delivery zone not found.") {
-    super(message);
-    this.name = "LocalDeliveryNotFoundError";
-  }
-}
-
 export interface LocalDeliveryZoneInput {
   readonly id?: string;
   readonly expectedUpdatedAt?: Date;
@@ -319,17 +312,6 @@ export class LocalDeliveryService {
           metadata: {},
         },
       });
-    });
-  }
-
-  quote(
-    zoneId: string,
-    options: Omit<Parameters<typeof quoteLocalDeliveryZone>[1], "now"> & { now?: Date },
-  ): Promise<LocalDeliveryQuote> {
-    assertUuid(zoneId, "zoneId");
-    return this.db.localDeliveryZone.findUnique({ where: { id: zoneId } }).then((zone) => {
-      if (!zone) throw new LocalDeliveryNotFoundError();
-      return quoteLocalDeliveryZone(zone, { ...options, now: options.now ?? new Date() });
     });
   }
 }

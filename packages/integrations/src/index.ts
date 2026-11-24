@@ -89,12 +89,7 @@ export type {
 } from "./shipping-types.js";
 export { EmailService } from "./email-service.js";
 export type { EmailSendOutcome } from "./email-service.js";
-export {
-  defaultEmailTemplate,
-  emailTemplateKeys,
-  renderEmailTemplate,
-  validateEmailTemplate,
-} from "./email-templates.js";
+export { defaultEmailTemplate, emailTemplateKeys, renderEmailTemplate } from "./email-templates.js";
 export type { EmailTemplateDefinition } from "./email-templates.js";
 export { parseEmailCredentials, ResendEmailProvider } from "./resend.js";
 export { verifySvixWebhook } from "./svix.js";
@@ -116,8 +111,8 @@ export type {
 } from "./email-types.js";
 export { InvoiceService } from "./invoice-service.js";
 export type { FiscalOperationResult } from "./invoice-service.js";
-export { calculateCude, calculateCufe, dianTimestamp, parseDianCredentials } from "./dian.js";
-export { DianInvoiceProvider, signedDocumentHash } from "./dian-provider.js";
+export { calculateCude, calculateCufe, parseDianCredentials } from "./dian.js";
+export { DianInvoiceProvider } from "./dian-provider.js";
 export { buildCreditNoteUbl, buildInvoiceUbl } from "./ubl.js";
 export {
   InvoiceConflictError,
@@ -139,14 +134,12 @@ export type {
 } from "./invoice-types.js";
 export { DomainEventWorker } from "./domain-event-worker.js";
 export type { DomainEventBatchResult, DomainEventWorkerOptions } from "./domain-event-worker.js";
-export { IntegrationTransportError, fetchWithLimit, parseHttpJson } from "./integration-http.js";
 export {
   buildMetaCapiPurchaseRequest,
   hashMetaCapiRequest,
   MetaCapiError,
   MetaConversionsApiClient,
   metaCapiEventsUrl,
-  metaCapiGraphApiBaseUrl,
   parseMetaCredentials,
 } from "./meta-capi.js";
 export type {
@@ -209,8 +202,6 @@ export {
   createMercadoLibrePkce,
   mercadoLibreAuthorizationUrl,
   mercadoLibreCallbackPath,
-  mercadoLibreScopes,
-  mercadoLibreTokenUrl,
   parseMercadoLibreClientCredentials,
   parseMercadoLibrePendingCredential,
   parseMercadoLibreTokenCredential,
@@ -241,7 +232,6 @@ export type { ChannelOfferConfiguration } from "./channel-catalog-snapshots.js";
 export {
   MercadoLibreCatalogError,
   MercadoLibreUserProductsClient,
-  mercadoLibreApiUrl,
 } from "./mercado-libre-catalog.js";
 export type {
   MercadoLibreAttributeInput,

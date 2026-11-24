@@ -21,13 +21,7 @@ export function CreateReferralCodeForm() {
   );
 }
 
-export function AttributeReferralForm({
-  initialCode,
-  disabled = false,
-}: {
-  readonly initialCode: string;
-  readonly disabled?: boolean;
-}) {
+export function AttributeReferralForm({ initialCode }: { readonly initialCode: string }) {
   const [state, action, pending] = useActionState(attributeReferralAction, initialActionState);
   const code = state.status === "error" ? (state.values?.code ?? initialCode) : initialCode;
   return (
@@ -46,11 +40,11 @@ export function AttributeReferralForm({
             autoCapitalize="characters"
             autoComplete="off"
             spellCheck={false}
-            disabled={pending || disabled}
+            disabled={pending}
             aria-describedby="referral-code-help"
             className="uppercase"
           />
-          <Button type="submit" disabled={pending || disabled}>
+          <Button type="submit" disabled={pending}>
             {pending ? "Validando…" : "Atribuir código"}
           </Button>
         </div>

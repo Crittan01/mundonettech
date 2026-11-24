@@ -5,7 +5,7 @@ import yauzl from "yauzl";
 
 import { inspectImageMagic } from "./image-safety.js";
 
-export interface GltfDocument {
+interface GltfDocument {
   asset?: { version?: unknown; minVersion?: unknown };
   extensionsRequired?: unknown;
   buffers?: Array<{ byteLength: number; uri?: string }>;

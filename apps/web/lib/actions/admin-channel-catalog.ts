@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { parseWholeCopToCents } from "@mundonettech/core";
+import { parseDecimalCopToCents, parseWholeCopToCents } from "@mundonettech/core";
 import { ChannelCatalogError, type ChannelOfferConfiguration } from "@mundonettech/integrations";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -32,23 +32,34 @@ const listingSchema = z.object({
   sellerNetworkNodeId: z.union([z.literal(""), z.string().regex(/^[A-Za-z0-9_-]{1,64}$/)]),
 });
 
+const copPattern = /^[0-9]+(?:[.,][0-9]{1,2})?$/;
+const wholeCopPattern = /^[0-9]+$/;
+
 const offerSchema = z.object({
   pricingMode: z.enum(["FORMULA", "MANUAL"]),
   listingTypeId: z.enum(["gold_special", "gold_pro"]),
   logisticType: z.enum(["CROSS_DOCKING", "FULFILLMENT"]),
   commissionBps: z.string().regex(/^[0-9]{1,4}$/),
-  fixedFeeCop: z.string().regex(/^[0-9]{1,15}$/),
-  shippingCostCop: z.string().regex(/^[0-9]{1,15}$/),
-  targetNetCop: z.string().max(15),
-  manualPriceCop: z.string().max(15),
+  fixedFeeCop: z.string().max(22).regex(copPattern),
+  shippingCostCop: z.string().max(22).regex(copPattern),
+  targetNetCop: z.string().max(22),
+  manualPriceCop: z.string().max(22),
 });
 
 function cents(value: string): bigint {
+  return BigInt(parseDecimalCopToCents(value));
+}
+
+function wholeCents(value: string): bigint {
   return BigInt(parseWholeCopToCents(value));
 }
 
 function optionalCents(value: string): bigint | null {
   return value ? cents(value) : null;
+}
+
+function optionalWholeCents(value: string): bigint | null {
+  return value ? wholeCents(value) : null;
 }
 
 function parseOffer(formData: FormData): ChannelOfferConfiguration {
@@ -70,10 +81,10 @@ function parseOffer(formData: FormData): ChannelOfferConfiguration {
   if (commissionBps > 5_000) {
     throw new ChannelCatalogError("INVALID_INPUT", "The commission cannot exceed 50 percent.");
   }
-  if (data.pricingMode === "FORMULA" && !/^[0-9]{1,15}$/.test(data.targetNetCop)) {
+  if (data.pricingMode === "FORMULA" && !copPattern.test(data.targetNetCop)) {
     throw new ChannelCatalogError("INVALID_INPUT", "A formula offer requires a target net amount.");
   }
-  if (data.pricingMode === "MANUAL" && !/^[0-9]{1,15}$/.test(data.manualPriceCop)) {
+  if (data.pricingMode === "MANUAL" && !wholeCopPattern.test(data.manualPriceCop)) {
     throw new ChannelCatalogError("INVALID_INPUT", "A manual offer requires a whole COP price.");
   }
   return {
@@ -84,7 +95,8 @@ function parseOffer(formData: FormData): ChannelOfferConfiguration {
     fixedFeeCents: cents(data.fixedFeeCop || "0"),
     shippingCostCents: cents(data.shippingCostCop || "0"),
     targetNetCents: data.pricingMode === "FORMULA" ? optionalCents(data.targetNetCop) : null,
-    manualPriceCents: data.pricingMode === "MANUAL" ? optionalCents(data.manualPriceCop) : null,
+    manualPriceCents:
+      data.pricingMode === "MANUAL" ? optionalWholeCents(data.manualPriceCop) : null,
   };
 }
 

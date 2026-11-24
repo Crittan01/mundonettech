@@ -11,15 +11,10 @@ import { ProductReviews } from "@/components/catalog/product-reviews";
 import { ProductVariantPanel } from "@/components/catalog/product-variant-panel";
 import { JsonLd } from "@/components/seo/json-ld";
 import { getCatalogProduct, searchCatalog } from "@/lib/catalog";
+import { authenticityLabels } from "@/lib/catalog-presenters";
 import { getPublicMediaOrigin } from "@/lib/env";
 import { getPublicReviews } from "@/lib/reviews";
 import { getProductImageUrls, getProductStructuredData, productUrl } from "@/lib/product-seo";
-
-const authenticityLabels = {
-  ORIGINAL: "Original",
-  CERTIFIED_COMPATIBLE: "Compatible certificado",
-  OEM: "OEM",
-} as const;
 
 const retractLabels = {
   STANDARD: "Retracto estándar (Ley 1480)",
@@ -67,10 +62,12 @@ async function ProductReviewsSlot({
   slug,
   initialReviews,
   searchParams,
+  variantId,
 }: {
   readonly slug: string;
   readonly initialReviews: Awaited<ReturnType<typeof getPublicReviews>>;
   readonly searchParams: PageProps<"/producto/[slug]">["searchParams"];
+  readonly variantId: string | undefined;
 }) {
   const query = await searchParams;
   const rawReviewCursor = Array.isArray(query.reviewCursor)
@@ -83,13 +80,20 @@ async function ProductReviewsSlot({
   const reviews = parsedReviewCursor.success
     ? await getPublicReviews(slug, parsedReviewCursor.data)
     : initialReviews;
-  return <ProductReviews slug={slug} reviews={reviews} />;
+  return <ProductReviews slug={slug} reviews={reviews} variantId={variantId} />;
 }
 
 export default async function ProductPage({ params, searchParams }: PageProps<"/producto/[slug]">) {
   const { slug } = await params;
   const product = await getCatalogProduct(slug);
   if (!product) notFound();
+  const query = await searchParams;
+  const rawVariantId = Array.isArray(query.variant) ? query.variant[0] : query.variant;
+  const variantId =
+    typeof rawVariantId === "string" &&
+    product.variants.some((variant) => variant.id === rawVariantId)
+      ? rawVariantId
+      : undefined;
   const [related, reviews] = await Promise.all([
     searchCatalog({
       categorySlug: product.category.slug,
@@ -324,7 +328,12 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
           </p>
         }
       >
-        <ProductReviewsSlot slug={slug} initialReviews={reviews} searchParams={searchParams} />
+        <ProductReviewsSlot
+          slug={slug}
+          initialReviews={reviews}
+          searchParams={searchParams}
+          variantId={variantId}
+        />
       </Suspense>
 
       {related.items.length ? (

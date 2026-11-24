@@ -145,14 +145,6 @@ export interface WompiCredentials {
   readonly mode: "test" | "prod";
 }
 
-export interface PaymentStatusTransition {
-  readonly previousStatus: string;
-  readonly status: string;
-  readonly paidCents: string;
-  readonly totalCents: string;
-  readonly fulfilledStock: boolean;
-}
-
 export interface StoreCreditAdjustmentInput {
   readonly customerId: string;
   readonly type: "GRANT" | "WITHDRAWAL";

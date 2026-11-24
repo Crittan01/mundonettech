@@ -11,6 +11,8 @@ import {
   CatalogProductForm,
   CatalogVariantForm,
 } from "@/components/admin/catalog-forms";
+import { ProductMediaAdmin } from "@/components/admin/product-media-admin";
+import { getPublicMediaOrigin } from "@/lib/env";
 import { StepUpPrompt } from "@/components/admin/security-manager";
 import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
@@ -72,6 +74,14 @@ export default async function AdminCatalogProductPage({
         >
           Producto creado con su variante inicial y cambio registrado en auditoría. Ahora puedes
           completar variantes adicionales, ficha técnica y compatibilidad.
+        </p>
+      ) : null}
+      {query.mediaArchived === "1" ? (
+        <p
+          role="status"
+          className="rounded-xl border border-border bg-card p-4 text-sm font-medium text-foreground"
+        >
+          Medio archivado. Se retiró de la ficha pública sin borrar su objeto ni su historial.
         </p>
       ) : null}
       {stepUp}
@@ -159,6 +169,15 @@ export default async function AdminCatalogProductPage({
           </details>
         ) : null}
       </section>
+
+      <ProductMediaAdmin
+        productId={product.id}
+        productName={product.name}
+        media={product.media}
+        variants={product.variants.map((variant) => ({ id: variant.id, sku: variant.sku }))}
+        origin={getPublicMediaOrigin()}
+        canWrite={canWrite}
+      />
 
       <section aria-labelledby="admin-attributes" className="space-y-4">
         <div>

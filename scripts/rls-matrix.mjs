@@ -262,9 +262,13 @@ async function ensureMatrixFixtures(client) {
        LIMIT 1`,
       [table],
     );
-    const rowId = freshRow.rows[0]?.id;
+    const rowId =
+      table === "UrlRedirectCacheState"
+        ? (await client.query(`SELECT t."id" FROM public."UrlRedirectCacheState" t LIMIT 1`))
+            .rows[0]?.id
+        : freshRow.rows[0]?.id;
     if (!rowId) {
-      throw new Error(`RLS matrix requires at least one freshly seeded row in ${table}.`);
+      throw new Error(`RLS matrix requires at least one seeded row in ${table}.`);
     }
     fixtureIds.set(table, rowId);
   }

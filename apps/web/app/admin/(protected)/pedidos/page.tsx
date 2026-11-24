@@ -6,6 +6,8 @@ import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -17,8 +19,6 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 const querySchema = z.object({
   q: z.string().trim().max(64).optional(),
@@ -39,10 +39,6 @@ const querySchema = z.object({
     .optional(),
   cursor: z.string().uuid().optional(),
 });
-
-function single(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
 
 export default async function OrdersPage({ searchParams }: PageProps<"/admin/pedidos">) {
   await requireAdminPage("orders:read");
@@ -109,27 +105,17 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
         </div>
         <div className="space-y-2">
           <Label htmlFor="order-status">Estado comercial</Label>
-          <select
-            id="order-status"
-            name="orderStatus"
-            defaultValue={query.orderStatus ?? ""}
-            className={selectClass}
-          >
+          <Select id="order-status" name="orderStatus" defaultValue={query.orderStatus ?? ""}>
             <option value="">Todos</option>
             <option value="PENDING">En validación</option>
             <option value="CONFIRMED">Confirmado</option>
             <option value="COMPLETED">Completado</option>
             <option value="CANCELLED">Cancelado</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="payment-status">Estado de pago</Label>
-          <select
-            id="payment-status"
-            name="paymentStatus"
-            defaultValue={query.paymentStatus ?? ""}
-            className={selectClass}
-          >
+          <Select id="payment-status" name="paymentStatus" defaultValue={query.paymentStatus ?? ""}>
             <option value="">Todos</option>
             <option value="UNPAID">Sin pagar</option>
             <option value="PARTIALLY_PAID">Pago parcial</option>
@@ -137,22 +123,21 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
             <option value="PARTIALLY_REFUNDED">Reembolso parcial</option>
             <option value="REFUNDED">Reembolsado</option>
             <option value="FAILED">Fallido</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="fulfillment-status">Estado logístico</Label>
-          <select
+          <Select
             id="fulfillment-status"
             name="fulfillmentStatus"
             defaultValue={query.fulfillmentStatus ?? ""}
-            className={selectClass}
           >
             <option value="">Todos</option>
             <option value="UNFULFILLED">Sin despachar</option>
             <option value="PARTIALLY_FULFILLED">Despacho parcial</option>
             <option value="FULFILLED">Despachado</option>
             <option value="CANCELLED">Cancelado</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="order-from">Creado desde</Label>

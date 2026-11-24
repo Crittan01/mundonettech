@@ -6,6 +6,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   cancelB2bProposalAction,
@@ -16,9 +17,6 @@ import {
   type B2bIssueActionState,
 } from "@/lib/actions/admin-b2b";
 import { initialActionState } from "@/lib/action-state";
-
-const selectClass =
-  "h-11 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export function B2bProposalBuilder({
   opportunityId,
@@ -246,15 +244,15 @@ export function B2bCloseOpportunityForm({
       <input type="hidden" name="expectedVersion" value={expectedVersion} />
       <div className="space-y-2">
         <Label htmlFor={`close-status-${opportunityId}`}>Cerrar oportunidad</Label>
-        <select
+        <Select
           id={`close-status-${opportunityId}`}
           name="status"
-          className={selectClass}
+          fullWidth={false}
           defaultValue="LOST"
         >
           <option value="LOST">Perdida</option>
           <option value="CANCELLED">Cancelada</option>
-        </select>
+        </Select>
       </div>
       <Button type="submit" variant="outline" disabled={pending}>
         {pending ? "Cerrando…" : "Cerrar y cancelar versiones abiertas"}
@@ -280,10 +278,10 @@ export function B2bCopilotForm({
       <input type="hidden" name="requestId" value={state.values?.requestId ?? requestId} />
       <div className="space-y-2">
         <Label htmlFor={`copilot-credential-${opportunityId}`}>Credencial Gemini</Label>
-        <select
+        <Select
           id={`copilot-credential-${opportunityId}`}
           name="credentialId"
-          className={selectClass}
+          fullWidth={false}
           defaultValue={state.values?.credentialId ?? credentials[0]?.id}
           required
         >
@@ -292,7 +290,7 @@ export function B2bCopilotForm({
               {credential.accountName}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <Button type="submit" disabled={pending || credentials.length === 0}>
         {pending ? "Clasificando sin PII…" : "Analizar con Copiloto 0-PII"}

@@ -75,6 +75,8 @@ test("readiness fails closed on an unfinished migration and recovers after clean
 test("CSP restricts media to self and the configured R2 origin on success and error responses", async ({
   request,
 }) => {
+  const configuredMediaOrigin = new URL(process.env.MEDIA_BASE_URL ?? "http://127.0.0.1:4110")
+    .origin;
   for (const response of [
     await request.get("/"),
     await request.get("/ruta-inexistente-f4a3"),
@@ -87,7 +89,8 @@ test("CSP restricts media to self and the configured R2 origin on success and er
     const media = csp.split(";").find((directive) => directive.trim().startsWith("media-src"));
     for (const directive of [image, media]) {
       expect(directive).toBeDefined();
-      expect(directive).toContain("http://127.0.0.1:4110");
+      expect(directive).toContain("'self'");
+      expect(directive).toContain(configuredMediaOrigin);
       expect(directive).not.toMatch(/(?:^|\s)https:(?:\s|$)/);
     }
   }

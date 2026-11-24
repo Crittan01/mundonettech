@@ -93,7 +93,7 @@ export function assertRedirectAllowed(
   }
 }
 
-export const reservedRedirectSourcePrefixes = [
+const reservedRedirectSourcePrefixes = [
   "/api",
   "/_next",
   "/admin",
@@ -118,7 +118,7 @@ export const reservedRedirectSourcePrefixes = [
   "/empresas",
 ] as const;
 
-export const reservedRedirectTargetPrefixes = ["/api", "/_next", "/admin", "/email"] as const;
+const reservedRedirectTargetPrefixes = ["/api", "/_next", "/admin", "/email"] as const;
 
 function hasRedirectPathPrefix(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(`${prefix}/`);

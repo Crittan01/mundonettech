@@ -109,24 +109,61 @@ test("operational vault, communications and fiscal views stay accessible with MF
 }) => {
   await authenticateAdmin(page);
   await page.goto("/admin/integraciones");
-  await page.getByLabel("Proveedor", { exact: true }).selectOption("resend");
+  const provider = page.getByLabel("Proveedor", { exact: true });
+  const submitCredential = page
+    .getByRole("region", { name: "Conectar logística, correo, facturación, Gemini o Meta" })
+    .getByRole("button", { name: "Cifrar y guardar credencial" });
+  await provider.selectOption("resend");
   await page.getByLabel("Nombre operativo de la integración").fill(resendAccount);
-  await page.getByLabel("Llave API de Resend").fill("re_e2e_1234567890abcdef");
+  await page.getByLabel("Endpoint de envío").fill("https://api.resend.com/emails?origen=anterior");
+  await provider.selectOption("gemini");
+  await expect(page.getByLabel("Base oficial de modelos")).toHaveValue(
+    "https://generativelanguage.googleapis.com/v1beta/models",
+  );
+  await expect(page.getByLabel("Llave API de Gemini")).toHaveValue("");
+  await provider.selectOption("resend");
+  await expect(page.getByLabel("Endpoint de envío")).toHaveValue("https://api.resend.com/emails");
+  await page.getByLabel("Llave API de Resend").fill("llave-invalida");
   await page.getByLabel("Correo remitente verificado").fill("ventas@example.test");
   await page.getByLabel("Nombre del remitente").fill("Tienda E2E");
   await page.getByLabel("Secreto Svix").fill("whsec_c2VjcmV0LWV2ZW50b3Mtd2l0aC0zMi1ieXRlcw");
   await page
     .getByLabel(/Secreto HMAC de baja/)
     .fill(Buffer.from("unsubscribe-secret-e2e-with-32bytes").toString("base64"));
+  await submitCredential.click();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Los campos no cumplen el contrato del proveedor" }),
+  ).toContainText("Los campos no cumplen el contrato del proveedor");
+  await provider.selectOption("gemini");
+  await expect(page.getByLabel("Base oficial de modelos")).toHaveValue(
+    "https://generativelanguage.googleapis.com/v1beta/models",
+  );
+  await expect(page.getByLabel("Modelo habilitado", { exact: false })).toHaveValue("");
+  await provider.selectOption("resend");
+  await expect(page.getByLabel("Endpoint de envío")).toHaveValue("https://api.resend.com/emails");
+  await page.getByLabel("Llave API de Resend").fill("re_e2e_1234567890abcdef");
+  await page.getByLabel("Secreto Svix").fill("whsec_c2VjcmV0LWV2ZW50b3Mtd2l0aC0zMi1ieXRlcw");
   await page
-    .getByRole("region", { name: "Conectar logística, correo, facturación, Gemini o Meta" })
-    .getByRole("button", { name: "Cifrar y guardar credencial" })
-    .click();
+    .getByLabel(/Secreto HMAC de baja/)
+    .fill(Buffer.from("unsubscribe-secret-e2e-with-32bytes").toString("base64"));
+  await submitCredential.click();
   await expect(page.getByText(new RegExp(`Credencial ${resendAccount} cifrada`))).toBeVisible();
   const credential = await db.integrationCredential.findFirstOrThrow({
     where: { provider: "resend", accountName: resendAccount },
   });
   expect(credential.ciphertext).not.toEqual(Buffer.from("re_e2e_1234567890abcdef"));
+  await page.reload();
+  const newCredential = page.getByRole("region", {
+    name: "Conectar logística, correo, facturación, Gemini o Meta",
+  });
+  await newCredential.getByLabel("Proveedor", { exact: true }).selectOption("resend");
+  await newCredential
+    .getByLabel("Endpoint de envío")
+    .fill("https://api.resend.com/emails?origen=posterior");
+  await newCredential.getByLabel("Proveedor", { exact: true }).selectOption("gemini");
+  await expect(newCredential.getByLabel("Base oficial de modelos")).toHaveValue(
+    "https://generativelanguage.googleapis.com/v1beta/models",
+  );
   await page.goto("/admin/comunicaciones");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
     "Comunicaciones transaccionales",

@@ -127,6 +127,8 @@ function pageInput(formData: FormData) {
 
 function invalidateCms(options: { pageId?: string; slugs?: readonly (string | undefined)[] } = {}) {
   updateTag("cms");
+  updateTag("seo");
+  updateTag("sitemap");
   for (const slug of new Set(options.slugs ?? [])) {
     if (slug) updateTag(`cms:page:${slug}`);
   }
@@ -436,7 +438,6 @@ export async function saveStoreSettingsAction(
       },
       audit(session, request),
     );
-    updateTag("store-settings");
     revalidatePath("/admin/configuracion");
     return actionSuccess(
       `Configuración guardada para ${settings.currency} y ${settings.timeZone}.`,

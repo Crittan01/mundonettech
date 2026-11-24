@@ -117,7 +117,7 @@ test("robots and sitemap expose only canonical public resources and allow Mercha
   const sitemap = await page.request.get("/sitemap.xml");
   expect(sitemap.status()).toBe(200);
   expect(sitemap.headers()["content-type"]).toContain("application/xml");
-  expect(sitemap.headers()["cache-control"]).toContain("s-maxage=300");
+  expect(sitemap.headers()["cache-control"]).toBe("no-store");
   const xml = await sitemap.text();
   expect(xml).toContain("<urlset");
   expect(xml).toContain("https://mundonettech.co/producto/sony-wh-1000xm5");
@@ -131,9 +131,13 @@ test("robots and sitemap expose only canonical public resources and allow Mercha
 
   const partition = await page.request.get("/sitemaps/0.xml");
   expect(partition.status()).toBe(200);
+  expect(partition.headers()["cache-control"]).toBe("no-store");
   expect(await partition.text()).toContain("sony-wh-1000xm5");
-  expect((await page.request.get("/sitemaps/999999.xml")).status()).toBe(404);
-  expect((await page.request.get("/sitemaps/not-a-number.xml")).status()).toBe(404);
+  for (const missingPath of ["/sitemaps/999999.xml", "/sitemaps/not-a-number.xml"]) {
+    const missing = await page.request.get(missingPath);
+    expect(missing.status()).toBe(404);
+    expect(missing.headers()["cache-control"]).toBe("no-store");
+  }
 });
 
 test("Merchant feed and PDP JSON-LD use persisted variants, money, brand and stock", async ({
@@ -143,6 +147,7 @@ test("Merchant feed and PDP JSON-LD use persisted variants, money, brand and sto
   expect(feed.status()).toBe(200);
   expect(feed.headers()["content-type"]).toContain("application/xml");
   expect(feed.headers()["x-robots-tag"]).toBe("noindex");
+  expect(feed.headers()["cache-control"]).toBe("no-store");
   const xml = await feed.text();
   expect(xml).toContain('<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">');
   expect(xml).toContain("<g:brand>Sony</g:brand>");

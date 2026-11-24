@@ -96,10 +96,6 @@ async function readSitemapEntries(): Promise<SitemapXmlEntry[]> {
   return [...unique.values()];
 }
 
-export function getSitemapEntries(): Promise<SitemapXmlEntry[]> {
-  return readSitemapEntries();
-}
-
 export async function getSitemapPartitions() {
   return partitionSitemapEntries(await readSitemapEntries(), sitemapEntriesPerFile);
 }

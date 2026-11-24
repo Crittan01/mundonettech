@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import {
   assertCartQuantity,
@@ -15,9 +15,9 @@ import type {
   OpportunityProposal,
   OpportunityProposalItem,
   Prisma,
-  PrismaClient,
 } from "./generated/client.js";
 import { assertUuid } from "./inventory-shared.js";
+import { databaseNow, recordAdminAction, type DatabaseExecutor } from "./primitives.js";
 import type { B2bAudit } from "./b2b-types.js";
 
 export type B2bErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN" | "EXPIRED";
@@ -160,9 +160,8 @@ export function b2bDate(value: Date, field: string): Date {
   return value;
 }
 
-export async function b2bNow(tx: PrismaClient | Prisma.TransactionClient): Promise<Date> {
-  const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-  return rows[0]!.now;
+export async function b2bNow(tx: DatabaseExecutor): Promise<Date> {
+  return databaseNow(tx);
 }
 
 export async function b2bActor(
@@ -190,18 +189,7 @@ export async function b2bLog(
   targetId: string,
   metadata: Prisma.JsonObject = {},
 ): Promise<void> {
-  await tx.adminActionLog.create({
-    data: {
-      actorAdminUserId: audit.actorAdminUserId,
-      action,
-      targetType,
-      targetId,
-      requestId: audit.requestId ?? randomUUID(),
-      ipHash: Uint8Array.from(audit.ipHash),
-      userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-      metadata,
-    },
-  });
+  await recordAdminAction(tx, audit, action, targetType, targetId, metadata);
 }
 
 function canonicalProposal(proposal: ProposalContentSource): string {

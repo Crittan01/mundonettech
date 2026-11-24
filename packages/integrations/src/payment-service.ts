@@ -28,7 +28,6 @@ import {
   providerFromValue,
   refreshOrderPaymentStatus,
   writePaymentAudit,
-  writePaymentOutbox,
 } from "./payment-shared.js";
 import {
   PaymentConflictError,
@@ -173,18 +172,6 @@ export class PaymentService {
             data: { status: "CANCELLED" },
           });
         }
-        await writePaymentOutbox(tx, {
-          eventType: "payment.attempt.expired.v1",
-          aggregateType: "PaymentAttempt",
-          aggregateId: stale.id,
-          deduplicationKey: `payment-attempt:${stale.id}:expired:v1`,
-          payload: {
-            attemptId: stale.id,
-            orderId: order.id,
-            provider: stale.provider,
-            expiredAt: now.toISOString(),
-          },
-        });
       }
       if (amount !== undefined) assertPaymentMoney(amount);
       const totals = await tx.$queryRaw<Array<{ captured: bigint; committed: bigint }>>`
@@ -359,19 +346,6 @@ export class PaymentService {
         });
         await refreshOrderPaymentStatus(tx, order.id);
       }
-      await writePaymentOutbox(tx, {
-        eventType: "payment.attempt.created.v1",
-        aggregateType: "PaymentAttempt",
-        aggregateId: attempt.id,
-        deduplicationKey: `payment-attempt:${attempt.id}:created:v1`,
-        payload: {
-          attemptId: attempt.id,
-          orderId: order.id,
-          provider: attempt.provider,
-          amountCents: attempt.amountCents.toString(),
-          status: attempt.status,
-        },
-      });
       return { attempt, replayed: false, now };
     });
     let checkoutUrl: string | null = null;
@@ -444,18 +418,6 @@ export class PaymentService {
           await tx.paymentAttempt.update({
             where: { id: attempt.id },
             data: { status: "EXPIRED", completedAt: now },
-          });
-          await writePaymentOutbox(tx, {
-            eventType: "payment.attempt.expired.v1",
-            aggregateType: "PaymentAttempt",
-            aggregateId: attempt.id,
-            deduplicationKey: `payment-attempt:${attempt.id}:expired:v1`,
-            payload: {
-              attemptId: attempt.id,
-              orderId: order.id,
-              provider: attempt.provider,
-              expiredAt: now.toISOString(),
-            },
           });
         }
         return { expired: true as const };
@@ -560,17 +522,6 @@ export class PaymentService {
           targetId: attempt.id,
           audit: options.audit,
           metadata: { orderId: attempt.orderId, amountCents: attempt.amountCents.toString() },
-        });
-        await writePaymentOutbox(tx, {
-          eventType: "payment.bank-transfer.confirmed.v1",
-          aggregateType: "PaymentAttempt",
-          aggregateId: attempt.id,
-          deduplicationKey: `payment-attempt:${attempt.id}:bank-confirmed:v1`,
-          payload: {
-            attemptId: attempt.id,
-            orderId: attempt.orderId,
-            amountCents: attempt.amountCents.toString(),
-          },
         });
         return paymentAttemptSnapshot(updated, false);
       });

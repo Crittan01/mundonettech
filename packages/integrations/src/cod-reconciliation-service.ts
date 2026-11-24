@@ -20,7 +20,6 @@ import {
   paymentText,
   refreshOrderPaymentStatus,
   writePaymentAudit,
-  writePaymentOutbox,
 } from "./payment-shared.js";
 import {
   PaymentConflictError,
@@ -236,18 +235,6 @@ export class CodReconciliationService {
             },
           });
           await refreshOrderPaymentStatus(tx, attempt.orderId);
-          await writePaymentOutbox(tx, {
-            eventType: "payment.cod.reconciled.v1",
-            aggregateType: "PaymentAttempt",
-            aggregateId: attempt.id,
-            deduplicationKey: `payment-attempt:${attempt.id}:cod-reconciled:v1`,
-            payload: {
-              attemptId: attempt.id,
-              orderId: attempt.orderId,
-              amountCents: attempt.amountCents.toString(),
-              remittanceBatchId: batch.id,
-            },
-          });
           reconciledAttemptIds.push(attempt.id);
         }
         await tx.remittanceBatch.update({

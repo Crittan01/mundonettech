@@ -6,6 +6,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   adjustStoreCreditAction,
   blockIdentityAction,
@@ -17,9 +18,6 @@ import {
   voidPaymentAction,
 } from "@/lib/actions/admin-payments";
 import { initialActionState } from "@/lib/action-state";
-
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export function BankTransferConfirmationForm({ paymentAttemptId }: { paymentAttemptId: string }) {
   const [state, action, pending] = useActionState(confirmBankTransferAction, initialActionState);
@@ -200,15 +198,10 @@ export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: stri
         </div>
         <div className="space-y-2">
           <Label htmlFor="credit-type">Movimiento</Label>
-          <select
-            id="credit-type"
-            name="type"
-            defaultValue={state.values?.type ?? "GRANT"}
-            className={selectClass}
-          >
+          <Select id="credit-type" name="type" defaultValue={state.values?.type ?? "GRANT"}>
             <option value="GRANT">Abonar saldo</option>
             <option value="WITHDRAWAL">Retirar saldo disponible</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="credit-amount">Monto en centavos COP</Label>
@@ -250,16 +243,11 @@ export function BlockIdentityForm() {
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="blocked-kind">Tipo de identidad</Label>
-          <select
-            id="blocked-kind"
-            name="kind"
-            defaultValue={state.values?.kind ?? "EMAIL"}
-            className={selectClass}
-          >
+          <Select id="blocked-kind" name="kind" defaultValue={state.values?.kind ?? "EMAIL"}>
             <option value="EMAIL">Correo</option>
             <option value="PHONE">Teléfono</option>
             <option value="DOCUMENT">Documento</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="blocked-identity">Identidad a bloquear</Label>

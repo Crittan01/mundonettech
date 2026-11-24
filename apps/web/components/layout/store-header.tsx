@@ -1,10 +1,9 @@
 import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
-import type { ReactNode } from "react";
 
 import { storeConfig } from "@mundonettech/config/store";
 
-export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }> = {}) {
+export async function StoreHeader() {
   "use cache";
 
   cacheLife("max");
@@ -41,7 +40,6 @@ export async function StoreHeader({ actions }: Readonly<{ actions?: ReactNode }>
           <span className="hidden text-sm text-muted-foreground sm:inline">
             {storeConfig.domain}
           </span>
-          {actions}
         </div>
       </div>
     </header>

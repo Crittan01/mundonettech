@@ -76,6 +76,7 @@ export type {
   UrlRedirect,
   CmsBlockVersion,
   CmsMedia,
+  ProductMedia,
   CmsPage,
   CmsSectionBlock,
   StoreSettings,
@@ -92,7 +93,6 @@ export {
   compareStrings,
   hasUniqueViolation,
   inInventoryTransaction,
-  normalizeStockMovements,
 } from "./inventory-shared.js";
 export {
   fulfillStock,
@@ -144,6 +144,7 @@ export {
 } from "./catalog-service.js";
 export type { CatalogConflictErrorCode, CatalogQueryErrorCode } from "./catalog-service.js";
 export {
+  CachedUrlRedirectResolver,
   UrlRedirectConflictError,
   UrlRedirectNotFoundError,
   UrlRedirectService,
@@ -232,7 +233,6 @@ export {
   CheckoutCouponError,
   CheckoutReviewRequiredError,
   CheckoutStockError,
-  OrderNotFoundError,
   OrderService,
   OrderValidationError,
   ReceiptBalanceError,
@@ -304,7 +304,7 @@ export {
   RefundNotFoundError,
   RefundValidationError,
 } from "./order-refund-service.js";
-export { OrderLifecycleError, OrderLifecycleService } from "./order-lifecycle-service.js";
+export { OrderLifecycleService } from "./order-lifecycle-service.js";
 export type {
   AbandonedCartCaptureResult,
   OrderReservationReleaseResult,
@@ -335,17 +335,14 @@ export type {
 } from "./generated/client.js";
 export {
   LocalDeliveryConflictError,
-  LocalDeliveryNotFoundError,
   LocalDeliveryService,
   LocalDeliveryValidationError,
-  quoteLocalDeliveryZone,
 } from "./local-delivery-service.js";
 export type {
   DeliveryMutationAudit,
   LocalDeliveryQuote,
   LocalDeliveryZoneInput,
 } from "./local-delivery-service.js";
-export { verifySecurityPosture } from "./verify-security-posture.js";
 export { OperationalHealthService } from "./health-service.js";
 export type {
   BackupRunView,
@@ -361,11 +358,7 @@ export { FunnelService, recordDailyFunnelCounters } from "./funnel-service.js";
 export type { FunnelCounters } from "./funnel-service.js";
 export { FinanceService, bogotaDayStart, currentYearRange } from "./finance-service.js";
 export type { FiscalWatchDefaults } from "./finance-service.js";
-export {
-  OperationsService,
-  canReadNotificationCategory,
-  notificationWhereForRole,
-} from "./operations-service.js";
+export { OperationsService, canReadNotificationCategory } from "./operations-service.js";
 export { AdminOrderService } from "./admin-order-service.js";
 export type { AdminOrderFilters } from "./admin-order-service.js";
 export type {
@@ -514,13 +507,8 @@ export type {
 } from "./lifecycle-service.js";
 export { SegmentationService } from "./segmentation-service.js";
 export type { CustomerSegmentInput, CustomerSegmentMutation } from "./segmentation-service.js";
-export { cancelPendingMetaCapiForCustomerInTransaction } from "./meta-capi.js";
 export { RfmAnalyticsError, RfmAnalyticsService } from "./rfm-analytics-service.js";
-export type {
-  RfmAnalyticsCursor,
-  RfmAnalyticsErrorCode,
-  RfmAnalyticsFilter,
-} from "./rfm-analytics-service.js";
+export type { RfmAnalyticsErrorCode, RfmAnalyticsFilter } from "./rfm-analytics-service.js";
 export {
   CustomerSegmentStatus,
   LifecycleEnrollmentStatus,

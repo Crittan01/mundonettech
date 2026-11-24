@@ -6,14 +6,12 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { initialActionState } from "@/lib/action-state";
 import {
   requestOrderRefundAction,
   transitionOrderRefundAction,
 } from "@/lib/actions/admin-operations";
-
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 interface RefundableItem {
   readonly id: string;
@@ -75,18 +73,17 @@ export function RequestRefundForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor={`refund-reason-${orderId}`}>Motivo</Label>
-          <select
+          <Select
             id={`refund-reason-${orderId}`}
             name="reason"
             defaultValue={state.values?.reason ?? "CUSTOMER_SUPPORT"}
-            className={selectClass}
             required
           >
             <option value="CUSTOMER_SUPPORT">Servicio al cliente</option>
             <option value="RETRACT">Retracto</option>
             <option value="WARRANTY">Garantía</option>
             <option value="ADJUSTMENT">Ajuste comercial</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`refund-note-${orderId}`}>Nota auditable (opcional)</Label>

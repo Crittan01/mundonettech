@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
 
 import {
   CartService,
+  OperationalHealthService,
+  OperationsService,
   OrderLifecycleService,
   OrderRefundService,
   OrderService,
@@ -17,6 +20,7 @@ import {
 import {
   BlockedIdentityService,
   CodReconciliationService,
+  DomainEventWorker,
   IntegrationCredentialVault,
   PaymentConflictError,
   PaymentProviderError,
@@ -50,6 +54,18 @@ const wompiCredentials = {
   integritySecret: "test_integrity_1234567890abcdef",
   eventsSecret: "test_events_1234567890abcdef",
 };
+const informationalEventTypes = [
+  "payment.attempt.created.v1",
+  "payment.attempt.expired.v1",
+  "payment.bank-transfer.confirmed.v1",
+  "payment.cod.reconciled.v1",
+  "payment.wompi.succeeded.v1",
+  "store-credit.adjusted.v1",
+];
+const paymentOutboxMigrationUrl = new URL(
+  "../packages/db/prisma/migrations/20261123235900_a1_payment_outbox_consumers/migration.sql",
+  import.meta.url,
+);
 
 let harness;
 let sql;
@@ -239,6 +255,37 @@ after(
 );
 
 describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
+  it("wires late payment reviews and retires every informational producer statically", () => {
+    const workerSource = readFileSync(
+      new URL("../packages/integrations/src/domain-event-worker.ts", import.meta.url),
+      "utf8",
+    );
+    const wompiSource = readFileSync(
+      new URL("../packages/integrations/src/wompi-webhook-service.ts", import.meta.url),
+      "utf8",
+    );
+    assert.match(wompiSource, /eventType: "payment\.late-review-required\.v1"/);
+    assert.match(workerSource, /"payment\.late-review-required\.v1"/);
+    assert.match(workerSource, /case "payment\.late-review-required\.v1"/);
+    const producerSources = [
+      "../packages/integrations/src/payment-service.ts",
+      "../packages/integrations/src/cod-reconciliation-service.ts",
+      "../packages/integrations/src/store-credit-service.ts",
+      "../packages/integrations/src/wompi-webhook-service.ts",
+      "../packages/db/src/order-lifecycle-service.ts",
+    ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8"));
+    const migration = readFileSync(paymentOutboxMigrationUrl, "utf8");
+    for (const eventType of informationalEventTypes) {
+      assert.equal(
+        producerSources.some((source) => source.includes(eventType)),
+        false,
+      );
+      assert.equal(workerSource.includes(eventType), false);
+      assert.match(migration, new RegExp(`'${eventType.replaceAll(".", "\\.")}'`));
+    }
+    assert.doesNotMatch(migration, /payment\.late-review-required\.v1/);
+  });
+
   it("blocks COD identities, preserves discrepancies and reconciles a corrected remittance", async () => {
     const orderId = await makeOrder();
     const emailHash = hash();
@@ -540,6 +587,190 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     );
   });
 
+  it("raises one persistent critical alert for a late Wompi approval without capturing or moving stock", async () => {
+    await markPurchaseOrderOrdered(db, inventory.purchaseOrderId);
+    await receivePurchaseOrder(db, {
+      purchaseOrderId: inventory.purchaseOrderId,
+      operationKey: `po-replenish:${randomUUID()}`,
+      items: [
+        {
+          variantId: catalog.variantId,
+          quantity: 10,
+          serials: Array.from({ length: 10 }, (_, index) => ({
+            serial: `SERIAL-REPLENISH-${String(index + 1).padStart(2, "0")}`,
+          })),
+        },
+      ],
+    });
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      idempotencyKey: `wompi-late:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const persistedAttempt = await db.paymentAttempt.findUniqueOrThrow({
+      where: { id: attempt.id },
+    });
+    await sql.query(
+      `UPDATE "PaymentAttempt" SET "expiresAt" = "createdAt" + interval '1 millisecond' WHERE "id" = $1`,
+      [attempt.id],
+    );
+    await assert.rejects(
+      payments.resumeWompiCheckout({
+        paymentAttemptId: attempt.id,
+        orderId,
+        returnUrl: "https://mundonettech.co/recibo/token",
+      }),
+      (error) => error instanceof PaymentConflictError && error.message.includes("expired"),
+    );
+    const stockBefore = await db.stockLevel.findFirstOrThrow({
+      where: { locationId: inventory.locationId },
+    });
+    const ledgerBefore = await db.inventoryLedger.count({ where: { orderId } });
+    const approved = wompiEvent(attempt, "APPROVED");
+    const late = await webhooks.process({
+      body: approved.body,
+      environment: "LOCAL",
+      headerChecksum: approved.checksum,
+    });
+    assert.equal(late.status, "IGNORED");
+    assert.equal(late.replayed, false);
+    const event = await db.domainOutbox.findFirstOrThrow({
+      where: {
+        eventType: "payment.late-review-required.v1",
+        aggregateType: "PaymentAttempt",
+        aggregateId: attempt.id,
+      },
+    });
+    assert.equal(event.processedAt, null);
+    assert.equal(
+      await db.domainOutbox.count({
+        where: { aggregateId: attempt.id, eventType: { in: informationalEventTypes } },
+      }),
+      0,
+    );
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: attempt.id } }), 0);
+    assert.equal(
+      (await db.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).status,
+      "EXPIRED",
+    );
+
+    const isolatedAt = new Date();
+    await db.domainOutbox.updateMany({
+      where: { id: { not: event.id }, processedAt: null, failedAt: null },
+      data: {
+        claimedAt: isolatedAt,
+        claimedBy: "worker:test-isolation",
+        claimExpiresAt: future(1),
+        processedAt: isolatedAt,
+      },
+    });
+    const worker = new DomainEventWorker(db, {
+      workerId: "worker:late-payment-test",
+      shipping: {},
+      email: {},
+      invoice: {},
+      vault,
+      publicSiteUrl: "https://example.test",
+      storeName: "Tienda de pruebas",
+      receiptTokenForSubmission: () => "x".repeat(43),
+    });
+    assert.deepEqual(await worker.runBatch(100), {
+      claimed: 1,
+      completed: 1,
+      retries: 0,
+      failed: 0,
+    });
+    const notification = await db.notification.findUniqueOrThrow({
+      where: { deduplicationKey: `payment-late-review:${attempt.id}` },
+    });
+    assert.equal(notification.category, "payments.review");
+    assert.equal(notification.severity, "CRITICAL");
+    assert.equal(notification.href, `/admin/pedidos/${orderId}`);
+    assert.equal(notification.entityType, "PaymentAttempt");
+    assert.equal(notification.entityId, attempt.id);
+    assert.equal(notification.resolvedAt, null);
+    assert.doesNotMatch(JSON.stringify(notification), /Laura|Rodríguez|3001234567|@example\.test/i);
+    assert.ok((await db.domainOutbox.findUniqueOrThrow({ where: { id: event.id } })).processedAt);
+
+    const operations = new OperationsService(db);
+    await operations.synchronizeNotifications();
+    assert.equal(
+      await db.notification.count({ where: { deduplicationKey: notification.deduplicationKey } }),
+      1,
+    );
+    await db.notification.update({
+      where: { id: notification.id },
+      data: { resolvedAt: new Date() },
+    });
+    await db.domainOutbox.update({
+      where: { id: event.id },
+      data: {
+        availableAt: new Date(),
+        claimedAt: null,
+        claimedBy: null,
+        claimExpiresAt: null,
+        processedAt: null,
+        failedAt: null,
+        lastError: null,
+      },
+    });
+    assert.deepEqual(await worker.runBatch(100), {
+      claimed: 1,
+      completed: 1,
+      retries: 0,
+      failed: 0,
+    });
+    const reopened = await db.notification.findUniqueOrThrow({
+      where: { deduplicationKey: notification.deduplicationKey },
+    });
+    assert.equal(reopened.id, notification.id);
+    assert.equal(reopened.resolvedAt, null);
+    assert.equal(
+      await db.notification.count({ where: { deduplicationKey: notification.deduplicationKey } }),
+      1,
+    );
+    const snapshot = await operations.snapshot(adminId);
+    assert.ok(snapshot.notifications.some((entry) => entry.id === notification.id));
+
+    const webhookReplay = await webhooks.process({
+      body: approved.body,
+      environment: "LOCAL",
+      headerChecksum: approved.checksum,
+    });
+    assert.equal(webhookReplay.replayed, true);
+    assert.equal(
+      await db.domainOutbox.count({
+        where: { eventType: "payment.late-review-required.v1", aggregateId: attempt.id },
+      }),
+      1,
+    );
+    const finalAttempt = await db.paymentAttempt.findUniqueOrThrow({
+      where: { id: attempt.id },
+    });
+    assert.equal(
+      Buffer.from(finalAttempt.requestHash).equals(Buffer.from(persistedAttempt.requestHash)),
+      true,
+    );
+    assert.equal(finalAttempt.status, "EXPIRED");
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: attempt.id } }), 0);
+    const finalOrder = await db.order.findUniqueOrThrow({ where: { id: orderId } });
+    assert.equal(finalOrder.orderStatus, "CONFIRMED");
+    assert.equal(finalOrder.paymentStatus, "UNPAID");
+    const stockAfter = await db.stockLevel.findFirstOrThrow({
+      where: { locationId: inventory.locationId },
+    });
+    assert.equal(stockAfter.onHand, stockBefore.onHand);
+    assert.equal(stockAfter.committed, stockBefore.committed);
+    assert.equal(await db.inventoryLedger.count({ where: { orderId } }), ledgerBefore);
+    assert.equal(
+      await db.inventoryLedger.count({ where: { orderId, entryType: "FULFILLMENT" } }),
+      0,
+    );
+  });
+
   it("requires verified reconciliation after an uncertain Wompi void without duplicating stock fulfillment", async () => {
     const orderId = await makeOrder();
     const attempt = await payments.start({
@@ -663,20 +894,6 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
   });
 
   it("auto-expires untouched stale attempts, supports safe Wompi replay/resume and routes multi-account webhooks by reference", async () => {
-    await markPurchaseOrderOrdered(db, inventory.purchaseOrderId);
-    await receivePurchaseOrder(db, {
-      purchaseOrderId: inventory.purchaseOrderId,
-      operationKey: `po-replenish:${randomUUID()}`,
-      items: [
-        {
-          variantId: catalog.variantId,
-          quantity: 10,
-          serials: Array.from({ length: 10 }, (_, index) => ({
-            serial: `SERIAL-REPLENISH-${String(index + 1).padStart(2, "0")}`,
-          })),
-        },
-      ],
-    });
     const orderId = await makeOrder();
     const activeAccounts = (await vault.list({ includeRevoked: false, limit: 100 })).items.filter(
       (item) => item.provider === "wompi",
@@ -858,5 +1075,70 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       credits.setActive(deactivatedCustomer.id, true, audit),
       PaymentConflictError,
     );
+  });
+
+  it("keeps ordinary payment operations healthy and drains only historical informative outbox rows", async () => {
+    const health = new OperationalHealthService(db);
+    const sentinel = await db.domainOutbox.create({
+      data: {
+        eventType: "outbox.migration-sentinel.v1",
+        aggregateType: "MigrationTest",
+        aggregateId: randomUUID(),
+        deduplicationKey: `outbox-migration-sentinel:${randomUUID()}`,
+        payload: {},
+      },
+    });
+    assert.equal(
+      await db.domainOutbox.count({ where: { eventType: { in: informationalEventTypes } } }),
+      0,
+    );
+    const before = await health.capture("LOCAL");
+    const financialBefore = await Promise.all([
+      db.paymentAttempt.count(),
+      db.paymentTransaction.count(),
+      db.paymentWebhookEvent.count(),
+      db.storeCreditEntry.count(),
+      db.adminActionLog.count(),
+    ]);
+    await db.domainOutbox.createMany({
+      data: informationalEventTypes.map((eventType, index) => ({
+        eventType,
+        aggregateType: "MigrationTest",
+        aggregateId: randomUUID(),
+        deduplicationKey: `informational-history:${eventType}`,
+        payload: {},
+        ...(index === 0
+          ? {
+              claimedAt: new Date(Date.now() - 1_000),
+              claimedBy: "migration-test",
+              claimExpiresAt: future(1),
+              processedAt: new Date(),
+            }
+          : {}),
+        ...(index === 1 ? { failedAt: new Date(), lastError: "orphaned historical event" } : {}),
+        ...(index === 2
+          ? { claimedAt: new Date(), claimedBy: "migration-test", claimExpiresAt: future(1) }
+          : {}),
+      })),
+    });
+    await sql.query(readFileSync(paymentOutboxMigrationUrl, "utf8"));
+    const after = await health.capture("LOCAL");
+    assert.equal(after.snapshot.pendingOutbox, before.snapshot.pendingOutbox);
+    assert.equal(after.snapshot.failedOutbox, before.snapshot.failedOutbox);
+    assert.equal(
+      await db.domainOutbox.count({ where: { eventType: { in: informationalEventTypes } } }),
+      0,
+    );
+    const retained = await db.domainOutbox.findUniqueOrThrow({ where: { id: sentinel.id } });
+    assert.equal(retained.processedAt, null);
+    assert.equal(retained.failedAt, null);
+    const financialAfter = await Promise.all([
+      db.paymentAttempt.count(),
+      db.paymentTransaction.count(),
+      db.paymentWebhookEvent.count(),
+      db.storeCreditEntry.count(),
+      db.adminActionLog.count(),
+    ]);
+    assert.deepEqual(financialAfter, financialBefore);
   });
 });

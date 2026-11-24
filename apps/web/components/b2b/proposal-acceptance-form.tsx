@@ -7,12 +7,10 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { acceptB2bProposalAction } from "@/lib/actions/b2b-public";
 import { initialActionState } from "@/lib/action-state";
-
-const selectClass =
-  "h-11 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export function ProposalAcceptanceForm({
   proposalId,
@@ -71,10 +69,9 @@ export function ProposalAcceptanceForm({
           </div>
           <div className="space-y-2">
             <Label htmlFor="proposal-document-type">Documento del firmante</Label>
-            <select
+            <Select
               id="proposal-document-type"
               name="signerDocumentType"
-              className={selectClass}
               defaultValue={values?.signerDocumentType ?? "13"}
               required
             >
@@ -88,7 +85,7 @@ export function ProposalAcceptanceForm({
               <option value="42">Documento de identificación extranjero</option>
               <option value="50">NIT de otro país</option>
               <option value="91">Otro documento</option>
-            </select>
+            </Select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="proposal-document-number">Número de documento</Label>
@@ -106,10 +103,9 @@ export function ProposalAcceptanceForm({
             <Label htmlFor="proposal-buyer-document-type">
               Tipo de documento fiscal de la empresa
             </Label>
-            <select
+            <Select
               id="proposal-buyer-document-type"
               name="buyerDocumentType"
-              className={selectClass}
               defaultValue={values?.buyerDocumentType ?? "31"}
               required
             >
@@ -119,20 +115,19 @@ export function ProposalAcceptanceForm({
               <option value="42">Documento de identificación extranjero</option>
               <option value="50">NIT de otro país</option>
               <option value="91">Otro documento</option>
-            </select>
+            </Select>
           </div>
           <div className="space-y-2 sm:col-span-2">
             <Label htmlFor="proposal-tax-regime">Régimen de IVA del comprador</Label>
-            <select
+            <Select
               id="proposal-tax-regime"
               name="buyerTaxRegime"
-              className={selectClass}
               defaultValue={values?.buyerTaxRegime ?? "NO_RESPONSABLE_IVA"}
               required
             >
               <option value="NO_RESPONSABLE_IVA">No responsable de IVA</option>
               <option value="RESPONSABLE_IVA">Responsable de IVA</option>
-            </select>
+            </Select>
           </div>
         </div>
       </fieldset>
@@ -141,10 +136,9 @@ export function ProposalAcceptanceForm({
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
             <Label htmlFor="proposal-department">Departamento</Label>
-            <select
+            <Select
               id="proposal-department"
               name="departmentCode"
-              className={selectClass}
               value={departmentCode}
               onChange={(event) => {
                 setDepartmentCode(event.target.value);
@@ -158,14 +152,13 @@ export function ProposalAcceptanceForm({
                   {department.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="proposal-municipality">Municipio</Label>
-            <select
+            <Select
               id="proposal-municipality"
               name="municipalityCode"
-              className={selectClass}
               value={municipalityCode}
               onChange={(event) => setMunicipalityCode(event.target.value)}
               disabled={!departmentCode}
@@ -177,7 +170,7 @@ export function ProposalAcceptanceForm({
                   {municipality.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
           <div className="space-y-2 sm:col-span-2">
             <Label htmlFor="proposal-address">Dirección</Label>

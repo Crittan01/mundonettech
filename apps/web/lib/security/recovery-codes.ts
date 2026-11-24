@@ -11,7 +11,7 @@ const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const codeLength = 16;
 const codeCount = 10;
 
-export function normalizeRecoveryCode(value: string): string {
+function normalizeRecoveryCode(value: string): string {
   const normalized = value.toUpperCase().replace(/[\s-]/g, "");
   if (
     normalized.length !== codeLength ||
@@ -22,7 +22,7 @@ export function normalizeRecoveryCode(value: string): string {
   return normalized;
 }
 
-export function hashRecoveryCode(value: string): Uint8Array<ArrayBuffer> {
+function hashRecoveryCode(value: string): Uint8Array<ArrayBuffer> {
   return createHmac("sha256", getRecoveryCodePepper())
     .update(normalizeRecoveryCode(value), "utf8")
     .digest();

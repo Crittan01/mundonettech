@@ -12,7 +12,6 @@ import {
   paymentDigest,
   paymentText,
   writePaymentAudit,
-  writePaymentOutbox,
 } from "./payment-shared.js";
 import {
   PaymentConflictError,
@@ -119,18 +118,6 @@ export class StoreCreditService {
           customerId: input.customerId,
           amountCents: amount.toString(),
           operationKey,
-        },
-      });
-      await writePaymentOutbox(tx, {
-        eventType: "store-credit.adjusted.v1",
-        aggregateType: "StoreCreditAccount",
-        aggregateId: account.id,
-        deduplicationKey: `store-credit:${operationKey}:v1`,
-        payload: {
-          accountId: account.id,
-          customerId: input.customerId,
-          type: input.type,
-          amountCents: amount.toString(),
         },
       });
       return snapshot(result.account);

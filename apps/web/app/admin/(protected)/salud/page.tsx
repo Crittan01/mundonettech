@@ -1,6 +1,7 @@
 import { OperationalHealthService } from "@mundonettech/db";
 import Link from "next/link";
 
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { getDatabase } from "@/lib/db";
 import { getIntegrationEnvironment } from "@/lib/integrations";
 import { requireAdminPage } from "@/lib/security/admin-auth";
@@ -65,14 +66,6 @@ const failureLabels: Record<string, string> = {
 
 function date(value: string | null): string {
   return value ? dateFormatter.format(new Date(value)) : "Sin evidencia";
-}
-
-function Empty({ children }: { children: string }) {
-  return (
-    <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-      {children}
-    </p>
-  );
 }
 
 export default async function HealthPage() {

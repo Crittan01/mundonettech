@@ -11,6 +11,8 @@ import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { single } from "@/lib/admin-search-params";
 import { rfmAnalyticsService } from "@/lib/lifecycle";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -21,8 +23,6 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const selectClass =
-  "h-11 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const querySchema = z.object({
   rfmClass: z.enum(rfmClasses).optional(),
   minLtvCop: z
@@ -31,10 +31,6 @@ const querySchema = z.object({
     .optional(),
   cursor: z.string().max(500).optional(),
 });
-
-function single(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
 
 export default async function RfmAnalyticsPage({
   searchParams,
@@ -125,10 +121,10 @@ export default async function RfmAnalyticsPage({
         <form className="flex flex-wrap items-end gap-3" action="/admin/analitica-rfm">
           <div className="space-y-2">
             <Label htmlFor="rfm-class-filter">Clase RFM</Label>
-            <select
+            <Select
               id="rfm-class-filter"
               name="rfmClass"
-              className={selectClass}
+              fullWidth={false}
               defaultValue={parsed.success ? (parsed.data.rfmClass ?? "") : ""}
             >
               <option value="">Todas</option>
@@ -137,7 +133,7 @@ export default async function RfmAnalyticsPage({
                   {rfmClassLabels[rfmClass]}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
           <div className="space-y-2">
             <Label htmlFor="rfm-min-ltv">LTV mínimo en COP</Label>

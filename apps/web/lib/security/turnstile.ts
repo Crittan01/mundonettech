@@ -4,7 +4,7 @@ import { verifyTurnstile } from "@mundonettech/core";
 import { storeConfig } from "@mundonettech/config/store";
 import { getTurnstileKeys } from "@/lib/env";
 
-export interface TurnstileVerificationOptions {
+interface TurnstileVerificationOptions {
   expectedAction: string;
   expectedHostname?: string;
   fetchImpl?: typeof fetch;

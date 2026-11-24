@@ -302,6 +302,7 @@ test("Meta credential, catalog feed and Purchase dispatch work through the stand
   expect(feed.headers()["content-type"]).toContain("text/csv");
   expect(feed.headers()["x-robots-tag"]).toBe("noindex");
   expect(feed.headers()["x-content-type-options"]).toBe("nosniff");
+  expect(feed.headers()["cache-control"]).toBe("no-store");
   const csv = await feed.text();
   expect(csv).toContain("id,title,description,availability,condition,price,link,image_link");
   expect(csv).toContain(scenario.catalog.variantId);
