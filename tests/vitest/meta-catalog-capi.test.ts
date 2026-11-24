@@ -81,11 +81,17 @@ describe("F6.4 — Meta Catalog CSV", () => {
     expect(withoutImage.csv.trim().split(/\r?\n/)).toHaveLength(1);
 
     const invalid = buildMetaCatalogCsv([
-      { ...feedItem, gtin: "5901234123458", mpn: null },
+      { ...feedItem, gtin: "5901234123458", mpn: "   ", color: "  " },
       { ...feedItem, id: "variant-2", priceCents: "0" },
       { ...feedItem, id: "variant-3", link: "http://insecure.example.co/product" },
       { ...feedItem, id: "variant-4", imageLink: "http://insecure.example.co/image" },
       { ...feedItem, id: "variant-5", availableQuantity: -1 },
+      { ...feedItem, id: " variant-6 ", title: "Con espacio en id" },
+      { ...feedItem, id: "variant-7", itemGroupId: "   " },
+      { ...feedItem, id: "variant-8", title: "" },
+      { ...feedItem, id: "variant-9", description: "   " },
+      { ...feedItem, id: "variant-10", brand: "" },
+      { ...feedItem, id: "variant-11", weightGrams: 0 },
     ]);
     expect(invalid.accepted).toBe(1);
     expect(invalid.issues).toEqual(
@@ -95,10 +101,16 @@ describe("F6.4 — Meta Catalog CSV", () => {
         { id: "variant-3", code: "INVALID_LINK" },
         { id: "variant-4", code: "INVALID_IMAGE" },
         { id: "variant-5", code: "INVALID_INVENTORY" },
+        { id: " variant-6 ", code: "INVALID_ID" },
+        { id: "variant-7", code: "INVALID_GROUP" },
+        { id: "variant-8", code: "INVALID_TITLE" },
+        { id: "variant-9", code: "INVALID_DESCRIPTION" },
+        { id: "variant-10", code: "INVALID_BRAND" },
+        { id: "variant-11", code: "INVALID_WEIGHT" },
       ]),
     );
     expect(invalid.csv).toContain("identifier_exists");
-    expect(invalid.csv).toContain(",no,7,250 g");
+    expect(invalid.csv).toContain(",no,7,250 g,,Única");
   });
 
   it("rejects duplicate IDs and neutralizes spreadsheet formulas in text fields", () => {

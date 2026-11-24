@@ -33,25 +33,30 @@ const accessToken = "e2e-meta-access-token-not-production-123456789";
 let db: ReturnType<typeof createDatabaseClient>;
 let sql: import("pg").Client;
 let admin: { id: string; authUserId: string; email: string };
+let analyst: { id: string; authUserId: string; email: string };
 let fixture: Awaited<ReturnType<typeof startMetaCapiFixture>>;
 let vault: IntegrationCredentialVault;
 let service: MetaCapiService;
 let behavior: ((call: MetaCapiFixtureCall) => { destroy?: boolean } | undefined) | undefined;
 
-async function authenticateAdmin(page: Page, mfaAgeSeconds = 30) {
+async function authenticateAdmin(
+  page: Page,
+  mfaAgeSeconds = 30,
+  targetAdmin: { authUserId: string; email: string } = admin,
+) {
   const secret = process.env.SESSION_TIMEOUT_SECRET;
   if (!secret) throw new Error("SESSION_TIMEOUT_SECRET is required for authenticated E2E.");
   await page.context().clearCookies();
   const session = createSupabaseFixtureSession({
-    subject: admin.authUserId,
-    email: admin.email,
+    subject: targetAdmin.authUserId,
+    email: targetAdmin.email,
     factorId: randomUUID(),
     aal: "aal2",
     mfaAgeSeconds,
   });
   const activity = createTimeoutToken({
     kind: "admin",
-    subject: admin.authUserId,
+    subject: targetAdmin.authUserId,
     secret: Buffer.from(secret, "base64"),
     idleSeconds: 1800,
     absoluteSeconds: 43_200,
@@ -112,6 +117,9 @@ async function seedScenario() {
     throw error;
   }
   const catalog = scenario!;
+  await db.productMedia.deleteMany({
+    where: { productId: catalog.productId, variantId: catalog.variantId },
+  });
   await db.productMedia.create({
     data: {
       productId: catalog.productId,
@@ -211,6 +219,15 @@ test.beforeAll(async () => {
       email: `meta-admin-${randomUUID()}@example.test`,
       displayName: "Administrador Meta E2E",
       role: "SUPERADMIN",
+      status: "ACTIVE",
+    },
+  });
+  analyst = await db.adminUser.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `meta-analyst-${randomUUID()}@example.test`,
+      displayName: "Analista Financiero Meta E2E",
+      role: "FINANCE_ANALYST",
       status: "ACTIVE",
     },
   });
@@ -334,8 +351,16 @@ test("an uncertain Meta result requires audited MFA reconciliation before an ide
   await runWorker(page, scenario.metaEventId, "UNCERTAIN");
   expect(fixture.calls).toHaveLength(1);
 
-  await authenticateAdmin(page);
+  await authenticateAdmin(page, 30, analyst);
   await page.goto("/admin/integraciones#meta-capi");
+  await expect(
+    page.getByRole("heading", { name: `Purchase · ${scenario.orderNumber}` }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Actualizar feed" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Conciliar con MFA" })).toHaveCount(0);
+
+  await authenticateAdmin(page);
+  await page.goto(`/admin/integraciones?metaRefresh=${randomUUID()}#meta-capi`);
   await expect(
     page.getByRole("heading", { name: `Purchase · ${scenario.orderNumber}` }),
   ).toBeVisible();

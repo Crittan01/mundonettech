@@ -1,4 +1,4 @@
-import { hasAdminPermission } from "@mundonettech/core";
+import { hasAdminPermission, type MetaCatalogIssueCode } from "@mundonettech/core";
 import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -28,13 +28,18 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 
-const feedIssueLabels: Record<string, string> = {
+const feedIssueLabels: Record<MetaCatalogIssueCode, string> = {
+  INVALID_ID: "Identificador de variante inválido",
+  INVALID_GROUP: "Identificador de grupo inválido",
+  INVALID_TITLE: "Título ausente o inválido",
+  INVALID_DESCRIPTION: "Descripción ausente o inválida",
+  INVALID_LINK: "Enlace de producto inválido",
   MISSING_IMAGE: "Falta una imagen pública real",
   INVALID_IMAGE: "La imagen no tiene una URL segura",
-  INVALID_GTIN: "GTIN inválido; se omite el identificador",
+  INVALID_BRAND: "Marca ausente o inválida",
   INVALID_PRICE: "Precio inválido",
-  INVALID_LINK: "Enlace de producto inválido",
   INVALID_INVENTORY: "Inventario inválido",
+  INVALID_GTIN: "GTIN inválido; se omite el identificador",
   INVALID_WEIGHT: "Peso logístico inválido",
 };
 
@@ -174,7 +179,7 @@ export default async function IntegrationsPage() {
             cancela pendientes; los resultados inciertos solo continúan tras conciliación con MFA.
           </p>
         </div>
-        <MetaCapiDashboard events={metaEvents} />
+        <MetaCapiDashboard events={metaEvents} canWrite={canWrite} />
       </section>
       <section aria-labelledby="credential-list" className="space-y-4">
         <div className="flex flex-wrap items-end justify-between gap-3">

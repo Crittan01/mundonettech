@@ -9,10 +9,8 @@ export const metadata = { title: "Mi cuenta", robots: { index: false, follow: fa
 export default async function AccountPage() {
   const { profile } = await requireCustomerPage();
   const account = await accountService().getProfile(profile.id);
-  const marketingEmail =
-    account.consents.find((consent) => consent.purpose === "MARKETING_EMAIL")?.status === "GRANTED";
-  const advertising =
-    account.consents.find((consent) => consent.purpose === "ADVERTISING")?.status === "GRANTED";
+  const marketingEmail = account.marketingEmailGranted;
+  const advertising = account.advertisingGranted;
   return (
     <main className="space-y-8">
       <div>

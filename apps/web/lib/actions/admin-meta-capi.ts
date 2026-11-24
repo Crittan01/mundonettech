@@ -13,7 +13,7 @@ import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const inputSchema = z.object({
   metaEventId: z.string().uuid(),
-  resolution: z.enum(["CONFIRMED_SENT", "RETRY"]),
+  resolution: z.enum(["CONFIRMED_SENT", "RETRY", "DISCARD"]),
   reference: z
     .string()
     .trim()
@@ -52,7 +52,9 @@ export async function reconcileMetaCapiAction(
     return actionSuccess(
       input.resolution === "CONFIRMED_SENT"
         ? `Evento ${saved.eventId} confirmado como recibido.`
-        : `Evento ${saved.eventId} programado con el mismo identificador y request sellado.`,
+        : input.resolution === "DISCARD"
+          ? `Evento ${saved.eventId} descartado sin reenvío y cerrado con evidencia.`
+          : `Evento ${saved.eventId} programado con el mismo identificador y request sellado.`,
     );
   } catch (error) {
     if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
@@ -92,14 +94,14 @@ export async function refreshMetaCatalogFeedAction(): Promise<ActionState> {
       requireRecentMfa: true,
     });
     const context = await getRequestSecurityContext();
-    updateTag("meta-catalog-feed");
-    revalidatePath("/api/feeds/meta-catalog");
     await metaCapiService().recordFeedRefresh({
       actorAdminUserId: session.profile.id,
       requestId: randomUUID(),
       ipHash: context.ipHash,
       userAgentHash: context.userAgentHash,
     });
+    updateTag("meta-catalog-feed");
+    revalidatePath("/api/feeds/meta-catalog");
     revalidatePath("/admin/integraciones");
     return actionSuccess("Feed Meta actualizado con el catálogo e inventario vigentes.");
   } catch (error) {

@@ -78,10 +78,17 @@ ALTER TABLE "MetaCapiEvent"
   ADD CONSTRAINT "MetaCapiEvent_hashes_length" CHECK (
     octet_length("requestHash") = 32 AND
     (
-      ("status" IN ('PENDING', 'DISPATCHING', 'UNCERTAIN') AND
+      ("status" IN ('PENDING', 'DISPATCHING') AND
         octet_length("externalIdHash") = 32 AND
         ("emailHash" IS NULL OR octet_length("emailHash") = 32) AND
         ("phoneHash" IS NULL OR octet_length("phoneHash") = 32)) OR
+      ("status" = 'UNCERTAIN' AND
+        (
+          ("externalIdHash" IS NULL AND "emailHash" IS NULL AND "phoneHash" IS NULL) OR
+          (octet_length("externalIdHash") = 32 AND
+            ("emailHash" IS NULL OR octet_length("emailHash") = 32) AND
+            ("phoneHash" IS NULL OR octet_length("phoneHash") = 32))
+        )) OR
       ("status" IN ('SENT', 'SKIPPED', 'FAILED') AND
         "externalIdHash" IS NULL AND "emailHash" IS NULL AND "phoneHash" IS NULL)
     )
@@ -156,7 +163,14 @@ BEGIN
   IF NEW."eventId" IS DISTINCT FROM OLD."eventId" OR
      NEW."eventName" IS DISTINCT FROM OLD."eventName" OR
      NEW."environment" IS DISTINCT FROM OLD."environment" OR
-     NEW."credentialId" IS DISTINCT FROM OLD."credentialId" OR
+     (NEW."credentialId" IS DISTINCT FROM OLD."credentialId" AND NOT (
+       OLD."status" IN ('UNCERTAIN', 'FAILED') AND NEW."status" = 'PENDING' AND
+       EXISTS (
+         SELECT 1 FROM "IntegrationCredential" credential
+         WHERE credential."id" = NEW."credentialId" AND credential."provider" = 'meta' AND
+           credential."environment" = NEW."environment" AND credential."revokedAt" IS NULL
+       )
+     )) OR
      NEW."orderId" IS DISTINCT FROM OLD."orderId" OR
      NEW."customerId" IS DISTINCT FROM OLD."customerId" OR
      NEW."consentId" IS DISTINCT FROM OLD."consentId" OR
@@ -176,25 +190,34 @@ BEGIN
     ('PENDING', 'PENDING'), ('PENDING', 'DISPATCHING'), ('PENDING', 'SKIPPED'), ('PENDING', 'FAILED'),
     ('DISPATCHING', 'DISPATCHING'), ('DISPATCHING', 'SENT'), ('DISPATCHING', 'SKIPPED'),
     ('DISPATCHING', 'FAILED'), ('DISPATCHING', 'UNCERTAIN'), ('DISPATCHING', 'PENDING'),
-    ('UNCERTAIN', 'UNCERTAIN'), ('UNCERTAIN', 'PENDING'), ('UNCERTAIN', 'SENT'),
-    ('FAILED', 'FAILED'), ('FAILED', 'PENDING')
+    ('UNCERTAIN', 'UNCERTAIN'), ('UNCERTAIN', 'PENDING'), ('UNCERTAIN', 'SENT'), ('UNCERTAIN', 'SKIPPED'),
+    ('FAILED', 'FAILED'), ('FAILED', 'PENDING'), ('FAILED', 'SKIPPED')
   ) THEN
     RAISE EXCEPTION 'Invalid Meta CAPI event transition' USING ERRCODE = '55000';
   END IF;
-  IF OLD."status" <> 'FAILED' AND NEW."status" IN ('PENDING', 'DISPATCHING', 'UNCERTAIN') AND
+  IF OLD."status" <> 'FAILED' AND NEW."status" IN ('PENDING', 'DISPATCHING') AND
      (NEW."externalIdHash" IS DISTINCT FROM OLD."externalIdHash" OR
       NEW."emailHash" IS DISTINCT FROM OLD."emailHash" OR
       NEW."phoneHash" IS DISTINCT FROM OLD."phoneHash") THEN
+    RAISE EXCEPTION 'Meta CAPI user matching data cannot change before a terminal state' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."status" <> 'FAILED' AND NEW."status" = 'UNCERTAIN' AND
+     (NEW."externalIdHash" IS DISTINCT FROM OLD."externalIdHash" OR
+      NEW."emailHash" IS DISTINCT FROM OLD."emailHash" OR
+      NEW."phoneHash" IS DISTINCT FROM OLD."phoneHash") AND
+     NOT (NEW."externalIdHash" IS NULL AND NEW."emailHash" IS NULL AND NEW."phoneHash" IS NULL) THEN
     RAISE EXCEPTION 'Meta CAPI user matching data cannot change before a terminal state' USING ERRCODE = '55000';
   END IF;
   IF NEW."status" IN ('SENT', 'SKIPPED', 'FAILED') AND
      (NEW."externalIdHash" IS NOT NULL OR NEW."emailHash" IS NOT NULL OR NEW."phoneHash" IS NOT NULL) THEN
     RAISE EXCEPTION 'Terminal Meta CAPI events must discard user matching data' USING ERRCODE = '55000';
   END IF;
-  IF OLD."status" IN ('UNCERTAIN', 'FAILED') AND NEW."status" = 'PENDING' AND
+  IF OLD."status" IN ('UNCERTAIN', 'FAILED') AND NEW."status" IN ('PENDING', 'SENT', 'SKIPPED') AND
      (NEW."reconciliationReference" IS NULL OR NEW."reconciledAt" IS NULL OR
-      NEW."reconciledByAdminUserId" IS NULL OR NEW."version" <> OLD."version" + 1) THEN
-    RAISE EXCEPTION 'Retrying an uncertain or failed Meta CAPI event requires reconciled evidence' USING ERRCODE = '55000';
+      NEW."reconciledByAdminUserId" IS NULL OR
+      (NEW."status" = 'PENDING' AND NEW."version" <> OLD."version" + 1) OR
+      (NEW."status" IN ('SENT', 'SKIPPED') AND NEW."version" <> OLD."version")) THEN
+    RAISE EXCEPTION 'Reconciling an uncertain or failed Meta CAPI event requires audited evidence' USING ERRCODE = '55000';
   END IF;
   RETURN NEW;
 END;

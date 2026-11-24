@@ -161,7 +161,8 @@ function catalogFeedItems(
         id: variant.id,
         itemGroupId: product.id,
         title: `${product.name}${optionLabels.length ? ` — ${optionLabels.join(" / ")}` : ""}`,
-        description: product.shortDescription ?? product.description ?? product.name,
+        description:
+          product.shortDescription?.trim() || product.description?.trim() || product.name,
         link: absolute(`/producto/${product.slug}?variant=${encodeURIComponent(variant.id)}`),
         imageLink,
         brand: product.brand.name,

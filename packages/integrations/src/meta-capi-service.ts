@@ -95,6 +95,7 @@ export interface MetaCapiEventView {
   readonly reconciliationReference: string | null;
   readonly version: number;
   readonly retryable: boolean;
+  readonly reconcilable: boolean;
 }
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -173,6 +174,7 @@ function view(record: MetaCapiEvent & { order: { orderNumber: string } }): MetaC
       (record.status === "UNCERTAIN" ||
         (record.status === "FAILED" && retryableFailureCodes.has(record.failureCode ?? ""))) &&
       record.version < 1_000_000,
+    reconcilable: record.status === "UNCERTAIN" || record.status === "FAILED",
   };
 }
 
@@ -396,6 +398,25 @@ export class MetaCapiService {
     });
   }
 
+  private async hasActiveConsent(
+    tx: Db,
+    event: Pick<MetaCapiEvent, "consentId" | "customerId" | "eventTime">,
+  ): Promise<boolean> {
+    const consent = await tx.consent.findFirst({
+      where: {
+        id: event.consentId,
+        customerId: event.customerId,
+        purpose: "ADVERTISING",
+        status: "GRANTED",
+        revokedBy: null,
+        occurredAt: { lte: event.eventTime },
+        customer: { deletedAt: null, status: { in: ["GUEST", "ACTIVE"] } },
+      },
+      select: { id: true },
+    });
+    return consent !== null;
+  }
+
   private async finish(
     eventId: string,
     claimId: string | null,
@@ -409,6 +430,15 @@ export class MetaCapiService {
       const now = await databaseTimestamp(tx);
       const terminal =
         input.status === "SENT" || input.status === "SKIPPED" || input.status === "FAILED";
+      const current =
+        input.status === "UNCERTAIN"
+          ? await tx.metaCapiEvent.findUnique({
+              where: { id: eventId },
+              select: { consentId: true, customerId: true, eventTime: true },
+            })
+          : null;
+      const purgeHashes =
+        terminal || (current !== null && !(await this.hasActiveConsent(tx, current)));
       const updated = await tx.metaCapiEvent.updateMany({
         where: {
           id: eventId,
@@ -424,7 +454,7 @@ export class MetaCapiService {
           completedAt: terminal ? now : null,
           providerTraceId: input.providerTraceId ?? null,
           failureCode: input.failureCode ?? null,
-          ...(terminal ? { externalIdHash: null, emailHash: null, phoneHash: null } : {}),
+          ...(purgeHashes ? { externalIdHash: null, emailHash: null, phoneHash: null } : {}),
         },
       });
       if (updated.count !== 1) {
@@ -491,6 +521,7 @@ export class MetaCapiService {
             return { status: "IN_FLIGHT", nextAttemptAt: event.claimExpiresAt };
           }
           if (event.requestStartedAt) {
+            const activeConsent = await this.hasActiveConsent(tx, event);
             await tx.metaCapiEvent.update({
               where: { id: event.id },
               data: {
@@ -500,6 +531,9 @@ export class MetaCapiService {
                 claimedAt: null,
                 claimExpiresAt: null,
                 failureCode: "CLAIM_EXPIRED",
+                ...(!activeConsent
+                  ? { externalIdHash: null, emailHash: null, phoneHash: null }
+                  : {}),
               },
             });
             await this.alert(tx, event.id, "CLAIM_EXPIRED", true);
@@ -628,8 +662,35 @@ export class MetaCapiService {
       });
       return { status: "FAILED" };
     }
-    const nextAttemptAt = await this.db.$transaction(async (tx) => {
+    const scheduled = await this.db.$transaction(async (tx): Promise<MetaCapiDispatchResult> => {
       const now = await databaseTimestamp(tx);
+      const activeConsent = await this.hasActiveConsent(tx, event);
+      if (!activeConsent) {
+        const skipped = await tx.metaCapiEvent.updateMany({
+          where: { id: event.id, claimId, status: "DISPATCHING" },
+          data: {
+            status: "SKIPPED",
+            availableAt: now,
+            completedAt: now,
+            claimId: null,
+            claimedBy: null,
+            claimedAt: null,
+            claimExpiresAt: null,
+            failureCode: "NO_CONSENT",
+            externalIdHash: null,
+            emailHash: null,
+            phoneHash: null,
+          },
+        });
+        if (skipped.count !== 1) {
+          throw new MetaCapiServiceError(
+            "CONFLICT",
+            "Meta CAPI claim changed before consent cancellation.",
+          );
+        }
+        await this.resolveAlert(tx, event.id);
+        return { status: "SKIPPED" };
+      }
       const availableAt = new Date(now.getTime() + result.retryAfterSeconds * 1000);
       const updated = await tx.metaCapiEvent.updateMany({
         where: { id: event.id, claimId, status: "DISPATCHING" },
@@ -649,9 +710,9 @@ export class MetaCapiService {
           "Meta CAPI claim changed before retry scheduling.",
         );
       }
-      return availableAt;
+      return { status: "PENDING", nextAttemptAt: availableAt };
     });
-    return { status: "PENDING", nextAttemptAt };
+    return scheduled;
   }
 
   async recordFeedRefresh(audit: MetaCapiAudit): Promise<void> {
@@ -701,7 +762,7 @@ export class MetaCapiService {
 
   async reconcile(input: {
     metaEventId: string;
-    resolution: "CONFIRMED_SENT" | "RETRY";
+    resolution: "CONFIRMED_SENT" | "RETRY" | "DISCARD";
     reference: string;
     audit: MetaCapiAudit;
   }): Promise<MetaCapiEventView> {
@@ -736,6 +797,16 @@ export class MetaCapiService {
         );
       }
       if (
+        input.resolution === "DISCARD" &&
+        event.status !== "UNCERTAIN" &&
+        event.status !== "FAILED"
+      ) {
+        throw new MetaCapiServiceError(
+          "CONFLICT",
+          "Only an uncertain or failed event can be discarded.",
+        );
+      }
+      if (
         input.resolution === "RETRY" &&
         (event.status === "FAILED"
           ? !retryableFailureCodes.has(event.failureCode ?? "")
@@ -765,7 +836,59 @@ export class MetaCapiService {
           },
         });
         await this.resolveAlert(tx, event.id);
+      } else if (input.resolution === "DISCARD") {
+        await tx.metaCapiEvent.update({
+          where: { id: event.id },
+          data: {
+            status: "SKIPPED",
+            completedAt: now,
+            failureCode: event.failureCode ?? "RECONCILED_NOT_SENT",
+            reconciliationReference: input.reference,
+            reconciledAt: now,
+            reconciledByAdminUserId: actor.id,
+            externalIdHash: null,
+            emailHash: null,
+            phoneHash: null,
+            claimId: null,
+            claimedBy: null,
+            claimedAt: null,
+            claimExpiresAt: null,
+          },
+        });
+        await this.resolveAlert(tx, event.id);
       } else {
+        const activeCredentialRow = await tx.integrationCredential.findFirst({
+          where: {
+            provider: "meta",
+            environment: this.options.environment,
+            revokedAt: null,
+          },
+          select: { id: true },
+        });
+        if (!activeCredentialRow) {
+          throw new MetaCapiServiceError(
+            "CONFLICT",
+            "An active Meta credential is required before retrying.",
+          );
+        }
+        let activeCredential: { pixelId: string; testEventCode: string | null };
+        try {
+          activeCredential = await this.credential(activeCredentialRow.id);
+        } catch {
+          throw new MetaCapiServiceError(
+            "CONFLICT",
+            "Active Meta credential is invalid or revoked.",
+          );
+        }
+        if (
+          activeCredential.pixelId !== event.pixelId ||
+          activeCredential.testEventCode !== event.testEventCode
+        ) {
+          throw new MetaCapiServiceError(
+            "CONFLICT",
+            "Active Meta credential identity does not match the sealed event.",
+          );
+        }
         const order = await tx.order.findUnique({
           where: { id: event.orderId },
           include: { customer: true },
@@ -794,7 +917,13 @@ export class MetaCapiService {
         if (now.getTime() - event.eventTime.getTime() > 7 * 24 * 3_600_000) {
           throw new MetaCapiServiceError("CONFLICT", "Meta CAPI event is too old to retry.");
         }
-        const hashes = matchingHashes(order.customer);
+        const hashes = event.externalIdHash
+          ? {
+              externalIdHash: Uint8Array.from(event.externalIdHash),
+              emailHash: event.emailHash ? Uint8Array.from(event.emailHash) : null,
+              phoneHash: event.phoneHash ? Uint8Array.from(event.phoneHash) : null,
+            }
+          : matchingHashes(order.customer);
         const request = buildMetaCapiPurchaseRequest({
           pixelId: event.pixelId,
           testEventCode: event.testEventCode,
@@ -825,6 +954,7 @@ export class MetaCapiService {
         await tx.metaCapiEvent.update({
           where: { id: event.id },
           data: {
+            credentialId: activeCredentialRow.id,
             status: "PENDING",
             availableAt: now,
             completedAt: null,
@@ -856,7 +986,9 @@ export class MetaCapiService {
           action:
             input.resolution === "CONFIRMED_SENT"
               ? "META_CAPI_UNCERTAIN_CONFIRMED"
-              : "META_CAPI_RETRY_RECONCILED",
+              : input.resolution === "DISCARD"
+                ? "META_CAPI_EVENT_DISCARDED"
+                : "META_CAPI_RETRY_RECONCILED",
           targetType: "MetaCapiEvent",
           targetId: event.id,
           requestId: input.audit.requestId ?? null,
@@ -882,16 +1014,27 @@ export class MetaCapiService {
   async cancelPendingForConsentRevocation(tx: Db, customerId: string): Promise<number> {
     assertIntegrationUuid(customerId, "customerId");
     const now = await databaseTimestamp(tx);
+    const revocationCondition: Prisma.MetaCapiEventWhereInput = {
+      OR: [
+        { consent: { status: "REVOKED" } },
+        { consent: { revokedBy: { isNot: null } } },
+        { customer: { status: "ANONYMIZED" } },
+        { customer: { deletedAt: { not: null } } },
+      ],
+    };
+    const pendingRows = await tx.metaCapiEvent.findMany({
+      where: {
+        customerId,
+        status: "PENDING",
+        ...revocationCondition,
+      },
+      select: { id: true },
+    });
     const result = await tx.metaCapiEvent.updateMany({
       where: {
         customerId,
         status: "PENDING",
-        OR: [
-          { consent: { status: "REVOKED" } },
-          { consent: { revokedBy: { isNot: null } } },
-          { customer: { status: "ANONYMIZED" } },
-          { customer: { deletedAt: { not: null } } },
-        ],
+        ...revocationCondition,
       },
       data: {
         status: "SKIPPED",
@@ -903,6 +1046,32 @@ export class MetaCapiService {
         availableAt: now,
       },
     });
+    await tx.metaCapiEvent.updateMany({
+      where: {
+        customerId,
+        status: "UNCERTAIN",
+        ...revocationCondition,
+        OR: [
+          { externalIdHash: { not: null } },
+          { emailHash: { not: null } },
+          { phoneHash: { not: null } },
+        ],
+      },
+      data: {
+        externalIdHash: null,
+        emailHash: null,
+        phoneHash: null,
+      },
+    });
+    if (pendingRows.length > 0) {
+      await tx.notification.updateMany({
+        where: {
+          deduplicationKey: { in: pendingRows.map((row) => `meta-capi:${row.id}:review`) },
+          resolvedAt: null,
+        },
+        data: { resolvedAt: now },
+      });
+    }
     return result.count;
   }
 }

@@ -913,9 +913,12 @@ export function CheckoutForm({
             </label>
             <label className="flex items-start gap-3 text-sm">
               <input
+                key={`advertising-${String(values?.advertisingAccepted === "on" || values?.advertisingAccepted === "true")}`}
                 type="checkbox"
                 name="advertisingAccepted"
-                defaultChecked={values?.advertisingAccepted === "on"}
+                defaultChecked={
+                  values?.advertisingAccepted === "on" || values?.advertisingAccepted === "true"
+                }
                 className="mt-1 size-4 accent-primary"
               />
               <span>

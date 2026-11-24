@@ -23,6 +23,7 @@ const statusLabels: Record<MetaCapiEventStatus, string> = {
 
 const failureLabels: Record<string, string> = {
   NO_CONSENT: "Consentimiento ausente o revocado",
+  RECONCILED_NOT_SENT: "Descartado en conciliación sin envío",
   EVENT_EXPIRED: "Evento fuera de la ventana admitida",
   EVENT_IN_FUTURE: "Fecha del evento inválida",
   PROVIDER_RATE_LIMITED: "Límite de tasa del proveedor",
@@ -51,6 +52,8 @@ function money(valueCents: string): string {
 
 function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
   const [state, action, pending] = useActionState(reconcileMetaCapiAction, initialActionState);
+  const defaultResolution =
+    event.status === "UNCERTAIN" ? "CONFIRMED_SENT" : event.retryable ? "RETRY" : "DISCARD";
   return (
     <form action={action} className="mt-4 space-y-3 rounded-lg bg-secondary/40 p-4">
       <input type="hidden" name="metaEventId" value={event.id} />
@@ -60,14 +63,15 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
           <select
             id={`resolution-${event.id}`}
             name="resolution"
-            defaultValue={event.status === "UNCERTAIN" ? "CONFIRMED_SENT" : "RETRY"}
+            defaultValue={defaultResolution}
             className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
             disabled={pending}
           >
             {event.status === "UNCERTAIN" ? (
               <option value="CONFIRMED_SENT">Confirmar recepción</option>
             ) : null}
-            <option value="RETRY">Autorizar reintento idéntico</option>
+            {event.retryable ? <option value="RETRY">Autorizar reintento idéntico</option> : null}
+            <option value="DISCARD">Descartar sin reenvío</option>
           </select>
         </div>
         <div className="space-y-2">
@@ -97,7 +101,13 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
   );
 }
 
-export function MetaCapiDashboard({ events }: { readonly events: readonly MetaCapiEventView[] }) {
+export function MetaCapiDashboard({
+  events,
+  canWrite,
+}: {
+  readonly events: readonly MetaCapiEventView[];
+  readonly canWrite: boolean;
+}) {
   if (events.length === 0) {
     return (
       <div className="rounded-xl border border-border bg-card p-8 text-center">
@@ -157,7 +167,7 @@ export function MetaCapiDashboard({ events }: { readonly events: readonly MetaCa
                 : null}
             </p>
           ) : null}
-          {event.retryable ? <ReconcileForm event={event} /> : null}
+          {canWrite && event.reconcilable ? <ReconcileForm event={event} /> : null}
         </li>
       ))}
     </ul>

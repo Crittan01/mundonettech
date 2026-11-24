@@ -179,20 +179,36 @@ export class AccountService {
 
   async getProfile(customerId: string) {
     assertUuid(customerId, "customerId");
-    const customer = await this.db.customer.findFirst({
-      where: { id: customerId, status: "ACTIVE", deletedAt: null },
-      include: {
-        consents: { orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 20 },
-        addresses: {
-          where: { deletedAt: null },
-          include: { municipality: { include: { department: true } } },
-          orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+    const [customer, activeConsents] = await Promise.all([
+      this.db.customer.findFirst({
+        where: { id: customerId, status: "ACTIVE", deletedAt: null },
+        include: {
+          consents: { orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 20 },
+          addresses: {
+            where: { deletedAt: null },
+            include: { municipality: { include: { department: true } } },
+            orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+          },
+          storeCreditAccounts: { select: { availableCents: true, heldCents: true, active: true } },
         },
-        storeCreditAccounts: { select: { availableCents: true, heldCents: true, active: true } },
-      },
-    });
+      }),
+      this.db.consent.findMany({
+        where: {
+          customerId,
+          purpose: { in: ["MARKETING_EMAIL", "ADVERTISING"] },
+          status: "GRANTED",
+          revokedBy: null,
+        },
+        select: { purpose: true },
+      }),
+    ]);
     if (!customer) throw new AccountError("NOT_FOUND", "Active customer account not found.");
-    return customer;
+    const grantedPurposes = new Set(activeConsents.map((item) => item.purpose));
+    return {
+      ...customer,
+      marketingEmailGranted: grantedPurposes.has("MARKETING_EMAIL"),
+      advertisingGranted: grantedPurposes.has("ADVERTISING"),
+    };
   }
 
   async updateProfile(customerId: string, input: ProfileInput, auditInput: AccountAudit) {
@@ -202,21 +218,28 @@ export class AccountService {
       const customer = await this.lockActiveCustomer(tx, customerId);
       const [latestConsent, latestAdvertisingConsent] = await Promise.all([
         tx.consent.findFirst({
-          where: { customerId, purpose: "MARKETING_EMAIL" },
-          include: { revokedBy: { select: { id: true } } },
+          where: {
+            customerId,
+            purpose: "MARKETING_EMAIL",
+            status: "GRANTED",
+            revokedBy: null,
+          },
+          select: { id: true },
           orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
         }),
         tx.consent.findFirst({
-          where: { customerId, purpose: "ADVERTISING" },
-          include: { revokedBy: { select: { id: true } } },
+          where: {
+            customerId,
+            purpose: "ADVERTISING",
+            status: "GRANTED",
+            revokedBy: null,
+          },
+          select: { id: true },
           orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
         }),
       ]);
-      const currentlyGranted =
-        latestConsent?.status === "GRANTED" && latestConsent.revokedBy === null;
-      const currentlyAdvertisingGranted =
-        latestAdvertisingConsent?.status === "GRANTED" &&
-        latestAdvertisingConsent.revokedBy === null;
+      const currentlyGranted = latestConsent !== null;
+      const currentlyAdvertisingGranted = latestAdvertisingConsent !== null;
       const proofHash = createHash("sha256")
         .update(
           JSON.stringify({
@@ -503,59 +526,80 @@ export class AccountService {
         "Use or resolve store credit before deleting the account.",
       );
     }
-    const [blockingOrder, blockingPayment, blockingRefund, blockingReturn, blockingWarranty] =
-      await Promise.all([
-        tx.order.findFirst({
-          where: {
-            customerId,
-            OR: [
-              { orderStatus: "PENDING" },
-              {
-                orderStatus: "CONFIRMED",
-                OR: [
-                  { fulfillmentStatus: { not: "FULFILLED" } },
-                  { paymentStatus: { in: ["UNPAID", "PARTIALLY_PAID"] } },
-                  { shipments: { some: { status: { notIn: ["DELIVERED", "CANCELLED"] } } } },
-                ],
-              },
-            ],
-          },
-          select: { id: true },
-        }),
-        tx.paymentAttempt.findFirst({
-          where: { order: { customerId }, status: { in: ["PENDING", "PROCESSING"] } },
-          select: { id: true },
-        }),
-        tx.orderRefund.findFirst({
-          where: {
-            order: { customerId },
-            status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
-          },
-          select: { id: true },
-        }),
-        tx.returnRequest.findFirst({
-          where: {
-            order: { customerId },
-            status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
-          },
-          select: { id: true },
-        }),
-        tx.warrantyClaim.findFirst({
-          where: {
-            order: { customerId },
-            status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
-          },
-          select: { id: true },
-        }),
-      ]);
-    if (blockingOrder || blockingPayment || blockingRefund || blockingReturn || blockingWarranty) {
+    const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+    const now = nowRows[0]!.now;
+    const [
+      blockingOrder,
+      blockingPayment,
+      blockingRefund,
+      blockingReturn,
+      blockingWarranty,
+      blockingMetaCapi,
+    ] = await Promise.all([
+      tx.order.findFirst({
+        where: {
+          customerId,
+          OR: [
+            { orderStatus: "PENDING" },
+            {
+              orderStatus: "CONFIRMED",
+              OR: [
+                { fulfillmentStatus: { not: "FULFILLED" } },
+                { paymentStatus: { in: ["UNPAID", "PARTIALLY_PAID"] } },
+                { shipments: { some: { status: { notIn: ["DELIVERED", "CANCELLED"] } } } },
+              ],
+            },
+          ],
+        },
+        select: { id: true },
+      }),
+      tx.paymentAttempt.findFirst({
+        where: { order: { customerId }, status: { in: ["PENDING", "PROCESSING"] } },
+        select: { id: true },
+      }),
+      tx.orderRefund.findFirst({
+        where: {
+          order: { customerId },
+          status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
+        },
+        select: { id: true },
+      }),
+      tx.returnRequest.findFirst({
+        where: {
+          order: { customerId },
+          status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
+        },
+        select: { id: true },
+      }),
+      tx.warrantyClaim.findFirst({
+        where: {
+          order: { customerId },
+          status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
+        },
+        select: { id: true },
+      }),
+      tx.metaCapiEvent.findFirst({
+        where: {
+          customerId,
+          status: "DISPATCHING",
+          claimExpiresAt: { gt: now },
+        },
+        select: { id: true },
+      }),
+    ]);
+    if (
+      blockingOrder ||
+      blockingPayment ||
+      blockingRefund ||
+      blockingReturn ||
+      blockingWarranty ||
+      blockingMetaCapi
+    ) {
       throw new AccountError(
         "CONFLICT",
         "Complete or resolve active orders, payments, refunds and post-sale requests before deleting the account.",
       );
     }
-    const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-    const now = nowRows[0]!.now;
     await new GrowthService(tx).forfeitCustomerPointsInTransaction(tx, customerId);
     if (!options.skipCrmCascade) {
       try {

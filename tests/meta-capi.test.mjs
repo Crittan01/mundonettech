@@ -5,10 +5,12 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 
 import {
+  AccountError,
   AccountService,
   CartService,
   createDatabaseClient,
   IntegrationEnvironment,
+  OperationsService,
   OrderService,
 } from "../packages/db/dist/index.js";
 import {
@@ -78,6 +80,9 @@ async function createCredential() {
 async function makePaidOrder() {
   await admin.query("BEGIN");
   try {
+    await admin.query(
+      `UPDATE "WholesaleTier" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "scope" = 'GLOBAL' AND "deletedAt" IS NULL`,
+    );
     const catalog = await seedCatalogFixture(admin);
     await admin.query(`UPDATE "Customer" SET "phoneE164" = '+573001234567' WHERE "id" = $1`, [
       catalog.customerId,
@@ -673,5 +678,230 @@ describe("F6.4 — catalog feed refresh audit", () => {
     });
     assert.equal(entry.actorAdminUserId, actor.id);
     assert.deepEqual(entry.metadata, { environment: "LOCAL" });
+  });
+});
+
+describe("F6.4 — credential rebinding, discard reconciliation, consent truncation and anonymization", () => {
+  it("rebinds CREDENTIAL_REVOKED retries to a replacement active Meta credential with identical pixel", async () => {
+    const { catalog, checkout, paidAt } = await makePaidOrder();
+    await grantConsent(catalog);
+    const initialCredential = await createCredential();
+    const metaEventId = await enqueue(catalog, checkout, paidAt);
+    await vault.revoke(initialCredential.id, actor.id, audit());
+    assert.equal(
+      (await service.dispatch(metaEventId, "worker:meta-cred-revoked")).status,
+      "FAILED",
+    );
+    const failed = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(failed.failureCode, "CREDENTIAL_REVOKED");
+    await assert.rejects(
+      service.reconcile({
+        metaEventId,
+        resolution: "RETRY",
+        reference: "EM-NO-CREDENTIAL",
+        audit: audit(),
+      }),
+      (error) => error instanceof MetaCapiServiceError && error.code === "CONFLICT",
+    );
+    const replacement = await createCredential();
+    const retried = await service.reconcile({
+      metaEventId,
+      resolution: "RETRY",
+      reference: "EM-CREDENTIAL-REPLACED-1",
+      audit: audit(),
+    });
+    assert.equal(retried.status, "PENDING");
+    const rebound = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(rebound.credentialId, replacement.id);
+    assert.equal((await service.dispatch(metaEventId, "worker:meta-cred-rebound")).status, "SENT");
+    assert.equal(fixture.calls.length, 1);
+    assert.equal(fixture.calls[0].body.data[0].event_id, `purchase:${checkout.orderId}`);
+  });
+
+  it("purges hashes on UNCERTAIN when consent is revoked and closes UNCERTAIN/FAILED alerts via DISCARD", async () => {
+    const { catalog, checkout, paidAt } = await makePaidOrder();
+    await grantConsent(catalog);
+    await createCredential();
+    behavior = () => ({ destroy: true });
+    const metaEventId = await enqueue(catalog, checkout, paidAt);
+    assert.equal(
+      (await service.dispatch(metaEventId, "worker:meta-uncertain-discard")).status,
+      "UNCERTAIN",
+    );
+
+    const operations = new OperationsService(db);
+    const beforeSnapshot = await operations.snapshot(actor.id);
+    assert.equal(
+      beforeSnapshot.notifications.some(
+        (item) => item.category === "meta.capi" && item.entityId === metaEventId,
+      ),
+      true,
+    );
+
+    const customer = await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } });
+    await new AccountService(db, { privacyPolicyVersion: "1.1.0" }).updateProfile(
+      customer.id,
+      {
+        givenName: customer.givenName,
+        familyName: customer.familyName,
+        phoneE164: customer.phoneE164,
+        marketingEmail: false,
+        advertising: false,
+      },
+      { ipHash: hash(), userAgentHash: hash() },
+    );
+
+    const uncertainAfterRevoke = await db.metaCapiEvent.findUniqueOrThrow({
+      where: { id: metaEventId },
+    });
+    assert.equal(uncertainAfterRevoke.status, "UNCERTAIN");
+    assert.equal(uncertainAfterRevoke.externalIdHash, null);
+    assert.equal(uncertainAfterRevoke.emailHash, null);
+    assert.equal(uncertainAfterRevoke.phoneHash, null);
+
+    await assert.rejects(
+      service.reconcile({
+        metaEventId,
+        resolution: "RETRY",
+        reference: "EM-CANNOT-RETRY",
+        audit: audit(),
+      }),
+      (error) => error instanceof MetaCapiServiceError && error.code === "CONFLICT",
+    );
+
+    const discarded = await service.reconcile({
+      metaEventId,
+      resolution: "DISCARD",
+      reference: "EM-NOT-RECEIVED-CLOSED-1",
+      audit: audit(),
+    });
+    assert.equal(discarded.status, "SKIPPED");
+    assert.equal(discarded.reconcilable, false);
+    const afterSnapshot = await operations.snapshot(actor.id);
+    assert.equal(
+      afterSnapshot.notifications.some(
+        (item) => item.category === "meta.capi" && item.entityId === metaEventId,
+      ),
+      false,
+    );
+    const discardLog = await db.adminActionLog.findFirstOrThrow({
+      where: { targetId: metaEventId, action: "META_CAPI_EVENT_DISCARDED" },
+    });
+    assert.equal(discardLog.actorAdminUserId, actor.id);
+
+    const second = await makePaidOrder();
+    await grantConsent(second.catalog);
+    behavior = () => ({ status: 400, body: {} });
+    const failedId = await enqueue(second.catalog, second.checkout, second.paidAt);
+    assert.equal(
+      (await service.dispatch(failedId, "worker:meta-payload-rejected")).status,
+      "FAILED",
+    );
+    const listed = (await service.listEvents(10)).find((item) => item.id === failedId);
+    assert.equal(listed?.retryable, false);
+    assert.equal(listed?.reconcilable, true);
+    const closedFailed = await service.reconcile({
+      metaEventId: failedId,
+      resolution: "DISCARD",
+      reference: "EM-PAYLOAD-ACK-1",
+      audit: audit(),
+    });
+    assert.equal(closedFailed.status, "SKIPPED");
+  });
+
+  it("preserves profile consent flags past 20 DATA_PROCESSING rows and purges UNCERTAIN hashes on anonymization", async () => {
+    const { catalog, checkout, paidAt } = await makePaidOrder();
+    await grantConsent(catalog);
+    await db.consent.create({
+      data: {
+        customerId: catalog.customerId,
+        purpose: "MARKETING_EMAIL",
+        status: "GRANTED",
+        source: "integration-test",
+        policyVersion: "1.1.0",
+        proofHash: hash(),
+        occurredAt: new Date(Date.now() - 60_000),
+      },
+    });
+    for (let index = 0; index < 25; index += 1) {
+      await db.consent.create({
+        data: {
+          customerId: catalog.customerId,
+          purpose: "DATA_PROCESSING",
+          status: "GRANTED",
+          source: "checkout",
+          policyVersion: "1.1.0",
+          proofHash: hash(),
+        },
+      });
+    }
+    const accounts = new AccountService(db, { privacyPolicyVersion: "1.1.0" });
+    const profile = await accounts.getProfile(catalog.customerId);
+    assert.equal(profile.consents.length, 20);
+    assert.equal(profile.advertisingGranted, true);
+    assert.equal(profile.marketingEmailGranted, true);
+
+    await createCredential();
+    const metaEventId = await enqueue(catalog, checkout, paidAt);
+    const deliveredAt = new Date();
+    await admin.query(`UPDATE "Shipment" SET "status" = 'READY', "readyAt" = $2 WHERE "id" = $1`, [
+      checkout.shipmentId,
+      new Date(deliveredAt.getTime() - 3_600_000),
+    ]);
+    await admin.query(
+      `UPDATE "Shipment" SET "status" = 'SHIPPED', "shippedAt" = $2 WHERE "id" = $1`,
+      [checkout.shipmentId, new Date(deliveredAt.getTime() - 1_800_000)],
+    );
+    await admin.query(
+      `UPDATE "Shipment" SET "status" = 'DELIVERED', "deliveredAt" = $2 WHERE "id" = $1`,
+      [checkout.shipmentId, deliveredAt],
+    );
+    await admin.query(
+      `UPDATE "Order" SET "fulfillmentStatus" = 'FULFILLED' WHERE "customerId" = $1`,
+      [catalog.customerId],
+    );
+    await admin.query(`UPDATE "OrderRefund" SET "status" = 'CANCELLED' WHERE "id" = $1`, [
+      checkout.refundId,
+    ]);
+    await db.metaCapiEvent.update({
+      where: { id: metaEventId },
+      data: {
+        status: "DISPATCHING",
+        claimId: randomUUID(),
+        claimedBy: "worker:active-claim",
+        claimedAt: new Date(),
+        claimExpiresAt: new Date(Date.now() + 60_000),
+        requestStartedAt: new Date(),
+        attempts: 1,
+      },
+    });
+    await assert.rejects(
+      accounts.anonymize(catalog.customerId, "ELIMINAR MI CUENTA", {
+        ipHash: hash(),
+        userAgentHash: hash(),
+      }),
+      (error) => error instanceof AccountError && error.code === "CONFLICT",
+    );
+
+    await db.metaCapiEvent.update({
+      where: { id: metaEventId },
+      data: {
+        status: "UNCERTAIN",
+        claimId: null,
+        claimedBy: null,
+        claimedAt: null,
+        claimExpiresAt: null,
+        failureCode: "PROVIDER_UNCERTAIN",
+      },
+    });
+    await accounts.anonymize(catalog.customerId, "ELIMINAR MI CUENTA", {
+      ipHash: hash(),
+      userAgentHash: hash(),
+    });
+    const afterAnonymize = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(afterAnonymize.status, "UNCERTAIN");
+    assert.equal(afterAnonymize.externalIdHash, null);
+    assert.equal(afterAnonymize.emailHash, null);
+    assert.equal(afterAnonymize.phoneHash, null);
   });
 });

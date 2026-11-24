@@ -53,8 +53,11 @@ const headers = [
 
 function validText(value: string, maximum: number): string | null {
   if (typeof value !== "string") return null;
-  const normalized = normalizeXmlText(value, maximum, "Meta catalog text");
-  return normalized.length > 0 ? normalized : null;
+  try {
+    return normalizeXmlText(value, maximum, "Meta catalog text");
+  } catch {
+    return null;
+  }
 }
 
 export function buildMetaCatalogCsv(items: readonly MerchantFeedItem[]): MetaCatalogFeed {
