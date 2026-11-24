@@ -563,15 +563,18 @@ describe("A2 admin session, AAL2 and recent MFA", () => {
   });
 
   it("rejects stale, future and missing AMR timestamps", async () => {
-    const now = Math.floor(Date.now() / 1000);
     await assertAuthorizationCode(
-      adminSessionHarness({ methods: [{ method: "totp", timestamp: now - 601 }] }).getAdminSession({
+      adminSessionHarness({
+        methods: [{ method: "totp", timestamp: Math.floor(Date.now() / 1000) - 605 }],
+      }).getAdminSession({
         requireRecentMfa: true,
       }),
       "MFA_STALE",
     );
     await assertAuthorizationCode(
-      adminSessionHarness({ methods: [{ method: "totp", timestamp: now + 31 }] }).getAdminSession({
+      adminSessionHarness({
+        methods: [{ method: "totp", timestamp: Math.ceil(Date.now() / 1000) + 35 }],
+      }).getAdminSession({
         requireRecentMfa: true,
       }),
       "MFA_STALE",
