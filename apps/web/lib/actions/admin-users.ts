@@ -50,8 +50,8 @@ export async function inviteAdministratorAction(
     });
     if (invited.error || !invited.data.user)
       return actionError("No pudimos crear la invitación. Verifica si el correo ya tiene acceso.");
-    const context = await getRequestSecurityContext();
     try {
+      const context = await getRequestSecurityContext();
       await getDatabase().$transaction(async (tx) => {
         const created = await tx.adminUser.create({
           data: {
@@ -76,7 +76,18 @@ export async function inviteAdministratorAction(
         });
       });
     } catch (error) {
-      await admin.auth.admin.deleteUser(invited.data.user.id);
+      let cleanupFailed = false;
+      try {
+        const deleted = await admin.auth.admin.deleteUser(invited.data.user.id);
+        cleanupFailed = Boolean(deleted.error);
+      } catch {
+        cleanupFailed = true;
+      }
+      if (cleanupFailed) {
+        return actionError(
+          "No pudimos crear el perfil ni retirar el acceso invitado. Contacta soporte.",
+        );
+      }
       throw error;
     }
     revalidatePath("/admin/usuarios");
@@ -109,7 +120,7 @@ export async function updateAdministratorAction(
     if (!canAssignAdminRole(session.profile.role, parsed.data.role))
       throw new OperationFailure("No puedes asignar ese rol.");
     const context = await getRequestSecurityContext();
-    const targetInfo = await getDatabase().$transaction(async (tx) => {
+    await getDatabase().$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('admin-role-membership'))`;
       const target = await tx.adminUser.findUnique({ where: { id: parsed.data.targetId } });
       if (!target || target.deletedAt || !isAdminRole(target.role))
@@ -128,6 +139,33 @@ export async function updateAdministratorAction(
         });
         if (activeSuperadmins <= 1)
           throw new OperationFailure("Debe quedar al menos un superadministrador activo.");
+      }
+      if (parsed.data.status === "SUSPENDED") {
+        const admin = createSupabaseAdminClient();
+        const banned = await admin.auth.admin.updateUserById(target.authUserId, {
+          ban_duration: "876000h",
+        });
+        if (banned.error) {
+          throw new OperationFailure(
+            "No pudimos confirmar el bloqueo de autenticación. El cambio no se aplicó.",
+          );
+        }
+        const signedOut = await admin.auth.admin.signOut(target.authUserId, "global");
+        if (signedOut.error) {
+          throw new OperationFailure(
+            "No pudimos confirmar la revocación global. El cambio no se aplicó.",
+          );
+        }
+      } else if (parsed.data.status === "ACTIVE" && target.status === "SUSPENDED") {
+        const admin = createSupabaseAdminClient();
+        const unbanned = await admin.auth.admin.updateUserById(target.authUserId, {
+          ban_duration: "none",
+        });
+        if (unbanned.error) {
+          throw new OperationFailure(
+            "No pudimos retirar el bloqueo de autenticación. El cambio no se aplicó.",
+          );
+        }
       }
       await tx.adminUser.update({
         where: { id: target.id },
@@ -150,18 +188,7 @@ export async function updateAdministratorAction(
           },
         },
       });
-      return { authUserId: target.authUserId, previousStatus: target.status };
     });
-
-    if (parsed.data.status === "SUSPENDED" || targetInfo.previousStatus === "SUSPENDED") {
-      const admin = createSupabaseAdminClient();
-      if (parsed.data.status === "SUSPENDED") {
-        await admin.auth.admin.updateUserById(targetInfo.authUserId, { ban_duration: "876000h" });
-        await admin.auth.admin.signOut(targetInfo.authUserId, "global");
-      } else if (parsed.data.status === "ACTIVE") {
-        await admin.auth.admin.updateUserById(targetInfo.authUserId, { ban_duration: "none" });
-      }
-    }
 
     revalidatePath("/admin/usuarios");
     return actionSuccess("Administrador actualizado y cambio registrado en auditoría.");

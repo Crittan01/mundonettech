@@ -5,9 +5,10 @@ import {
   normalizePromotionSlug,
   normalizeSku,
   parseMoneyCents,
+  sanitizeAuditValue,
 } from "@mundonettech/core";
 
-import type { Prisma, PrismaClient } from "./generated/client.js";
+import type { Bundle, Coupon, Prisma, PrismaClient, WholesaleTier } from "./generated/client.js";
 import {
   acquireOperationLocks,
   assertUuid,
@@ -97,6 +98,64 @@ function pageResult<T>(items: T[], total: number, page: number, pageSize: number
   return { items, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
 }
 
+function wholesaleAuditState(record: WholesaleTier): Prisma.JsonObject {
+  return {
+    id: record.id,
+    scope: record.scope,
+    variantId: record.variantId,
+    productId: record.productId,
+    categoryId: record.categoryId,
+    minimumQuantity: record.minimumQuantity,
+    unitPriceCents: record.unitPriceCents.toString(),
+    active: record.active,
+    deleted: record.deletedAt !== null,
+  };
+}
+
+function couponAuditState(
+  record: Coupon,
+  productIds: readonly string[],
+  categoryIds: readonly string[],
+): Prisma.JsonObject {
+  return {
+    id: record.id,
+    code: record.code,
+    discountType: record.discountType,
+    status: record.status,
+    percentageBps: record.percentageBps,
+    amountCents: record.amountCents?.toString() ?? null,
+    maximumDiscountCents: record.maximumDiscountCents?.toString() ?? null,
+    minimumSubtotalCents: record.minimumSubtotalCents.toString(),
+    startsAt: record.startsAt?.toISOString() ?? null,
+    endsAt: record.endsAt?.toISOString() ?? null,
+    maximumUsages: record.maximumUsages,
+    perCustomerUsages: record.perCustomerUsages,
+    productIds: [...productIds].sort(),
+    categoryIds: [...categoryIds].sort(),
+    deleted: record.deletedAt !== null,
+  };
+}
+
+function bundleAuditState(
+  record: Bundle,
+  items: readonly { readonly variantId: string; readonly quantity: number }[],
+): Prisma.JsonObject {
+  const sortedItems = [...items].sort((left, right) =>
+    left.variantId < right.variantId ? -1 : left.variantId > right.variantId ? 1 : 0,
+  );
+  return {
+    id: record.id,
+    slug: record.slug,
+    status: record.status,
+    priceCents: record.priceCents?.toString() ?? null,
+    discountCents: record.discountCents.toString(),
+    items: Object.fromEntries(
+      sortedItems.map((item) => [item.variantId, { quantity: item.quantity }]),
+    ),
+    deleted: record.deletedAt !== null,
+  };
+}
+
 async function writeAudit(
   tx: Prisma.TransactionClient,
   audit: PricingMutationAudit,
@@ -120,7 +179,7 @@ async function writeAudit(
       targetId,
       ipHash: Uint8Array.from(audit.ipHash),
       userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-      metadata,
+      metadata: sanitizeAuditValue(metadata) as Prisma.JsonObject,
     },
   });
 }
@@ -390,21 +449,8 @@ export class PricingService {
           "WholesaleTier",
           saved.id,
           {
-            previous: existing
-              ? {
-                  scope: existing.scope,
-                  variantId: existing.variantId,
-                  productId: existing.productId,
-                  categoryId: existing.categoryId,
-                  minimumQuantity: existing.minimumQuantity,
-                  unitPriceCents: existing.unitPriceCents.toString(),
-                  active: existing.active,
-                }
-              : null,
-            scope: saved.scope,
-            minimumQuantity: saved.minimumQuantity,
-            unitPriceCents: saved.unitPriceCents.toString(),
-            active: saved.active,
+            before: existing ? wholesaleAuditState(existing) : null,
+            after: wholesaleAuditState(saved),
           },
         );
         return saved;
@@ -433,9 +479,8 @@ export class PricingService {
         data: { active: false, deletedAt: now },
       });
       await writeAudit(tx, audit, "WHOLESALE_TIER_ARCHIVED", "WholesaleTier", id, {
-        scope: existing.scope,
-        minimumQuantity: existing.minimumQuantity,
-        unitPriceCents: existing.unitPriceCents.toString(),
+        before: wholesaleAuditState(existing),
+        after: wholesaleAuditState(updated),
       });
       return updated;
     });
@@ -468,7 +513,15 @@ export class PricingService {
       return await inInventoryTransaction(this.db, async (tx) => {
         await acquireOperationLocks(tx, [`coupon-code:${data.code}`]);
         const restrictions = await resolveCouponRestrictions(tx, productSlugs, categorySlugs);
-        const existing = id ? await tx.coupon.findFirst({ where: { id, deletedAt: null } }) : null;
+        const existing = id
+          ? await tx.coupon.findFirst({
+              where: { id, deletedAt: null },
+              include: {
+                products: { select: { productId: true } },
+                categories: { select: { categoryId: true } },
+              },
+            })
+          : null;
         if (id && !existing) throw new PricingNotFoundError("Coupon not found.");
         if (existing) await acquireOperationLocks(tx, [`coupon-write:${existing.id}`]);
         const saved = existing
@@ -502,18 +555,16 @@ export class PricingService {
           "Coupon",
           saved.id,
           {
-            previousCode: existing?.code ?? null,
-            code: saved.code,
-            discountType: saved.discountType,
-            percentageBps: saved.percentageBps,
-            amountCents: saved.amountCents?.toString() ?? null,
-            maximumDiscountCents: saved.maximumDiscountCents?.toString() ?? null,
-            minimumSubtotalCents: saved.minimumSubtotalCents.toString(),
-            maximumUsages: saved.maximumUsages,
-            perCustomerUsages: saved.perCustomerUsages,
-            status: saved.status,
-            productSlugs,
-            categorySlugs,
+            before: existing
+              ? couponAuditState(
+                  existing,
+                  existing.products.map((entry) => entry.productId),
+                  existing.categories.map((entry) => entry.categoryId),
+                )
+              : null,
+            after: couponAuditState(saved, restrictions.productIds, restrictions.categoryIds),
+            couponIdentityChanged: existing === null || existing.code !== saved.code,
+            nameChanged: existing === null || existing.name !== saved.name,
           },
         );
         return saved;
@@ -527,18 +578,30 @@ export class PricingService {
     assertUuid(id, "couponId");
     return inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`coupon-redemption:${id}`, `coupon-write:${id}`]);
-      const existing = await tx.coupon.findFirst({ where: { id, deletedAt: null } });
+      const existing = await tx.coupon.findFirst({
+        where: { id, deletedAt: null },
+        include: {
+          products: { select: { productId: true } },
+          categories: { select: { categoryId: true } },
+        },
+      });
       if (!existing) throw new PricingNotFoundError("Coupon not found.");
+      const beforeProductIds = existing.products.map((entry) => entry.productId);
+      const beforeCategoryIds = existing.categories.map((entry) => entry.categoryId);
       const now = await databaseNow(tx);
       const updated = await tx.coupon.update({
         where: { id },
         data: { status: "ARCHIVED", deletedAt: now },
       });
-      await tx.couponUsage.updateMany({
+      const released = await tx.couponUsage.updateMany({
         where: { couponId: id, status: "RESERVED" },
         data: { status: "RELEASED", releasedAt: now },
       });
-      await writeAudit(tx, audit, "COUPON_ARCHIVED", "Coupon", id, { code: existing.code });
+      await writeAudit(tx, audit, "COUPON_ARCHIVED", "Coupon", id, {
+        before: couponAuditState(existing, beforeProductIds, beforeCategoryIds),
+        after: couponAuditState(updated, beforeProductIds, beforeCategoryIds),
+        releasedReservationCount: released.count,
+      });
       return updated;
     });
   }
@@ -686,12 +749,10 @@ export class PricingService {
           "Bundle",
           saved.id,
           {
-            previousSlug: existing?.slug ?? null,
-            slug: saved.slug,
-            status: saved.status,
-            priceCents: saved.priceCents?.toString() ?? null,
-            discountCents: saved.discountCents.toString(),
-            items: resolvedItems.map((item) => ({ ...item, quantity: item.quantity })),
+            before: existing ? bundleAuditState(existing, existing.items) : null,
+            after: bundleAuditState(saved, resolvedItems),
+            nameChanged: existing === null || existing.name !== saved.name,
+            detailsChanged: existing === null || existing.description !== saved.description,
           },
         );
         return saved;
@@ -705,14 +766,20 @@ export class PricingService {
     assertUuid(id, "bundleId");
     return inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`bundle:${id}`]);
-      const existing = await tx.bundle.findFirst({ where: { id, deletedAt: null } });
+      const existing = await tx.bundle.findFirst({
+        where: { id, deletedAt: null },
+        include: { items: true },
+      });
       if (!existing) throw new PricingNotFoundError("Bundle not found.");
       const now = await databaseNow(tx);
       const updated = await tx.bundle.update({
         where: { id },
         data: { status: "ARCHIVED", deletedAt: now },
       });
-      await writeAudit(tx, audit, "BUNDLE_ARCHIVED", "Bundle", id, { slug: existing.slug });
+      await writeAudit(tx, audit, "BUNDLE_ARCHIVED", "Bundle", id, {
+        before: bundleAuditState(existing, existing.items),
+        after: bundleAuditState(updated, existing.items),
+      });
       return updated;
     });
   }

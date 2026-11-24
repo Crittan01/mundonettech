@@ -18,13 +18,23 @@ export interface EmailTemplateView {
 
 export function EmailTemplateForm({
   templates,
+  idempotencyKey,
 }: {
   templates: Readonly<Record<string, EmailTemplateView>>;
+  idempotencyKey: string;
 }) {
   const keys = Object.keys(templates);
   const firstKey = keys[0]!;
   const [templateKey, setTemplateKey] = useState(firstKey);
-  const [state, action, pending] = useActionState(saveEmailTemplateAction, initialActionState);
+  const [requestKey, setRequestKey] = useState(idempotencyKey);
+  const [state, action, pending] = useActionState(
+    async (previous: typeof initialActionState, formData: FormData) => {
+      const result = await saveEmailTemplateAction(previous, formData);
+      if (result.status === "success") setRequestKey(crypto.randomUUID());
+      return result;
+    },
+    initialActionState,
+  );
   const [useServerValues, setUseServerValues] = useState(false);
   const [subject, setSubject] = useState(templates[firstKey]!.subject);
   const [htmlBody, setHtmlBody] = useState(templates[firstKey]!.htmlBody);
@@ -46,6 +56,7 @@ export function EmailTemplateForm({
   }
   return (
     <form action={action} className="space-y-4" onSubmit={() => setUseServerValues(true)}>
+      <input type="hidden" name="idempotencyKey" value={requestKey} />
       <div className="space-y-2">
         <Label htmlFor="email-template-key">Tipo de comunicación</Label>
         <select

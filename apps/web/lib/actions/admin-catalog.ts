@@ -9,13 +9,10 @@ import {
   type CatalogVariantInput,
 } from "@mundonettech/db";
 import {
-  ProductMediaConflictError,
   ProductMediaNotFoundError,
   ProductMediaService,
   ProductMediaValidationError,
-  productMediaLimits,
   type ProductMediaAudit,
-  type ProductMediaTargetInput,
 } from "@mundonettech/media";
 import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
@@ -29,7 +26,6 @@ import {
   type ActionState,
 } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
-import { createMediaStorage } from "@/lib/media-storage";
 import {
   AdminAuthorizationError,
   getAdminSession,
@@ -51,23 +47,44 @@ const baseSchema = z.object({
   status: z.enum(["DRAFT", "ACTIVE", "ARCHIVED"]),
   authenticity: z.enum(["ORIGINAL", "CERTIFIED_COMPATIBLE", "OEM"]),
   retractPolicy: z.enum(["STANDARD", "LEGAL_EXCEPTION_REVIEW"]),
-  warrantyMonths: z.string().regex(/^[0-9]+$/),
+  warrantyMonths: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .max(4),
   seoTitle: z.string().max(200),
   seoDescription: z.string().max(300),
 });
 
 const variantSchema = z.object({
   sku: z.string().trim().min(2).max(64),
-  priceCents: z.string().regex(/^[0-9]+$/),
-  costCents: z.string().regex(/^[0-9]+$/),
-  compareAtPriceCents: z.string(),
-  gtin: z.string(),
-  ean: z.string(),
+  priceCents: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .max(19),
+  costCents: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .max(19),
+  compareAtPriceCents: z.string().max(19),
+  gtin: z.string().max(18),
+  ean: z.string().max(13),
   mpn: z.string().max(64),
-  weightGrams: z.string().regex(/^[0-9]+$/),
-  lengthMillimeters: z.string().regex(/^[0-9]+$/),
-  widthMillimeters: z.string().regex(/^[0-9]+$/),
-  heightMillimeters: z.string().regex(/^[0-9]+$/),
+  weightGrams: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .max(10),
+  lengthMillimeters: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .max(10),
+  widthMillimeters: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .max(10),
+  heightMillimeters: z
+    .string()
+    .regex(/^[0-9]+$/)
+    .max(10),
   status: z.enum(["ACTIVE", "INACTIVE"]),
 });
 
@@ -111,16 +128,64 @@ function variantInput(formData: FormData): CatalogVariantInput | null {
     heightMillimeters: formString(formData, "heightMillimeters"),
     status: formString(formData, "status"),
   });
-  if (!parsed.success) return null;
+  const variantId = formString(formData, "variantId");
+  if (!parsed.success || (variantId && !z.string().uuid().safeParse(variantId).success)) {
+    return null;
+  }
   return {
     ...parsed.data,
-    ...(formString(formData, "variantId") ? { id: formString(formData, "variantId") } : {}),
+    ...(variantId ? { id: variantId } : {}),
     weightGrams: Number(parsed.data.weightGrams),
     lengthMillimeters: Number(parsed.data.lengthMillimeters),
     widthMillimeters: Number(parsed.data.widthMillimeters),
     heightMillimeters: Number(parsed.data.heightMillimeters),
     isDefault: ["on", "true"].includes(formString(formData, "isDefault")),
   };
+}
+
+const catalogSnapshotFields = new Set([
+  "productId",
+  "variantId",
+  "slug",
+  "name",
+  "shortDescription",
+  "description",
+  "brandId",
+  "categoryId",
+  "taxGroupId",
+  "status",
+  "authenticity",
+  "retractPolicy",
+  "warrantyMonths",
+  "trackSerial",
+  "seoTitle",
+  "seoDescription",
+  "sku",
+  "priceCents",
+  "compareAtPriceCents",
+  "gtin",
+  "ean",
+  "mpn",
+  "weightGrams",
+  "lengthMillimeters",
+  "widthMillimeters",
+  "heightMillimeters",
+  "isDefault",
+  "attributeId",
+  "attributeValueId",
+  "value",
+  "deviceId",
+  "fit",
+  "notes",
+  "altText",
+  "mediaId",
+  "position",
+]);
+
+function catalogSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(([key]) => catalogSnapshotFields.has(key)),
+  );
 }
 
 function mutationMessage(error: unknown, values: Record<string, string>): ActionState {
@@ -229,18 +294,18 @@ export async function createCatalogProductAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const product = baseInput(formData);
-  const variant = variantInput(formData);
-  if (!product || !variant) {
-    return actionError(
-      "Completa correctamente los campos obligatorios del producto y su variante inicial.",
-      values,
-    );
-  }
+  const values = catalogSnapshot(formData);
   let createdId: string;
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+    const product = baseInput(formData);
+    const variant = variantInput(formData);
+    if (!product || !variant) {
+      return actionError(
+        "Completa correctamente los campos obligatorios del producto y su variante inicial.",
+        values,
+      );
+    }
     const context = await getRequestSecurityContext();
     const created = await new CatalogService(getDatabase()).createProduct(
       { ...product, variant },
@@ -262,14 +327,14 @@ export async function updateCatalogProductAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const product = baseInput(formData);
-  const productId = formString(formData, "productId");
-  if (!product || !z.string().uuid().safeParse(productId).success) {
-    return actionError("Los datos del producto no son válidos.", values);
-  }
+  const values = catalogSnapshot(formData);
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+    const product = baseInput(formData);
+    const productId = formString(formData, "productId");
+    if (!product || !z.string().uuid().safeParse(productId).success) {
+      return actionError("Los datos del producto no son válidos.", values);
+    }
     const context = await getRequestSecurityContext();
     const updated = await new CatalogService(getDatabase()).updateProduct(productId, product, {
       actorAdminUserId: session.profile.id,
@@ -292,14 +357,14 @@ export async function upsertCatalogVariantAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const variant = variantInput(formData);
-  const productId = formString(formData, "productId");
-  if (!variant || !z.string().uuid().safeParse(productId).success) {
-    return actionError("Los datos de la variante no son válidos.", values);
-  }
+  const values = catalogSnapshot(formData);
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+    const variant = variantInput(formData);
+    const productId = formString(formData, "productId");
+    if (!variant || !z.string().uuid().safeParse(productId).success) {
+      return actionError("Los datos de la variante no son válidos.", values);
+    }
     const context = await getRequestSecurityContext();
     const saved = await new CatalogService(getDatabase()).upsertVariant(productId, variant, {
       actorAdminUserId: session.profile.id,
@@ -317,20 +382,22 @@ export async function upsertCatalogAttributeAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const productId = formString(formData, "productId");
-  const attributeId = formString(formData, "attributeId");
-  const attributeValueId = formString(formData, "attributeValueId");
-  const value = formString(formData, "value");
-  if (
-    !z.string().uuid().safeParse(productId).success ||
-    !z.string().uuid().safeParse(attributeId).success ||
-    !value.trim()
-  ) {
-    return actionError("Selecciona un atributo técnico e ingresa un valor válido.", values);
-  }
+  const values = catalogSnapshot(formData);
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+    const productId = formString(formData, "productId");
+    const attributeId = formString(formData, "attributeId");
+    const attributeValueId = formString(formData, "attributeValueId");
+    const value = formString(formData, "value");
+    if (
+      !z.string().uuid().safeParse(productId).success ||
+      !z.string().uuid().safeParse(attributeId).success ||
+      (attributeValueId && !z.string().uuid().safeParse(attributeValueId).success) ||
+      !value.trim() ||
+      value.length > 100_000
+    ) {
+      return actionError("Selecciona un atributo técnico e ingresa un valor válido.", values);
+    }
     const context = await getRequestSecurityContext();
     const saved = await new CatalogService(getDatabase()).upsertProductAttribute(
       productId,
@@ -356,17 +423,17 @@ export async function removeCatalogAttributeAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const productId = formString(formData, "productId");
-  const attributeValueId = formString(formData, "attributeValueId");
-  if (
-    !z.string().uuid().safeParse(productId).success ||
-    !z.string().uuid().safeParse(attributeValueId).success
-  ) {
-    return actionError("El atributo seleccionado no es válido.", values);
-  }
+  const values = catalogSnapshot(formData);
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+    const productId = formString(formData, "productId");
+    const attributeValueId = formString(formData, "attributeValueId");
+    if (
+      !z.string().uuid().safeParse(productId).success ||
+      !z.string().uuid().safeParse(attributeValueId).success
+    ) {
+      return actionError("El atributo seleccionado no es válido.", values);
+    }
     const context = await getRequestSecurityContext();
     const removed = await new CatalogService(getDatabase()).removeProductAttribute(
       productId,
@@ -388,25 +455,26 @@ export async function upsertCatalogCompatibilityAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const parsed = z
-    .object({
-      productId: z.string().uuid(),
-      deviceId: z.string().uuid(),
-      fit: z.enum(["EXACT", "ADAPTER", "NOT_COMPATIBLE"]),
-      notes: z.string().max(500),
-    })
-    .safeParse({
-      productId: formString(formData, "productId"),
-      deviceId: formString(formData, "deviceId"),
-      fit: formString(formData, "fit"),
-      notes: formString(formData, "notes"),
-    });
-  if (!parsed.success) {
-    return actionError("Selecciona un dispositivo y el tipo de ajuste.", values);
-  }
+  const values = catalogSnapshot(formData);
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+    const parsed = z
+      .object({
+        productId: z.string().uuid(),
+        deviceId: z.string().uuid(),
+        fit: z.enum(["EXACT", "ADAPTER", "NOT_COMPATIBLE"]),
+        notes: z.string().max(500),
+      })
+      .strict()
+      .safeParse({
+        productId: formString(formData, "productId"),
+        deviceId: formString(formData, "deviceId"),
+        fit: formString(formData, "fit"),
+        notes: formString(formData, "notes"),
+      });
+    if (!parsed.success) {
+      return actionError("Selecciona un dispositivo y el tipo de ajuste.", values);
+    }
     const context = await getRequestSecurityContext();
     const saved = await new CatalogService(getDatabase()).upsertProductCompatibility(
       parsed.data.productId,
@@ -432,17 +500,17 @@ export async function removeCatalogCompatibilityAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const productId = formString(formData, "productId");
-  const compatibilityId = formString(formData, "compatibilityId");
-  if (
-    !z.string().uuid().safeParse(productId).success ||
-    !z.string().uuid().safeParse(compatibilityId).success
-  ) {
-    return actionError("El vínculo de compatibilidad no es válido.", values);
-  }
+  const values = catalogSnapshot(formData);
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+    const productId = formString(formData, "productId");
+    const compatibilityId = formString(formData, "compatibilityId");
+    if (
+      !z.string().uuid().safeParse(productId).success ||
+      !z.string().uuid().safeParse(compatibilityId).success
+    ) {
+      return actionError("El vínculo de compatibilidad no es válido.", values);
+    }
     const context = await getRequestSecurityContext();
     const removed = await new CatalogService(getDatabase()).removeProductCompatibility(
       productId,
@@ -458,21 +526,6 @@ export async function removeCatalogCompatibilityAction(
   } catch (error) {
     return mutationMessage(error, values);
   }
-}
-
-const mediaTargetSchema = z.object({
-  productId: z.string().uuid(),
-  variantId: z.string().uuid().nullable(),
-  altText: z.string().trim().min(1).max(250),
-});
-
-function mediaTargetInput(formData: FormData): ProductMediaTargetInput {
-  const rawVariant = formString(formData, "variantId");
-  return mediaTargetSchema.parse({
-    productId: formString(formData, "productId"),
-    variantId: rawVariant || null,
-    altText: formString(formData, "altText"),
-  });
 }
 
 async function authorizeMediaMutation(): Promise<{
@@ -491,24 +544,6 @@ function mediaAudit(session: AdminSession, request: RequestSecurityContext): Pro
   };
 }
 
-function requiredMediaFile(formData: FormData, field: string, maximum: number): File {
-  const file = formData.get(field);
-  if (!(file instanceof File) || file.size === 0 || file.size > maximum) {
-    throw new ProductMediaValidationError(`${field} exceeds its file contract.`);
-  }
-  return file;
-}
-
-function optionalMediaFile(formData: FormData, field: string, maximum: number): File | undefined {
-  const file = formData.get(field);
-  if (file === null || (file instanceof File && file.size === 0 && !file.name)) return undefined;
-  return requiredMediaFile(formData, field, maximum);
-}
-
-async function mediaBytes(file: File): Promise<Uint8Array> {
-  return new Uint8Array(await file.arrayBuffer());
-}
-
 function mediaMutationError(error: unknown, values: Record<string, string>): ActionState {
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de modificar los medios.", values);
@@ -522,22 +557,7 @@ function mediaMutationError(error: unknown, values: Record<string, string>): Act
       values,
     );
   }
-  if (error instanceof ProductMediaConflictError) {
-    return actionError(
-      "El contenido ya está asociado a otro medio activo incompatible. Recarga y revisa el listado.",
-      values,
-    );
-  }
   if (error instanceof ProductMediaValidationError || error instanceof z.ZodError) {
-    if (error instanceof Error && /between 2 and 120/i.test(error.message)) {
-      return actionError("La secuencia 360° debe contener entre 2 y 120 imágenes.", values);
-    }
-    if (error instanceof Error && /aggregate byte limit/i.test(error.message)) {
-      return actionError(
-        "Las imágenes de la secuencia no pueden superar 100 MiB en total.",
-        values,
-      );
-    }
     if (error instanceof Error && /position/i.test(error.message)) {
       return actionError("La posición debe estar dentro del rango de medios activos.", values);
     }
@@ -547,117 +567,19 @@ function mediaMutationError(error: unknown, values: Record<string, string>): Act
         values,
       );
     }
-    return actionError(
-      "Revisa los archivos y sus límites: imagen 20 MiB, GLB 50 MiB y USDZ 25 MiB. Vuelve a seleccionarlos antes de reintentar.",
-      values,
-    );
-  }
-  if (error instanceof Error && error.message.includes("R2 endpoint")) {
-    return actionError(
-      "El almacenamiento R2 no está configurado en este ambiente. Contacta al administrador.",
-      values,
-    );
+    return actionError("Revisa el texto alternativo y la posición del medio.", values);
   }
   return actionError(
-    "No pudimos procesar o almacenar el medio. Verifica que sea un archivo válido y vuelve a seleccionarlo; tus demás campos se conservan.",
+    "No pudimos actualizar el medio. Recarga la página e inténtalo de nuevo.",
     values,
   );
-}
-
-export async function uploadCatalogMediaAction(
-  _previous: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  let storage: ReturnType<typeof createMediaStorage> | null = null;
-  try {
-    const { session, request } = await authorizeMediaMutation();
-    const target = mediaTargetInput(formData);
-    const mediaType = formString(formData, "mediaType");
-    storage = createMediaStorage();
-    const service = new ProductMediaService(getDatabase(), storage);
-    const result =
-      mediaType === "IMAGE"
-        ? await service.uploadImage(
-            {
-              ...target,
-              bytes: await mediaBytes(
-                requiredMediaFile(formData, "file", productMediaLimits.imageBytes),
-              ),
-            },
-            mediaAudit(session, request),
-          )
-        : mediaType === "SPIN_360"
-          ? await (async () => {
-              const entries = formData.getAll("frames");
-              if (
-                entries.length < productMediaLimits.spinMinFrames ||
-                entries.length > productMediaLimits.spinMaxFrames
-              ) {
-                throw new ProductMediaValidationError(
-                  "SPIN_360 requires between 2 and 120 frames.",
-                );
-              }
-              let total = 0;
-              const files = entries.map((entry) => {
-                if (
-                  !(entry instanceof File) ||
-                  entry.size === 0 ||
-                  entry.size > productMediaLimits.spinFrameBytes
-                ) {
-                  throw new ProductMediaValidationError(
-                    "Every SPIN_360 frame must be a valid file.",
-                  );
-                }
-                const file = entry;
-                total += file.size;
-                if (total > productMediaLimits.spinTotalBytes) {
-                  throw new ProductMediaValidationError(
-                    "SPIN_360 exceeds the aggregate byte limit.",
-                  );
-                }
-                return file;
-              });
-              return service.uploadSpin360(
-                { ...target, frames: await Promise.all(files.map(mediaBytes)) },
-                mediaAudit(session, request),
-              );
-            })()
-          : mediaType === "MODEL_3D"
-            ? await (async () => {
-                const usdzFile = optionalMediaFile(formData, "usdz", productMediaLimits.usdzBytes);
-                return service.uploadModel3d(
-                  {
-                    ...target,
-                    glb: await mediaBytes(
-                      requiredMediaFile(formData, "glb", productMediaLimits.glbBytes),
-                    ),
-                    ...(usdzFile ? { usdz: await mediaBytes(usdzFile) } : {}),
-                  },
-                  mediaAudit(session, request),
-                );
-              })()
-            : (() => {
-                throw new ProductMediaValidationError("Unsupported media type.");
-              })();
-    if (!result.reused) invalidateCatalog({ productId: target.productId, slug: result.slug });
-    return actionSuccess(
-      result.reused
-        ? "El mismo contenido ya estaba asociado; se reutilizó sin duplicar el registro."
-        : "Medio validado, almacenado en R2 y publicado en la ficha del producto.",
-    );
-  } catch (error) {
-    return mediaMutationError(error, values);
-  } finally {
-    await storage?.destroy();
-  }
 }
 
 export async function updateCatalogMediaAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = catalogSnapshot(formData);
   try {
     const { session, request } = await authorizeMediaMutation();
     const productId = formString(formData, "productId");
@@ -686,7 +608,7 @@ export async function archiveCatalogMediaAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = catalogSnapshot(formData);
   const productId = formString(formData, "productId");
   try {
     const { session, request } = await authorizeMediaMutation();

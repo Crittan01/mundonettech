@@ -40,13 +40,3 @@ export async function getGuestOrderAccess(
     return null;
   }
 }
-
-async function getGuestOrderActor(token: string): Promise<PostSaleActor | null> {
-  return (await getGuestOrderAccess(token))?.actor ?? null;
-}
-
-export async function requireGuestOrderActor(token: string): Promise<PostSaleActor> {
-  const actor = await getGuestOrderActor(token);
-  if (!actor) throw new Error("La sesión de posventa expiró. Verifica un código nuevo.");
-  return actor;
-}

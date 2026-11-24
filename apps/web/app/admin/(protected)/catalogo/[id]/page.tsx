@@ -32,10 +32,10 @@ export default async function AdminCatalogProductPage({
 }: PageProps<"/admin/catalogo/[id]">) {
   const [{ id }, query] = await Promise.all([params, searchParams]);
   const session = await requireAdminPage("catalog:read");
-  const service = new CatalogService(getDatabase());
-  const product = await service.getAdminProduct(id);
-  if (!product) notFound();
   const canWrite = hasAdminPermission(session.profile.role, "catalog:write");
+  const service = new CatalogService(getDatabase());
+  const product = await service.getAdminProduct(id, { includeCosts: canWrite });
+  if (!product) notFound();
   const references = canWrite ? await service.getReferences() : null;
   let stepUp: React.ReactNode = null;
   if (canWrite) {
@@ -137,7 +137,7 @@ export default async function AdminCatalogProductPage({
                 id: variant.id,
                 sku: variant.sku,
                 priceCents: variant.priceCents.toString(),
-                costCents: variant.costCents.toString(),
+                costCents: variant.costCents?.toString() ?? "",
                 compareAtPriceCents: variant.compareAtPriceCents?.toString() ?? "",
                 gtin: variant.gtin ?? "",
                 ean: variant.ean ?? "",

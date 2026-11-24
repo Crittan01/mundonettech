@@ -114,10 +114,16 @@ function optionalNote(value: string | null | undefined): string | null {
 
 function validatedAudit(audit: RefundAudit) {
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+  if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
   const ipHash = hash32(audit.ipHash, "ipHash");
   const userAgentHash =
     audit.userAgentHash === null ? null : hash32(audit.userAgentHash, "userAgentHash");
-  return { actorAdminUserId: audit.actorAdminUserId, ipHash, userAgentHash };
+  return {
+    actorAdminUserId: audit.actorAdminUserId,
+    ipHash,
+    userAgentHash,
+    requestId: audit.requestId ?? null,
+  };
 }
 
 export class OrderRefundService {
@@ -139,7 +145,7 @@ export class OrderRefundService {
     input: RefundRequestInput,
   ): Promise<RefundRequestResult> {
     assertUuid(input.orderId, "orderId");
-    const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
+    const { actorAdminUserId, ipHash, userAgentHash, requestId } = validatedAudit(input.audit);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
     if (!["RETRACT", "WARRANTY", "ADJUSTMENT", "CUSTOMER_SUPPORT"].includes(input.reason)) {
       throw new RefundValidationError("Invalid refund reason.");
@@ -308,6 +314,7 @@ export class OrderRefundService {
             action: "ORDER_REFUND_REQUESTED",
             targetType: "OrderRefund",
             targetId: refund.id,
+            requestId,
             ipHash,
             userAgentHash,
             metadata: {
@@ -423,7 +430,7 @@ export class OrderRefundService {
     allowLinkedPostSale = false,
   ): Promise<RefundRequestResult> {
     assertUuid(input.refundId, "refundId");
-    const { actorAdminUserId, ipHash, userAgentHash } = validatedAudit(input.audit);
+    const { actorAdminUserId, ipHash, userAgentHash, requestId } = validatedAudit(input.audit);
     const note = input.note === undefined ? undefined : optionalNote(input.note);
     return inInventoryTransaction(db, async (tx) => {
       const peek = await tx.orderRefund.findUnique({
@@ -517,6 +524,7 @@ export class OrderRefundService {
           action: auditAction,
           targetType: "OrderRefund",
           targetId: updated.id,
+          requestId,
           ipHash,
           userAgentHash,
           metadata: {

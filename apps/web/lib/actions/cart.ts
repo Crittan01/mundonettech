@@ -18,7 +18,7 @@ import { getDatabase } from "@/lib/db";
 
 const quantitySchema = z
   .string()
-  .regex(/^[0-9]+$/)
+  .regex(/^[0-9]{1,7}$/)
   .transform(Number)
   .pipe(z.number().int().min(0).max(1_000_000));
 const uuidSchema = z.string().uuid();
@@ -179,6 +179,7 @@ export async function claimAssistedCartAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
+  delete values.token;
   const token = formString(formData, "token");
   try {
     await claimAssistedCart(token);

@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
 import {
   ShippingProviderCode,
   type OrderFulfillmentStatus,
+  type PrismaClient,
   type ShipmentPackageStatus,
 } from "@mundonettech/db";
 
@@ -26,6 +28,7 @@ import {
   type ShippingTransaction,
 } from "./shipping-shared.js";
 import {
+  ShippingAuthorizationError,
   ShippingConflictError,
   ShippingNotFoundError,
   ShippingProviderError,
@@ -70,6 +73,33 @@ export class ShippingService {
     );
   }
 
+  private async assertHumanActor(
+    db: PrismaClient | ShippingTransaction,
+    audit: ShippingAuditContext | undefined,
+    lock = false,
+  ): Promise<void> {
+    if (!audit) return;
+    assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
+    let role: string | undefined;
+    if (lock) {
+      const rows = await db.$queryRaw<Array<{ role: string }>>`
+        SELECT "role"::text AS "role" FROM "AdminUser"
+        WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      role = rows[0]?.role;
+    } else {
+      const actor = await db.adminUser.findFirst({
+        where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { role: true },
+      });
+      role = actor?.role;
+    }
+    if (!role || !isAdminRole(role) || !hasAdminPermission(role, "fulfillment:write")) {
+      throw new ShippingAuthorizationError();
+    }
+  }
+
   async ensureFulfillments(
     orderId: string,
     credentialId?: string,
@@ -77,6 +107,7 @@ export class ShippingService {
   ): Promise<readonly string[]> {
     assertIntegrationUuid(orderId, "orderId");
     if (credentialId !== undefined) assertIntegrationUuid(credentialId, "credentialId");
+    await this.assertHumanActor(this.db, audit);
     const order = await this.db.order.findUnique({
       where: { id: orderId },
       include: { shipments: true },
@@ -102,7 +133,7 @@ export class ShippingService {
       aveonlineCredentialId = selected.id;
     }
     return this.db.$transaction(async (tx) => {
-      if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      await this.assertHumanActor(tx, audit, true);
       const locked = await lockOrder(tx, orderId);
       await assertPaidOrder(tx, locked);
       const shipments = await tx.shipment.findMany({
@@ -685,10 +716,12 @@ export class ShippingService {
   ): Promise<LabelProcessResult> {
     assertIntegrationUuid(packageId, "packageId");
     const workerId = shippingWorkerId(workerIdInput);
+    await this.assertHumanActor(this.db, audit);
     const claimSeconds = this.options.claimSeconds ?? 300;
     if (!Number.isInteger(claimSeconds) || claimSeconds < 60 || claimSeconds > 900)
       throw new ShippingValidationError("claimSeconds must be between 60 and 900.");
     const claim = await this.db.$transaction(async (tx) => {
+      await this.assertHumanActor(tx, audit, true);
       const peek = await tx.shipmentPackage.findUnique({
         where: { id: packageId },
         select: { shipmentId: true },
@@ -753,7 +786,6 @@ export class ShippingService {
         },
       });
       if (audit) {
-        await assertFulfillmentActor(tx, audit.actorAdminUserId);
         await writeShippingAudit(tx, {
           action: "SHIPMENT_LABEL_CLAIMED",
           targetType: "ShipmentPackage",

@@ -213,7 +213,7 @@ describe("F2.3 — persistent redirect graph, concurrency and audit", () => {
 });
 
 describe("A1 — shared redirect cache generation across independent processes", () => {
-  it("refreshes a warm independent cache immediately after every service mutation", async () => {
+  it("refreshes a warm cache after effective mutations and preserves generation on no-op replay", async () => {
     const source = `/shared-cache-${randomUUID()}`;
     let generation = await currentGeneration();
     assert.equal(await cacheB.resolve(source), null);
@@ -230,8 +230,16 @@ describe("A1 — shared redirect cache generation across independent processes",
     });
 
     generation = await currentGeneration();
+    const noOpLogCount = await db.adminActionLog.count({
+      where: { targetType: "UrlRedirect", targetId: created.id },
+    });
     await service.setActive(created.id, true, audit);
-    assert.equal(await currentGeneration(), generation + 1n);
+    await service.setActive(created.id, true, audit);
+    assert.equal(await currentGeneration(), generation);
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "UrlRedirect", targetId: created.id } }),
+      noOpLogCount,
+    );
     assert.deepEqual(await cacheB.resolve(source), {
       toPath: "/productos",
       statusCode: 308,
@@ -440,5 +448,65 @@ describe("A1 — shared redirect cache generation across independent processes",
     } finally {
       await client.end();
     }
+  });
+});
+
+describe("A2 — URL redirect audit before/after and error branches", () => {
+  it("persists complete safe states and no success log on rejected graph mutations", async () => {
+    const source = `/a2-audit-${randomUUID()}`;
+    const created = await service.create(
+      { fromPath: source, toPath: "/productos", statusCode: 308 },
+      audit,
+    );
+    const createdLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "URL_REDIRECT_CREATED", targetId: created.id },
+    });
+    assert.equal(createdLog.metadata.before, null);
+    assert.equal(createdLog.metadata.after.fromPath, source);
+    assert.equal(createdLog.metadata.after.active, true);
+
+    await service.update(
+      created.id,
+      { fromPath: source, toPath: "/comparar", statusCode: 307, active: true },
+      audit,
+    );
+    const updateLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "URL_REDIRECT_UPDATED", targetId: created.id },
+    });
+    assert.equal(updateLog.metadata.before.toPath, "/productos");
+    assert.equal(updateLog.metadata.after.toPath, "/comparar");
+    assert.equal(updateLog.metadata.before.statusCode, 308);
+    assert.equal(updateLog.metadata.after.statusCode, 307);
+
+    await service.setActive(created.id, false, audit);
+    const activityLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "URL_REDIRECT_ACTIVITY_UPDATED", targetId: created.id },
+    });
+    assert.equal(activityLog.metadata.before.active, true);
+    assert.equal(activityLog.metadata.after.active, false);
+
+    await service.archive(created.id, audit);
+    const archiveLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "URL_REDIRECT_ARCHIVED", targetId: created.id },
+    });
+    assert.equal(archiveLog.metadata.before.deleted, false);
+    assert.equal(archiveLog.metadata.after.deleted, true);
+    assert.equal(archiveLog.metadata.after.active, false);
+
+    const rejectedSource = `/a2-rejected-${randomUUID()}`;
+    await assert.rejects(
+      service.create({ fromPath: rejectedSource, toPath: "/admin", statusCode: 308 }, audit),
+      UrlRedirectValidationError,
+    );
+    assert.equal(await db.urlRedirect.count({ where: { fromPath: rejectedSource } }), 0);
+    assert.equal(
+      await db.adminActionLog.count({
+        where: {
+          action: "URL_REDIRECT_CREATED",
+          metadata: { path: ["after", "fromPath"], equals: rejectedSource },
+        },
+      }),
+      0,
+    );
   });
 });

@@ -86,9 +86,12 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
   const active = !["WON", "LOST", "CANCELLED"].includes(opportunity.status);
   const credentials = canWrite
-    ? (await getIntegrationCredentialVault().list({ limit: 100 })).items
+    ? (await getIntegrationCredentialVault().forSystemProvider("gemini").list({ limit: 100 })).items
         .filter((credential) => credential.provider === "gemini" && !credential.revokedAt)
-        .map((credential) => ({ id: credential.id, accountName: credential.accountName }))
+        .map((credential, index) => ({
+          id: credential.id,
+          accountName: `Integración Gemini ${index + 1}`,
+        }))
     : [];
   return (
     <div className="space-y-8">

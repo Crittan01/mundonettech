@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { hasAdminPermission, isAdminRole, type AdminPermission } from "@mundonettech/core";
 import {
   IntegrationEnvironment,
   Prisma,
@@ -53,7 +54,40 @@ export class CredentialCursorError extends Error {
   }
 }
 
+export class CredentialForbiddenError extends Error {
+  constructor() {
+    super("The administrator is not authorized for integration credentials.");
+    this.name = "CredentialForbiddenError";
+  }
+}
+
 export type CredentialDescriptor = Omit<IntegrationCredential, "nonce" | "ciphertext" | "authTag">;
+type CredentialDescriptorRecord = Pick<
+  IntegrationCredential,
+  | "id"
+  | "provider"
+  | "environment"
+  | "accountName"
+  | "keyVersion"
+  | "createdByAdminUserId"
+  | "lastRotatedByAdminUserId"
+  | "createdAt"
+  | "updatedAt"
+  | "revokedAt"
+>;
+
+const descriptorSelect = {
+  id: true,
+  provider: true,
+  environment: true,
+  accountName: true,
+  keyVersion: true,
+  createdByAdminUserId: true,
+  lastRotatedByAdminUserId: true,
+  createdAt: true,
+  updatedAt: true,
+  revokedAt: true,
+} satisfies Prisma.IntegrationCredentialSelect;
 
 export interface CredentialAuditContext {
   readonly requestId?: string;
@@ -61,7 +95,7 @@ export interface CredentialAuditContext {
   readonly userAgentHash?: Uint8Array | null | undefined;
 }
 
-function descriptor(record: IntegrationCredential): CredentialDescriptor {
+function descriptor(record: CredentialDescriptorRecord): CredentialDescriptor {
   return {
     id: record.id,
     provider: record.provider,
@@ -81,7 +115,9 @@ function hasErrorCode(error: unknown, code: string): boolean {
 }
 
 function assertUuid(value: string, field: string): void {
-  if (!uuidPattern.test(value)) throw new TypeError(`${field} must be a canonical UUID.`);
+  if (typeof value !== "string" || !uuidPattern.test(value)) {
+    throw new TypeError(`${field} must be a canonical UUID.`);
+  }
 }
 
 function validateIdentity(provider: string, accountName: string, actorId: string): void {
@@ -118,6 +154,22 @@ function validateAuditContext(audit?: CredentialAuditContext): {
   };
 }
 
+async function assertActor(
+  tx: Prisma.TransactionClient,
+  actorAdminUserId: string,
+  permission: AdminPermission,
+): Promise<void> {
+  assertUuid(actorAdminUserId, "actorAdminUserId");
+  await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR UPDATE`;
+  const actor = await tx.adminUser.findFirst({
+    where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+    select: { role: true },
+  });
+  if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
+    throw new CredentialForbiddenError();
+  }
+}
+
 async function writeAudit(
   tx: Prisma.TransactionClient,
   action: string,
@@ -138,7 +190,6 @@ async function writeAudit(
       metadata: {
         provider: record.provider,
         environment: record.environment,
-        accountName: record.accountName,
         keyVersion: record.keyVersion,
       },
     },
@@ -161,17 +212,17 @@ export class IntegrationCredentialVault {
     validateIdentity(options.provider, options.accountName, options.actorAdminUserId);
     validateAuditContext(options.audit);
     const credentialId = randomUUID();
-    const sealed = encryptIntegrationCredential({
-      credentialId,
-      environment: this.ring.environment,
-      provider: options.provider,
-      accountName: options.accountName,
-      plaintext: options.plaintext,
-      ring: this.ring,
-    });
-
     try {
       return await this.db.$transaction(async (tx) => {
+        await assertActor(tx, options.actorAdminUserId, "integrations:write");
+        const sealed = encryptIntegrationCredential({
+          credentialId,
+          environment: this.ring.environment,
+          provider: options.provider,
+          accountName: options.accountName,
+          plaintext: options.plaintext,
+          ring: this.ring,
+        });
         const record = await tx.integrationCredential.create({
           data: {
             id: credentialId,
@@ -200,19 +251,25 @@ export class IntegrationCredentialVault {
     }
   }
 
-  private async activeRecord(id: string): Promise<IntegrationCredential> {
+  private async activeRecord(
+    id: string,
+    expectedProvider?: string,
+  ): Promise<IntegrationCredential> {
     assertUuid(id, "credentialId");
     const record = await this.db.integrationCredential.findUnique({ where: { id } });
-
-    if (!record || record.environment !== this.ring.environment) {
+    if (
+      !record ||
+      record.environment !== this.ring.environment ||
+      (expectedProvider !== undefined && record.provider !== expectedProvider)
+    ) {
       throw new CredentialNotFoundError();
     }
     if (record.revokedAt) throw new CredentialRevokedError();
     return record;
   }
 
-  async reveal(id: string): Promise<Uint8Array> {
-    const record = await this.activeRecord(id);
+  async reveal(id: string, expectedProvider?: string): Promise<Uint8Array> {
+    const record = await this.activeRecord(id, expectedProvider);
     return decryptIntegrationCredential(
       {
         ...record,
@@ -228,13 +285,17 @@ export class IntegrationCredentialVault {
     credentialId: string;
     plaintext: Uint8Array;
     actorAdminUserId: string;
+    expectedProvider?: string;
     audit?: CredentialAuditContext;
   }): Promise<CredentialDescriptor> {
     assertUuid(options.credentialId, "credentialId");
     assertUuid(options.actorAdminUserId, "actorAdminUserId");
+    if (options.expectedProvider !== undefined && !providerPattern.test(options.expectedProvider)) {
+      throw new TypeError("expectedProvider must be a valid provider identifier.");
+    }
     validateAuditContext(options.audit);
-
     return this.db.$transaction(async (tx) => {
+      await assertActor(tx, options.actorAdminUserId, "integrations:write");
       const existing = await tx.integrationCredential.findUnique({
         where: { id: options.credentialId },
       });
@@ -242,6 +303,12 @@ export class IntegrationCredentialVault {
         throw new CredentialNotFoundError();
       }
       if (existing.revokedAt) throw new CredentialRevokedError();
+      if (
+        options.expectedProvider !== undefined &&
+        existing.provider !== options.expectedProvider
+      ) {
+        throw new CredentialConflictError();
+      }
       if (existing.provider === "mercado-libre") {
         const [activeAccount, activeAttempt] = await Promise.all([
           tx.channelAccount.findFirst({
@@ -255,7 +322,6 @@ export class IntegrationCredentialVault {
         ]);
         if (activeAccount || activeAttempt) throw new CredentialConflictError();
       }
-
       const sealed = encryptIntegrationCredential({
         credentialId: existing.id,
         environment: existing.environment,
@@ -275,7 +341,6 @@ export class IntegrationCredentialVault {
           updatedAt: new Date(),
         },
       });
-
       if (result.count !== 1) throw new CredentialConflictError();
       const updated = await tx.integrationCredential.findUniqueOrThrow({
         where: { id: existing.id },
@@ -299,14 +364,13 @@ export class IntegrationCredentialVault {
     assertUuid(credentialId, "credentialId");
     assertUuid(actorAdminUserId, "actorAdminUserId");
     validateAuditContext(audit);
-
     return this.db.$transaction(async (tx) => {
+      await assertActor(tx, actorAdminUserId, "integrations:write");
       const existing = await tx.integrationCredential.findUnique({ where: { id: credentialId } });
       if (!existing || existing.environment !== this.ring.environment) {
         throw new CredentialNotFoundError();
       }
       if (existing.revokedAt) throw new CredentialRevokedError();
-
       const sealed = reencryptIntegrationCredential(
         {
           ...existing,
@@ -344,8 +408,8 @@ export class IntegrationCredentialVault {
     assertUuid(credentialId, "credentialId");
     assertUuid(actorAdminUserId, "actorAdminUserId");
     validateAuditContext(audit);
-
     return this.db.$transaction(async (tx) => {
+      await assertActor(tx, actorAdminUserId, "integrations:write");
       const existing = await tx.integrationCredential.findUnique({ where: { id: credentialId } });
       if (!existing || existing.environment !== this.ring.environment) {
         throw new CredentialNotFoundError();
@@ -364,13 +428,9 @@ export class IntegrationCredentialVault {
         ]);
         if (activeAccount || activeAttempt) throw new CredentialConflictError();
       }
-
       const result = await tx.integrationCredential.updateMany({
         where: { id: existing.id, nonce: existing.nonce, revokedAt: null },
-        data: {
-          revokedAt: new Date(),
-          updatedAt: new Date(),
-        },
+        data: { revokedAt: new Date(), updatedAt: new Date() },
       });
       if (result.count !== 1) throw new CredentialConflictError();
       const updated = await tx.integrationCredential.findUniqueOrThrow({
@@ -381,47 +441,78 @@ export class IntegrationCredentialVault {
     });
   }
 
-  async list(options: { limit?: number; cursor?: string; includeRevoked?: boolean } = {}): Promise<{
-    items: CredentialDescriptor[];
-    nextCursor: string | null;
-  }> {
+  async list(
+    actorAdminUserId: string,
+    options: { limit?: number; cursor?: string; includeRevoked?: boolean } = {},
+  ): Promise<{ items: CredentialDescriptor[]; nextCursor: string | null }> {
+    assertUuid(actorAdminUserId, "actorAdminUserId");
     const limit = options.limit ?? 50;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new RangeError("limit must be an integer between 1 and 100.");
     }
     if (options.cursor) assertUuid(options.cursor, "cursor");
-
     try {
-      if (options.cursor) {
-        const cursor = await this.db.integrationCredential.findUnique({
-          where: { id: options.cursor },
-          select: { environment: true, revokedAt: true },
-        });
-        if (
-          !cursor ||
-          cursor.environment !== this.ring.environment ||
-          (!options.includeRevoked && cursor.revokedAt)
-        ) {
-          throw new CredentialCursorError();
+      return await this.db.$transaction(async (tx) => {
+        await assertActor(tx, actorAdminUserId, "integrations:read");
+        if (options.cursor) {
+          const cursor = await tx.integrationCredential.findUnique({
+            where: { id: options.cursor },
+            select: { environment: true, revokedAt: true },
+          });
+          if (
+            !cursor ||
+            cursor.environment !== this.ring.environment ||
+            (!options.includeRevoked && cursor.revokedAt)
+          ) {
+            throw new CredentialCursorError();
+          }
         }
-      }
-
-      const records = await this.db.integrationCredential.findMany({
-        where: {
-          environment: this.ring.environment,
-          ...(options.includeRevoked ? {} : { revokedAt: null }),
-        },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: limit + 1,
-        ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
+        const records = await tx.integrationCredential.findMany({
+          where: {
+            environment: this.ring.environment,
+            ...(options.includeRevoked ? {} : { revokedAt: null }),
+          },
+          select: descriptorSelect,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: limit + 1,
+          ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
+        });
+        const items = records.slice(0, limit).map(descriptor);
+        const nextCursor = records.length > limit ? (items.at(-1)?.id ?? null) : null;
+        return { items, nextCursor };
       });
-      const items = records.slice(0, limit).map(descriptor);
-      const nextCursor = records.length > limit ? (items.at(-1)?.id ?? null) : null;
-      return { items, nextCursor };
     } catch (error) {
       if (hasErrorCode(error, "P2025")) throw new CredentialCursorError();
       throw error;
     }
+  }
+
+  forSystemProvider(provider: string): {
+    list(options: { includeRevoked?: boolean; limit: number }): Promise<{
+      items: CredentialDescriptor[];
+      nextCursor: null;
+    }>;
+    reveal(id: string): Promise<Uint8Array>;
+  } {
+    if (!providerPattern.test(provider)) {
+      throw new TypeError("provider must be a lowercase identifier of at most 100 characters.");
+    }
+    return {
+      list: async (options) => {
+        if (options.includeRevoked === true) throw new CredentialForbiddenError();
+        if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100) {
+          throw new RangeError("limit must be an integer between 1 and 100.");
+        }
+        const records = await this.db.integrationCredential.findMany({
+          where: { environment: this.ring.environment, provider, revokedAt: null },
+          select: descriptorSelect,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: options.limit,
+        });
+        return { items: records.map(descriptor), nextCursor: null };
+      },
+      reveal: (id) => this.reveal(id, provider),
+    };
   }
 
   assertEnvironment(environment: IntegrationEnvironment): void {

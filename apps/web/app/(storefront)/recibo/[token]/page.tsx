@@ -127,7 +127,7 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
         },
       }),
       optionalCustomerId(),
-      getIntegrationCredentialVault().list({ limit: 100 }),
+      getIntegrationCredentialVault().forSystemProvider("wompi").list({ limit: 100 }),
     ]);
   const credit =
     customerId && order?.customerId === customerId
@@ -225,7 +225,10 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
         attempts={attempts}
         wompiAccounts={credentials.items
           .filter((credential) => credential.provider === "wompi" && !credential.revokedAt)
-          .map((credential) => ({ id: credential.id, accountName: credential.accountName }))}
+          .map((credential, index) => ({
+            id: credential.id,
+            accountName: `Cuenta Wompi ${index + 1}`,
+          }))}
         bankTransferInstructions={getBankTransferInstructions()}
         storeCreditAvailableCents={
           credit?.active && BigInt(credit.availableCents) > 0n ? credit.availableCents : null

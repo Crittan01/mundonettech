@@ -47,6 +47,29 @@ model IdempotencyKey {
   @@map("IdempotencyKey")
 }
 
+enum OperationRateLimitSubjectType {
+  ADMIN_USER
+  ORDER
+  IP
+}
+
+model OperationRateLimit {
+  id              String                        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  operation       String                        @db.VarChar(80)
+  subjectType     OperationRateLimitSubjectType
+  subjectHash     Bytes                         @db.ByteA
+  ipHash          Bytes                         @db.ByteA
+  windowStartedAt DateTime                      @db.Timestamptz(6)
+  count           Int                           @default(1)
+  expiresAt       DateTime                      @db.Timestamptz(6)
+  createdAt       DateTime                      @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime                      @default(now()) @updatedAt @db.Timestamptz(6)
+
+  @@unique([operation, subjectType, subjectHash, ipHash, windowStartedAt], map: "OperationRateLimit_bucket_key")
+  @@index([expiresAt])
+  @@map("OperationRateLimit")
+}
+
 model DailyFunnelMetric {
   id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   metricDate      DateTime @db.Date

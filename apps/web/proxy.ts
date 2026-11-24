@@ -1,5 +1,5 @@
 import { helpArticles } from "@mundonettech/config/help";
-import { refreshTimeoutToken } from "@mundonettech/core";
+import { isReservedRedirectSource, refreshTimeoutToken } from "@mundonettech/core";
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
@@ -18,6 +18,14 @@ import {
 const helpArticlePaths = new Set(helpArticles.map((article) => `/ayuda/${article.slug}`));
 const staticRedirectBypassPattern =
   /^\/(?:favicon\.ico|manifest\.webmanifest|apple-touch-icon(?:\.[^/]+)?|icon(?:\.[^/]+)?|opengraph-image(?:\.[^/]+)?|twitter-image(?:\.[^/]+)?)$|\.(?:ico|png|jpe?g|webp|avif|gif|svg|woff2?|css|js|mjs|map)$/i;
+
+function hasPathPrefix(pathname: string, prefix: string): boolean {
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+function hasProtectedPathPrefix(pathname: string, prefix: string): boolean {
+  return hasPathPrefix(pathname, prefix) || pathname.startsWith(`${prefix}.`);
+}
 
 function securityPolicy(
   supabaseUrl: string,
@@ -75,12 +83,47 @@ function loginRedirect(request: NextRequest, destination: string, reason: string
   return NextResponse.redirect(url);
 }
 
+function hasSameOriginServerAction(request: NextRequest): boolean {
+  const value = request.headers.get("origin");
+  if (!value) return false;
+  try {
+    const origin = new URL(value);
+    if (
+      !["http:", "https:"].includes(origin.protocol) ||
+      origin.username ||
+      origin.password ||
+      origin.pathname !== "/" ||
+      origin.search ||
+      origin.hash
+    ) {
+      return false;
+    }
+    const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+    const host = forwardedHost || request.headers.get("host") || request.nextUrl.host;
+    return origin.host === host;
+  } catch {
+    return false;
+  }
+}
+
 export async function proxy(request: NextRequest) {
   const isDevelopment = process.env.NODE_ENV === "development";
   const requestNonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const config = getSupabasePublicConfig();
   const mediaOrigin = getPublicMediaOrigin();
   const csp = securityPolicy(config.url, mediaOrigin, isDevelopment);
+  if (
+    request.method === "POST" &&
+    request.headers.has("next-action") &&
+    !hasSameOriginServerAction(request)
+  ) {
+    const rejected = new NextResponse(null, {
+      status: 403,
+      headers: { "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow, noarchive" },
+    });
+    applyHeaders(rejected, csp, isDevelopment);
+    return rejected;
+  }
   const isSafeNavigationMethod = request.method === "GET" || request.method === "HEAD";
   const helpPath = request.nextUrl.pathname.replace(/\/+$/, "");
   if (isSafeNavigationMethod && helpPath.startsWith("/ayuda/") && !helpArticlePaths.has(helpPath)) {
@@ -100,6 +143,7 @@ export async function proxy(request: NextRequest) {
     isSafeNavigationMethod &&
     !request.headers.has("next-action") &&
     !isLiveEditRequest &&
+    !isReservedRedirectSource(request.nextUrl.pathname) &&
     !staticRedirectBypassPattern.test(request.nextUrl.pathname)
   ) {
     const persistedRedirect = await resolveCachedUrlRedirect(request.nextUrl.pathname);
@@ -137,13 +181,18 @@ export async function proxy(request: NextRequest) {
   });
 
   const hasAuthCookie = request.cookies.getAll().some(({ name }) => /^(?:sb-|supabase)/.test(name));
-  const user = hasAuthCookie ? (await supabase.auth.getUser()).data.user : null;
+  const user = hasAuthCookie
+    ? await supabase.auth
+        .getUser()
+        .then(({ data }) => data.user)
+        .catch(() => null)
+    : null;
   const pathname = request.nextUrl.pathname;
   const isAdmin =
-    pathname.startsWith("/admin") &&
-    !pathname.startsWith("/admin/login") &&
-    !pathname.startsWith("/admin/invitacion");
-  const isCustomer = pathname.startsWith("/mi-cuenta");
+    hasProtectedPathPrefix(pathname, "/admin") &&
+    !hasProtectedPathPrefix(pathname, "/admin/login") &&
+    !hasProtectedPathPrefix(pathname, "/admin/invitacion");
+  const isCustomer = hasProtectedPathPrefix(pathname, "/mi-cuenta");
   let redirectResponse: NextResponse | null = null;
 
   const isPrefetch =
@@ -205,7 +254,7 @@ export async function proxy(request: NextRequest) {
     !isPrefetch &&
     (pathname === "/carrito" ||
       pathname === "/empresas" ||
-      pathname.startsWith("/checkout") ||
+      hasPathPrefix(pathname, "/checkout") ||
       pathname.startsWith("/pagar/") ||
       pathname.startsWith("/pedido/") ||
       pathname.startsWith("/referido/") ||
@@ -240,6 +289,10 @@ export async function proxy(request: NextRequest) {
     response = redirectResponse;
   }
   applyHeaders(response, csp, isDevelopment);
+  if (request.headers.has("next-action")) {
+    response.headers.set("Cache-Control", "no-store");
+    response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
   if (pathname === "/api/channels/mercado-libre/oauth/callback") {
     response.headers.set("Cache-Control", "no-store");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");

@@ -585,7 +585,6 @@ function receiptSnapshot(record: ReceiptWithOrder): OrderReceiptSnapshot {
       productSlugSnapshot: item.productSlugSnapshot,
       quantity: item.quantity,
       unitPriceCents: item.unitPriceCents.toString(),
-      unitCostWacCents: item.unitCostWacCents.toString(),
       discountCents: item.discountCents.toString(),
       lineTotalCents: item.lineTotalCents.toString(),
       taxCents: item.taxCents.toString(),

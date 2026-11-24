@@ -192,7 +192,6 @@ export interface ReceiptItemSnapshot {
   readonly productSlugSnapshot: string;
   readonly quantity: number;
   readonly unitPriceCents: string;
-  readonly unitCostWacCents: string;
   readonly discountCents: string;
   readonly lineTotalCents: string;
   readonly taxCents: string;
@@ -244,6 +243,7 @@ export interface RefundAudit {
   readonly actorAdminUserId: string;
   readonly ipHash: Uint8Array;
   readonly userAgentHash: Uint8Array | null;
+  readonly requestId?: string;
 }
 
 export interface RefundRequestInput {

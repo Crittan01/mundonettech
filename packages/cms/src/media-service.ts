@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { maskEmail, maskName, sanitizeAuditValue } from "@mundonettech/core";
 import { Prisma, PrismaClient } from "@mundonettech/db";
 import {
   R2MediaStorage,
@@ -90,12 +91,20 @@ export class CmsMediaService {
       take: limit + 1,
       ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
     });
-    const page = items.slice(0, limit);
+    const page = items.slice(0, limit).map((media) => ({
+      ...media,
+      createdBy: {
+        ...media.createdBy,
+        displayName: maskName(media.createdBy.displayName),
+        email: maskEmail(media.createdBy.email),
+      },
+    }));
     return { items: page, nextCursor: items.length > limit ? (page.at(-1)?.id ?? null) : null };
   }
 
   async upload(input: CmsMediaUpload, audit: CmsAudit) {
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     validateUpload(input);
     const hash = createHash("sha256").update(input.bytes).digest();
     const hashBytes = Uint8Array.from(hash);
@@ -136,13 +145,21 @@ export class CmsMediaService {
             action: "CMS_MEDIA_CREATED",
             targetType: "CmsMedia",
             targetId: created.id,
+            requestId: audit.requestId ?? null,
             ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
             userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-            metadata: {
-              storageKey: created.storageKey,
-              byteSize: created.byteSize,
-              derivativeCount: stored.length,
-            },
+            metadata: sanitizeAuditValue({
+              before: null,
+              after: {
+                id: created.id,
+                mimeType: created.mimeType,
+                byteSize: created.byteSize,
+                width: created.width,
+                height: created.height,
+                derivativeCount: stored.length,
+                deleted: created.deletedAt !== null,
+              },
+            }) as Prisma.JsonObject,
           },
         });
         return created;
@@ -217,7 +234,23 @@ export class CmsMediaService {
           targetId: id,
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-          metadata: { altText },
+          metadata: sanitizeAuditValue({
+            before: {
+              id: existing.id,
+              mimeType: existing.mimeType,
+              byteSize: existing.byteSize,
+              altTextLength: existing.altText.length,
+              deleted: existing.deletedAt !== null,
+            },
+            after: {
+              id: updated.id,
+              mimeType: updated.mimeType,
+              byteSize: updated.byteSize,
+              altTextLength: updated.altText.length,
+              deleted: updated.deletedAt !== null,
+            },
+            altTextChanged: existing.altText !== updated.altText,
+          }) as Prisma.JsonObject,
         },
       });
       return updated;
@@ -228,8 +261,10 @@ export class CmsMediaService {
     assertUuid(id, "mediaId");
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
-      const locked = await tx.$queryRaw<Array<{ id: string; storageKey: string; now: Date }>>`
-        SELECT "id", "storageKey", CURRENT_TIMESTAMP AS "now"
+      const locked = await tx.$queryRaw<
+        Array<{ id: string; mimeType: string; byteSize: number; now: Date }>
+      >`
+        SELECT "id", "mimeType", "byteSize", CURRENT_TIMESTAMP AS "now"
         FROM "CmsMedia"
         WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
         FOR UPDATE
@@ -262,7 +297,20 @@ export class CmsMediaService {
           targetId: id,
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-          metadata: { storageKey: existing.storageKey },
+          metadata: sanitizeAuditValue({
+            before: {
+              id: existing.id,
+              mimeType: existing.mimeType,
+              byteSize: existing.byteSize,
+              deleted: false,
+            },
+            after: {
+              id: updated.id,
+              mimeType: updated.mimeType,
+              byteSize: updated.byteSize,
+              deleted: updated.deletedAt !== null,
+            },
+          }) as Prisma.JsonObject,
         },
       });
       return updated;

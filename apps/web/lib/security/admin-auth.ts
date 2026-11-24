@@ -45,7 +45,10 @@ function latestMfaTimestamp(
   const timestamps = methods
     .filter((entry): entry is { method: string; timestamp: number } => typeof entry !== "string")
     .filter(
-      (entry) => ["otp", "totp"].includes(entry.method) && Number.isSafeInteger(entry.timestamp),
+      (entry) =>
+        ["otp", "totp"].includes(entry.method) &&
+        Number.isSafeInteger(entry.timestamp) &&
+        entry.timestamp > 0,
     )
     .map((entry) => entry.timestamp);
   return timestamps.length > 0 ? Math.max(...timestamps) : null;
@@ -73,11 +76,12 @@ export async function getAdminSession(
   const { data: aal, error: aalError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
   if (aalError || !aal) throw new AdminAuthorizationError("NO_SESSION");
   const timestamp = latestMfaTimestamp(aal.currentAuthenticationMethods);
-  const lastMfaAt = timestamp ? new Date(timestamp * 1000) : null;
-  if (options.requireAal2 !== false && aal.currentLevel !== "aal2") {
+  const lastMfaAt = timestamp !== null ? new Date(timestamp * 1000) : null;
+  const requiresAal2 = options.requireAal2 !== false || options.requireRecentMfa === true;
+  if (requiresAal2 && aal.currentLevel !== "aal2") {
     throw new AdminAuthorizationError("AAL1");
   }
-  if (options.requireAal2 !== false) {
+  if (requiresAal2) {
     const store = await cookies();
     const token = store.get(adminActivityCookie)?.value;
     try {
@@ -94,13 +98,15 @@ export async function getAdminSession(
       throw new AdminAuthorizationError("TIMEOUT");
     }
   }
-  if (
-    options.requireRecentMfa &&
-    (!lastMfaAt ||
-      Date.now() - lastMfaAt.getTime() > recentMfaSeconds * 1000 ||
-      lastMfaAt.getTime() > Date.now() + 30_000)
-  ) {
-    throw new AdminAuthorizationError("MFA_STALE");
+  if (options.requireRecentMfa) {
+    const now = Date.now();
+    if (
+      !lastMfaAt ||
+      now - lastMfaAt.getTime() > recentMfaSeconds * 1000 ||
+      lastMfaAt.getTime() > now + 30_000
+    ) {
+      throw new AdminAuthorizationError("MFA_STALE");
+    }
   }
   return { supabase, user: userData.user, profile: profile as AdminSession["profile"], lastMfaAt };
 }

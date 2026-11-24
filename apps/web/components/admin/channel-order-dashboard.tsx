@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { formatCopCents, formatSignedCopCents } from "@mundonettech/core";
 import type { ChannelOrderDashboard, ChannelStockLocationChoice } from "@mundonettech/integrations";
 
@@ -214,6 +216,7 @@ export function ChannelOrderDashboardView({
                     order={order}
                     canReconcile={canReconcile}
                     locations={locations[order.id] ?? []}
+                    adjustmentIdempotencyKey={randomUUID()}
                   />
                 ) : null}
               </li>

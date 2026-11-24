@@ -284,7 +284,19 @@ test("customer registration and recovery connect server field errors to their co
     await page.getByRole("button", { name: "Solicitar recuperación" }).click();
     await expectFieldError("#email", "recovery-request-email-error", "Ingresa un correo válido.");
 
-    await page.goto("/recuperar?code=1&email=persona%40example.test");
+    await page.goto("/recuperar?code=1");
+    await expect(
+      page.getByRole("button", { name: "Actualizar contraseña e ingresar" }),
+    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Solicitar recuperación" })).toBeVisible();
+
+    await page.goto("/recuperar");
+    await page.getByLabel("Correo electrónico").fill("persona@example.test");
+    await passChallenge("customer_recovery");
+    await page.getByRole("button", { name: "Solicitar recuperación" }).click();
+    const recoveryLink = page.getByRole("link", { name: "Ingresar código y nueva contraseña" });
+    await expect(recoveryLink).toHaveAttribute("href", "/recuperar?code=1");
+    await recoveryLink.click();
     const reset = page.locator("form").filter({
       has: page.getByRole("button", { name: "Actualizar contraseña e ingresar" }),
     });
@@ -302,7 +314,6 @@ test("customer registration and recovery connect server field errors to their co
       "Las contraseñas no coinciden.",
     );
 
-    await page.goto("/recuperar?code=1&email=persona%40example.test");
     await reset.evaluate((form) => {
       (form as HTMLFormElement).noValidate = true;
     });

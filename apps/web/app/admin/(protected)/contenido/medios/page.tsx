@@ -58,6 +58,11 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
           {cursorWarning}
         </p>
       ) : null}
+      {raw.archived === "1" ? (
+        <p role="status" className="rounded-xl border border-border bg-card p-4 text-sm">
+          Activo archivado sin borrar su objeto ni el historial editorial.
+        </p>
+      ) : null}
       {canWrite ? (
         <>
           <CmsStepUp session={session} />

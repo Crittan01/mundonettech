@@ -288,6 +288,7 @@ describe("F6.4 — persistent Meta CAPI purchase delivery", () => {
         marketingEmail: false,
         advertising: false,
       },
+      customer.updatedAt,
       { ipHash: hash(), userAgentHash: hash() },
     );
     const skipped = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
@@ -525,10 +526,19 @@ describe("F6.4 — order payment domain-worker chaining", () => {
     });
     const worker = new DomainEventWorker(db, {
       workerId: "worker:payment-meta-chain",
-      shipping: new ShippingService(db, { vault, environment: IntegrationEnvironment.LOCAL }),
-      email: new EmailService(db, { vault, publicSiteUrl: "http://127.0.0.1:4110" }),
-      invoice: new InvoiceService(db, { vault, environment: IntegrationEnvironment.LOCAL }),
-      vault,
+      shipping: new ShippingService(db, {
+        vault: vault.forSystemProvider("aveonline"),
+        environment: IntegrationEnvironment.LOCAL,
+      }),
+      email: new EmailService(db, {
+        vault: vault.forSystemProvider("resend"),
+        publicSiteUrl: "http://127.0.0.1:4110",
+      }),
+      invoice: new InvoiceService(db, {
+        vault: vault.forSystemProvider("dian"),
+        environment: IntegrationEnvironment.LOCAL,
+      }),
+      vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "http://127.0.0.1:4110",
       storeName: "Tienda de pruebas",
       receiptTokenForSubmission: () => randomBytes(32).toString("base64url"),
@@ -748,6 +758,7 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
         marketingEmail: false,
         advertising: false,
       },
+      customer.updatedAt,
       { ipHash: hash(), userAgentHash: hash() },
     );
 
@@ -797,7 +808,7 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
       (await service.dispatch(failedId, "worker:meta-payload-rejected")).status,
       "FAILED",
     );
-    const listed = (await service.listEvents(10)).find((item) => item.id === failedId);
+    const listed = (await service.listEvents(actor.id, 10)).find((item) => item.id === failedId);
     assert.equal(listed?.retryable, false);
     assert.equal(listed?.reconcilable, true);
     const closedFailed = await service.reconcile({

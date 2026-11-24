@@ -284,32 +284,56 @@ after(
 );
 
 describe("F4A.2 — account profile, DANE and privacy", () => {
-  it("updates profile and append-only marketing consents, and serializes default DANE addresses", async () => {
+  it("updates profile with optimistic concurrency and idempotent append-only consents", async () => {
     const context = { ipHash: bytes(), userAgentHash: bytes() };
-    await accounts.updateProfile(
+    const initial = await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } });
+    const firstInput = {
+      givenName: "Laura",
+      familyName: "Rodríguez",
+      phoneE164: "+573001234567",
+      marketingEmail: true,
+      advertising: false,
+    };
+    const firstUpdate = await accounts.updateProfile(
       catalog.customerId,
-      {
-        givenName: "Laura",
-        familyName: "Rodríguez",
-        phoneE164: "+573001234567",
-        marketingEmail: true,
-        advertising: false,
-      },
+      firstInput,
+      initial.updatedAt,
       context,
     );
     assert.equal(await accounts.marketingEmailGranted(catalog.customerId), true);
-    await accounts.updateProfile(
+    await assert.rejects(
+      accounts.updateProfile(
+        catalog.customerId,
+        { ...firstInput, familyName: "Obsoleta", marketingEmail: false },
+        initial.updatedAt,
+        context,
+      ),
+      (error) => error instanceof AccountError && error.code === "CONFLICT",
+    );
+    assert.equal(
+      (await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } })).familyName,
+      "Rodríguez",
+    );
+    const secondInput = { ...firstInput, marketingEmail: false };
+    const secondUpdate = await accounts.updateProfile(
       catalog.customerId,
-      {
-        givenName: "Laura",
-        familyName: "Rodríguez",
-        phoneE164: "+573001234567",
-        marketingEmail: false,
-        advertising: false,
-      },
+      secondInput,
+      firstUpdate.updatedAt,
       context,
     );
     assert.equal(await accounts.marketingEmailGranted(catalog.customerId), false);
+    const consentCount = await db.consent.count({ where: { customerId: catalog.customerId } });
+    const replay = await accounts.updateProfile(
+      catalog.customerId,
+      secondInput,
+      initial.updatedAt,
+      context,
+    );
+    assert.equal(replay.updatedAt.getTime(), secondUpdate.updatedAt.getTime());
+    assert.equal(
+      await db.consent.count({ where: { customerId: catalog.customerId } }),
+      consentCount,
+    );
     const revoked = await db.consent.findFirstOrThrow({
       where: { customerId: catalog.customerId, purpose: "MARKETING_EMAIL", status: "REVOKED" },
     });
@@ -911,11 +935,56 @@ describe("F4A.2 — account anonymization and concurrency", () => {
         unsubscribeTokenHash: bytes(),
       },
     });
+    const guestCode = await guestAccess.requestCode({
+      token: order.token,
+      idempotencyKey: `erase-guest-review-${randomUUID()}`,
+      ipHash: bytes(),
+    });
+    const guestChallengeId = guestCode.challengeId;
+    assert.ok(guestChallengeId);
+    const otpEmail = sentEmails.at(-1);
+    const otp = otpEmail.text.match(/es (\d{6})\./)[1];
+    const guestSession = await guestAccess.verifyCode({
+      token: order.token,
+      challengeId: guestChallengeId,
+      code: otp,
+      ipHash: bytes(),
+    });
+    const privateReview = await postsale.createReview(
+      { kind: "GUEST", guestSessionId: guestSession.sessionId },
+      {
+        orderId: order.orderId,
+        orderItemId: order.orderItemId,
+        rating: 5,
+        title: "Privacidad de invitado",
+        body: "La reseña conserva contenido útil sin conservar el nombre privado.",
+        authorDisplayName: "Nombre privado de invitado",
+        idempotencyKey: `erase-review-${randomUUID()}`,
+      },
+    );
+    await admin.moderateReview({
+      reviewId: privateReview.id,
+      status: "PUBLISHED",
+      note: "Contenido aprobado para validar la anonimización posterior.",
+      expectedUpdatedAt: (await db.review.findUniqueOrThrow({ where: { id: privateReview.id } }))
+        .updatedAt,
+      audit,
+    });
+    const product = await db.product.findUniqueOrThrow({ where: { id: catalog.productId } });
+    assert.equal(
+      (await postsale.publicReviews(product.slug)).items[0].authorDisplayName,
+      "Nombre privado de invitado",
+    );
     const result = await accounts.anonymize(customerId, "ELIMINAR MI CUENTA", {
       ipHash: bytes(),
       userAgentHash: bytes(),
     });
     assert.ok(result.anonymizedAt);
+    assert.deepEqual(result.affectedReviewProductSlugs, [product.slug]);
+    const anonymizedReviews = await postsale.publicReviews(product.slug);
+    assert.equal(anonymizedReviews.items[0].authorDisplayName, "Cliente verificado");
+    assert.equal(anonymizedReviews.items[0].title, "Privacidad de invitado");
+    assert.equal(JSON.stringify(anonymizedReviews).includes("Nombre privado de invitado"), false);
     const customer = await db.customer.findUniqueOrThrow({ where: { id: customerId } });
     assert.equal(customer.status, "ANONYMIZED");
     assert.equal(customer.authUserId, null);
@@ -970,7 +1039,7 @@ describe("F4A.2 — account anonymization and concurrency", () => {
         phoneE164: "+573001234567",
       },
     });
-    await accounts.updateProfile(
+    const cycleOne = await accounts.updateProfile(
       customerId,
       {
         givenName: "Ciclo",
@@ -979,9 +1048,10 @@ describe("F4A.2 — account anonymization and concurrency", () => {
         marketingEmail: true,
         advertising: false,
       },
+      (await db.customer.findUniqueOrThrow({ where: { id: customerId } })).updatedAt,
       context,
     );
-    await accounts.updateProfile(
+    const cycleTwo = await accounts.updateProfile(
       customerId,
       {
         givenName: "Ciclo",
@@ -990,6 +1060,7 @@ describe("F4A.2 — account anonymization and concurrency", () => {
         marketingEmail: false,
         advertising: false,
       },
+      cycleOne.updatedAt,
       context,
     );
     await accounts.updateProfile(
@@ -1001,6 +1072,7 @@ describe("F4A.2 — account anonymization and concurrency", () => {
         marketingEmail: true,
         advertising: false,
       },
+      cycleTwo.updatedAt,
       context,
     );
     assert.equal(await accounts.marketingEmailGranted(customerId), true);

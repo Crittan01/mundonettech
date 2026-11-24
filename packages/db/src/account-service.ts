@@ -211,8 +211,16 @@ export class AccountService {
     };
   }
 
-  async updateProfile(customerId: string, input: ProfileInput, auditInput: AccountAudit) {
+  async updateProfile(
+    customerId: string,
+    input: ProfileInput,
+    expectedUpdatedAt: Date,
+    auditInput: AccountAudit,
+  ) {
     const values = profileInput(input);
+    if (!(expectedUpdatedAt instanceof Date) || Number.isNaN(expectedUpdatedAt.getTime())) {
+      throw new AccountError("VALIDATION", "expectedUpdatedAt is invalid.");
+    }
     const audit = this.audit(auditInput);
     return inInventoryTransaction(this.db, async (tx) => {
       const customer = await this.lockActiveCustomer(tx, customerId);
@@ -240,6 +248,18 @@ export class AccountService {
       ]);
       const currentlyGranted = latestConsent !== null;
       const currentlyAdvertisingGranted = latestAdvertisingConsent !== null;
+      if (
+        customer.givenName === values.givenName &&
+        customer.familyName === values.familyName &&
+        customer.phoneE164 === values.phoneE164 &&
+        currentlyGranted === values.marketingEmail &&
+        currentlyAdvertisingGranted === values.advertising
+      ) {
+        return customer;
+      }
+      if (customer.updatedAt.getTime() !== expectedUpdatedAt.getTime()) {
+        throw new AccountError("CONFLICT", "The profile changed in another session.");
+      }
       const proofHash = createHash("sha256")
         .update(
           JSON.stringify({
@@ -709,10 +729,17 @@ export class AccountService {
       where: { requesterCustomerId: customerId, contactEmailSnapshot: { not: anonymizedEmail } },
       data: { contactEmailSnapshot: anonymizedEmail, version: { increment: 1 } },
     });
+    const affectedReviews = await tx.review.findMany({
+      where: {
+        authorDisplayName: { not: "Cliente verificado" },
+        OR: [{ requesterCustomerId: customerId }, { orderItem: { order: { customerId } } }],
+      },
+      select: { product: { select: { slug: true } } },
+    });
     await tx.review.updateMany({
       where: {
-        requesterCustomerId: customerId,
         authorDisplayName: { not: "Cliente verificado" },
+        OR: [{ requesterCustomerId: customerId }, { orderItem: { order: { customerId } } }],
       },
       data: { authorDisplayName: "Cliente verificado" },
     });
@@ -732,7 +759,10 @@ export class AccountService {
         },
       });
     }
-    return { customerId, anonymizedAt: now };
+    const affectedReviewProductSlugs = [
+      ...new Set(affectedReviews.map((review) => review.product.slug)),
+    ];
+    return { customerId, anonymizedAt: now, affectedReviewProductSlugs };
   }
 
   async getDaneDirectory() {

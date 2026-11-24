@@ -9,11 +9,19 @@ const headers = {
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
-async function readBody(request: Request): Promise<string> {
-  const declared = Number(request.headers.get("content-length") ?? "0");
-  if (!Number.isFinite(declared) || declared < 0 || declared > maximumBodyBytes) {
+function declaredBodyLength(request: Request): number | null {
+  const value = request.headers.get("content-length");
+  if (value === null) return null;
+  if (!/^[0-9]+$/.test(value)) throw new RangeError("Invalid body size.");
+  const declared = Number(value);
+  if (!Number.isSafeInteger(declared) || declared > maximumBodyBytes) {
     throw new RangeError("Invalid body size.");
   }
+  return declared;
+}
+
+async function readBody(request: Request): Promise<string> {
+  declaredBodyLength(request);
   if (!request.body) return "";
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -32,10 +40,11 @@ async function readBody(request: Request): Promise<string> {
   } finally {
     reader.releaseLock();
   }
-  return Buffer.concat(
-    chunks.map((chunk) => Buffer.from(chunk)),
-    total,
-  ).toString("utf8");
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
+  } catch {
+    throw new SyntaxError("Invalid UTF-8 body.");
+  }
 }
 
 export function GET(): Response {
@@ -51,18 +60,25 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json({ error: "JSON is required." }, { status: 415, headers });
   }
   try {
+    const url = new URL(request.url);
+    const queryDataIds = url.searchParams.getAll("data.id");
+    if (queryDataIds.length > 1) {
+      return Response.json({ error: "Invalid webhook." }, { status: 400, headers });
+    }
     const body = await readBody(request);
-    const queryDataId = new URL(request.url).searchParams.get("data.id");
     const result = await channelOrderService().enqueueNotification({
       body,
       requestId: request.headers.get("x-request-id"),
       signature: request.headers.get("x-signature"),
-      queryDataId,
+      queryDataId: queryDataIds[0] ?? null,
     });
     return Response.json(result, { status: 202, headers });
   } catch (error) {
     if (error instanceof RangeError) {
       return Response.json({ error: "Payload too large." }, { status: 413, headers });
+    }
+    if (error instanceof SyntaxError) {
+      return Response.json({ error: "Invalid webhook." }, { status: 400, headers });
     }
     if (error instanceof MercadoLibreCatalogError && error.code === "INVALID_INPUT") {
       return Response.json({ error: "Webhook authentication failed." }, { status: 401, headers });
@@ -71,9 +87,10 @@ export async function POST(request: Request): Promise<Response> {
       return Response.json({ error: "Invalid webhook." }, { status: 400, headers });
     }
     if (error instanceof ChannelOrderError) {
-      const status =
-        error.code === "NOT_FOUND" ? 404 : error.code === "REAUTH_REQUIRED" ? 409 : 400;
-      return Response.json({ error: "Webhook could not be accepted." }, { status, headers });
+      if (["NOT_FOUND", "FORBIDDEN", "REAUTH_REQUIRED"].includes(error.code)) {
+        return Response.json({ error: "Webhook authentication failed." }, { status: 401, headers });
+      }
+      return Response.json({ error: "Invalid webhook." }, { status: 400, headers });
     }
     return Response.json({ error: "Webhook processing failed." }, { status: 500, headers });
   }

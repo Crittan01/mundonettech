@@ -18,6 +18,7 @@ import { seedCatalogFixture } from "../scripts/lib/catalog-test-fixture.mjs";
 import { seedInventoryFixture } from "../scripts/lib/inventory-test-fixture.mjs";
 import { seedPricingFixture } from "../scripts/lib/pricing-test-fixture.mjs";
 import { seedCheckoutFixture, seedPaymentFixture } from "../scripts/lib/checkout-test-fixture.mjs";
+import { withSystemProviderVault } from "./helpers/system-provider-vault.mjs";
 
 const resendCredentialId = randomUUID();
 const dianCredentialId = randomUUID();
@@ -61,7 +62,7 @@ const plaintext = new Map([
   [resendCredentialId, new TextEncoder().encode(JSON.stringify(resend))],
   [dianCredentialId, new TextEncoder().encode(JSON.stringify(dian))],
 ]);
-const vault = {
+const vault = withSystemProviderVault({
   async list() {
     return {
       items: [
@@ -75,7 +76,7 @@ const vault = {
     if (!value) throw new Error("Unknown test credential");
     return Uint8Array.from(value);
   },
-};
+});
 
 let harness;
 let sql;
@@ -181,7 +182,7 @@ before(async () => {
   uncertain = false;
   transientEmail = false;
   email = new EmailService(db, {
-    vault,
+    vault: vault.forSystemProvider("resend"),
     publicSiteUrl: "https://example.test",
     providerFactory: () => ({
       async send(input) {
@@ -196,7 +197,7 @@ before(async () => {
     }),
   });
   invoice = new InvoiceService(db, {
-    vault,
+    vault: vault.forSystemProvider("dian"),
     environment: "LOCAL",
     providerFactory: () => ({
       async transmit(input) {
@@ -422,7 +423,7 @@ describe("F3.4 domain worker over the real outbox", () => {
       },
     });
     const shipping = new ShippingService(db, {
-      vault,
+      vault: vault.forSystemProvider("aveonline"),
       environment: "LOCAL",
       providerFactory: () => {
         throw new ShippingProviderError(
@@ -436,7 +437,7 @@ describe("F3.4 domain worker over the real outbox", () => {
       shipping,
       email,
       invoice,
-      vault,
+      vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "https://example.test",
       storeName: "Tienda de pruebas",
       receiptTokenForSubmission: () => "x".repeat(43),

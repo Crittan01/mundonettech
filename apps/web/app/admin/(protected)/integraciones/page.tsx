@@ -18,7 +18,11 @@ import {
   metaCapiService,
 } from "@/lib/integrations";
 import { getMetaCatalogFeed } from "@/lib/seo-data";
-import { requireAdminPage } from "@/lib/security/admin-auth";
+import {
+  AdminAuthorizationError,
+  getAdminSession,
+  requireAdminPage,
+} from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Integraciones y bóveda" };
 
@@ -45,17 +49,41 @@ const feedIssueLabels: Record<MetaCatalogIssueCode, string> = {
 
 export default async function IntegrationsPage() {
   const session = await requireAdminPage("integrations:read");
+  let recentSession;
+  try {
+    recentSession = await getAdminSession({
+      permission: "integrations:read",
+      requireRecentMfa: true,
+    });
+  } catch (error) {
+    if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
+      return (
+        <div className="space-y-6 rounded-xl border border-border bg-card p-5">
+          <div>
+            <h1 className="text-3xl font-bold">Integraciones y bóveda</h1>
+            <p className="mt-2 text-sm text-muted-foreground" role="alert">
+              Confirma tu autenticador para leer los descriptores y eventos de integraciones.
+            </p>
+          </div>
+          <CmsStepUp session={session} />
+        </div>
+      );
+    }
+    throw error;
+  }
   const environment = getIntegrationEnvironment();
   const [credentials, feed, metaEvents] = await Promise.all([
-    getIntegrationCredentialVault().list({ includeRevoked: true, limit: 100 }),
+    getIntegrationCredentialVault().list(recentSession.profile.id, {
+      includeRevoked: true,
+      limit: 100,
+    }),
     getMetaCatalogFeed(),
-    metaCapiService().listEvents(50),
+    metaCapiService().listEvents(recentSession.profile.id, 50),
   ]);
-  const canWrite = hasAdminPermission(session.profile.role, "integrations:write");
+  const canWrite = hasAdminPermission(recentSession.profile.role, "integrations:write");
   const items: IntegrationCredentialView[] = credentials.items.map((credential) => ({
     id: credential.id,
     provider: credential.provider,
-    accountName: credential.accountName,
     environment: credential.environment,
     keyVersion: credential.keyVersion,
     createdAt: credential.createdAt.toISOString(),
@@ -206,7 +234,7 @@ export default async function IntegrationsPage() {
               <li key={credential.id} className="rounded-xl border border-border bg-card p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div>
-                    <h3 className="text-lg font-semibold">{credential.accountName}</h3>
+                    <h3 className="text-lg font-semibold">Credencial {credential.id}</h3>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {credential.provider} · {credential.environment} · versión de clave{" "}
                       {credential.keyVersion}
@@ -247,11 +275,7 @@ export default async function IntegrationsPage() {
                           credential.provider === "meta" ? (
                           <OperationalCredentialForm
                             environment={environment}
-                            credential={{
-                              id: credential.id,
-                              provider: credential.provider,
-                              accountName: credential.accountName,
-                            }}
+                            credential={{ id: credential.id, provider: credential.provider }}
                           />
                         ) : (
                           <p className="text-sm text-muted-foreground">

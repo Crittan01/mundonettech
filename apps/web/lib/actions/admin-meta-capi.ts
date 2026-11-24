@@ -26,7 +26,8 @@ export async function reconcileMetaCapiAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = { reference: formString(formData, "reference") };
+  const reference = inputSchema.shape.reference.safeParse(formString(formData, "reference"));
+  const values = reference.success ? { reference: reference.data } : undefined;
   try {
     const session = await getAdminSession({
       permission: "integrations:write",

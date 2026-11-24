@@ -2,14 +2,9 @@
 
 import { GrowthError } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
+import { z } from "zod";
 
-import {
-  actionError,
-  actionSuccess,
-  formSnapshot,
-  formString,
-  type ActionState,
-} from "@/lib/action-state";
+import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
 import { growthService } from "@/lib/growth";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 import { clearReferralCode } from "@/lib/security/referral";
@@ -28,18 +23,21 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
   return actionError("No pudimos completar la operación. Inténtalo de nuevo.", values);
 }
 
+const referralCodeSchema = z.string().regex(/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{12}$/i);
+
 export async function createReferralCodeAction(
   _previous: ActionState,
-  formData: FormData,
+  _formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  void _previous;
+  void _formData;
   try {
     const { profile } = await requireCustomerPage();
     const result = await growthService().createReferralCode(profile.id);
     revalidatePath("/mi-cuenta/beneficios");
     return actionSuccess(`Tu código ${result.code} está listo para compartir.`);
   } catch (error) {
-    return failure(error, values);
+    return failure(error, {});
   }
 }
 
@@ -47,13 +45,15 @@ export async function attributeReferralAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  let values: Record<string, string> = {};
   try {
     const { profile } = await requireCustomerPage();
-    const result = await growthService().attributeReferral(
-      profile.id,
-      formString(formData, "code"),
-    );
+    const parsed = referralCodeSchema.safeParse(formString(formData, "code"));
+    if (!parsed.success) {
+      return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.");
+    }
+    values = { code: parsed.data };
+    const result = await growthService().attributeReferral(profile.id, parsed.data);
     await clearReferralCode();
     revalidatePath("/mi-cuenta/beneficios");
     return actionSuccess(

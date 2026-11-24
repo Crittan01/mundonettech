@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { initialActionState, type ActionState } from "@/lib/action-state";
 import {
+  cancelCustomerAuthRequestAction,
   registerCustomerAction,
   requestCustomerOtpAction,
   requestCustomerRecoveryAction,
@@ -99,6 +100,16 @@ function PasswordFields({ state, idPrefix }: { state: ActionState; idPrefix: str
   );
 }
 
+function CancelRequestForm() {
+  return (
+    <form action={cancelCustomerAuthRequestAction}>
+      <Button type="submit" variant="outline" className="w-full">
+        Cancelar solicitud
+      </Button>
+    </form>
+  );
+}
+
 export function RegistrationForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(registerCustomerAction, initialActionState);
   const [email, setEmail] = useState("");
@@ -114,10 +125,7 @@ export function RegistrationForm({ siteKey, nonce }: SecurityProps) {
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_register" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
-        <Link
-          className="block text-sm font-medium text-primary underline"
-          href={`/verificar-correo?mode=signup&email=${encodeURIComponent(email)}`}
-        >
+        <Link className="block text-sm font-medium text-primary underline" href="/verificar-correo">
           Ingresar el código
         </Link>
       ) : null}
@@ -137,10 +145,7 @@ export function CustomerLoginForm({ siteKey, nonce }: SecurityProps) {
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_login" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
-        <Link
-          className="block text-sm font-medium text-primary underline"
-          href={`/verificar-correo?mode=email&email=${encodeURIComponent(email)}`}
-        >
+        <Link className="block text-sm font-medium text-primary underline" href="/verificar-correo">
           Ingresar el código
         </Link>
       ) : null}
@@ -168,10 +173,7 @@ export function RecoveryRequestForm({ siteKey, nonce }: SecurityProps) {
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_recovery" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
-        <Link
-          className="block text-sm font-medium text-primary underline"
-          href={`/recuperar?code=1&email=${encodeURIComponent(email)}`}
-        >
+        <Link className="block text-sm font-medium text-primary underline" href="/recuperar?code=1">
           Ingresar código y nueva contraseña
         </Link>
       ) : null}
@@ -182,78 +184,68 @@ export function RecoveryRequestForm({ siteKey, nonce }: SecurityProps) {
   );
 }
 
-export function OtpVerificationForm({
-  siteKey,
-  nonce,
-  defaultEmail,
-  mode,
-}: SecurityProps & { defaultEmail: string; mode: "signup" | "email" }) {
+export function OtpVerificationForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(verifyCustomerOtpAction, initialActionState);
-  const [email, setEmail] = useState(defaultEmail);
   return (
-    <form action={action} className="space-y-5">
-      <EmailInput
-        value={email}
-        onChange={setEmail}
-        state={state}
-        errorId="verification-email-error"
-      />
-      <input type="hidden" name="mode" value={mode} />
-      <div className="space-y-2">
-        <Label htmlFor="code">Código de seis dígitos</Label>
-        <Input
-          id="code"
-          name="code"
-          inputMode="numeric"
-          autoComplete="one-time-code"
-          pattern="[0-9]{6}"
-          maxLength={6}
-          required
-          className="text-center text-2xl tracking-[0.4em]"
-        />
-      </div>
-      <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_verify" state={state} />
-      <FormMessage state={state} />
-      <Button type="submit" className="w-full" disabled={pending}>
-        {pending ? "Verificando…" : "Verificar código"}
-      </Button>
-    </form>
+    <div className="space-y-3">
+      <form action={action} className="space-y-5">
+        <p className="text-sm text-muted-foreground">
+          Ingresa el código enviado al correo asociado a esta solicitud. El correo queda protegido
+          por una cookie cifrada y no se incluye en el enlace.
+        </p>
+        <div className="space-y-2">
+          <Label htmlFor="code">Código de seis dígitos</Label>
+          <Input
+            id="code"
+            name="code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            required
+            className="text-center text-2xl tracking-[0.4em]"
+          />
+        </div>
+        <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_verify" state={state} />
+        <FormMessage state={state} />
+        <Button type="submit" className="w-full" disabled={pending}>
+          {pending ? "Verificando…" : "Verificar código"}
+        </Button>
+      </form>
+      <CancelRequestForm />
+    </div>
   );
 }
 
-export function PasswordResetForm({
-  siteKey,
-  nonce,
-  defaultEmail,
-}: SecurityProps & { defaultEmail: string }) {
+export function PasswordResetForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(resetCustomerPasswordAction, initialActionState);
-  const [email, setEmail] = useState(defaultEmail);
   return (
-    <form action={action} className="space-y-5">
-      <EmailInput
-        value={email}
-        onChange={setEmail}
-        state={state}
-        errorId="recovery-reset-email-error"
-      />
-      <div className="space-y-2">
-        <Label htmlFor="code">Código de recuperación</Label>
-        <Input
-          id="code"
-          name="code"
-          inputMode="numeric"
-          autoComplete="one-time-code"
-          pattern="[0-9]{6}"
-          maxLength={6}
-          required
-        />
-      </div>
-      <PasswordFields state={state} idPrefix="recovery-reset" />
-      <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_reset" state={state} />
-      <FormMessage state={state} />
-      <Button type="submit" className="w-full" disabled={pending}>
-        {pending ? "Actualizando…" : "Actualizar contraseña e ingresar"}
-      </Button>
-    </form>
+    <div className="space-y-3">
+      <form action={action} className="space-y-5">
+        <p className="text-sm text-muted-foreground">
+          El correo de recuperación permanece en una cookie cifrada, HttpOnly y con vencimiento de
+          diez minutos.
+        </p>
+        <div className="space-y-2">
+          <Label htmlFor="code">Código de recuperación</Label>
+          <Input
+            id="code"
+            name="code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            required
+          />
+        </div>
+        <PasswordFields state={state} idPrefix="recovery-reset" />
+        <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_reset" state={state} />
+        <FormMessage state={state} />
+        <Button type="submit" className="w-full" disabled={pending}>
+          {pending ? "Actualizando…" : "Actualizar contraseña e ingresar"}
+        </Button>
+      </form>
+      <CancelRequestForm />
+    </div>
   );
 }

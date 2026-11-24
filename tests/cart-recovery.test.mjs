@@ -17,6 +17,7 @@ import {
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
 import { seedCatalogFixture } from "../scripts/lib/catalog-test-fixture.mjs";
 import { seedInventoryFixture } from "../scripts/lib/inventory-test-fixture.mjs";
+import { withSystemProviderVault } from "./helpers/system-provider-vault.mjs";
 
 const resendCredentialId = randomUUID();
 const svixSecret = `whsec_${Buffer.from("cart-recovery-test-secret-32-bytes").toString("base64")}`;
@@ -30,7 +31,7 @@ const resend = {
   unsubscribeSecret,
   apiUrl: "https://api.resend.com/emails",
 };
-const vault = {
+const vault = withSystemProviderVault({
   async list() {
     return { items: [{ id: resendCredentialId, provider: "resend", revokedAt: null }] };
   },
@@ -38,7 +39,7 @@ const vault = {
     if (id !== resendCredentialId) throw new Error("Unknown credential");
     return new TextEncoder().encode(JSON.stringify(resend));
   },
-};
+});
 
 let harness;
 let db;
@@ -169,7 +170,7 @@ before(async () => {
   });
   providerCalls = [];
   email = new EmailService(db, {
-    vault,
+    vault: vault.forSystemProvider("resend"),
     publicSiteUrl: "https://example.test",
     providerFactory: () => ({
       async send(input) {
@@ -182,10 +183,16 @@ before(async () => {
   lifecycle = new OrderLifecycleService(db);
   worker = new DomainEventWorker(db, {
     workerId: "worker:cart-recovery",
-    shipping: new ShippingService(db, { vault, environment: "LOCAL" }),
+    shipping: new ShippingService(db, {
+      vault: vault.forSystemProvider("aveonline"),
+      environment: "LOCAL",
+    }),
     email,
-    invoice: new InvoiceService(db, { vault, environment: "LOCAL" }),
-    vault,
+    invoice: new InvoiceService(db, {
+      vault: vault.forSystemProvider("dian"),
+      environment: "LOCAL",
+    }),
+    vault: vault.forSystemProvider("resend"),
     publicSiteUrl: "https://example.test",
     storeName: "Tienda de pruebas",
     receiptTokenForSubmission: () => "x".repeat(43),
@@ -281,6 +288,7 @@ describe("F5.1 — abandoned-cart recovery with privacy enforcement", () => {
         marketingEmail: false,
         advertising: false,
       },
+      customer.updatedAt,
       { ipHash: hash(), userAgentHash: hash() },
     );
     await worker.runBatch(10);

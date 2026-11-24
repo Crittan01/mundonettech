@@ -1721,13 +1721,23 @@ export class ChannelOrderService {
 
   async appendLedgerAdjustment(options: {
     readonly orderId: string;
+    readonly expectedVersion: number;
+    readonly idempotencyKey: string;
     readonly amountCents: bigint;
     readonly direction: ChannelLedgerDirection;
     readonly evidenceReference: string;
     readonly reasonCode: string;
     readonly audit: ChannelAuditContext;
-  }): Promise<void> {
+  }): Promise<{ entry: ChannelLedgerEntryView; replayed: boolean }> {
     assertUuid(options.orderId, "orderId");
+    assertUuid(options.idempotencyKey, "idempotencyKey");
+    if (
+      !Number.isInteger(options.expectedVersion) ||
+      options.expectedVersion < 0 ||
+      options.expectedVersion > 2_147_483_647
+    ) {
+      throw new ChannelOrderError("INVALID_INPUT", "The order version is invalid.");
+    }
     if (typeof options.amountCents !== "bigint" || options.amountCents <= 0n) {
       throw new ChannelOrderError(
         "INVALID_INPUT",
@@ -1739,9 +1749,10 @@ export class ChannelOrderService {
     }
     const evidenceReference = evidence(options.evidenceReference, "evidenceReference");
     const reasonCode = reason(options.reasonCode);
-    await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
-    await this.actor(this.db, options.audit.actorAdminUserId, "finance:read");
-    await inInventoryTransaction(this.db, async (tx) => {
+    const idempotencyKey = options.idempotencyKey.toLowerCase();
+    return inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+      await this.actor(tx, options.audit.actorAdminUserId, "finance:read");
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
       const order = await tx.channelOrder.findUnique({
         where: { id: options.orderId },
@@ -1751,16 +1762,40 @@ export class ChannelOrderService {
       if (order.account.environment !== this.options.ring.environment) {
         throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.");
       }
-      const now = await this.now(tx);
-      const request = {
+      const deduplicationKey = `channel-ledger:${order.id}:MANUAL:${idempotencyKey}`;
+      const hash = digest({
         orderId: order.id,
+        expectedVersion: options.expectedVersion,
+        idempotencyKey,
+        actorAdminUserId: options.audit.actorAdminUserId,
         amountCents: options.amountCents,
         direction: options.direction,
         evidenceReference,
         reasonCode,
-        requestId: options.audit.requestId,
-      };
-      const hash = digest(request);
+      });
+      const expectedHash = Buffer.from(hash).toString("hex");
+      const existing = await tx.channelLedgerEntry.findUnique({
+        where: { deduplicationKey },
+      });
+      if (existing) {
+        if (
+          existing.orderId !== order.id ||
+          existing.accountId !== order.accountId ||
+          existing.entryType !== "MANUAL_ADJUSTMENT" ||
+          existing.createdByAdminUserId !== options.audit.actorAdminUserId ||
+          sourceHash(existing) !== expectedHash
+        ) {
+          throw new ChannelOrderError(
+            "CONFLICT",
+            "The adjustment idempotency key was used for another request.",
+          );
+        }
+        return { entry: ledgerView(existing), replayed: true };
+      }
+      if (order.version !== options.expectedVersion) {
+        throw new ChannelOrderError("CONFLICT", "The order changed before the adjustment.");
+      }
+      const now = await this.now(tx);
       const entry = await tx.channelLedgerEntry.create({
         data: {
           accountId: order.accountId,
@@ -1768,13 +1803,17 @@ export class ChannelOrderService {
           entryType: "MANUAL_ADJUSTMENT",
           direction: options.direction,
           amountCents: options.amountCents,
-          deduplicationKey: `channel-ledger:${order.id}:MANUAL:${options.audit.requestId}`,
+          deduplicationKey,
           sourceHash: Buffer.from(hash),
           evidenceReference,
           reasonCode,
           occurredAt: now,
           createdByAdminUserId: options.audit.actorAdminUserId,
         },
+      });
+      await tx.channelOrder.update({
+        where: { id: order.id },
+        data: { version: { increment: 1 }, updatedAt: now },
       });
       await this.audit(
         tx,
@@ -1790,6 +1829,7 @@ export class ChannelOrderService {
           reasonCode,
         },
       );
+      return { entry: ledgerView(entry), replayed: false };
     });
   }
 

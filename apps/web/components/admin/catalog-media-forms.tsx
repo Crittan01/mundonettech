@@ -1,6 +1,7 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useRouter } from "next/navigation";
+import { type FormEvent, useActionState, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -8,11 +9,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { initialActionState } from "@/lib/action-state";
+import { archiveCatalogMediaAction, updateCatalogMediaAction } from "@/lib/actions/admin-catalog";
 import {
-  archiveCatalogMediaAction,
-  updateCatalogMediaAction,
-  uploadCatalogMediaAction,
-} from "@/lib/actions/admin-catalog";
+  AdminMediaUploadError,
+  adminMediaUploadMessage,
+  uploadAdminMedia,
+} from "@/lib/media-upload-client";
 
 type MediaKind = "IMAGE" | "SPIN_360" | "MODEL_3D";
 
@@ -23,16 +25,60 @@ export function CatalogMediaUploadForm({
   productId: string;
   variants: Array<{ id: string; sku: string }>;
 }) {
-  const [state, action, pending] = useActionState(uploadCatalogMediaAction, initialActionState);
+  const router = useRouter();
+  const submitting = useRef(false);
   const [mediaType, setMediaType] = useState<MediaKind>("IMAGE");
-  const values = state.status === "error" ? state.values : undefined;
+  const [status, setStatus] = useState<{
+    phase: "idle" | "uploading" | "success" | "error";
+    message: string;
+    code: string;
+    progress: number | null;
+  }>({ phase: "idle", message: "", code: "", progress: null });
   const id = `catalog-media-${productId}`;
-  const altText = values?.altText ?? "";
-  const variantId = values?.variantId ?? "";
+  const pending = status.phase === "uploading";
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (submitting.current) return;
+    submitting.current = true;
+    const form = event.currentTarget;
+    setStatus({ phase: "uploading", message: "", code: "", progress: 0 });
+    try {
+      const result = await uploadAdminMedia({
+        url: "/api/admin/catalog-media/upload",
+        formData: new FormData(form),
+        onProgress: (progress) =>
+          setStatus((current) =>
+            current.phase === "uploading" ? { ...current, progress } : current,
+          ),
+      });
+      form.reset();
+      setMediaType("IMAGE");
+      setStatus({
+        phase: "success",
+        message: result.reused
+          ? "El mismo contenido ya estaba asociado; se reutilizó sin duplicar el registro."
+          : "Medio validado, almacenado en R2 y publicado en la ficha del producto.",
+        code: "",
+        progress: 100,
+      });
+      router.refresh();
+    } catch (error) {
+      const code = error instanceof AdminMediaUploadError ? error.code : "upload_failed";
+      setStatus({
+        phase: "error",
+        message: adminMediaUploadMessage(code),
+        code,
+        progress: null,
+      });
+    } finally {
+      submitting.current = false;
+    }
+  }
 
   return (
     <form
-      action={action}
+      onSubmit={submit}
       aria-label="Añadir medio del producto"
       aria-busy={pending}
       className="space-y-5 rounded-xl border border-border bg-card p-5"
@@ -55,13 +101,7 @@ export function CatalogMediaUploadForm({
         </div>
         <div className="space-y-2">
           <Label htmlFor={`${id}-variant`}>Asociación</Label>
-          <Select
-            key={`${id}-variant-${variantId}`}
-            id={`${id}-variant`}
-            name="variantId"
-            defaultValue={variantId}
-            disabled={pending}
-          >
+          <Select id={`${id}-variant`} name="variantId" defaultValue="" disabled={pending}>
             <option value="">Producto y todas sus variantes</option>
             {variants.map((variant) => (
               <option key={variant.id} value={variant.id}>
@@ -74,10 +114,9 @@ export function CatalogMediaUploadForm({
       <div className="space-y-2">
         <Label htmlFor={`${id}-alt`}>Texto alternativo</Label>
         <Input
-          key={`${id}-alt-${altText}`}
           id={`${id}-alt`}
           name="altText"
-          defaultValue={altText}
+          defaultValue=""
           required
           maxLength={250}
           disabled={pending}
@@ -159,7 +198,43 @@ export function CatalogMediaUploadForm({
       <Button type="submit" disabled={pending}>
         {pending ? "Validando, procesando y subiendo…" : "Procesar y publicar medio"}
       </Button>
-      <FormMessage state={state} />
+      {pending ? (
+        <div role="status" aria-live="polite" className="space-y-2 text-sm text-muted-foreground">
+          <p>
+            {status.progress === null
+              ? "Subiendo datos; el navegador no puede calcular el progreso."
+              : `Carga ${status.progress}% completada. No cierres esta página.`}
+          </p>
+          {status.progress !== null ? (
+            <progress
+              aria-label="Progreso de carga del medio"
+              max={100}
+              value={status.progress}
+              className="h-2 w-full"
+            />
+          ) : null}
+        </div>
+      ) : null}
+      {status.phase === "success" ? (
+        <p role="status" className="text-sm font-medium text-success">
+          {status.message}
+        </p>
+      ) : null}
+      {status.phase === "error" ? (
+        <div role="alert" className="space-y-2 text-sm text-destructive">
+          <p>{status.message}</p>
+          {status.code === "mfa_stale" ? (
+            <a href="/admin/seguridad" className="font-medium text-primary underline">
+              Confirmar autenticador en seguridad
+            </a>
+          ) : null}
+          {status.code === "unauthorized" ? (
+            <a href="/admin/login?reason=security" className="font-medium text-primary underline">
+              Volver a ingresar
+            </a>
+          ) : null}
+        </div>
+      ) : null}
     </form>
   );
 }

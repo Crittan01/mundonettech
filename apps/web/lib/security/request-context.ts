@@ -1,10 +1,10 @@
 import "server-only";
 
-import { createHmac } from "node:crypto";
-import { isIP } from "node:net";
-
+import { sanitizeAuditValue } from "@mundonettech/core";
 import type { Prisma, PrismaClient } from "@mundonettech/db";
 import { ipAddress } from "@vercel/functions";
+import { createHmac } from "node:crypto";
+import { isIP } from "node:net";
 import { headers } from "next/headers";
 
 import { getSecurityEventPepper } from "@/lib/env";
@@ -73,7 +73,7 @@ export async function recordSecurityEvent(
   },
 ): Promise<void> {
   try {
-    const metadata = JSON.parse(JSON.stringify(options.metadata ?? {})) as Prisma.InputJsonValue;
+    const metadata = sanitizeAuditValue(options.metadata ?? {}) as Prisma.InputJsonValue;
     await db.securityEvent.create({
       data: {
         eventType: options.eventType,

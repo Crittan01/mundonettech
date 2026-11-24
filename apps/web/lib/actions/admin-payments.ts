@@ -22,6 +22,7 @@ import { z } from "zod";
 import {
   actionError,
   actionSuccess,
+  formEntries,
   formSnapshot,
   formString,
   type ActionState,
@@ -42,8 +43,39 @@ import {
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-async function authorize() {
+const snapshotFields = new Set([
+  "carrier",
+  "collectedCents",
+  "remittedCents",
+  "type",
+  "amountCents",
+  "kind",
+  "expiresAt",
+]);
+function safeSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(
+      ([key, value]) => snapshotFields.has(key) && value.length <= 256,
+    ),
+  );
+}
+
+function assertClosedForm(formData: FormData, allowedFields: readonly string[]): void {
+  const shape: Record<string, z.ZodOptional<z.ZodString>> = {};
+  const values: Record<string, string> = {};
+  for (const field of allowedFields) shape[field] = z.string().optional();
+  for (const [key, value] of formEntries(formData)) {
+    if (typeof value !== "string" || Object.hasOwn(values, key)) {
+      throw new TypeError("Form fields must be unique strings.");
+    }
+    values[key] = value;
+  }
+  z.object(shape).strict().parse(values);
+}
+
+async function authorize(formData: FormData, allowedFields: readonly string[]) {
   const session = await getAdminSession({ permission: "payments:write", requireRecentMfa: true });
+  assertClosedForm(formData, allowedFields);
   const context = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
@@ -51,6 +83,10 @@ async function authorize() {
     userAgentHash: context.userAgentHash,
     requestId: randomUUID(),
   };
+}
+
+function text(value: string, minimum: number, maximum: number): string {
+  return z.string().trim().min(minimum).max(maximum).parse(value);
 }
 
 function failure(error: unknown, values: Record<string, string>): ActionState {
@@ -109,7 +145,8 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
 }
 
 function cents(value: string): bigint {
-  if (!/^[0-9]+$/.test(value)) throw new PaymentValidationError("Amount must be integer cents.");
+  if (!/^[0-9]{1,19}$/.test(value))
+    throw new PaymentValidationError("Amount must be integer cents.");
   const parsed = BigInt(value);
   if (parsed > 9_223_372_036_854_775_807n)
     throw new PaymentValidationError("Amount exceeds BIGINT.");
@@ -129,12 +166,12 @@ export async function confirmBankTransferAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["paymentAttemptId", "externalReference"]);
     const result = await paymentService().confirmBankTransfer({
       paymentAttemptId: z.string().uuid().parse(formString(formData, "paymentAttemptId")),
-      externalReference: formString(formData, "externalReference").trim(),
+      externalReference: text(formString(formData, "externalReference"), 6, 120),
       audit,
     });
     revalidatePaymentViews(result.orderId);
@@ -150,18 +187,28 @@ export async function reconcileCodAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, [
+      "carrier",
+      "reference",
+      "paymentAttemptId",
+      "collectedCents",
+      "remittedCents",
+      "carrierReference",
+    ]);
     const result = await codReconciliationService().reconcile({
-      carrier: formString(formData, "carrier").trim(),
-      reference: formString(formData, "reference").trim(),
+      carrier: text(formString(formData, "carrier"), 1, 120),
+      reference: z
+        .string()
+        .regex(/^[A-Za-z0-9._:-]{3,128}$/)
+        .parse(formString(formData, "reference")),
       items: [
         {
           paymentAttemptId: z.string().uuid().parse(formString(formData, "paymentAttemptId")),
           collectedCents: cents(formString(formData, "collectedCents")),
           remittedCents: cents(formString(formData, "remittedCents")),
-          carrierReference: formString(formData, "carrierReference").trim(),
+          carrierReference: text(formString(formData, "carrierReference"), 3, 120),
         },
       ],
       audit,
@@ -181,9 +228,9 @@ export async function executeRefundAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["refundId"]);
     const refundId = z.string().uuid().parse(formString(formData, "refundId"));
     const db = getDatabase();
     const existing = await db.orderRefund.findUnique({
@@ -210,9 +257,9 @@ export async function completeCompensationAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["transactionId", "externalId"]);
     const transactionId = z.string().uuid().parse(formString(formData, "transactionId"));
     const existing = await getDatabase().paymentTransaction.findUnique({
       where: { id: transactionId },
@@ -220,7 +267,7 @@ export async function completeCompensationAction(
     });
     await paymentRefundService().completeManualTransaction({
       transactionId,
-      externalId: formString(formData, "externalId").trim(),
+      externalId: text(formString(formData, "externalId"), 3, 128),
       audit,
     });
     revalidatePaymentViews(existing?.attempt.orderId);
@@ -234,9 +281,9 @@ export async function voidPaymentAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["paymentAttemptId"]);
     const paymentAttemptId = z.string().uuid().parse(formString(formData, "paymentAttemptId"));
     const existing = await getDatabase().paymentAttempt.findUnique({
       where: { id: paymentAttemptId },
@@ -258,10 +305,16 @@ export async function adjustStoreCreditAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
-    const email = normalizeEmail(formString(formData, "customerEmail"));
+    const audit = await authorize(formData, [
+      "customerEmail",
+      "type",
+      "amountCents",
+      "operationKey",
+      "reason",
+    ]);
+    const email = normalizeEmail(text(formString(formData, "customerEmail"), 3, 320));
     const customer = await getDatabase().customer.findFirst({
       where: { email, status: "ACTIVE", deletedAt: null },
       select: { id: true },
@@ -271,8 +324,11 @@ export async function adjustStoreCreditAction(
       customerId: customer.id,
       type: z.enum(["GRANT", "WITHDRAWAL"]).parse(formString(formData, "type")),
       amountCents: cents(formString(formData, "amountCents")),
-      operationKey: formString(formData, "operationKey"),
-      reason: formString(formData, "reason").trim(),
+      operationKey: z
+        .string()
+        .regex(/^[A-Za-z0-9._:-]{3,128}$/)
+        .parse(formString(formData, "operationKey")),
+      reason: text(formString(formData, "reason"), 1, 500),
       audit,
     });
     revalidatePath("/admin/pagos");
@@ -288,11 +344,11 @@ export async function blockIdentityAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["kind", "identity", "reason", "expiresAt"]);
     const kind = z.enum(["EMAIL", "PHONE", "DOCUMENT"]).parse(formString(formData, "kind"));
-    const identity = formString(formData, "identity").trim();
+    const identity = text(formString(formData, "identity"), 1, 320);
     const identityHash =
       kind === "EMAIL"
         ? emailIdentityHash(identity)
@@ -301,16 +357,21 @@ export async function blockIdentityAction(
           : documentIdentityHash(identity);
     const rawExpiration = formString(formData, "expiresAt");
     const expiresAt = rawExpiration ? new Date(`${rawExpiration}T23:59:59-05:00`) : undefined;
+    const calendar = rawExpiration ? new Date(`${rawExpiration}T00:00:00Z`) : null;
     if (
       expiresAt &&
-      (!/^\d{4}-\d{2}-\d{2}$/.test(rawExpiration) || Number.isNaN(expiresAt.getTime()))
+      (!/^\d{4}-\d{2}-\d{2}$/.test(rawExpiration) ||
+        !calendar ||
+        Number.isNaN(calendar.getTime()) ||
+        calendar.toISOString().slice(0, 10) !== rawExpiration ||
+        Number.isNaN(expiresAt.getTime()))
     ) {
       return actionError("La fecha de expiración no es válida.", values);
     }
     await blockedIdentityService().block({
       kind,
       identityHash,
-      reason: formString(formData, "reason").trim(),
+      reason: text(formString(formData, "reason"), 1, 500),
       ...(expiresAt ? { expiresAt } : {}),
       audit,
     });
@@ -325,9 +386,9 @@ export async function unblockIdentityAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["blockedIdentityId"]);
     await blockedIdentityService().unblock(
       z.string().uuid().parse(formString(formData, "blockedIdentityId")),
       audit,

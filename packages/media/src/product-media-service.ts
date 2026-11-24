@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { sanitizeAuditValue } from "@mundonettech/core";
 import { Prisma, PrismaClient, type ProductMedia } from "@mundonettech/db";
 
 import { inspectImageMagic } from "./image-safety.js";
@@ -30,6 +31,7 @@ export interface ProductMediaAudit {
   readonly actorAdminUserId: string;
   readonly ipHash: Uint8Array;
   readonly userAgentHash: Uint8Array | null;
+  readonly requestId?: string;
 }
 
 export interface ProductMediaTargetInput {
@@ -154,6 +156,7 @@ function normalizeTarget(input: ProductMediaTargetInput): NormalizedTarget {
 
 function validateAudit(audit: ProductMediaAudit): void {
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+  if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
   if (
     !(audit.ipHash instanceof Uint8Array) ||
     audit.ipHash.byteLength !== 32 ||
@@ -289,9 +292,10 @@ export class ProductMediaService {
         action,
         targetType: "ProductMedia",
         targetId,
+        requestId: audit.requestId ?? null,
         ipHash: Uint8Array.from(audit.ipHash),
         userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-        metadata,
+        metadata: sanitizeAuditValue(metadata) as Prisma.JsonObject,
       },
     });
   }
@@ -450,14 +454,19 @@ export class ProductMediaService {
           },
         });
         await this.writeAudit(tx, audit, "CATALOG_MEDIA_CREATED", created.id, {
-          productId: target.productId,
-          variantId: target.variantId,
-          mediaType: prepared.mediaType,
-          storageKey: prepared.storageKey,
-          usdzKey: prepared.usdzKey,
-          frameCount: prepared.frameCount,
+          before: null,
+          after: {
+            id: created.id,
+            productId: created.productId,
+            variantId: created.variantId,
+            mediaType: created.mediaType,
+            status: created.status,
+            position: created.position,
+            frameCount: created.frameCount,
+            hasUsdz: created.usdzKey !== null,
+            deleted: created.deletedAt !== null,
+          },
           derivativeCount: prepared.derivativeCount,
-          position,
         });
         return { media: created, slug: product.slug, reused: false };
       });
@@ -674,8 +683,8 @@ export class ProductMediaService {
     }
     return this.db.$transaction(async (tx) => {
       const product = await this.lockTarget(tx, { productId, variantId: null });
-      const rows = await tx.$queryRaw<Array<Pick<ProductMedia, "id" | "position" | "altText">>>`
-        SELECT "id", "position", "altText" FROM "ProductMedia"
+      const rows = await tx.$queryRaw<ProductMedia[]>`
+        SELECT * FROM "ProductMedia"
         WHERE "id" = ${mediaId}::uuid AND "productId" = ${productId}::uuid
           AND "deletedAt" IS NULL
         FOR UPDATE
@@ -716,10 +725,28 @@ export class ProductMediaService {
         data: { altText, position: input.position },
       });
       await this.writeAudit(tx, audit, "CATALOG_MEDIA_UPDATED", mediaId, {
-        productId,
-        mediaType: media.mediaType,
-        previousPosition: existing.position,
-        position: input.position,
+        before: {
+          id: existing.id,
+          productId: existing.productId,
+          variantId: existing.variantId,
+          mediaType: existing.mediaType,
+          status: existing.status,
+          position: existing.position,
+          frameCount: existing.frameCount,
+          hasUsdz: existing.usdzKey !== null,
+          deleted: existing.deletedAt !== null,
+        },
+        after: {
+          id: media.id,
+          productId: media.productId,
+          variantId: media.variantId,
+          mediaType: media.mediaType,
+          status: media.status,
+          position: media.position,
+          frameCount: media.frameCount,
+          hasUsdz: media.usdzKey !== null,
+          deleted: media.deletedAt !== null,
+        },
         altTextChanged: existing.altText !== altText,
       });
       return { media, slug: product.slug };
@@ -736,10 +763,8 @@ export class ProductMediaService {
     validateAudit(audit);
     return this.db.$transaction(async (tx) => {
       const product = await this.lockTarget(tx, { productId, variantId: null });
-      const rows = await tx.$queryRaw<
-        Array<{ id: string; mediaType: ProductMedia["mediaType"]; now: Date }>
-      >`
-        SELECT "id", "mediaType", CURRENT_TIMESTAMP AS "now" FROM "ProductMedia"
+      const rows = await tx.$queryRaw<Array<ProductMedia & { now: Date }>>`
+        SELECT "ProductMedia".*, CURRENT_TIMESTAMP AS "now" FROM "ProductMedia"
         WHERE "id" = ${mediaId}::uuid AND "productId" = ${productId}::uuid
           AND "deletedAt" IS NULL
         FOR UPDATE
@@ -751,10 +776,28 @@ export class ProductMediaService {
         data: { deletedAt: existing.now },
       });
       await this.writeAudit(tx, audit, "CATALOG_MEDIA_ARCHIVED", mediaId, {
-        productId,
-        mediaType: existing.mediaType,
-        storageKey: media.storageKey,
-        usdzKey: media.usdzKey,
+        before: {
+          id: existing.id,
+          productId: existing.productId,
+          variantId: existing.variantId,
+          mediaType: existing.mediaType,
+          status: existing.status,
+          position: existing.position,
+          frameCount: existing.frameCount,
+          hasUsdz: existing.usdzKey !== null,
+          deleted: false,
+        },
+        after: {
+          id: media.id,
+          productId: media.productId,
+          variantId: media.variantId,
+          mediaType: media.mediaType,
+          status: media.status,
+          position: media.position,
+          frameCount: media.frameCount,
+          hasUsdz: media.usdzKey !== null,
+          deleted: true,
+        },
       });
       return { media, slug: product.slug };
     });

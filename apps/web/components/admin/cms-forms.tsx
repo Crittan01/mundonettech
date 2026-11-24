@@ -6,8 +6,9 @@ import {
   type CmsSeoImage,
   type StoreSettingsInput,
 } from "@mundonettech/cms";
-import type { ReactNode } from "react";
-import { useActionState, useState } from "react";
+import { useRouter } from "next/navigation";
+import type { FormEvent, ReactNode } from "react";
+import { useActionState, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { CmsSeoPreview } from "@/components/cms/cms-seo-preview";
@@ -31,8 +32,12 @@ import {
   setCmsBlockVisibilityAction,
   updateCmsMediaAltAction,
   updateCmsPageAction,
-  uploadCmsMediaAction,
 } from "@/lib/actions/admin-cms";
+import {
+  AdminMediaUploadError,
+  adminMediaUploadMessage,
+  uploadAdminMedia,
+} from "@/lib/media-upload-client";
 
 type ServerAction = (previous: ActionState, formData: FormData) => Promise<ActionState>;
 const inputClass =
@@ -686,41 +691,124 @@ export function StoreSettingsForm({ settings }: { settings: StoreSettingsInput }
 }
 
 export function CmsMediaUploadForm() {
+  const router = useRouter();
+  const submitting = useRef(false);
+  const [status, setStatus] = useState<{
+    phase: "idle" | "uploading" | "success" | "error";
+    message: string;
+    code: string;
+    progress: number | null;
+  }>({ phase: "idle", message: "", code: "", progress: null });
+  const pending = status.phase === "uploading";
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (submitting.current) return;
+    submitting.current = true;
+    const form = event.currentTarget;
+    setStatus({ phase: "uploading", message: "", code: "", progress: 0 });
+    try {
+      const result = await uploadAdminMedia({
+        url: "/api/admin/cms-media/upload",
+        formData: new FormData(form),
+        onProgress: (progress) =>
+          setStatus((current) =>
+            current.phase === "uploading" ? { ...current, progress } : current,
+          ),
+      });
+      form.reset();
+      setStatus({
+        phase: "success",
+        message: result.reused
+          ? "La imagen ya existía; se reutilizó el activo persistido."
+          : "Imagen procesada, almacenada en R2 y registrada en la mediateca.",
+        code: "",
+        progress: 100,
+      });
+      router.refresh();
+    } catch (error) {
+      const code = error instanceof AdminMediaUploadError ? error.code : "upload_failed";
+      setStatus({
+        phase: "error",
+        message: adminMediaUploadMessage(code),
+        code,
+        progress: null,
+      });
+    } finally {
+      submitting.current = false;
+    }
+  }
+
   return (
-    <StatefulForm
-      action={uploadCmsMediaAction}
-      submitLabel="Procesar y subir imagen"
+    <form
+      onSubmit={submit}
+      aria-label="Subir medio CMS"
+      aria-busy={pending}
       className="space-y-4 rounded-xl border border-border bg-card p-5"
     >
-      {(values) => {
-        const altDefault = values?.altText ?? "";
-        return (
-          <>
-            <div className="space-y-2">
-              <Label htmlFor="media-file">Imagen JPEG, PNG, WebP, HEIC o AVIF</Label>
-              <Input
-                id="media-file"
-                name="file"
-                type="file"
-                accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="media-alt">Texto alternativo</Label>
-              <Input
-                key={`media-alt-${altDefault}`}
-                id="media-alt"
-                name="altText"
-                defaultValue={altDefault}
-                required
-                maxLength={250}
-              />
-            </div>
-          </>
-        );
-      }}
-    </StatefulForm>
+      <div className="space-y-2">
+        <Label htmlFor="media-file">Imagen JPEG, PNG, WebP, HEIC o AVIF</Label>
+        <Input
+          id="media-file"
+          name="file"
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif"
+          required
+          disabled={pending}
+        />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="media-alt">Texto alternativo</Label>
+        <Input
+          id="media-alt"
+          name="altText"
+          defaultValue=""
+          required
+          maxLength={250}
+          disabled={pending}
+        />
+      </div>
+      <Button type="submit" variant="outline" size="sm" disabled={pending}>
+        {pending ? "Procesando y subiendo…" : "Procesar y subir imagen"}
+      </Button>
+      {pending ? (
+        <div role="status" aria-live="polite" className="space-y-2 text-sm text-muted-foreground">
+          <p>
+            {status.progress === null
+              ? "Subiendo datos; el navegador no puede calcular el progreso."
+              : `Carga ${status.progress}% completada. No cierres esta página.`}
+          </p>
+          {status.progress !== null ? (
+            <progress
+              aria-label="Progreso de carga de la imagen CMS"
+              max={100}
+              value={status.progress}
+              className="h-2 w-full"
+            />
+          ) : null}
+        </div>
+      ) : null}
+      {status.phase === "success" ? (
+        <p role="status" className="text-sm font-medium text-success">
+          {status.message}
+        </p>
+      ) : null}
+      {status.phase === "error" ? (
+        <div role="alert" className="space-y-2 text-sm text-destructive">
+          <p>{status.message}</p>
+          {status.code === "mfa_stale" ? (
+            <a href="/admin/seguridad" className="font-medium text-primary underline">
+              Confirmar autenticador en seguridad
+            </a>
+          ) : null}
+          {status.code === "unauthorized" ? (
+            <a href="/admin/login?reason=security" className="font-medium text-primary underline">
+              Volver a ingresar
+            </a>
+          ) : null}
+        </div>
+      ) : null}
+    </form>
   );
 }
 

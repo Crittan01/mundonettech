@@ -1,10 +1,16 @@
-import { maskEmail, maskIdentifier, maskName, maskPhone } from "@mundonettech/core";
+import {
+  hasAdminPermission,
+  isAdminRole,
+  maskEmail,
+  maskIdentifier,
+  maskName,
+  maskPhone,
+} from "@mundonettech/core";
 
 import type {
   OrderStatus,
   PaymentStatus,
   FulfillmentStatus,
-  Prisma,
   PrismaClient,
 } from "./generated/client.js";
 import { assertUuid } from "./inventory-shared.js";
@@ -18,6 +24,11 @@ export interface AdminOrderFilters {
   readonly from?: Date | undefined;
   readonly to?: Date | undefined;
   readonly cursor?: string | undefined;
+}
+
+interface AdminOrderAccess {
+  readonly finance: boolean;
+  readonly payments: boolean;
 }
 
 function listItem(order: {
@@ -46,8 +57,8 @@ function listItem(order: {
   };
 }
 
-function filters(input: AdminOrderFilters): Prisma.OrderWhereInput {
-  const conditions: Prisma.OrderWhereInput[] = [];
+function filters(input: AdminOrderFilters) {
+  const conditions = [];
   if (input.query !== undefined) {
     const query = input.query.trim().toUpperCase();
     if (query.length < 3 || query.length > 64 || !/^[A-Z0-9-]+$/.test(query)) {
@@ -66,9 +77,29 @@ function filters(input: AdminOrderFilters): Prisma.OrderWhereInput {
 }
 
 export class AdminOrderService {
-  constructor(private readonly db: PrismaClient) {}
+  constructor(
+    private readonly db: PrismaClient,
+    private readonly actorAdminUserId: string,
+  ) {
+    assertUuid(actorAdminUserId, "actorAdminUserId");
+  }
+
+  private async access(permission: "orders:read"): Promise<AdminOrderAccess> {
+    const actor = await this.db.adminUser.findFirst({
+      where: { id: this.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+      select: { role: true },
+    });
+    if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
+      throw new Error("Active administrator is not authorized to read orders.");
+    }
+    return {
+      finance: hasAdminPermission(actor.role, "finance:read"),
+      payments: hasAdminPermission(actor.role, "payments:read"),
+    };
+  }
 
   async list(input: AdminOrderFilters = {}): Promise<AdminOrderPage> {
+    await this.access("orders:read");
     const where = filters(input);
     let cursor: { id: string; createdAt: Date } | null = null;
     if (input.cursor) {
@@ -79,7 +110,7 @@ export class AdminOrderService {
       });
       if (!cursor) throw new RangeError("The order cursor no longer exists.");
     }
-    const cursorWhere: Prisma.OrderWhereInput = cursor
+    const cursorWhere = cursor
       ? {
           OR: [
             { createdAt: { lt: cursor.createdAt } },
@@ -89,7 +120,18 @@ export class AdminOrderService {
       : {};
     const records = await this.db.order.findMany({
       where: { AND: [where, cursorWhere] },
-      include: { _count: { select: { items: true } } },
+      select: {
+        id: true,
+        orderNumber: true,
+        createdAt: true,
+        totalCents: true,
+        orderStatus: true,
+        paymentStatus: true,
+        fulfillmentStatus: true,
+        recipientNameSnapshot: true,
+        emailSnapshot: true,
+        _count: { select: { items: true } },
+      },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: 51,
     });
@@ -102,53 +144,176 @@ export class AdminOrderService {
 
   async detail(orderId: string): Promise<AdminOrderDetail | null> {
     assertUuid(orderId, "orderId");
+    const access = await this.access("orders:read");
     const order = await this.db.order.findUnique({
       where: { id: orderId },
-      include: {
+      select: {
+        id: true,
+        orderNumber: true,
+        createdAt: true,
+        confirmedAt: true,
+        orderStatus: true,
+        paymentStatus: true,
+        fulfillmentStatus: true,
+        fulfillmentMethod: true,
+        currency: true,
+        subtotalCents: true,
+        discountCents: true,
+        taxCents: true,
+        shippingCents: true,
+        totalCents: true,
+        emailSnapshot: true,
+        recipientNameSnapshot: true,
+        phoneE164Snapshot: true,
+        buyerDocumentNumberSnapshot: true,
+        addressLine1Snapshot: true,
+        municipalityNameSnapshot: true,
         items: {
-          include: {
-            variant: { include: { product: { select: { trackSerial: true } } } },
-            taxLines: { orderBy: { id: "asc" } },
-            refundItems: { include: { refund: { select: { status: true } } } },
+          select: {
+            id: true,
+            variantId: true,
+            titleSnapshot: true,
+            skuSnapshot: true,
+            quantity: true,
+            unitPriceCents: true,
+            unitCostWacCents: access.finance,
+            discountCents: true,
+            taxCents: true,
+            lineTotalCents: true,
+            variant: { select: { product: { select: { trackSerial: true } } } },
+            taxLines: {
+              select: {
+                id: true,
+                taxGroupCode: true,
+                rule: true,
+                appliedRateBps: true,
+                taxCents: true,
+              },
+              orderBy: { id: "asc" },
+            },
+            refundItems: {
+              select: { quantity: true, refund: { select: { status: true } } },
+            },
           },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         },
-        paymentAttempts: {
-          include: { transactions: { orderBy: [{ createdAt: "asc" }, { id: "asc" }] } },
-          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-          take: 100,
-        },
         shipments: {
-          include: {
-            fulfillment: true,
+          select: {
+            id: true,
+            originLocationId: true,
+            status: true,
+            trackingCode: true,
+            promisedAt: true,
+            shippedAt: true,
+            deliveredAt: true,
+            fulfillment: { select: { status: true, provider: true } },
             items: {
-              include: {
+              select: {
+                id: true,
+                orderItemId: true,
+                quantity: true,
                 orderItem: {
-                  include: { variant: { include: { product: { select: { trackSerial: true } } } } },
+                  select: {
+                    variantId: true,
+                    titleSnapshot: true,
+                    variant: { select: { product: { select: { trackSerial: true } } } },
+                  },
                 },
               },
               orderBy: { id: "asc" },
             },
-            packages: { orderBy: [{ packageNumber: "asc" }, { id: "asc" }] },
+            packages: {
+              select: { id: true, packageNumber: true, status: true, trackingCode: true },
+              orderBy: [{ packageNumber: "asc" }, { id: "asc" }],
+            },
           },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         },
-        serializedUnits: { orderBy: [{ variantId: "asc" }, { serial: "asc" }], take: 10_000 },
-        refunds: {
-          include: {
-            items: { orderBy: { id: "asc" } },
+        serializedUnits: {
+          select: {
+            id: true,
+            serial: true,
+            imei: true,
+            variantId: true,
+            locationId: true,
+            shipmentId: true,
+            status: true,
+          },
+          orderBy: [{ variantId: "asc" }, { serial: "asc" }],
+          take: 10_000,
+        },
+        statusEvents: {
+          select: {
+            id: true,
+            occurredAt: true,
+            orderStatus: true,
+            paymentStatus: true,
+            fulfillmentStatus: true,
+            reason: true,
+          },
+          orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+          take: 500,
+        },
+      },
+    });
+    if (!order) return null;
+    const paymentAttempts = access.payments
+      ? await this.db.paymentAttempt.findMany({
+          where: { orderId },
+          select: {
+            id: true,
+            provider: true,
+            status: true,
+            reference: true,
+            amountCents: true,
+            createdAt: true,
+            transactions: {
+              select: {
+                id: true,
+                kind: true,
+                status: true,
+                amountCents: true,
+                externalId: true,
+                createdAt: true,
+              },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            },
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          take: 100,
+        })
+      : [];
+    const refunds = access.payments
+      ? await this.db.orderRefund.findMany({
+          where: { orderId },
+          select: {
+            id: true,
+            reason: true,
+            status: true,
+            note: true,
+            subtotalCents: true,
+            taxCents: true,
+            shippingCents: true,
+            totalCents: true,
+            createdAt: true,
+            processedAt: true,
+            items: { select: { orderItemId: true, quantity: true }, orderBy: { id: "asc" } },
             paymentTransactions: {
               where: { kind: "REFUND" },
+              select: {
+                id: true,
+                provider: true,
+                status: true,
+                amountCents: true,
+                externalId: true,
+              },
               orderBy: [{ createdAt: "asc" }, { id: "asc" }],
             },
           },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
           take: 200,
-        },
-        statusEvents: { orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 500 },
-      },
-    });
-    if (!order) return null;
+        })
+      : [];
     const address = [order.addressLine1Snapshot, order.municipalityNameSnapshot]
       .filter(Boolean)
       .join(", ");
@@ -182,7 +347,7 @@ export class AdminOrderService {
         quantity: item.quantity,
         trackSerial: item.variant.product.trackSerial,
         unitPriceCents: item.unitPriceCents.toString(),
-        unitCostWacCents: item.unitCostWacCents.toString(),
+        ...(access.finance ? { unitCostWacCents: item.unitCostWacCents.toString() } : {}),
         discountCents: item.discountCents.toString(),
         taxCents: item.taxCents.toString(),
         lineTotalCents: item.lineTotalCents.toString(),
@@ -196,22 +361,26 @@ export class AdminOrderService {
           taxCents: tax.taxCents.toString(),
         })),
       })),
-      payments: order.paymentAttempts.map((attempt) => ({
-        id: attempt.id,
-        provider: attempt.provider,
-        status: attempt.status,
-        reference: maskIdentifier(attempt.reference),
-        amountCents: attempt.amountCents.toString(),
-        createdAt: attempt.createdAt.toISOString(),
-        transactions: attempt.transactions.map((transaction) => ({
-          id: transaction.id,
-          kind: transaction.kind,
-          status: transaction.status,
-          amountCents: transaction.amountCents.toString(),
-          externalId: transaction.externalId ? maskIdentifier(transaction.externalId) : null,
-          createdAt: transaction.createdAt.toISOString(),
-        })),
-      })),
+      ...(access.payments
+        ? {
+            payments: paymentAttempts.map((attempt) => ({
+              id: attempt.id,
+              provider: attempt.provider,
+              status: attempt.status,
+              reference: maskIdentifier(attempt.reference),
+              amountCents: attempt.amountCents.toString(),
+              createdAt: attempt.createdAt.toISOString(),
+              transactions: attempt.transactions.map((transaction) => ({
+                id: transaction.id,
+                kind: transaction.kind,
+                status: transaction.status,
+                amountCents: transaction.amountCents.toString(),
+                externalId: transaction.externalId ? maskIdentifier(transaction.externalId) : null,
+                createdAt: transaction.createdAt.toISOString(),
+              })),
+            })),
+          }
+        : {}),
       shipments: order.shipments.map((shipment) => ({
         id: shipment.id,
         originLocationId: shipment.originLocationId,
@@ -246,29 +415,33 @@ export class AdminOrderService {
         shipmentId: unit.shipmentId,
         status: unit.status,
       })),
-      refunds: order.refunds.map((refund) => ({
-        id: refund.id,
-        reason: refund.reason,
-        status: refund.status,
-        note: refund.note,
-        subtotalCents: refund.subtotalCents.toString(),
-        taxCents: refund.taxCents.toString(),
-        shippingCents: refund.shippingCents.toString(),
-        totalCents: refund.totalCents.toString(),
-        createdAt: refund.createdAt.toISOString(),
-        processedAt: refund.processedAt?.toISOString() ?? null,
-        items: refund.items.map((item) => ({
-          orderItemId: item.orderItemId,
-          quantity: item.quantity,
-        })),
-        transactions: refund.paymentTransactions.map((transaction) => ({
-          id: transaction.id,
-          provider: transaction.provider,
-          status: transaction.status,
-          amountCents: transaction.amountCents.toString(),
-          externalId: transaction.externalId ? maskIdentifier(transaction.externalId) : null,
-        })),
-      })),
+      ...(access.payments
+        ? {
+            refunds: refunds.map((refund) => ({
+              id: refund.id,
+              reason: refund.reason,
+              status: refund.status,
+              note: refund.note,
+              subtotalCents: refund.subtotalCents.toString(),
+              taxCents: refund.taxCents.toString(),
+              shippingCents: refund.shippingCents.toString(),
+              totalCents: refund.totalCents.toString(),
+              createdAt: refund.createdAt.toISOString(),
+              processedAt: refund.processedAt?.toISOString() ?? null,
+              items: refund.items.map((item) => ({
+                orderItemId: item.orderItemId,
+                quantity: item.quantity,
+              })),
+              transactions: refund.paymentTransactions.map((transaction) => ({
+                id: transaction.id,
+                provider: transaction.provider,
+                status: transaction.status,
+                amountCents: transaction.amountCents.toString(),
+                externalId: transaction.externalId ? maskIdentifier(transaction.externalId) : null,
+              })),
+            })),
+          }
+        : {}),
       timeline: order.statusEvents.map((event) => ({
         id: event.id,
         occurredAt: event.occurredAt.toISOString(),

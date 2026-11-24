@@ -23,15 +23,19 @@ export async function POST(request: Request) {
   if (!authorization.startsWith("Bearer ") || !matches(authorization.slice(7), secret)) {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers });
   }
-  const worker = domainEventWorker();
-  const total = { claimed: 0, completed: 0, retries: 0, failed: 0 };
-  for (let batch = 0; batch < 4; batch += 1) {
-    const result = await worker.runBatch(25);
-    total.claimed += result.claimed;
-    total.completed += result.completed;
-    total.retries += result.retries;
-    total.failed += result.failed;
-    if (result.claimed === 0) break;
+  try {
+    const worker = domainEventWorker();
+    const total = { claimed: 0, completed: 0, retries: 0, failed: 0 };
+    for (let batch = 0; batch < 4; batch += 1) {
+      const result = await worker.runBatch(25);
+      total.claimed += result.claimed;
+      total.completed += result.completed;
+      total.retries += result.retries;
+      total.failed += result.failed;
+      if (result.claimed === 0) break;
+    }
+    return Response.json(total, { headers });
+  } catch {
+    return Response.json({ error: "Domain worker execution failed." }, { status: 500, headers });
   }
-  return Response.json(total, { headers });
 }

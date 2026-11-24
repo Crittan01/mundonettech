@@ -1,3 +1,4 @@
+import { maskEmail, maskName, sanitizeAuditValue } from "@mundonettech/core";
 import { Prisma, PrismaClient, type StoreSettings } from "@mundonettech/db";
 
 import type { CmsAudit } from "./cms-service.js";
@@ -105,14 +106,44 @@ type StoreSettingsRecord = Prisma.StoreSettingsGetPayload<{
   include: { updatedBy: { select: { id: true; displayName: true; email: true } } };
 }>;
 
+function settingsAuditState(settings: StoreSettings): Prisma.JsonObject {
+  return {
+    id: settings.id,
+    taxRegime: settings.taxRegime,
+    annualRevenueAlertUvt: settings.annualRevenueAlertUvt,
+    currency: settings.currency,
+    timeZone: settings.timeZone,
+    orderNumberPrefix: settings.orderNumberPrefix,
+    orderNumberPadding: settings.orderNumberPadding,
+    uvtValueCents: settings.uvtValueCents.toString(),
+    uvtYear: settings.uvtYear,
+    deliveryCents: settings.standardShippingCents.toString(),
+    deliveryPromiseDays: settings.deliveryPromiseDays,
+    reservationMinutes: settings.reservationMinutes,
+    clickAndCollectEnabled: settings.clickAndCollectEnabled,
+    localDeliveryEnabled: settings.localDeliveryEnabled,
+  };
+}
+
 export class StoreSettingsService {
   constructor(private readonly db: PrismaClient) {}
 
   async get(): Promise<StoreSettingsRecord | null> {
-    return this.db.storeSettings.findUnique({
+    const settings = await this.db.storeSettings.findUnique({
       where: { key: "default" },
       include: { updatedBy: { select: { id: true, displayName: true, email: true } } },
     });
+    if (!settings) return null;
+    return {
+      ...settings,
+      updatedBy: settings.updatedBy
+        ? {
+            ...settings.updatedBy,
+            displayName: maskName(settings.updatedBy.displayName),
+            email: maskEmail(settings.updatedBy.email),
+          }
+        : null,
+    };
   }
 
   async save(input: StoreSettingsInput, audit: CmsAudit): Promise<StoreSettings> {
@@ -122,6 +153,7 @@ export class StoreSettingsService {
     const settings = validateSettings(input);
     return this.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('store-settings-default'))`;
+      const existing = await tx.storeSettings.findUnique({ where: { key: "default" } });
       const saved = await tx.storeSettings.upsert({
         where: { key: "default" },
         create: { key: "default", ...settings, updatedByAdminUserId: audit.actorAdminUserId },
@@ -135,21 +167,10 @@ export class StoreSettingsService {
           targetId: saved.id,
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-          metadata: {
-            taxRegime: saved.taxRegime,
-            annualRevenueAlertUvt: saved.annualRevenueAlertUvt,
-            currency: saved.currency,
-            timeZone: saved.timeZone,
-            orderNumberPrefix: saved.orderNumberPrefix,
-            orderNumberPadding: saved.orderNumberPadding,
-            uvtValueCents: saved.uvtValueCents.toString(),
-            uvtYear: saved.uvtYear,
-            standardShippingCents: saved.standardShippingCents.toString(),
-            deliveryPromiseDays: saved.deliveryPromiseDays,
-            reservationMinutes: saved.reservationMinutes,
-            clickAndCollectEnabled: saved.clickAndCollectEnabled,
-            localDeliveryEnabled: saved.localDeliveryEnabled,
-          },
+          metadata: sanitizeAuditValue({
+            before: existing ? settingsAuditState(existing) : null,
+            after: settingsAuditState(saved),
+          }) as Prisma.JsonObject,
         },
       });
       return saved;

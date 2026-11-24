@@ -15,6 +15,10 @@ export function actionSuccess(message: string, values?: Record<string, string>):
   return values ? { status: "success", message, values } : { status: "success", message };
 }
 
+export function formEntries(formData: FormData): [string, FormDataEntryValue][] {
+  return Array.from(formData.entries()).filter(([key]) => !key.startsWith("$ACTION_"));
+}
+
 export function formString(formData: FormData, key: string): string {
   const value = formData.get(key);
   return typeof value === "string" ? value : "";
@@ -22,10 +26,10 @@ export function formString(formData: FormData, key: string): string {
 
 export function formSnapshot(formData: FormData): Record<string, string> {
   const snapshot: Record<string, string> = {};
-  formData.forEach((value, key) => {
+  for (const [key, value] of formEntries(formData)) {
     if (typeof value === "string") {
       snapshot[key] = value;
     }
-  });
+  }
   return snapshot;
 }

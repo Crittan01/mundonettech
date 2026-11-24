@@ -54,8 +54,10 @@ export async function acceptAdminInvitationAction(
   if (verified.error || !authUser || !verified.data.session)
     return actionError("La invitación no es válida o expiró.");
   const updated = await supabase.auth.updateUser({ password: parsed.data.password });
-  if (updated.error)
+  if (updated.error) {
+    await supabase.auth.signOut({ scope: "local" });
     return actionError("No pudimos establecer la contraseña. Solicita una invitación nueva.");
+  }
   try {
     const context = await getRequestSecurityContext();
     await getDatabase().$transaction(async (tx) => {
@@ -78,12 +80,12 @@ export async function acceptAdminInvitationAction(
       });
     });
   } catch {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" });
     return actionError(
       "No pudimos activar el perfil administrativo. Contacta al administrador que te invitó.",
     );
   }
-  await supabase.auth.signOut();
+  await supabase.auth.signOut({ scope: "local" });
   await clearActivityCookies();
   redirect("/admin/login?reason=invitation");
 }

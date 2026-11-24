@@ -18,11 +18,24 @@ export default async function InvoicesPage() {
         paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED"] },
         taxInvoice: null,
       },
+      select: {
+        id: true,
+        orderNumber: true,
+        totalCents: true,
+        emailSnapshot: true,
+        buyerDocumentNumberSnapshot: true,
+      },
       orderBy: [{ confirmedAt: "asc" }, { id: "asc" }],
       take: 50,
     }),
     db.taxInvoice.findMany({
-      include: {
+      select: {
+        id: true,
+        fullNumber: true,
+        status: true,
+        totalCents: true,
+        failureCode: true,
+        cufe: true,
         order: {
           select: { orderNumber: true, emailSnapshot: true, buyerDocumentNumberSnapshot: true },
         },
@@ -31,7 +44,15 @@ export default async function InvoicesPage() {
       take: 100,
     }),
     db.creditNote.findMany({
-      include: { invoice: { include: { order: { select: { orderNumber: true } } } } },
+      select: {
+        id: true,
+        fullNumber: true,
+        status: true,
+        totalCents: true,
+        failureCode: true,
+        cude: true,
+        invoice: { select: { order: { select: { orderNumber: true } } } },
+      },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: 100,
     }),
@@ -41,7 +62,12 @@ export default async function InvoicesPage() {
         creditNote: null,
         order: { taxInvoice: { status: "ACCEPTED" } },
       },
-      include: { order: { select: { orderNumber: true } } },
+      select: {
+        id: true,
+        totalCents: true,
+        reason: true,
+        order: { select: { orderNumber: true } },
+      },
       orderBy: [{ processedAt: "asc" }, { id: "asc" }],
       take: 50,
     }),

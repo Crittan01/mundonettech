@@ -354,6 +354,16 @@ describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => 
 
     const cancelled = await refundService.cancel({ refundId: firstRefund.id, audit });
     assert.equal(cancelled.status, "CANCELLED");
+    const correlatedLogs = await db.adminActionLog.findMany({
+      where: {
+        targetId: firstRefund.id,
+        action: {
+          in: ["ORDER_REFUND_REQUESTED", "ORDER_REFUND_APPROVED", "ORDER_REFUND_CANCELLED"],
+        },
+      },
+    });
+    assert.equal(correlatedLogs.length, 3);
+    assert.ok(correlatedLogs.every((entry) => entry.requestId === audit.requestId));
     assert.equal(
       (await db.paymentTransaction.findUniqueOrThrow({ where: { id: failedTxId } })).status,
       "CANCELLED",
@@ -437,11 +447,26 @@ describe("F4A.1 — aggregate funnel, operational notifications and masked order
     const notification = snapshot.notifications.find(
       (entry) => entry.entityId === checkout.orderId,
     );
-    await operations.markNotificationRead(notification.id, adminId);
-    await operations.markNotificationRead(notification.id, adminId);
+    const notificationAudit = { ...audit, requestId: randomUUID() };
+    await operations.markNotificationRead(notification.id, notificationAudit);
+    await operations.markNotificationRead(notification.id, notificationAudit);
     assert.equal(
       await db.notificationRead.count({ where: { notificationId: notification.id } }),
       1,
+    );
+    const notificationLogs = await db.adminActionLog.findMany({
+      where: { requestId: notificationAudit.requestId, action: "NOTIFICATION_MARKED_READ" },
+    });
+    assert.equal(notificationLogs.length, 2);
+    assert.ok(
+      notificationLogs.every(
+        (entry) =>
+          entry.actorAdminUserId === adminId &&
+          entry.targetId === notification.id &&
+          Buffer.from(entry.ipHash).equals(Buffer.from(notificationAudit.ipHash)) &&
+          Buffer.from(entry.userAgentHash).equals(Buffer.from(notificationAudit.userAgentHash)) &&
+          Object.keys(entry.metadata).join(",") === "category",
+      ),
     );
     const other = await operations.snapshot(secondAdminId);
     assert.equal(other.notifications.find((entry) => entry.id === notification.id).readAt, null);
@@ -453,7 +478,13 @@ describe("F4A.1 — aggregate funnel, operational notifications and masked order
     assert.equal(cmsSnapshot.pendingRefunds.length, 0);
     assert.equal(cmsSnapshot.pendingPayments.length, 0);
     assert.equal(cmsSnapshot.notifications.length, 0);
-    await assert.rejects(operations.markNotificationRead(notification.id, cmsAdminId));
+    await assert.rejects(
+      operations.markNotificationRead(notification.id, {
+        ...audit,
+        actorAdminUserId: cmsAdminId,
+        requestId: randomUUID(),
+      }),
+    );
     const cmsDashboard = await funnel.dashboard(cmsAdminId, 30);
     assert.equal(cmsDashboard.unreadNotifications, 0);
     const fulfillmentSnapshot = await operations.snapshot(fulfillmentAdminId);
@@ -486,7 +517,7 @@ describe("F4A.1 — aggregate funnel, operational notifications and masked order
   });
 
   it("returns cursor-based order reads with server-side PII masks and validated filters", async () => {
-    const service = new AdminOrderService(db);
+    const service = new AdminOrderService(db, adminId);
     const page = await service.list({ query: "RLS-" });
     assert.ok(page.items.some((order) => order.id === checkout.orderId));
     const listed = page.items.find((order) => order.id === checkout.orderId);

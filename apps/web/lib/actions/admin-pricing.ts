@@ -78,6 +78,41 @@ async function auditContext() {
   };
 }
 
+const pricingSnapshotFields = new Set([
+  "id",
+  "scope",
+  "target",
+  "minimumQuantity",
+  "unitPriceCents",
+  "active",
+  "discountType",
+  "status",
+  "startsAt",
+  "endsAt",
+  "percentageBps",
+  "maximumUsages",
+  "perCustomerUsages",
+  "code",
+  "name",
+  "amountCents",
+  "maximumDiscountCents",
+  "minimumSubtotalCents",
+  "productSlugs",
+  "categorySlugs",
+  "slug",
+  "description",
+  "priceCents",
+  "discountCents",
+  "items",
+  "kind",
+]);
+
+function pricingSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(([key]) => pricingSnapshotFields.has(key)),
+  );
+}
+
 function invalidate(): void {
   updateTag("catalog");
   updateTag("catalog:search");
@@ -135,27 +170,27 @@ export async function saveWholesaleTierAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const id = formString(formData, "id");
-  const minimumQuantity = integer(formString(formData, "minimumQuantity"));
-  const scope = formString(formData, "scope");
-  if (
-    !optionalIdSchema.safeParse(id).success ||
-    minimumQuantity === null ||
-    minimumQuantity < 1 ||
-    !["GLOBAL", "CATEGORY", "PRODUCT", "VARIANT"].includes(scope)
-  )
-    return actionError("Revisa el alcance, la referencia y la cantidad mínima.", values);
-  const input: WholesaleTierInput = {
-    scope: scope as WholesaleTierInput["scope"],
-    target: formString(formData, "target"),
-    minimumQuantity,
-    unitPriceCents: formString(formData, "unitPriceCents"),
-    active: formString(formData, "active") === "on" || formString(formData, "active") === "true",
-  };
+  const values = pricingSnapshot(formData);
   let createdId: string;
   try {
     const audit = await auditContext();
+    const id = formString(formData, "id");
+    const minimumQuantity = integer(formString(formData, "minimumQuantity"));
+    const scope = formString(formData, "scope");
+    if (
+      !optionalIdSchema.safeParse(id).success ||
+      minimumQuantity === null ||
+      minimumQuantity < 1 ||
+      !["GLOBAL", "CATEGORY", "PRODUCT", "VARIANT"].includes(scope)
+    )
+      return actionError("Revisa el alcance, la referencia y la cantidad mínima.", values);
+    const input: WholesaleTierInput = {
+      scope: scope as WholesaleTierInput["scope"],
+      target: formString(formData, "target"),
+      minimumQuantity,
+      unitPriceCents: formString(formData, "unitPriceCents"),
+      active: formString(formData, "active") === "on" || formString(formData, "active") === "true",
+    };
     const saved = await new PricingService(getDatabase()).upsertWholesaleTier(
       id || null,
       input,
@@ -174,51 +209,51 @@ export async function saveCouponAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const id = formString(formData, "id");
-  const discountType = formString(formData, "discountType");
-  const status = formString(formData, "status");
-  const startsAt = localDate(formString(formData, "startsAt"));
-  const endsAt = localDate(formString(formData, "endsAt"));
-  const percentageBps = formString(formData, "percentageBps")
-    ? integer(formString(formData, "percentageBps"))
-    : undefined;
-  const maximumUsages = formString(formData, "maximumUsages")
-    ? integer(formString(formData, "maximumUsages"))
-    : undefined;
-  const perCustomerUsages = formString(formData, "perCustomerUsages")
-    ? integer(formString(formData, "perCustomerUsages"))
-    : undefined;
-  if (
-    !optionalIdSchema.safeParse(id).success ||
-    !["PERCENTAGE", "FIXED_AMOUNT"].includes(discountType) ||
-    !["DRAFT", "ACTIVE"].includes(status) ||
-    startsAt === undefined ||
-    endsAt === undefined ||
-    percentageBps === null ||
-    maximumUsages === null ||
-    perCustomerUsages === null
-  )
-    return actionError("Revisa tipo, estado, fechas, porcentaje y límites del cupón.", values);
-  const input: CouponInput = {
-    code: formString(formData, "code"),
-    name: formString(formData, "name"),
-    discountType: discountType as CouponInput["discountType"],
-    status: status as CouponInput["status"],
-    ...(percentageBps !== undefined ? { percentageBps } : {}),
-    amountCents: formString(formData, "amountCents"),
-    maximumDiscountCents: formString(formData, "maximumDiscountCents"),
-    minimumSubtotalCents: formString(formData, "minimumSubtotalCents"),
-    startsAt,
-    endsAt,
-    ...(maximumUsages !== undefined ? { maximumUsages } : {}),
-    ...(perCustomerUsages !== undefined ? { perCustomerUsages } : {}),
-    productSlugs: slugs(formString(formData, "productSlugs")),
-    categorySlugs: slugs(formString(formData, "categorySlugs")),
-  };
+  const values = pricingSnapshot(formData);
   let createdId: string;
   try {
     const audit = await auditContext();
+    const id = formString(formData, "id");
+    const discountType = formString(formData, "discountType");
+    const status = formString(formData, "status");
+    const startsAt = localDate(formString(formData, "startsAt"));
+    const endsAt = localDate(formString(formData, "endsAt"));
+    const percentageBps = formString(formData, "percentageBps")
+      ? integer(formString(formData, "percentageBps"))
+      : undefined;
+    const maximumUsages = formString(formData, "maximumUsages")
+      ? integer(formString(formData, "maximumUsages"))
+      : undefined;
+    const perCustomerUsages = formString(formData, "perCustomerUsages")
+      ? integer(formString(formData, "perCustomerUsages"))
+      : undefined;
+    if (
+      !optionalIdSchema.safeParse(id).success ||
+      !["PERCENTAGE", "FIXED_AMOUNT"].includes(discountType) ||
+      !["DRAFT", "ACTIVE"].includes(status) ||
+      startsAt === undefined ||
+      endsAt === undefined ||
+      percentageBps === null ||
+      maximumUsages === null ||
+      perCustomerUsages === null
+    )
+      return actionError("Revisa tipo, estado, fechas, porcentaje y límites del cupón.", values);
+    const input: CouponInput = {
+      code: formString(formData, "code"),
+      name: formString(formData, "name"),
+      discountType: discountType as CouponInput["discountType"],
+      status: status as CouponInput["status"],
+      ...(percentageBps !== undefined ? { percentageBps } : {}),
+      amountCents: formString(formData, "amountCents"),
+      maximumDiscountCents: formString(formData, "maximumDiscountCents"),
+      minimumSubtotalCents: formString(formData, "minimumSubtotalCents"),
+      startsAt,
+      endsAt,
+      ...(maximumUsages !== undefined ? { maximumUsages } : {}),
+      ...(perCustomerUsages !== undefined ? { perCustomerUsages } : {}),
+      productSlugs: slugs(formString(formData, "productSlugs")),
+      categorySlugs: slugs(formString(formData, "categorySlugs")),
+    };
     const saved = await new PricingService(getDatabase()).upsertCoupon(id || null, input, audit);
     invalidate();
     if (id) return actionSuccess("Cupón actualizado con referencias y límites persistentes.");
@@ -233,28 +268,32 @@ export async function saveBundleAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const id = formString(formData, "id");
-  const status = formString(formData, "status");
-  const items = bundleItems(formString(formData, "items"));
-  if (!optionalIdSchema.safeParse(id).success || !["DRAFT", "ACTIVE"].includes(status) || !items) {
-    return actionError(
-      "Cada componente debe usar una línea con el formato SKU | cantidad positiva.",
-      values,
-    );
-  }
-  const input: BundleInput = {
-    slug: formString(formData, "slug"),
-    name: formString(formData, "name"),
-    description: formString(formData, "description"),
-    status: status as BundleInput["status"],
-    priceCents: formString(formData, "priceCents"),
-    discountCents: formString(formData, "discountCents"),
-    items,
-  };
+  const values = pricingSnapshot(formData);
   let createdId: string;
   try {
     const audit = await auditContext();
+    const id = formString(formData, "id");
+    const status = formString(formData, "status");
+    const items = bundleItems(formString(formData, "items"));
+    if (
+      !optionalIdSchema.safeParse(id).success ||
+      !["DRAFT", "ACTIVE"].includes(status) ||
+      !items
+    ) {
+      return actionError(
+        "Cada componente debe usar una línea con el formato SKU | cantidad positiva.",
+        values,
+      );
+    }
+    const input: BundleInput = {
+      slug: formString(formData, "slug"),
+      name: formString(formData, "name"),
+      description: formString(formData, "description"),
+      status: status as BundleInput["status"],
+      priceCents: formString(formData, "priceCents"),
+      discountCents: formString(formData, "discountCents"),
+      items,
+    };
     const saved = await new PricingService(getDatabase()).upsertBundle(id || null, input, audit);
     invalidate();
     if (id)
@@ -272,21 +311,23 @@ export async function archivePricingAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const id = formString(formData, "id");
-  const kind = formString(formData, "kind");
-  if (!idSchema.safeParse(id).success || !["mayoristas", "cupones", "bundles"].includes(kind)) {
-    return actionError("El registro que intentas archivar no es válido.", values);
-  }
+  const values = pricingSnapshot(formData);
+  let destination: string;
   try {
     const audit = await auditContext();
+    const id = formString(formData, "id");
+    const kind = formString(formData, "kind");
+    if (!idSchema.safeParse(id).success || !["mayoristas", "cupones", "bundles"].includes(kind)) {
+      return actionError("El registro que intentas archivar no es válido.", values);
+    }
     const service = new PricingService(getDatabase());
     if (kind === "mayoristas") await service.archiveWholesaleTier(id, audit);
     else if (kind === "cupones") await service.archiveCoupon(id, audit);
     else await service.archiveBundle(id, audit);
     invalidate();
+    destination = `/admin/precios?vista=${kind}&archivado=1`;
   } catch (error) {
     return message(error, values);
   }
-  redirect(`/admin/precios?vista=${kind}&archivado=1`);
+  redirect(destination);
 }

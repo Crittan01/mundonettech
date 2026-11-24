@@ -18,7 +18,7 @@
 
 - `[x]` ✅ **Fases 0–6 en CI (`F0.1`–`F6.4`, `ADR-001`..`045`):** `474` archivos, `29` págs. Cliente, `43` págs. Admin, `22` APIs, `131` tablas PG 17 y `99` suites.
 - `[x]` ✅ **`A1` — Grafo AST, Código Muerto y Caché (`ADR-046`):** `guard:ast` en `make check` (`558` fuentes, `2.784` exports, `23` familias caché, `94` env vars), `ProductMediaService` R2, generación `UrlRedirectCacheState` y paridad 1:1 certificadas.
-- `[ ]` **`A2` — Seguridad Zero-Trust (`audit/a2-security-rbac-mfa-pii`):** inventariar el 100 % de `"use server"`, `22` `route.ts` y `proxy.ts`: sesión, RBAC (8 roles), `aal2`, `requireRecentMfa` (`≤ 10 min`), CSRF/Origin, HMAC *timing-safe*, rate limits, `AdminActionLog` (`selfDealing`) y 0-PII/0-`WAC` en payloads RSC y logs.
+- `[R]` **`A2` — Seguridad Zero-Trust (`ADR-047`):** `guard:security-surface` sobre 56 módulos/166 actions/47 handlers/proxy; RBAC/MFA/Origin/HMAC/cuotas, RSC y auditoría sin PII/WAC, uploads separados (`5mb` global). `37` migraciones, `133` tablas y `2.306` RLS; `make check`, `980` pruebas, build, OWASP y `80` E2E verdes.
 - `[ ]` **`A3` — Esquema PG 17, Índices y Concurrencia (`audit/a3-db-constraints-locks`):** cruzar los `11` `.prisma` ↔ SQL ↔ `pg_catalog`: `CHECK >= 0` en todos los `BigInt`/stocks, índices parciales `WHERE "deletedAt" IS NULL`, índices en FKs calientes, `ON DELETE`, cobertura `rls-matrix` y orden léxico de locks (Retail/Asistida/B2B/ML, cero `40P01`).
 - `[ ]` **`A4` — Espejo Admin ↔ Cliente: Catálogo, Media 360°/3D, WAC, Precios y CMS/SEO (`audit/a4-catalog-media-cms`):** cruzar `/admin/{catalogo,precios,contenido,configuracion}` ↔ `/`, `/productos`, `/categoria`, `/marca`, `/producto`, `/comparar`, `/pagina`, `/ayuda`, `/legal`, `/sitemap*`: toda mutación Admin refleja al instante en Cliente/JSON-LD sin caché obsoleta.
 - `[ ]` **`A5` — Espejo Admin ↔ Cliente: Carrito, Checkout, Venta Asistida, Pagos, Logística y DIAN (`audit/a5-checkout-payments-shipping`):** cruzar `/carrito`, `/checkout`, `/pagar/[token]`, `/recibo/[token]` ↔ `/admin/{venta-asistida,pagos,logistica,pedidos,facturacion}` + Wompi/Aveonline/Flex/Resend/Outbox: `safetyStock`, cupones, IVA dual/UVT, *pick & pack* multi-bulto y recibos/DIAN punta a punta.
@@ -33,6 +33,6 @@
 
 ## 3. Handoff
 
-- **Siguiente:** **Implementador `A2`** (`audit/a2-security-rbac-mfa-pii`, desde `develop` limpio; congelado `feat/f7-*`).
+- **Siguiente:** **Auditor `A2`** (`audit/a2-security-rbac-mfa-pii`; sin PR ni cambios en `develop`). Tras certificar y fusionar, sigue Implementador `A3`; `feat/f7-*` congelado.
 - **Leer:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md` y `docs/SECURITY.md`.
-- **Alcance `A2`:** inventariar y blindar el 100 % de `"use server"`, `22` `route.ts` y `proxy.ts` (RBAC 8 roles, `aal2`, step-up `≤ 10 min`, CSRF/Origin, HMAC *timing-safe*, rate limits, `AdminActionLog`/`selfDealing` y 0-PII/0-`WAC` en RSC/logs), entregar en `[R]` con `make check && pnpm test && pnpm build` en verde.
+- **Entregado `[R]`:** 56 módulos/166 actions/47 handlers/proxy, RBAC+MFA/Origin/HMAC/cuotas, RSC y logs sin PII/WAC, uploads separados y `37` migraciones/`133` tablas/`2.306` RLS. `make check`, `980` pruebas, `pnpm build`, OWASP y `80` E2E en verde.

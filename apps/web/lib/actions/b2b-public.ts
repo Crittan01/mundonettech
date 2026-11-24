@@ -5,7 +5,7 @@ import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
-import { actionError, actionSuccess, formSnapshot, type ActionState } from "@/lib/action-state";
+import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
 import { b2bService, hashProposalToken, receiptTokenForProposal, sha256 } from "@/lib/b2b";
 import { orderService } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
@@ -61,10 +61,34 @@ const acceptanceSchema = z.object({
   signatureAccepted: z.literal("true"),
 });
 
-function publicValues(formData: FormData, secrets: readonly string[]): Record<string, string> {
-  const values = formSnapshot(formData);
-  for (const secret of secrets) delete values[secret];
-  return values;
+const publicValueSchemas = { submissionId: z.string().uuid() } as const;
+const validationFields = new Set([
+  ...Object.keys(leadSchema.shape),
+  ...Object.keys(acceptanceSchema.shape),
+]);
+
+function publicValues(formData: FormData): Record<string, string> {
+  const submissionId = formString(formData, "submissionId");
+  return publicValueSchemas.submissionId.safeParse(submissionId).success ? { submissionId } : {};
+}
+
+function fieldErrors(error: z.ZodError): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const issue of error.issues) {
+    const field = issue.path[0];
+    if (typeof field === "string" && validationFields.has(field) && !result[field]) {
+      result[field] = ["Revisa este campo."];
+    }
+  }
+  return result;
+}
+
+function validationFailure(
+  message: string,
+  values: Record<string, string>,
+  error: z.ZodError,
+): ActionState {
+  return { ...actionError(message, values), fieldErrors: fieldErrors(error) };
 }
 
 function b2bFailure(error: unknown, values: Record<string, string>): ActionState {
@@ -78,7 +102,14 @@ function b2bFailure(error: unknown, values: Record<string, string>): ActionState
     } as const;
     return actionError(messages[error.code], values);
   }
-  if (error instanceof z.ZodError || error instanceof TypeError || error instanceof RangeError) {
+  if (error instanceof z.ZodError) {
+    return validationFailure(
+      "Revisa los campos obligatorios y los formatos ingresados.",
+      values,
+      error,
+    );
+  }
+  if (error instanceof TypeError || error instanceof RangeError) {
     return actionError("Revisa los campos obligatorios y los formatos ingresados.", values);
   }
   return actionError(checkoutMutationMessage(error), values);
@@ -88,12 +119,13 @@ export async function captureB2bOpportunityAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = publicValues(formData, ["turnstileToken"]);
+  const values = publicValues(formData);
   const parsed = leadSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) {
-    return actionError(
+    return validationFailure(
       "Revisa la empresa, el contacto, tu necesidad, el desafío y la autorización de datos.",
       values,
+      parsed.error,
     );
   }
   const input = parsed.data;
@@ -155,12 +187,13 @@ export async function acceptB2bProposalAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = publicValues(formData, ["token"]);
+  const values = publicValues(formData);
   const parsed = acceptanceSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) {
-    return actionError(
+    return validationFailure(
       "Revisa la firma, el documento, el régimen fiscal, la dirección y las tres aceptaciones.",
       values,
+      parsed.error,
     );
   }
   const input = parsed.data;

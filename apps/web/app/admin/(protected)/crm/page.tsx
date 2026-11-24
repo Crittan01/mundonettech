@@ -51,6 +51,8 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
   const query = parsed.success ? parsed.data : {};
   const db = getDatabase();
   const service = crmService(db);
+  const canWrite = hasAdminPermission(session.profile.role, "crm:write");
+  const canMerge = hasAdminPermission(session.profile.role, "crm:merge");
   let cursorNotFound = false;
   const [contacts, openTasks, organizations, pending, merged] = await Promise.all([
     parsed.success
@@ -75,12 +77,14 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
       limit: 25,
     }),
     service.listOrganizations(),
-    crmMergeService(db).listCandidates("PENDING"),
-    crmMergeService(db).listCandidates("MERGED"),
+    canMerge
+      ? crmMergeService(db).listCandidates(session.profile.id, "PENDING")
+      : Promise.resolve([]),
+    canMerge
+      ? crmMergeService(db).listCandidates(session.profile.id, "MERGED")
+      : Promise.resolve([]),
   ]);
   const filterValid = parsed.success && !cursorNotFound;
-  const canWrite = hasAdminPermission(session.profile.role, "crm:write");
-  const canMerge = hasAdminPermission(session.profile.role, "crm:merge");
   const nextParams = new URLSearchParams();
   if (query.q) nextParams.set("q", query.q);
   if (query.status) nextParams.set("status", query.status);
@@ -237,86 +241,89 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
           </details>
         </section>
       ) : null}
-      <section aria-labelledby="crm-duplicates" className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 id="crm-duplicates" className="text-2xl font-semibold">
-              Duplicados e identidad
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              La fusión y la reversa exigen Anillo 1 y MFA reciente.
-            </p>
-          </div>
-          {canWrite ? <CrmDetectDuplicatesForm /> : null}
-        </div>
-        {pending.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
-            No hay candidatas de duplicado pendientes.
-          </p>
-        ) : null}
-        {pending.map((candidate) => (
-          <article
-            key={candidate.id}
-            className="space-y-4 rounded-xl border border-border bg-card p-5"
-          >
-            <h3 className="font-semibold">
-              Coincidencia {candidate.matchScore / 100}% ·{" "}
-              {formatCrmMatchReasons(candidate.matchReasons)}
-            </h3>
-            <div className="grid gap-3 text-sm sm:grid-cols-2">
-              <p>
-                <Link className="underline" href={`/admin/crm/${candidate.sourceContact.id}`}>
-                  Origen: {candidate.sourceContact.givenName} {candidate.sourceContact.familyName}
-                </Link>
-                <br />
-                {candidate.sourceContact.email} · {candidate.sourceContact.phoneE164}
-              </p>
-              <p>
-                <Link className="underline" href={`/admin/crm/${candidate.targetContact.id}`}>
-                  Destino: {candidate.targetContact.givenName} {candidate.targetContact.familyName}
-                </Link>
-                <br />
-                {candidate.targetContact.email} · {candidate.targetContact.phoneE164}
+      {canMerge ? (
+        <section aria-labelledby="crm-duplicates" className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 id="crm-duplicates" className="text-2xl font-semibold">
+                Duplicados e identidad
+              </h2>
+              <p className="text-sm text-muted-foreground">
+                La fusión y la reversa exigen Anillo 1 y MFA reciente.
               </p>
             </div>
-            {canMerge ? (
-              <CrmMergeForm
-                candidateId={candidate.id}
-                version={candidate.version}
-                sourceVersion={candidate.sourceContact.version}
-                targetVersion={candidate.targetContact.version}
-                status="PENDING"
-              />
-            ) : null}
-          </article>
-        ))}
-        {merged.length > 0 ? (
-          <h3 className="pt-4 text-xl font-semibold">Fusiones reversibles</h3>
-        ) : null}
-        {merged.map((candidate) => (
-          <article
-            key={candidate.id}
-            className="space-y-3 rounded-xl border border-border bg-card p-5"
-          >
-            <p className="text-sm">
-              <Link className="underline" href={`/admin/crm/${candidate.targetContact.id}`}>
-                {candidate.targetContact.givenName} {candidate.targetContact.familyName}
-              </Link>{" "}
-              conserva el linaje de {candidate.sourceContact.givenName}{" "}
-              {candidate.sourceContact.familyName} · {candidate.resolutionNote}
+            {canWrite ? <CrmDetectDuplicatesForm /> : null}
+          </div>
+          {pending.length === 0 ? (
+            <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
+              No hay candidatas de duplicado pendientes.
             </p>
-            {canMerge ? (
-              <CrmMergeForm
-                candidateId={candidate.id}
-                version={candidate.version}
-                sourceVersion={candidate.sourceContact.version}
-                targetVersion={candidate.targetContact.version}
-                status="MERGED"
-              />
-            ) : null}
-          </article>
-        ))}
-      </section>
+          ) : null}
+          {pending.map((candidate) => (
+            <article
+              key={candidate.id}
+              className="space-y-4 rounded-xl border border-border bg-card p-5"
+            >
+              <h3 className="font-semibold">
+                Coincidencia {candidate.matchScore / 100}% ·{" "}
+                {formatCrmMatchReasons(candidate.matchReasons)}
+              </h3>
+              <div className="grid gap-3 text-sm sm:grid-cols-2">
+                <p>
+                  <Link className="underline" href={`/admin/crm/${candidate.sourceContact.id}`}>
+                    Origen: {candidate.sourceContact.givenName} {candidate.sourceContact.familyName}
+                  </Link>
+                  <br />
+                  {candidate.sourceContact.email} · {candidate.sourceContact.phoneE164}
+                </p>
+                <p>
+                  <Link className="underline" href={`/admin/crm/${candidate.targetContact.id}`}>
+                    Destino: {candidate.targetContact.givenName}{" "}
+                    {candidate.targetContact.familyName}
+                  </Link>
+                  <br />
+                  {candidate.targetContact.email} · {candidate.targetContact.phoneE164}
+                </p>
+              </div>
+              {canMerge ? (
+                <CrmMergeForm
+                  candidateId={candidate.id}
+                  version={candidate.version}
+                  sourceVersion={candidate.sourceContact.version}
+                  targetVersion={candidate.targetContact.version}
+                  status="PENDING"
+                />
+              ) : null}
+            </article>
+          ))}
+          {merged.length > 0 ? (
+            <h3 className="pt-4 text-xl font-semibold">Fusiones reversibles</h3>
+          ) : null}
+          {merged.map((candidate) => (
+            <article
+              key={candidate.id}
+              className="space-y-3 rounded-xl border border-border bg-card p-5"
+            >
+              <p className="text-sm">
+                <Link className="underline" href={`/admin/crm/${candidate.targetContact.id}`}>
+                  {candidate.targetContact.givenName} {candidate.targetContact.familyName}
+                </Link>{" "}
+                conserva el linaje de {candidate.sourceContact.givenName}{" "}
+                {candidate.sourceContact.familyName} · {candidate.resolutionNote}
+              </p>
+              {canMerge ? (
+                <CrmMergeForm
+                  candidateId={candidate.id}
+                  version={candidate.version}
+                  sourceVersion={candidate.sourceContact.version}
+                  targetVersion={candidate.targetContact.version}
+                  status="MERGED"
+                />
+              ) : null}
+            </article>
+          ))}
+        </section>
+      ) : null}
     </div>
   );
 }

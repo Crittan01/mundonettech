@@ -109,6 +109,15 @@ export class PaymentService {
     const result = await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`order-payment:${input.orderId}`]);
       const order = await lockPaymentOrder(tx, input.orderId);
+      if (providerCode === PaymentProvider.COD) {
+        const requiredIdentityKinds: ("EMAIL" | "PHONE" | "DOCUMENT")[] = ["EMAIL", "PHONE"];
+        if (order.buyerDocumentNumberSnapshot) requiredIdentityKinds.push("DOCUMENT");
+        for (const kind of requiredIdentityKinds) {
+          if (!identityHashes[kind]) {
+            throw new PaymentValidationError(`COD requires a ${kind} identity hash.`);
+          }
+        }
+      }
       const now = await databaseNow(tx);
       const existing = await tx.paymentAttempt.findUnique({
         where: { orderId_idempotencyKey: { orderId: input.orderId, idempotencyKey } },
@@ -231,10 +240,6 @@ export class PaymentService {
         identityHashes,
       });
       if (providerCode === PaymentProvider.COD) {
-        for (const kind of ["EMAIL", "PHONE"] as const) {
-          if (!identityHashes[kind])
-            throw new PaymentValidationError(`COD requires a ${kind} identity hash.`);
-        }
         const blocked = await tx.blockedIdentity.findFirst({
           where: {
             active: true,

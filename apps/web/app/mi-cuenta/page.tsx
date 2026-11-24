@@ -39,6 +39,7 @@ export default async function AccountPage() {
         </h2>
         <ProfileForm
           initial={{
+            updatedAt: account.updatedAt.toISOString(),
             givenName: account.givenName ?? "",
             familyName: account.familyName ?? "",
             phoneE164: account.phoneE164 ?? "",

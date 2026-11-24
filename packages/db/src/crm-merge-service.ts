@@ -1,5 +1,7 @@
 import {
   deriveContactVerificationLevel,
+  hasAdminPermission,
+  isAdminRole,
   strongestContactVerificationLevel,
 } from "@mundonettech/core";
 
@@ -99,7 +101,18 @@ function restoredContactFields(snapshot: Record<string, unknown>) {
 export class CrmMergeService {
   constructor(private readonly db: PrismaClient) {}
 
-  async listCandidates(status: "PENDING" | "MERGED" | "REJECTED" | "REVERSED" = "PENDING") {
+  async listCandidates(
+    actorAdminUserId: string,
+    status: "PENDING" | "MERGED" | "REJECTED" | "REVERSED" = "PENDING",
+  ) {
+    assertUuid(actorAdminUserId, "actorAdminUserId");
+    const actor = await this.db.adminUser.findFirst({
+      where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+      select: { role: true },
+    });
+    if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, "crm:merge")) {
+      throw new CrmError("FORBIDDEN", "The administrator is not authorized to read CRM merges.");
+    }
     const candidates = await this.db.identityMergeCandidate.findMany({
       where: { status },
       select: {

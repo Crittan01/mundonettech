@@ -6,7 +6,7 @@ import {
   normalizePromotionSlug,
   normalizeSku,
 } from "@mundonettech/core";
-import { CartService } from "@mundonettech/db";
+import { CartNotFoundError, CartService } from "@mundonettech/db";
 import { storeConfig } from "@mundonettech/config/store";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -46,6 +46,32 @@ async function context() {
   };
 }
 
+const assistedSnapshotFields = new Set([
+  "expirationHours",
+  "cartId",
+  "operation",
+  "quantity",
+  "sku",
+  "slug",
+  "itemId",
+  "bundleId",
+  "code",
+]);
+
+function assistedSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(([key]) => assistedSnapshotFields.has(key)),
+  );
+}
+
+async function assertAssistedCart(cartId: string): Promise<void> {
+  const cart = await getDatabase().cart.findFirst({
+    where: { id: cartId, kind: "ASSISTED" },
+    select: { id: true },
+  });
+  if (!cart) throw new CartNotFoundError("Assisted cart not found.");
+}
+
 function failure(error: unknown, values: Record<string, string>): ActionState {
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de modificar la venta asistida.", values);
@@ -64,15 +90,15 @@ export async function createAssistedSaleAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const parsed = quantitySchema.safeParse(formString(formData, "expirationHours"));
-  const rawEmail = formString(formData, "customerEmail");
-  if (!parsed.success || parsed.data < 1 || parsed.data > 720)
-    return actionError("La vigencia debe ser un número entero entre 1 y 720 horas.", values);
+  const values = assistedSnapshot(formData);
   let customerId: string | undefined;
   let createdId: string;
   try {
     const audit = await context();
+    const parsed = quantitySchema.safeParse(formString(formData, "expirationHours"));
+    const rawEmail = formString(formData, "customerEmail");
+    if (!parsed.success || parsed.data < 1 || parsed.data > 720)
+      return actionError("La vigencia debe ser un número entero entre 1 y 720 horas.", values);
     if (rawEmail.trim()) {
       let email: string;
       try {
@@ -114,13 +140,14 @@ export async function mutateAssistedCartAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const cartId = formString(formData, "cartId");
-  const operation = formString(formData, "operation");
-  if (!uuidSchema.safeParse(cartId).success)
-    return actionError("El identificador del carrito no es válido.", values);
+  const values = assistedSnapshot(formData);
   try {
     const audit = await context();
+    const cartId = formString(formData, "cartId");
+    const operation = formString(formData, "operation");
+    if (!uuidSchema.safeParse(cartId).success)
+      return actionError("El identificador del carrito no es válido.", values);
+    await assertAssistedCart(cartId);
     const service = new CartService(getDatabase());
     const reference = { cartId };
     const quantity = quantitySchema.safeParse(formString(formData, "quantity") || "1");
@@ -186,9 +213,12 @@ export async function mutateAssistedCartAction(
       case "clear":
         await service.clear(reference, audit);
         break;
-      case "apply_coupon":
-        await service.applyCoupon(reference, formString(formData, "code"), audit);
+      case "apply_coupon": {
+        const code = z.string().min(2).max(64).safeParse(formString(formData, "code"));
+        if (!code.success) return actionError("El código del cupón no es válido.", values);
+        await service.applyCoupon(reference, code.data, audit);
         break;
+      }
       case "remove_coupon":
         await service.removeCoupon(reference, audit);
         break;
@@ -206,19 +236,19 @@ export async function issueAssistedLinkAction(
   _previous: AssistedLinkState,
   formData: FormData,
 ): Promise<AssistedLinkState> {
-  const values = formSnapshot(formData);
-  const cartId = formString(formData, "cartId");
-  const hours = quantitySchema.safeParse(formString(formData, "expirationHours"));
-  if (
-    !uuidSchema.safeParse(cartId).success ||
-    !hours.success ||
-    hours.data < 1 ||
-    hours.data > 720
-  ) {
-    return actionError("Revisa el carrito y una vigencia entera entre 1 y 720 horas.", values);
-  }
+  const values = assistedSnapshot(formData);
   try {
     const audit = await context();
+    const cartId = formString(formData, "cartId");
+    const hours = quantitySchema.safeParse(formString(formData, "expirationHours"));
+    if (
+      !uuidSchema.safeParse(cartId).success ||
+      !hours.success ||
+      hours.data < 1 ||
+      hours.data > 720
+    ) {
+      return actionError("Revisa el carrito y una vigencia entera entre 1 y 720 horas.", values);
+    }
     const generated = createCartToken();
     await new CartService(getDatabase()).issueAssistedToken({
       cartId,
@@ -242,11 +272,12 @@ export async function cancelAssistedSaleAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  const cartId = formString(formData, "cartId");
-  if (!uuidSchema.safeParse(cartId).success) return actionError("El carrito no es válido.", values);
+  const values = assistedSnapshot(formData);
   try {
     const audit = await context();
+    const cartId = formString(formData, "cartId");
+    if (!uuidSchema.safeParse(cartId).success)
+      return actionError("El carrito no es válido.", values);
     await new CartService(getDatabase()).cancelAssistedCart(cartId, audit);
     revalidatePath(`/admin/venta-asistida/${cartId}`);
     return actionSuccess("Venta cancelada, enlace invalidado y cupón liberado.");

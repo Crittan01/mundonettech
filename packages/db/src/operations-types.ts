@@ -197,7 +197,7 @@ export interface AdminOrderDetail {
     readonly quantity: number;
     readonly trackSerial: boolean;
     readonly unitPriceCents: string;
-    readonly unitCostWacCents: string;
+    readonly unitCostWacCents?: string;
     readonly discountCents: string;
     readonly taxCents: string;
     readonly lineTotalCents: string;
@@ -209,7 +209,7 @@ export interface AdminOrderDetail {
       readonly taxCents: string;
     }[];
   }[];
-  readonly payments: readonly {
+  readonly payments?: readonly {
     readonly id: string;
     readonly provider: string;
     readonly status: string;
@@ -251,7 +251,7 @@ export interface AdminOrderDetail {
     }[];
   }[];
   readonly serialUnits: AdminSerialUnit[];
-  readonly refunds: readonly {
+  readonly refunds?: readonly {
     readonly id: string;
     readonly reason: string;
     readonly status: string;

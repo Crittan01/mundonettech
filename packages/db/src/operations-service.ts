@@ -2,6 +2,7 @@ import { hasAdminPermission, isAdminRole, maskName, type AdminRoleValue } from "
 
 import type { Prisma, PrismaClient } from "./generated/client.js";
 import { acquireOperationLocks, assertUuid } from "./inventory-shared.js";
+import { recordAdminAction, type AdminActionAudit } from "./primitives.js";
 import type {
   OperationalNotification,
   OperationsPermissions,
@@ -505,32 +506,56 @@ export class OperationsService {
     };
   }
 
-  async markNotificationRead(notificationId: string, adminUserId: string): Promise<Date> {
+  async markNotificationRead(notificationId: string, audit: AdminActionAudit): Promise<Date> {
     assertUuid(notificationId, "notificationId");
-    assertUuid(adminUserId, "adminUserId");
-    const [notification, actor] = await Promise.all([
-      this.db.notification.findUnique({
-        where: { id: notificationId },
-        select: { id: true, category: true },
-      }),
-      this.db.adminUser.findFirst({
-        where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
-        select: { id: true, role: true },
-      }),
-    ]);
+    assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     if (
-      !notification ||
-      !actor ||
-      !isAdminRole(actor.role) ||
-      !canReadNotificationCategory(actor.role, notification.category)
+      !(audit.ipHash instanceof Uint8Array) ||
+      audit.ipHash.length !== 32 ||
+      (audit.userAgentHash !== null &&
+        (!(audit.userAgentHash instanceof Uint8Array) || audit.userAgentHash.length !== 32))
     ) {
-      throw new Error("Notification or authorized active administrator not found.");
+      throw new TypeError("Notification audit hashes must contain exactly 32 bytes.");
     }
-    const read = await this.db.notificationRead.upsert({
-      where: { notificationId_adminUserId: { notificationId, adminUserId } },
-      create: { notificationId, adminUserId },
-      update: {},
+    return this.db.$transaction(async (tx) => {
+      const [notification, actor] = await Promise.all([
+        tx.notification.findUnique({
+          where: { id: notificationId },
+          select: { id: true, category: true },
+        }),
+        tx.adminUser.findFirst({
+          where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+          select: { id: true, role: true },
+        }),
+      ]);
+      if (
+        !notification ||
+        !actor ||
+        !isAdminRole(actor.role) ||
+        !canReadNotificationCategory(actor.role, notification.category)
+      ) {
+        throw new Error("Notification or authorized active administrator not found.");
+      }
+      const read = await tx.notificationRead.upsert({
+        where: {
+          notificationId_adminUserId: {
+            notificationId,
+            adminUserId: audit.actorAdminUserId,
+          },
+        },
+        create: { notificationId, adminUserId: audit.actorAdminUserId },
+        update: {},
+      });
+      await recordAdminAction(
+        tx,
+        audit,
+        "NOTIFICATION_MARKED_READ",
+        "Notification",
+        notificationId,
+        { category: notification.category },
+      );
+      return read.readAt;
     });
-    return read.readAt;
   }
 }

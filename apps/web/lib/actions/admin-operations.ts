@@ -15,6 +15,7 @@ import { z } from "zod";
 import {
   actionError,
   actionSuccess,
+  formEntries,
   formSnapshot,
   formString,
   type ActionState,
@@ -22,6 +23,28 @@ import {
 import { getDatabase } from "@/lib/db";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
+
+const snapshotFields = new Set(["reason", "includeShipping"]);
+function safeSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(
+      ([key, value]) => snapshotFields.has(key) && value.length <= 256,
+    ),
+  );
+}
+
+function assertClosedForm(formData: FormData, allowedFields: readonly string[]): void {
+  const shape: Record<string, z.ZodOptional<z.ZodString>> = {};
+  const values: Record<string, string> = {};
+  for (const field of allowedFields) shape[field] = z.string().optional();
+  for (const [key, value] of formEntries(formData)) {
+    if (typeof value !== "string" || Object.hasOwn(values, key)) {
+      throw new TypeError("Form fields must be unique strings.");
+    }
+    values[key] = value;
+  }
+  z.object(shape).strict().parse(values);
+}
 
 function revalidateOperations(orderId?: string): void {
   revalidatePath("/admin/hoy");
@@ -32,15 +55,15 @@ function revalidateOperations(orderId?: string): void {
   if (orderId) revalidatePath(`/admin/pedidos/${orderId}`);
 }
 
-async function financialAudit(orderId: string) {
+async function financialAudit(formData: FormData, allowedFields: readonly string[]) {
   const session = await getAdminSession({ permission: "payments:write", requireRecentMfa: true });
+  assertClosedForm(formData, allowedFields);
   const context = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
     ipHash: context.ipHash,
     userAgentHash: context.userAgentHash,
     requestId: randomUUID(),
-    orderId,
   };
 }
 
@@ -76,24 +99,44 @@ export async function markNotificationReadAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const session = await getAdminSession({ permission: "dashboard:read" });
+    const session = await getAdminSession({
+      permission: "dashboard:read",
+      requireRecentMfa: true,
+    });
+    assertClosedForm(formData, ["notificationId"]);
     const notificationId = z.string().uuid().parse(formString(formData, "notificationId"));
-    await new OperationsService(getDatabase()).markNotificationRead(
-      notificationId,
-      session.profile.id,
-    );
+    const context = await getRequestSecurityContext();
+    await new OperationsService(getDatabase()).markNotificationRead(notificationId, {
+      actorAdminUserId: session.profile.id,
+      ipHash: context.ipHash,
+      userAgentHash: context.userAgentHash,
+      requestId: randomUUID(),
+    });
     revalidatePath("/admin/hoy");
     revalidatePath("/admin/dashboard");
     return actionSuccess("Notificación marcada como leída solo para tu usuario.");
-  } catch {
+  } catch (error) {
+    if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
+      return actionError("Confirma tu autenticador antes de marcar esta notificación.", values);
+    }
+    if (error instanceof AdminAuthorizationError) {
+      return actionError("Tu sesión no está autorizada para marcar esta notificación.", values);
+    }
     return actionError("No pudimos registrar la lectura. Recarga e inténtalo de nuevo.", values);
   }
 }
 
 const refundItemsSchema = z
-  .array(z.object({ orderItemId: z.string().uuid(), quantity: z.number().int().positive() }))
+  .array(
+    z
+      .object({
+        orderItemId: z.string().uuid(),
+        quantity: z.number().int().positive().max(1_000_000_000),
+      })
+      .strict(),
+  )
   .min(1)
   .max(1000);
 
@@ -101,20 +144,32 @@ export async function requestOrderRefundAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
+    const audit = await financialAudit(formData, [
+      "orderId",
+      "idempotencyKey",
+      "reason",
+      "note",
+      "includeShipping",
+      "items",
+    ]);
     const orderId = z.string().uuid().parse(formString(formData, "orderId"));
-    const audit = await financialAudit(orderId);
     const note = formString(formData, "note").trim();
     const result = await new OrderRefundService(getDatabase()).request({
       orderId,
-      idempotencyKey: formString(formData, "idempotencyKey"),
+      idempotencyKey: z
+        .string()
+        .regex(/^[A-Za-z0-9._:-]{3,128}$/)
+        .parse(formString(formData, "idempotencyKey")),
       reason: z
         .enum(["RETRACT", "WARRANTY", "ADJUSTMENT", "CUSTOMER_SUPPORT"])
         .parse(formString(formData, "reason")),
-      ...(note ? { note } : {}),
+      ...(note ? { note: z.string().max(500).parse(note) } : {}),
       includeShipping: formString(formData, "includeShipping") === "on",
-      items: refundItemsSchema.parse(JSON.parse(formString(formData, "items"))),
+      items: refundItemsSchema.parse(
+        JSON.parse(z.string().max(100_000).parse(formString(formData, "items"))),
+      ),
       audit,
     });
     revalidateOperations(orderId);
@@ -132,18 +187,18 @@ export async function transitionOrderRefundAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = safeSnapshot(formData);
   try {
-    const orderId = z.string().uuid().parse(formString(formData, "orderId"));
-    const audit = await financialAudit(orderId);
+    const audit = await financialAudit(formData, ["orderId", "refundId", "transition", "note"]);
+    z.string().uuid().parse(formString(formData, "orderId"));
     const refundId = z.string().uuid().parse(formString(formData, "refundId"));
     const transition = z.enum(["reject", "cancel"]).parse(formString(formData, "transition"));
     const note = formString(formData, "note").trim();
-    const input = { refundId, ...(note ? { note } : {}), audit };
+    const input = { refundId, ...(note ? { note: z.string().max(500).parse(note) } : {}), audit };
     const result = await (transition === "reject"
       ? new OrderRefundService(getDatabase()).reject(input)
       : new OrderRefundService(getDatabase()).cancel(input));
-    revalidateOperations(orderId);
+    revalidateOperations(result.orderId);
     return actionSuccess(`Reembolso ${result.status.toLowerCase()} y transición auditada.`);
   } catch (error) {
     return failure(error, values);

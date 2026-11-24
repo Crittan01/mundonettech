@@ -81,10 +81,21 @@ export function createTimeoutToken(options: {
   );
 }
 
+function decodeCanonicalBase64Url(value: string): Buffer {
+  if (!/^[A-Za-z0-9_-]+$/.test(value) || value.length % 4 === 1) {
+    throw new Error("Invalid timeout token.");
+  }
+  const decoded = Buffer.from(value, "base64url");
+  if (decoded.toString("base64url") !== value) {
+    throw new Error("Invalid timeout token.");
+  }
+  return decoded;
+}
+
 function parsePayload(value: string): TimeoutTokenPayload {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    parsed = JSON.parse(decodeCanonicalBase64Url(value).toString("utf8"));
   } catch {
     throw new Error("Invalid timeout token.");
   }
@@ -123,12 +134,8 @@ export function verifyTimeoutToken(options: {
   if (!encodedPayload || !encodedSignature || extra !== undefined || options.token.length > 4096) {
     throw new Error("Invalid timeout token.");
   }
-  let suppliedSignature: Buffer;
-  try {
-    suppliedSignature = Buffer.from(encodedSignature, "base64url");
-  } catch {
-    throw new Error("Invalid timeout token.");
-  }
+  if (encodedSignature.length !== 43) throw new Error("Invalid timeout token.");
+  const suppliedSignature = decodeCanonicalBase64Url(encodedSignature);
   const expectedSignature = signature(encodedPayload, options.secret);
   if (
     suppliedSignature.length !== expectedSignature.length ||

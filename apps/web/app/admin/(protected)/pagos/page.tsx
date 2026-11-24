@@ -47,32 +47,47 @@ export default async function PaymentsPage() {
     await Promise.all([
       db.paymentAttempt.findMany({
         where: { provider: "BANK_TRANSFER", status: { in: ["PENDING", "PROCESSING"] } },
-        include: { order: { select: { orderNumber: true, emailSnapshot: true } } },
+        select: {
+          id: true,
+          amountCents: true,
+          reference: true,
+          order: { select: { orderNumber: true, emailSnapshot: true } },
+        },
         orderBy: { createdAt: "asc" },
         take: 100,
       }),
       db.paymentAttempt.findMany({
         where: { provider: "COD", status: { in: ["PENDING", "PROCESSING"] } },
-        include: {
+        select: {
+          id: true,
+          amountCents: true,
           order: { select: { orderNumber: true, emailSnapshot: true } },
-          codReconciliation: true,
+          codReconciliation: { select: { status: true } },
         },
         orderBy: { createdAt: "asc" },
         take: 100,
       }),
       db.orderRefund.findMany({
         where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] } },
-        include: {
+        select: {
+          id: true,
+          reason: true,
+          status: true,
+          totalCents: true,
           order: { select: { orderNumber: true, emailSnapshot: true } },
-          paymentTransactions: { select: { id: true, status: true } },
         },
         orderBy: { createdAt: "asc" },
         take: 100,
       }),
       db.paymentTransaction.findMany({
         where: { kind: { in: ["REFUND", "VOID"] }, status: { in: ["PENDING", "PROCESSING"] } },
-        include: {
-          attempt: { include: { order: { select: { orderNumber: true } } } },
+        select: {
+          id: true,
+          kind: true,
+          provider: true,
+          amountCents: true,
+          status: true,
+          attempt: { select: { order: { select: { orderNumber: true } } } },
         },
         orderBy: { createdAt: "asc" },
         take: 100,
@@ -88,7 +103,13 @@ export default async function PaymentsPage() {
             },
           },
         },
-        include: { order: { select: { orderNumber: true } } },
+        select: {
+          id: true,
+          provider: true,
+          reference: true,
+          amountCents: true,
+          order: { select: { orderNumber: true } },
+        },
         orderBy: { createdAt: "desc" },
         take: 100,
       }),

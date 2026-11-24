@@ -23,6 +23,7 @@ export {
   StockLocationType,
   RecoveryRunStatus,
   OperationalHealthStatus,
+  OperationRateLimitSubjectType,
   ChannelProvider,
   ChannelAccountStatus,
   ChannelOAuthAttemptStatus,
@@ -359,6 +360,17 @@ export type { FunnelCounters } from "./funnel-service.js";
 export { FinanceService, bogotaDayStart, currentYearRange } from "./finance-service.js";
 export type { FiscalWatchDefaults } from "./finance-service.js";
 export { OperationsService, canReadNotificationCategory } from "./operations-service.js";
+export {
+  AdminOperationRateLimitError,
+  OperationRateLimitError,
+  consumeAdminOperationRateLimit,
+  consumeOperationRateLimit,
+  purgeExpiredOperationRateLimits,
+} from "./operation-rate-limit.js";
+export type {
+  OperationRateLimitResult,
+  OperationRateLimitSubject,
+} from "./operation-rate-limit.js";
 export { AdminOrderService } from "./admin-order-service.js";
 export type { AdminOrderFilters } from "./admin-order-service.js";
 export type {

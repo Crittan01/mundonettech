@@ -302,7 +302,7 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
         provider: PaymentProvider.COD,
         environment: "LOCAL",
         idempotencyKey: `cod:${randomUUID()}`,
-        identityHashes: { EMAIL: emailHash, PHONE: phoneHash },
+        identityHashes: { EMAIL: emailHash, PHONE: phoneHash, DOCUMENT: hash() },
       }),
       (error) => error instanceof PaymentConflictError && error.code === "BLOCKED_IDENTITY",
     );
@@ -312,7 +312,7 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       provider: PaymentProvider.COD,
       environment: "LOCAL",
       idempotencyKey: `cod:${randomUUID()}`,
-      identityHashes: { EMAIL: emailHash, PHONE: phoneHash },
+      identityHashes: { EMAIL: emailHash, PHONE: phoneHash, DOCUMENT: hash() },
     };
     const attempt = await payments.start(input);
     assert.equal(attempt.status, "PENDING");
@@ -672,7 +672,7 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       shipping: {},
       email: {},
       invoice: {},
-      vault,
+      vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "https://example.test",
       storeName: "Tienda de pruebas",
       receiptTokenForSubmission: () => "x".repeat(43),
@@ -844,7 +844,7 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       provider: PaymentProvider.COD,
       environment: "LOCAL",
       idempotencyKey: key,
-      identityHashes: { EMAIL: hash(), PHONE: hash() },
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
     };
     const starts = await Promise.all(Array.from({ length: 8 }, () => payments.start(input)));
     assert.equal(new Set(starts.map((attempt) => attempt.id)).size, 1);
@@ -895,9 +895,9 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
 
   it("auto-expires untouched stale attempts, supports safe Wompi replay/resume and routes multi-account webhooks by reference", async () => {
     const orderId = await makeOrder();
-    const activeAccounts = (await vault.list({ includeRevoked: false, limit: 100 })).items.filter(
-      (item) => item.provider === "wompi",
-    );
+    const activeAccounts = (
+      await vault.forSystemProvider("wompi").list({ includeRevoked: false, limit: 100 })
+    ).items.filter((item) => item.provider === "wompi");
     const chosenCredentialId = activeAccounts[0].id;
     assert.ok(activeAccounts.length >= 2);
     const startInput = {
@@ -961,10 +961,12 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     );
 
     const otherOrderId = await makeOrder();
+    let syncCalls = 0;
     const syncGateway = new WompiWebhookService(db, {
       vault,
-      fetchImpl: async () =>
-        new Response(
+      fetchImpl: async () => {
+        syncCalls += 1;
+        return new Response(
           JSON.stringify({
             data: {
               id: approved.externalId,
@@ -976,7 +978,8 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
             },
           }),
           { status: 200 },
-        ),
+        );
+      },
     });
     await assert.rejects(
       syncGateway.synchronize({
@@ -987,12 +990,59 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       }),
       PaymentValidationError,
     );
+    assert.equal(syncCalls, 0);
+    const terminalReplay = await syncGateway.synchronize({
+      externalId: approved.externalId,
+      environment: "LOCAL",
+      credentialId: chosenCredentialId,
+      expectedOrderId: orderId,
+    });
+    assert.equal(terminalReplay.replayed, true);
+    assert.equal(syncCalls, 0);
+
+    const capturesBefore = await db.paymentTransaction.count({
+      where: { attemptId: replacement.id, kind: "CAPTURE" },
+    });
+    let unknownCalls = 0;
+    const unknownGateway = new WompiWebhookService(db, {
+      vault,
+      fetchImpl: async () => {
+        unknownCalls += 1;
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: "unknown_external_123",
+              reference: "unknown_reference_123",
+              status: "APPROVED",
+              amount_in_cents: 100000,
+              currency: "COP",
+              status_message: "Aprobada",
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    await assert.rejects(
+      unknownGateway.synchronize({
+        externalId: "unknown_external_123",
+        environment: "LOCAL",
+        credentialId: chosenCredentialId,
+        expectedOrderId: orderId,
+      }),
+      PaymentValidationError,
+    );
+    assert.equal(unknownCalls, 1);
+    assert.equal(
+      await db.paymentTransaction.count({ where: { attemptId: replacement.id, kind: "CAPTURE" } }),
+      capturesBefore,
+    );
   });
 
   it("marks deterministic HTTP void rejections as FAILED, supersedes them on order refund and blocks voids after partial refunds", async () => {
-    const activeAccounts = (await vault.list({ includeRevoked: false, limit: 100 })).items.filter(
-      (item) => item.provider === "wompi",
-    );
+    const activeAccounts = (
+      await vault.forSystemProvider("wompi").list({ includeRevoked: false, limit: 100 })
+    ).items.filter((item) => item.provider === "wompi");
     const chosenCredentialId = activeAccounts[0].id;
     const orderId = await makeOrder();
     const attempt = await payments.start({

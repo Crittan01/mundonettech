@@ -458,7 +458,7 @@ describe("F3.4 Flex quote and checkout conversion", () => {
       provider: PaymentProvider.COD,
       environment: "LOCAL",
       idempotencyKey: `cod-multi-${randomUUID()}`,
-      identityHashes: { EMAIL: hash(), PHONE: hash() },
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
     });
     const multiShipment = await db.shipment.findFirstOrThrow({
       where: { orderId: multiOrder.orderId },
@@ -527,7 +527,7 @@ describe("F3.4 Flex quote and checkout conversion", () => {
       provider: PaymentProvider.COD,
       environment: "LOCAL",
       idempotencyKey: `cod-expiring-${randomUUID()}`,
-      identityHashes: { EMAIL: hash(), PHONE: hash() },
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
     });
     await shipping.ensureFulfillments(expiringOrder.orderId);
     await sql.query(

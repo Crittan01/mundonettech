@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
@@ -154,6 +154,122 @@ describe("F0.4 — PII minimization and password policy", () => {
     assert.equal(sanitized.nested.safe, "ok");
   });
 
+  it("preserves safe operational metadata without substring false positives", () => {
+    const sanitized = sanitizeAuditValue({
+      unitPriceCents: "100000",
+      priceCents: "100000",
+      shippingCents: "20000",
+      freightCents: "20000",
+      statusCode: 308,
+      httpStatus: 307,
+      opportunity: "opportunity-1",
+      opportunityId: "opportunity-1",
+      deal: "opportunity-1",
+      Unit_Price_Cents: "100000",
+      SHIPPING_CENTS: "20000",
+      STATUS_CODE: 301,
+      "status-code": 302,
+      communityName: "safe operational value",
+      nested: {
+        unit_price_cents: "100000",
+        ShippingCents: "20000",
+        StatusCode: 301,
+        Opportunity: "opportunity-1",
+      },
+      historical: {
+        priceCents: "90000",
+        freightCents: "10000",
+        httpStatus: 206,
+        deal: "legacy-opportunity",
+      },
+    });
+    for (const [key, expected] of [
+      ["unitPriceCents", "100000"],
+      ["priceCents", "100000"],
+      ["shippingCents", "20000"],
+      ["freightCents", "20000"],
+      ["statusCode", 308],
+      ["httpStatus", 307],
+      ["opportunity", "opportunity-1"],
+      ["opportunityId", "opportunity-1"],
+      ["deal", "opportunity-1"],
+      ["Unit_Price_Cents", "100000"],
+      ["SHIPPING_CENTS", "20000"],
+      ["STATUS_CODE", 301],
+      ["status-code", 302],
+      ["communityName", "safe operational value"],
+    ]) {
+      assert.equal(sanitized[key], expected, key);
+    }
+    assert.deepEqual(sanitized.nested, {
+      unit_price_cents: "100000",
+      ShippingCents: "20000",
+      StatusCode: 301,
+      Opportunity: "opportunity-1",
+    });
+    assert.deepEqual(sanitized.historical, {
+      priceCents: "90000",
+      freightCents: "10000",
+      httpStatus: 206,
+      deal: "legacy-opportunity",
+    });
+  });
+
+  it("redacts sensitive key segments across nesting, case and separators", () => {
+    const sensitiveKeys = [
+      "email",
+      "customerEmails",
+      "phoneNumber",
+      "accessToken",
+      "tokens",
+      "apiSecret",
+      "password",
+      "credentials",
+      "plaintext",
+      "recoveryCode",
+      "contentHash",
+      "cookie",
+      "authorization",
+      "addressLine1",
+      "cedula",
+      "CEDULA",
+      "NIT",
+      "customerNit",
+      "customer_nit",
+      "customer-nit",
+      "customer.nit",
+      "ipAddress",
+      "CLIENT_IP",
+      "userAgent",
+      "user_agent",
+      "user-agent",
+      "USER AGENT",
+      "eMail",
+      "e-mail",
+      "recipientName",
+      "description",
+      "accountName",
+      "ACCOUNT_NAME",
+      "storageKey",
+      "STORAGE-KEY",
+      "posterKey",
+      "usdzKey",
+      "objectKey",
+      "signedXml",
+      "INVOICE.XML",
+      "opportunityNit",
+      "shippingIp",
+      "unitPriceNit",
+      "statusCodeHash",
+      "recoveryStatusCode",
+    ];
+    for (const key of sensitiveKeys) {
+      const sanitized = sanitizeAuditValue({ nested: { [key]: "sensitive-marker" } });
+      assert.equal(sanitized.nested[key], "[redactado]", key);
+      assert.equal(JSON.stringify(sanitized).includes("sensitive-marker"), false, key);
+    }
+  });
+
   it("enforces normalized email and all password dimensions", () => {
     assert.equal(normalizeEmail(" USER@EXAMPLE.COM "), "user@example.com");
     assert.throws(() => normalizeEmail("bad"), TypeError);
@@ -170,8 +286,10 @@ describe("F0.4 — PII minimization and password policy", () => {
 });
 
 describe("F0.4 — signed activity timeout tokens", () => {
-  it("round-trips and slides idle activity without extending absolute expiry", () => {
-    const token = createTimeoutToken({
+  const base64UrlAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+  function issueToken() {
+    return createTimeoutToken({
       kind: "admin",
       subject,
       secret,
@@ -179,7 +297,10 @@ describe("F0.4 — signed activity timeout tokens", () => {
       idleSeconds: 1800,
       absoluteSeconds: 43200,
     });
-    const payload = verifyTimeoutToken({
+  }
+
+  function verificationOptions(token) {
+    return {
       token,
       expectedKind: "admin",
       expectedSubject: subject,
@@ -187,7 +308,33 @@ describe("F0.4 — signed activity timeout tokens", () => {
       now,
       idleSeconds: 1800,
       maximumAbsoluteSeconds: 43200,
-    });
+    };
+  }
+
+  function mutateFinalBits(value) {
+    const index = base64UrlAlphabet.indexOf(value.at(-1));
+    assert.ok(index >= 0);
+    return `${value.slice(0, -1)}${base64UrlAlphabet[index ^ 1]}`;
+  }
+
+  function resignPayload(encodedPayload) {
+    const encodedSignature = createHmac("sha256", secret)
+      .update(encodedPayload, "utf8")
+      .digest("base64url");
+    return `${encodedPayload}.${encodedSignature}`;
+  }
+
+  it("round-trips and slides idle activity without extending absolute expiry", () => {
+    const token = issueToken();
+    const [encodedPayload, encodedSignature, extra] = token.split(".");
+    assert.ok(encodedPayload && encodedSignature);
+    assert.equal(extra, undefined);
+    assert.equal(encodedPayload.includes("="), false);
+    assert.equal(encodedSignature.length, 43);
+    assert.equal(encodedSignature.includes("="), false);
+    assert.equal(Buffer.from(encodedSignature, "base64url").length, 32);
+    assert.equal(Buffer.from(encodedPayload, "base64url").toString("base64url"), encodedPayload);
+    const payload = verifyTimeoutToken(verificationOptions(token));
     assert.equal(payload.sub, subject);
     const refreshed = refreshTimeoutToken({
       token,
@@ -201,6 +348,7 @@ describe("F0.4 — signed activity timeout tokens", () => {
     assert.equal(refreshed.refreshed, true);
     assert.equal(refreshed.payload.exp, payload.exp);
     assert.equal(refreshed.payload.lastSeen - payload.lastSeen, 61);
+    assert.equal(refreshed.token.includes("="), false);
     const immediate = refreshTimeoutToken({
       token: refreshed.token,
       expectedKind: "admin",
@@ -213,24 +361,70 @@ describe("F0.4 — signed activity timeout tokens", () => {
     assert.equal(immediate.refreshed, false);
   });
 
+  it("rejects invalid signature alphabets, padding, truncation and impossible lengths", () => {
+    const token = issueToken();
+    const [encodedPayload, encodedSignature] = token.split(".");
+    const variants = [
+      `${token}!`,
+      `${encodedPayload}.${encodedSignature.slice(0, -1)}!`,
+      `${encodedPayload}.${encodedSignature}=`,
+      `${encodedPayload}.${encodedSignature.slice(0, -1)}=`,
+      `${encodedPayload}.${encodedSignature.slice(0, -1)}`,
+      `${encodedPayload}.${encodedSignature.slice(0, -2)}`,
+      `${encodedPayload}.${encodedSignature.slice(0, -3)}`,
+      `${encodedPayload}.${encodedSignature}A`,
+      `${encodedPayload}.`,
+      `${token}.extra`,
+    ];
+    for (const candidate of variants) {
+      assert.throws(
+        () => verifyTimeoutToken(verificationOptions(candidate)),
+        /Invalid timeout token/,
+        candidate,
+      );
+    }
+  });
+
+  it("rejects noncanonical final signature bits even when decoded bytes are unchanged", () => {
+    const token = issueToken();
+    const [encodedPayload, encodedSignature] = token.split(".");
+    const mutated = mutateFinalBits(encodedSignature);
+    assert.notEqual(mutated, encodedSignature);
+    assert.equal(
+      Buffer.from(encodedSignature, "base64url").equals(Buffer.from(mutated, "base64url")),
+      true,
+    );
+    assert.notEqual(Buffer.from(mutated, "base64url").toString("base64url"), mutated);
+    assert.throws(() => verifyTimeoutToken(verificationOptions(`${encodedPayload}.${mutated}`)));
+  });
+
+  it("rejects noncanonical payload encodings even with a valid HMAC", () => {
+    const [encodedPayload] = issueToken().split(".");
+    const impossibleLength = `${encodedPayload}${"A".repeat((1 - (encodedPayload.length % 4) + 4) % 4)}`;
+    assert.equal(impossibleLength.length % 4, 1);
+    const mutatedFinalBits = mutateFinalBits(encodedPayload);
+    assert.equal(
+      Buffer.from(encodedPayload, "base64url").equals(Buffer.from(mutatedFinalBits, "base64url")),
+      true,
+    );
+    const variants = [
+      `${encodedPayload}!`,
+      `${encodedPayload}=`,
+      impossibleLength,
+      mutatedFinalBits,
+    ];
+    for (const candidate of variants) {
+      assert.throws(
+        () => verifyTimeoutToken(verificationOptions(resignPayload(candidate))),
+        /Invalid timeout token/,
+        candidate,
+      );
+    }
+  });
+
   it("rejects tampering, wrong subjects/kinds, idle and absolute expiration", () => {
-    const token = createTimeoutToken({
-      kind: "admin",
-      subject,
-      secret,
-      now,
-      idleSeconds: 1800,
-      absoluteSeconds: 43200,
-    });
-    const base = {
-      token,
-      expectedKind: "admin",
-      expectedSubject: subject,
-      secret,
-      now,
-      idleSeconds: 1800,
-      maximumAbsoluteSeconds: 43200,
-    };
+    const token = issueToken();
+    const base = verificationOptions(token);
     assert.throws(() => verifyTimeoutToken({ ...base, token: `${token.slice(0, -2)}xx` }));
     assert.throws(() => verifyTimeoutToken({ ...base, expectedSubject: randomUUID() }));
     assert.throws(() => verifyTimeoutToken({ ...base, expectedKind: "customer" }));
@@ -287,7 +481,7 @@ describe("F0.4 — edge security and PPR storefront wiring", () => {
   it("uses verified Supabase user lookup, PPR-compatible CSP, __Host- safe expiry, and static RootLayout", () => {
     const proxy = readFileSync("apps/web/proxy.ts", "utf8");
     const rootLayout = readFileSync("apps/web/app/layout.tsx", "utf8");
-    assert.match(proxy, /supabase\.auth\.getUser\(\)/);
+    assert.match(proxy, /supabase\.auth\s*\.getUser\(\)/);
     assert.match(proxy, /Content-Security-Policy/);
     assert.match(proxy, /Strict-Transport-Security/);
     assert.match(proxy, /refreshTimeoutToken/);

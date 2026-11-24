@@ -151,7 +151,26 @@ function sameHash(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-function view(record: MetaCapiEvent & { order: { orderNumber: string } }): MetaCapiEventView {
+type MetaCapiEventViewRecord = Pick<
+  MetaCapiEvent,
+  | "id"
+  | "eventId"
+  | "eventName"
+  | "status"
+  | "orderId"
+  | "eventTime"
+  | "valueCents"
+  | "attempts"
+  | "availableAt"
+  | "sentAt"
+  | "completedAt"
+  | "failureCode"
+  | "providerTraceId"
+  | "reconciliationReference"
+  | "version"
+> & { order: { orderNumber: string } };
+
+function view(record: MetaCapiEventViewRecord): MetaCapiEventView {
   return {
     id: record.id,
     eventId: record.eventId,
@@ -744,20 +763,48 @@ export class MetaCapiService {
     });
   }
 
-  async listEvents(limit = 50): Promise<MetaCapiEventView[]> {
+  async listEvents(actorAdminUserId: string, limit = 50): Promise<MetaCapiEventView[]> {
+    assertIntegrationUuid(actorAdminUserId, "actorAdminUserId");
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new MetaCapiServiceError(
         "VALIDATION",
         "Meta CAPI list limit must be between 1 and 100.",
       );
     }
-    const records = await this.db.metaCapiEvent.findMany({
-      where: { environment: this.options.environment },
-      include: { order: { select: { orderNumber: true } } },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: limit,
+    return this.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR UPDATE`;
+      const actor = await tx.adminUser.findFirst({
+        where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { id: true, role: true },
+      });
+      if (!actor || !hasAdminPermission(actor.role, "integrations:read")) {
+        throw new MetaCapiServiceError("UNAUTHORIZED", "Active integrations reader required.");
+      }
+      const records = await tx.metaCapiEvent.findMany({
+        where: { environment: this.options.environment },
+        select: {
+          id: true,
+          eventId: true,
+          eventName: true,
+          status: true,
+          orderId: true,
+          eventTime: true,
+          valueCents: true,
+          attempts: true,
+          availableAt: true,
+          sentAt: true,
+          completedAt: true,
+          failureCode: true,
+          providerTraceId: true,
+          reconciliationReference: true,
+          version: true,
+          order: { select: { orderNumber: true } },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: limit,
+      });
+      return records.map(view);
     });
-    return records.map(view);
   }
 
   async reconcile(input: {

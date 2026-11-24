@@ -11,6 +11,8 @@ export const adminActivityCookie =
   process.env.NODE_ENV === "production" ? "__Host-admin_activity" : "admin_activity";
 export const customerActivityCookie =
   process.env.NODE_ENV === "production" ? "__Host-customer_activity" : "customer_activity";
+export const customerAuthRequestCookie =
+  process.env.NODE_ENV === "production" ? "__Host-customer_auth_request" : "customer_auth_request";
 export const factorResetCookie =
   process.env.NODE_ENV === "production" ? "__Host-admin_factor_reset" : "admin_factor_reset";
 export const cartTokenCookie =

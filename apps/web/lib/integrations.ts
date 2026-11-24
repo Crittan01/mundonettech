@@ -111,21 +111,21 @@ export function blockedIdentityService(db: PrismaClient = getDatabase()): Blocke
 
 export function shippingService(db: PrismaClient = getDatabase()): ShippingService {
   return new ShippingService(db, {
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("aveonline"),
     environment: getIntegrationEnvironment(),
   });
 }
 
 export function emailService(db: PrismaClient = getDatabase()): EmailService {
   return new EmailService(db, {
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("resend"),
     publicSiteUrl: getPublicSiteUrl(),
   });
 }
 
 export function invoiceService(db: PrismaClient = getDatabase()): InvoiceService {
   return new InvoiceService(db, {
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("dian"),
     environment: getIntegrationEnvironment(),
   });
 }
@@ -138,7 +138,7 @@ export function guestOrderAccessService(db: PrismaClient = getDatabase()): Guest
   return new GuestOrderAccessService(db, {
     secret: getSessionHmacSecret(),
     storeName: storeConfig.name,
-    vault: getIntegrationCredentialVault(),
+    vault: getIntegrationCredentialVault().forSystemProvider("resend"),
   });
 }
 

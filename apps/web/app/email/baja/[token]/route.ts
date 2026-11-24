@@ -23,6 +23,13 @@ function page(token: string, topic: string, completed: boolean): string {
   return `<!doctype html><html lang="es-CO"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Baja de comunicaciones · ${escapeHtml(storeConfig.name)}</title></head><body style="font-family:system-ui;max-width:42rem;margin:3rem auto;padding:1rem"><main><h1>${completed ? "Baja confirmada" : "Confirmar baja de comunicaciones"}</h1><p>${completed ? "La supresión quedó registrada para el tema" : "Confirma la baja para el tema"} <strong>${escapeHtml(topic)}</strong> en ${escapeHtml(storeConfig.name)}.</p>${completed ? "" : `<form method="post" action="/email/baja/${encodeURIComponent(token)}"><input type="hidden" name="List-Unsubscribe" value="One-Click"><button type="submit">Confirmar baja</button></form>`}</main></body></html>`;
 }
 
+function methodNotAllowed(): Response {
+  return Response.json(
+    { error: "Method not allowed." },
+    { status: 405, headers: { ...headers, Allow: "GET, POST" } },
+  );
+}
+
 export async function GET(_request: Request, { params }: { params: Promise<{ token: string }> }) {
   const { token } = await params;
   try {
@@ -67,21 +74,30 @@ async function readBoundedText(request: Request, maxBytes: number): Promise<stri
 
 export async function POST(request: Request, { params }: { params: Promise<{ token: string }> }) {
   const contentType = request.headers.get("content-type") ?? "";
-  if (
-    !contentType.includes("application/x-www-form-urlencoded") &&
-    !contentType.includes("multipart/form-data")
-  ) {
+  const mediaType = contentType.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "application/x-www-form-urlencoded" && mediaType !== "multipart/form-data") {
     return new Response(null, { status: 415, headers });
   }
   const raw = await readBoundedText(request, 4096);
   if (raw === null) return new Response(null, { status: 413, headers });
-  const form = await new Request(request.url, {
-    method: "POST",
-    headers: request.headers,
-    body: raw,
-  }).formData();
-  if (form.get("List-Unsubscribe") !== "One-Click")
+  let form: FormData;
+  try {
+    form = await new Request(request.url, {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: raw,
+    }).formData();
+  } catch {
     return new Response(null, { status: 400, headers });
+  }
+  const values = form.getAll("List-Unsubscribe");
+  if (
+    values.length !== 1 ||
+    values[0] !== "One-Click" ||
+    ![...form.keys()].every((key) => key === "List-Unsubscribe")
+  ) {
+    return new Response(null, { status: 400, headers });
+  }
   const { token } = await params;
   try {
     const result = await emailService().unsubscribe(token);
@@ -95,3 +111,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ tok
     throw error;
   }
 }
+
+export const HEAD = methodNotAllowed;
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;
+export const OPTIONS = methodNotAllowed;

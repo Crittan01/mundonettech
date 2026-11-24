@@ -5,7 +5,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   cacheComponents: true,
   experimental: {
-    serverActions: { bodySizeLimit: "110mb" },
+    serverActions: { bodySizeLimit: "5mb" },
     staticGenerationMaxConcurrency: 4,
     staticGenerationMinPagesPerWorker: 25,
   },

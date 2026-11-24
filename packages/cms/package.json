@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@mundonettech/core": "workspace:*",
     "@mundonettech/db": "workspace:*",
     "@mundonettech/media": "workspace:*",
     "zod": "4.6.7"

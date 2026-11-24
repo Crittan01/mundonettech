@@ -1,4 +1,5 @@
-import { IntegrationEnvironment, Prisma } from "@mundonettech/db";
+import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
+import { IntegrationEnvironment, Prisma, type PrismaClient } from "@mundonettech/db";
 
 import { calculateCude, calculateCufe, dianTimestamp, parseDianCredentials } from "./dian.js";
 import { DianInvoiceProvider, signedDocumentHash } from "./dian-provider.js";
@@ -117,6 +118,37 @@ export class InvoiceService {
     return this.options.providerFactory?.(credentials) ?? new DianInvoiceProvider(credentials);
   }
 
+  private async assertActor(
+    db: PrismaClient | Prisma.TransactionClient,
+    audit: InvoiceAuditContext,
+    lock = false,
+  ): Promise<void> {
+    assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertIntegrationUuid(audit.requestId, "requestId");
+    let role: string | undefined;
+    if (lock) {
+      const rows = await db.$queryRaw<Array<{ role: string }>>`
+        SELECT "role"::text AS "role" FROM "AdminUser"
+        WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      role = rows[0]?.role;
+    } else {
+      const actor = await db.adminUser.findFirst({
+        where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { role: true },
+      });
+      role = actor?.role;
+    }
+    if (!role || !isAdminRole(role) || !hasAdminPermission(role, "invoices:write")) {
+      throw new InvoiceValidationError("Administrator is not authorized for fiscal operations.");
+    }
+  }
+
+  private async assertHumanActor(audit?: InvoiceAuditContext): Promise<void> {
+    if (audit) await this.assertActor(this.db, audit);
+  }
+
   private async writeAudit(
     tx: Prisma.TransactionClient,
     options: {
@@ -129,14 +161,7 @@ export class InvoiceService {
   ): Promise<void> {
     if (!options.audit) return;
     const audit = options.audit;
-    assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
-    if (audit.requestId !== undefined) assertIntegrationUuid(audit.requestId, "requestId");
-    const actor = await tx.adminUser.findFirst({
-      where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-      select: { role: true },
-    });
-    if (!actor || !["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"].includes(actor.role))
-      throw new InvoiceValidationError("Administrator is not authorized for fiscal operations.");
+    await this.assertActor(tx, audit);
     await tx.adminActionLog.create({
       data: {
         actorAdminUserId: audit.actorAdminUserId,
@@ -172,6 +197,7 @@ export class InvoiceService {
     credentialId?: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
+    await this.assertHumanActor(audit);
     assertIntegrationUuid(orderId, "orderId");
     if (credentialId !== undefined) assertIntegrationUuid(credentialId, "credentialId");
     const selectedCredential = await this.selectCredential(credentialId);
@@ -185,6 +211,7 @@ export class InvoiceService {
         replayed: true,
       };
     return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       const orders = await tx.$queryRaw<
         Array<{ id: string }>
       >`SELECT "id" FROM "Order" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
@@ -311,6 +338,7 @@ export class InvoiceService {
     refundId: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
+    await this.assertHumanActor(audit);
     assertIntegrationUuid(refundId, "refundId");
     const existing = await this.db.creditNote.findUnique({ where: { refundId } });
     if (existing)
@@ -340,6 +368,7 @@ export class InvoiceService {
     }
     const credentials = await this.credentials(refund.order.taxInvoice.credentialId);
     return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"dian-credit-note:" + refund.order.taxInvoice!.credentialId + ":" + credentials.creditNotePrefix}))`;
       const lockedRefund = await tx.orderRefund.findUniqueOrThrow({
         where: { id: refundId },
@@ -473,6 +502,7 @@ export class InvoiceService {
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
         Array<{ id: string; fullNumber: string; status: string }>
       >`SELECT "id", "fullNumber", "status" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
@@ -534,6 +564,7 @@ export class InvoiceService {
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       const invoice = await tx.taxInvoice.update({
         where: { id: invoiceId },
         data: {
@@ -581,9 +612,11 @@ export class InvoiceService {
     workerIdInput: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
+    await this.assertHumanActor(audit);
     assertIntegrationUuid(invoiceId, "invoiceId");
     const workerId = assertIntegrationKey(workerIdInput, "workerId");
     const claimed = await this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
         Array<import("@mundonettech/db").TaxInvoice>
       >`SELECT * FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
@@ -667,6 +700,7 @@ export class InvoiceService {
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
         Array<{ id: string; fullNumber: string; status: string }>
       >`SELECT "id", "fullNumber", "status" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
@@ -731,6 +765,7 @@ export class InvoiceService {
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       const note = await tx.creditNote.update({
         where: { id: creditNoteId },
         data: {
@@ -775,9 +810,11 @@ export class InvoiceService {
     workerIdInput: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
+    await this.assertHumanActor(audit);
     assertIntegrationUuid(creditNoteId, "creditNoteId");
     const workerId = assertIntegrationKey(workerIdInput, "workerId");
     const claimed = await this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
         Array<import("@mundonettech/db").CreditNote>
       >`SELECT * FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;

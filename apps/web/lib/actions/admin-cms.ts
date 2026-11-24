@@ -22,7 +22,6 @@ import {
   type ActionState,
 } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
-import { createMediaStorage } from "@/lib/media-storage";
 import {
   AdminAuthorizationError,
   getAdminSession,
@@ -98,8 +97,22 @@ function errorMessage(error: unknown, values: Record<string, string>): ActionSta
   );
 }
 
+const maximumCmsContentLength = 250_000;
+const bogotaMinuteFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Bogota",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
 function contentJson(formData: FormData): unknown {
   const raw = formString(formData, "content");
+  if (raw.length > maximumCmsContentLength) {
+    throw new CmsValidationError("Content exceeds the CMS request limit.");
+  }
   try {
     return JSON.parse(raw) as unknown;
   } catch {
@@ -113,6 +126,11 @@ function localDate(value: string): Date {
   }
   const date = new Date(`${value}:00-05:00`);
   if (Number.isNaN(date.getTime())) throw new CmsValidationError("Invalid local date.");
+  const parts = bogotaMinuteFormatter.formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  const roundTrip = `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
+  if (roundTrip !== value) throw new CmsValidationError("Invalid local date.");
   return date;
 }
 
@@ -123,6 +141,44 @@ function pageInput(formData: FormData) {
     seoTitle: formString(formData, "seoTitle"),
     seoDescription: formString(formData, "seoDescription"),
   };
+}
+
+const cmsSnapshotFields = new Set([
+  "pageId",
+  "slug",
+  "title",
+  "seoTitle",
+  "seoDescription",
+  "liveEdit",
+  "blockType",
+  "content",
+  "blockId",
+  "versionId",
+  "effectiveAt",
+  "scheduledFor",
+  "blockIds",
+  "isVisible",
+  "taxRegime",
+  "annualRevenueAlertUvt",
+  "currency",
+  "timeZone",
+  "orderNumberPrefix",
+  "orderNumberPadding",
+  "uvtValueCents",
+  "uvtYear",
+  "standardShippingCents",
+  "deliveryPromiseDays",
+  "reservationMinutes",
+  "clickAndCollectEnabled",
+  "localDeliveryEnabled",
+  "altText",
+  "mediaId",
+]);
+
+function cmsSnapshot(formData: FormData): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(formSnapshot(formData)).filter(([key]) => cmsSnapshotFields.has(key)),
+  );
 }
 
 function invalidateCms(options: { pageId?: string; slugs?: readonly (string | undefined)[] } = {}) {
@@ -160,7 +216,7 @@ export async function createCmsPageAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   let createdId: string;
   try {
     const { session, request } = await authorize("content:write");
@@ -182,7 +238,7 @@ export async function updateCmsPageAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   let liveEditSlug: string | null = null;
   try {
     const { session, request } = await authorize("content:write");
@@ -207,7 +263,7 @@ export async function addCmsBlockAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const pageId = z.uuid().parse(formString(formData, "pageId"));
@@ -235,7 +291,7 @@ export async function createCmsVersionAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const blockId = z.uuid().parse(formString(formData, "blockId"));
@@ -256,7 +312,7 @@ export async function publishCmsVersionAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const versionId = z.uuid().parse(formString(formData, "versionId"));
@@ -273,7 +329,7 @@ export async function scheduleCmsVersionAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const versionId = z.uuid().parse(formString(formData, "versionId"));
@@ -294,7 +350,7 @@ export async function publishCmsPageAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const pageId = z.uuid().parse(formString(formData, "pageId"));
@@ -310,7 +366,7 @@ export async function scheduleCmsPageAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const pageId = z.uuid().parse(formString(formData, "pageId"));
@@ -330,7 +386,7 @@ export async function archiveCmsPageAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const pageId = z.uuid().parse(formString(formData, "pageId"));
@@ -346,11 +402,14 @@ export async function reorderCmsBlocksAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const pageId = z.uuid().parse(formString(formData, "pageId"));
-    const blockIds = z.array(z.uuid()).parse(JSON.parse(formString(formData, "blockIds")));
+    const blockIds = z
+      .array(z.uuid())
+      .max(100)
+      .parse(JSON.parse(formString(formData, "blockIds")));
     await cmsService().reorderBlocks(pageId, blockIds, audit(session, request));
     const page = await getDatabase().cmsPage.findUnique({
       where: { id: pageId },
@@ -367,15 +426,15 @@ export async function setCmsBlockVisibilityAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     const blockId = z.uuid().parse(formString(formData, "blockId"));
-    await cmsService().setBlockVisibility(
-      blockId,
-      formString(formData, "isVisible") === "true",
-      audit(session, request),
-    );
+    const isVisible = z
+      .enum(["true", "false"])
+      .transform((value) => value === "true")
+      .parse(formString(formData, "isVisible"));
+    await cmsService().setBlockVisibility(blockId, isVisible, audit(session, request));
     const page = await resolvePageByBlock(blockId);
     invalidateCms({ ...(page ? { pageId: page.id, slugs: [page.slug] } : {}) });
     return actionSuccess("Visibilidad del bloque actualizada.");
@@ -388,7 +447,7 @@ export async function saveStoreSettingsAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("settings:write");
     const settings = await new StoreSettingsService(getDatabase()).save(
@@ -447,46 +506,11 @@ export async function saveStoreSettingsAction(
   }
 }
 
-export async function uploadCmsMediaAction(
-  _previous: ActionState,
-  formData: FormData,
-): Promise<ActionState> {
-  const values = formSnapshot(formData);
-  let storage: ReturnType<typeof createMediaStorage> | null = null;
-  try {
-    const { session, request } = await authorize("content:write");
-    storage = createMediaStorage();
-    const file = formData.get("file");
-    if (!(file instanceof File) || file.size === 0) {
-      throw new CmsValidationError("An image file is required.");
-    }
-    const result = await new CmsMediaService(getDatabase(), storage).upload(
-      {
-        bytes: new Uint8Array(await file.arrayBuffer()),
-        filename: file.name,
-        altText: formString(formData, "altText").trim(),
-      },
-      audit(session, request),
-    );
-    updateTag("cms:media");
-    revalidatePath("/admin/contenido/medios");
-    return actionSuccess(
-      result.reused
-        ? "La imagen ya existía; se reutilizó el activo persistido."
-        : "Imagen procesada, almacenada en R2 y registrada en la mediateca.",
-    );
-  } catch (error) {
-    return errorMessage(error, values);
-  } finally {
-    await storage?.destroy();
-  }
-}
-
 export async function updateCmsMediaAltAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     await new CmsMediaService(getDatabase(), null).updateAltText(
@@ -507,17 +531,17 @@ export async function archiveCmsMediaAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = cmsSnapshot(formData);
   try {
     const { session, request } = await authorize("content:write");
     await new CmsMediaService(getDatabase(), null).archive(
       z.uuid().parse(formString(formData, "mediaId")),
       audit(session, request),
     );
-    updateTag("cms:media");
-    revalidatePath("/admin/contenido/medios");
-    return actionSuccess("Activo archivado sin borrar su objeto ni el historial editorial.");
   } catch (error) {
     return errorMessage(error, values);
   }
+  updateTag("cms:media");
+  revalidatePath("/admin/contenido/medios");
+  redirect("/admin/contenido/medios?archived=1");
 }

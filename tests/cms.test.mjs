@@ -5,6 +5,8 @@ import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
 
+import { maskEmail, maskName } from "../packages/core/dist/index.js";
+
 import {
   CmsConflictError,
   CmsMediaService,
@@ -596,6 +598,151 @@ describe("F2.1 — CMS media with sharp-safe, R2 compensation and reference lock
         );
       } finally {
         failDeletes = false;
+      }
+    } finally {
+      await client.destroy();
+    }
+  });
+});
+
+describe("A2 — CMS media/settings audit, operator masking and rollback", () => {
+  it("masks operators and persists complete redacted before/after states", async () => {
+    const settings = new StoreSettingsService(db);
+    const first = {
+      taxRegime: "NO_RESPONSABLE_IVA",
+      annualRevenueAlertUvt: 3600,
+      currency: "COP",
+      timeZone: "America/Bogota",
+      orderNumberPrefix: "A2S",
+      orderNumberPadding: 5,
+      uvtValueCents: "5237400",
+      uvtYear: 2026,
+      standardShippingCents: "12000",
+      deliveryPromiseDays: 20,
+      reservationMinutes: 90,
+      clickAndCollectEnabled: true,
+      localDeliveryEnabled: false,
+    };
+    const initialSaved = await settings.save(first, audit);
+    await settings.save(
+      {
+        ...first,
+        annualRevenueAlertUvt: 3700,
+        standardShippingCents: "14000",
+        reservationMinutes: 100,
+        localDeliveryEnabled: true,
+      },
+      audit,
+    );
+    const settingsLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "STORE_SETTINGS_UPDATED", targetId: initialSaved.id },
+      orderBy: { createdAt: "desc" },
+    });
+    assert.equal(settingsLog.metadata.before.annualRevenueAlertUvt, 3600);
+    assert.equal(settingsLog.metadata.after.annualRevenueAlertUvt, 3700);
+    assert.equal(settingsLog.metadata.before.deliveryCents, "12000");
+    assert.equal(settingsLog.metadata.after.deliveryCents, "14000");
+    assert.equal(settingsLog.metadata.after.localDeliveryEnabled, true);
+    const stored = await settings.get();
+    assert.equal(stored.updatedBy.displayName, maskName(actor.displayName));
+    assert.equal(stored.updatedBy.email, maskEmail(actor.email));
+    assert.notEqual(stored.updatedBy.displayName, actor.displayName);
+    assert.notEqual(stored.updatedBy.email, actor.email);
+
+    const settingsLogCount = await db.adminActionLog.count({
+      where: { targetType: "StoreSettings", targetId: initialSaved.id },
+    });
+    await assert.rejects(settings.save({ ...first, currency: "co" }, audit), CmsValidationError);
+    assert.equal(
+      await db.adminActionLog.count({
+        where: { targetType: "StoreSettings", targetId: initialSaved.id },
+      }),
+      settingsLogCount,
+    );
+
+    const client = storage();
+    try {
+      const media = new CmsMediaService(db, client);
+      const uploaded = await media.upload(
+        {
+          bytes: createPng(91, 53),
+          filename: "archivo-privado.png",
+          altText: "Texto inicial con persona@example.com",
+        },
+        audit,
+      );
+      const createdLog = await db.adminActionLog.findFirstOrThrow({
+        where: { action: "CMS_MEDIA_CREATED", targetId: uploaded.media.id },
+      });
+      assert.equal(createdLog.metadata.before, null);
+      assert.equal(createdLog.metadata.after.id, uploaded.media.id);
+      assert.equal(createdLog.metadata.after.deleted, false);
+      assert.equal(createdLog.metadata.after.derivativeCount, 2);
+
+      await media.updateAltText(uploaded.media.id, "Texto posterior con +573001112233", audit);
+      const updateLog = await db.adminActionLog.findFirstOrThrow({
+        where: { action: "CMS_MEDIA_UPDATED", targetId: uploaded.media.id },
+      });
+      assert.equal(updateLog.metadata.before.altTextLength, uploaded.media.altText.length);
+      assert.equal(
+        updateLog.metadata.after.altTextLength,
+        "Texto posterior con +573001112233".length,
+      );
+      assert.equal(updateLog.metadata.altTextChanged, true);
+
+      const updateLogCount = await db.adminActionLog.count({
+        where: { targetType: "CmsMedia", targetId: uploaded.media.id },
+      });
+      await assert.rejects(
+        media.updateAltText(uploaded.media.id, "Debe revertirse", {
+          ...audit,
+          actorAdminUserId: randomUUID(),
+        }),
+      );
+      assert.equal(
+        (await db.cmsMedia.findUniqueOrThrow({ where: { id: uploaded.media.id } })).altText,
+        "Texto posterior con +573001112233",
+      );
+      assert.equal(
+        await db.adminActionLog.count({
+          where: { targetType: "CmsMedia", targetId: uploaded.media.id },
+        }),
+        updateLogCount,
+      );
+
+      const listed = await media.list({ limit: 100 });
+      const listedMedia = listed.items.find((item) => item.id === uploaded.media.id);
+      assert.equal(listedMedia.createdBy.displayName, maskName(actor.displayName));
+      assert.equal(listedMedia.createdBy.email, maskEmail(actor.email));
+      assert.equal(JSON.stringify(listed.items).includes(actor.displayName), false);
+      assert.equal(JSON.stringify(listed.items).includes(actor.email), false);
+
+      await media.archive(uploaded.media.id, audit);
+      const archiveLog = await db.adminActionLog.findFirstOrThrow({
+        where: { action: "CMS_MEDIA_ARCHIVED", targetId: uploaded.media.id },
+      });
+      assert.equal(archiveLog.metadata.before.deleted, false);
+      assert.equal(archiveLog.metadata.after.deleted, true);
+      assert.equal(archiveLog.metadata.before.byteSize, uploaded.media.byteSize);
+
+      const serialized = JSON.stringify([
+        settingsLog.metadata,
+        createdLog.metadata,
+        updateLog.metadata,
+        archiveLog.metadata,
+      ]);
+      for (const forbidden of [
+        actor.displayName,
+        actor.email,
+        "archivo-privado.png",
+        "Texto inicial con persona@example.com",
+        "Texto posterior con +573001112233",
+        uploaded.media.storageKey,
+        "storageKey",
+        "originalFilename",
+        '"altText":',
+      ]) {
+        assert.equal(serialized.includes(forbidden), false, forbidden);
       }
     } finally {
       await client.destroy();

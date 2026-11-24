@@ -11,6 +11,7 @@ import {
 } from "../packages/db/dist/index.js";
 import { DomainEventWorker, EmailService } from "../packages/integrations/dist/index.js";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
+import { withSystemProviderVault } from "./helpers/system-provider-vault.mjs";
 
 let harness;
 let db;
@@ -151,7 +152,7 @@ before(
     });
     lifecycle = new LifecycleService(db);
     segments = new SegmentationService(db);
-    const vault = {
+    const vault = withSystemProviderVault({
       list: async () => ({ items: [{ id: credentialId, provider: "resend", revokedAt: null }] }),
       reveal: async () =>
         Uint8Array.from(
@@ -167,9 +168,9 @@ before(
             }),
           ),
         ),
-    };
+    });
     email = new EmailService(db, {
-      vault,
+      vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "http://127.0.0.1:4110",
       providerFactory: () => ({
         send: async (input) => {
@@ -183,7 +184,7 @@ before(
       shipping: {},
       email,
       invoice: {},
-      vault,
+      vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "http://127.0.0.1:4110",
       storeName: "Tienda Lifecycle",
       receiptTokenForSubmission: () => "x".repeat(43),
@@ -734,6 +735,7 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
         marketingEmail: false,
         advertising: false,
       },
+      customer.updatedAt,
       { ipHash: hash(), userAgentHash: hash() },
     );
     const latestMembership = await db.customerSegmentMembership.findFirstOrThrow({

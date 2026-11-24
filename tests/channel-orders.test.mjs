@@ -591,17 +591,60 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
         where: { orderId: order.id, entryType: "FEE_REVERSAL", amountCents: 100n },
       }),
     );
-    await orderService.appendLedgerAdjustment({
+    const adjustmentKey = randomUUID();
+    const adjustmentInput = {
       orderId: order.id,
+      expectedVersion: diverged.version,
+      idempotencyKey: adjustmentKey,
       amountCents: 500n,
       direction: "CREDIT",
       evidenceReference: "SETTLEMENT-2026-001",
       reasonCode: "PROVIDER_CORRECTION",
+    };
+    const firstAdjustment = await orderService.appendLedgerAdjustment({
+      ...adjustmentInput,
       audit: audit(),
     });
+    assert.equal(firstAdjustment.replayed, false);
+    const replayedAdjustment = await orderService.appendLedgerAdjustment({
+      ...adjustmentInput,
+      audit: audit(),
+    });
+    assert.equal(replayedAdjustment.replayed, true);
+    assert.equal(replayedAdjustment.entry.id, firstAdjustment.entry.id);
+    const afterAdjustment = await db.channelOrder.findUniqueOrThrow({ where: { id: order.id } });
+    assert.equal(afterAdjustment.version, diverged.version + 1);
+    await assert.rejects(
+      orderService.appendLedgerAdjustment({
+        ...adjustmentInput,
+        amountCents: 600n,
+        audit: audit(),
+      }),
+      (error) => error.code === "CONFLICT",
+    );
+    await assert.rejects(
+      orderService.appendLedgerAdjustment({
+        ...adjustmentInput,
+        idempotencyKey: randomUUID(),
+        audit: audit(),
+      }),
+      (error) => error.code === "CONFLICT",
+    );
+    assert.equal(
+      await db.channelLedgerEntry.count({
+        where: { orderId: order.id, entryType: "MANUAL_ADJUSTMENT" },
+      }),
+      1,
+    );
+    assert.equal(
+      await db.adminActionLog.count({
+        where: { targetId: firstAdjustment.entry.id, action: "CHANNEL_LEDGER_ADJUSTMENT_APPEND" },
+      }),
+      1,
+    );
     await orderService.markReconciled({
       orderId: order.id,
-      expectedVersion: diverged.version,
+      expectedVersion: diverged.version + 1,
       evidenceReference: "SETTLEMENT-2026-001",
       reasonCode: "PROVIDER_SETTLEMENT_MATCH",
       audit: audit(),
@@ -893,6 +936,8 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
     await assert.rejects(
       orderService.appendLedgerAdjustment({
         orderId: order.id,
+        expectedVersion: order.version,
+        idempotencyKey: randomUUID(),
         amountCents: 100n,
         direction: "CREDIT",
         evidenceReference: "SETTLEMENT-UNAUTHORIZED",

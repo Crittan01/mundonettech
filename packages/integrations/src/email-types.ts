@@ -78,6 +78,7 @@ export interface EmailTemplateInput {
   readonly textBody: string;
   readonly variables: readonly string[];
   readonly publish: boolean;
+  readonly idempotencyKey: string;
 }
 
 export interface EmailQueueInput {

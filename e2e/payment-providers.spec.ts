@@ -176,7 +176,7 @@ test("integration wizard seals Wompi credentials and keeps an accessible MFA vau
   expect(serialized).not.toContain(credentials.integritySecret);
   expect(serialized).not.toContain(credentials.eventsSecret);
   expect(page.url()).not.toContain(credentials.privateKey);
-  await expect(page.getByText(primaryAccountName, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(`Credencial ${credentialId}`, { exact: true }).first()).toBeVisible();
   await page.goto("/admin/pagos");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Operación de pagos");
   const operationsAxe = await new AxeBuilder({ page })
@@ -278,6 +278,9 @@ test("enforces recent MFA on financial actions, blocks COD pre-checkout without 
     .getByRole("button", { name: "Cifrar y guardar credencial" })
     .click();
   await expect(page.getByText(/cifrada y registrada en LOCAL/)).toBeVisible();
+  const secondaryCredential = await db.integrationCredential.findFirstOrThrow({
+    where: { provider: "wompi", accountName: secondaryAccountName, environment: "LOCAL" },
+  });
 
   await page.goto("/admin/pagos");
   await page.getByLabel("Identidad a bloquear").fill(blockedEmail);
@@ -305,7 +308,7 @@ test("enforces recent MFA on financial actions, blocks COD pre-checkout without 
   expect(await db.order.count({ where: { emailSnapshot: blockedEmail } })).toBe(0);
 
   await page.getByRole("radio", { name: /^Wompi/ }).check();
-  await page.getByLabel("Cuenta Wompi").selectOption({ label: secondaryAccountName });
+  await page.getByLabel("Cuenta Wompi").selectOption(secondaryCredential.id);
   await page.getByRole("button", { name: "Registrar pedido e iniciar pago" }).click();
   await page.waitForURL(/checkout\.wompi\.co\/p\//);
 
