@@ -2099,16 +2099,14 @@ export class ChannelOrderService {
             failures.push({ eventId: event.id, code });
           }
         } else {
-          const retriedNow = await retryDomainOutbox(this.db, {
+          await retryDomainOutbox(this.db, {
             id: event.id,
             workerId,
             availableAt: new Date(Date.now() + Math.min(300_000, 5_000 * 2 ** event.attempts)),
             error: code.slice(0, 100),
           });
-          if (retriedNow) {
-            retries += 1;
-            failures.push({ eventId: event.id, code });
-          }
+          retries += 1;
+          failures.push({ eventId: event.id, code });
         }
       }
     }
