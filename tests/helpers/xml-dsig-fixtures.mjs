@@ -1,13 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { createHash, sign as signPayload } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const cbcNamespace = "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2";
 const dsigNamespace = "http://www.w3.org/2000/09/xmldsig#";
 
 export function createXmlDsigSigner(commonName) {
-  const directory = mkdtempSync("tmp/xml-dsig-");
+  const directory = mkdtempSync(join(tmpdir(), "mundonettech-xml-dsig-"));
   const keyPath = join(directory, "key.pem");
   const certificatePath = join(directory, "certificate.pem");
   try {
