@@ -1,6 +1,7 @@
 "use server";
 
 import {
+  AdminActorAuthorizationError,
   PricingConflictError,
   PricingNotFoundError,
   PricingService,
@@ -130,7 +131,7 @@ function message(error: unknown, values: Record<string, string>): ActionState {
       values,
     );
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para esta mutación comercial.", values);
   }
   if (error instanceof PricingConflictError) {

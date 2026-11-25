@@ -1,5 +1,12 @@
+import { randomUUID } from "node:crypto";
+
 import { maskEmail, maskName, sanitizeAuditValue } from "@mundonettech/core";
-import { Prisma, PrismaClient, type StoreSettings } from "@mundonettech/db";
+import {
+  assertAdminActorInTransaction,
+  Prisma,
+  PrismaClient,
+  type StoreSettings,
+} from "@mundonettech/db";
 
 import type { CmsAudit } from "./cms-service.js";
 import { CmsValidationError } from "./cms-service.js";
@@ -46,8 +53,8 @@ function validateSettings(input: StoreSettingsInput) {
     throw new CmsValidationError("Annual revenue alert must be a positive 32-bit integer.");
   }
   const currency = input.currency.trim().toUpperCase();
-  if (!/^[A-Z]{3}$/.test(currency)) {
-    throw new CmsValidationError("Currency must use ISO 4217 uppercase letters.");
+  if (currency !== "COP") {
+    throw new CmsValidationError("Store currency must be COP for integer-cent accounting.");
   }
   const timeZone = input.timeZone.trim();
   if (!timeZone || timeZone.length > 64 || !ianaTimeZonePattern.test(timeZone)) {
@@ -150,9 +157,21 @@ export class StoreSettingsService {
     if (!uuidPattern.test(audit.actorAdminUserId)) {
       throw new CmsValidationError("actorAdminUserId must be a canonical UUID.");
     }
+    if (audit.requestId !== undefined && !uuidPattern.test(audit.requestId)) {
+      throw new CmsValidationError("requestId must be a canonical UUID.");
+    }
     const settings = validateSettings(input);
     return this.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('store-settings-default'))`;
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "settings:write");
+      const timeZone = await tx.$queryRaw<Array<{ supported: boolean }>>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_catalog.pg_timezone_names WHERE name = ${settings.timeZone}
+        ) AS "supported"
+      `;
+      if (!timeZone[0]?.supported) {
+        throw new CmsValidationError("The IANA time zone is not supported by PostgreSQL 17.");
+      }
       const existing = await tx.storeSettings.findUnique({ where: { key: "default" } });
       const saved = await tx.storeSettings.upsert({
         where: { key: "default" },
@@ -165,6 +184,7 @@ export class StoreSettingsService {
           action: "STORE_SETTINGS_UPDATED",
           targetType: "StoreSettings",
           targetId: saved.id,
+          requestId: audit.requestId ?? randomUUID(),
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
           metadata: sanitizeAuditValue({

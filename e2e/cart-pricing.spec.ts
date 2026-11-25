@@ -19,6 +19,7 @@ let admin: { id: string; authUserId: string; email: string };
 let financeViewer: { id: string; authUserId: string; email: string };
 let audit: { actorAdminUserId: string; ipHash: Uint8Array<ArrayBuffer>; userAgentHash: null };
 let couponCode: string;
+let bundleId: string;
 let productSlug: string;
 
 function tokenHash(token: string): Uint8Array<ArrayBuffer> {
@@ -152,7 +153,7 @@ test.beforeAll(async () => {
     },
     audit,
   );
-  await pricing.upsertBundle(
+  const createdBundle = await pricing.upsertBundle(
     null,
     {
       slug: `e2e-bundle-${randomUUID()}`,
@@ -165,6 +166,7 @@ test.beforeAll(async () => {
     },
     audit,
   );
+  bundleId = createdBundle.id;
 });
 
 test.afterAll(async () => {
@@ -222,10 +224,29 @@ test("PDP, wholesale, coupon, quantities and stock work through real Server Acti
 });
 
 test("bundle CTA persists every component and exact bundle discount", async ({ page }) => {
-  await page.goto(`/producto/${productSlug}`);
+  await authenticateAdmin(page);
+  await page.goto(`/admin/precios/bundles/${bundleId}`);
+  await page.getByLabel("Componentes: SKU | cantidad, uno por línea").fill(`${sku}|2`);
+  await page.getByRole("button", { name: "Guardar bundle" }).click();
+  await expect(page.getByText(/Bundle actualizado;/)).toBeVisible();
+  await page.context().clearCookies();
+
+  let releaseHydration!: () => void;
+  const hydrationGate = new Promise<void>((resolve) => {
+    releaseHydration = resolve;
+  });
+  await page.route("**/_next/static/**/*.js", async (route) => {
+    await hydrationGate;
+    await route.continue().catch(() => undefined);
+  });
+  await page.goto(`/producto/${productSlug}`, { waitUntil: "domcontentloaded" });
   const bundle = page.locator("article").filter({ hasText: "Paquete E2E Sony" });
   await expect(bundle).toBeVisible();
-  await bundle.getByRole("button", { name: "Añadir paquete" }).click();
+  const addButton = bundle.getByRole("button", { name: "Añadir paquete" });
+  await expect(addButton).toBeDisabled();
+  releaseHydration();
+  await expect(addButton).toBeEnabled();
+  await addButton.click();
   await expect(page.getByText(/Paquete añadido con todos sus componentes/)).toBeVisible();
   await page.goto("/carrito");
   await expect(page.getByText("Paquete E2E Sony").first()).toBeVisible();
@@ -238,9 +259,10 @@ test("bundle CTA persists every component and exact bundle discount", async ({ p
   await page.getByRole("button", { name: "Vaciar carrito" }).click();
 });
 
-test("pricing admin writes an audited tier with recent aal2 and preserves RBAC shell", async ({
+test("pricing admin writes BigInt tiers, refreshes existing carts and preserves RBAC/MFA", async ({
   page,
 }) => {
+  test.setTimeout(90_000);
   await authenticateAdmin(page);
   await page.goto("/admin/precios/nuevo?tipo=mayoristas");
   await page.getByLabel("Alcance").selectOption("PRODUCT");
@@ -258,6 +280,53 @@ test("pricing admin writes an audited tier with recent aal2 and preserves RBAC s
     await db.adminActionLog.count({ where: { targetType: "WholesaleTier", targetId: saved.id } }),
   ).toBe(1);
 
+  await authenticateAdmin(page, 30, financeViewer);
+  await page.goto(`/admin/precios/mayoristas/${saved.id}`);
+  await expect(page.getByRole("heading", { name: "Vista de solo lectura" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Guardar escala" })).toHaveCount(0);
+  await page.goto("/admin/venta-asistida");
+  await expect(page).toHaveURL(/\/admin\/login\?reason=security/);
+
+  await authenticateAdmin(page);
+  await page.goto(`/producto/${productSlug}`);
+  await page.getByLabel("Cantidad", { exact: true }).fill("3");
+  await page.getByRole("button", { name: "Añadir al carrito" }).click();
+  await expect(page.getByText(/Producto añadido/)).toBeVisible();
+  await page.goto("/carrito");
+  let snapshot = await currentBrowserCart(page);
+  expect(snapshot.subtotalCents).toBe("435000000");
+  expect(snapshot.wholesaleDiscountCents).toBe("60000000");
+  expect(snapshot.totalCents).toBe("375000000");
+  expect(snapshot.items[0]?.quantity).toBe(3);
+
+  await page.goto(`/admin/precios/mayoristas/${saved.id}`);
+  await page.getByLabel("Precio unitario (centavos COP)").fill("120000000");
+  await page.getByRole("button", { name: "Guardar escala" }).click();
+  await expect(
+    page.getByText("Escala mayorista actualizada y auditoría registrada."),
+  ).toBeVisible();
+  expect(
+    (await db.wholesaleTier.findUniqueOrThrow({ where: { id: saved.id } })).unitPriceCents,
+  ).toBe(120000000n);
+  await page.goto("/carrito");
+  await expect(page.getByText(/3\.600\.000/).first()).toBeVisible();
+  snapshot = await currentBrowserCart(page);
+  expect(snapshot.subtotalCents).toBe("435000000");
+  expect(snapshot.wholesaleDiscountCents).toBe("75000000");
+  expect(snapshot.totalCents).toBe("360000000");
+
+  await page.goto(`/admin/precios/mayoristas/${saved.id}`);
+  await page.getByRole("button", { name: "Archivar definitivamente" }).click();
+  await expect(page).toHaveURL(/\/admin\/precios\?vista=mayoristas&archivado=1$/);
+  await page.goto("/carrito");
+  snapshot = await currentBrowserCart(page);
+  expect(snapshot.subtotalCents).toBe("435000000");
+  expect(snapshot.wholesaleDiscountCents).toBe("45000000");
+  expect(snapshot.totalCents).toBe("390000000");
+  expect(
+    await db.adminActionLog.count({ where: { targetType: "WholesaleTier", targetId: saved.id } }),
+  ).toBe(3);
+
   await authenticateAdmin(page, 900);
   await page.goto("/admin/precios");
   await expect(page.getByText(/autenticador/i).first()).toBeVisible();
@@ -272,12 +341,6 @@ test("pricing admin writes an audited tier with recent aal2 and preserves RBAC s
   await page.getByLabel("Monto fijo (centavos COP)").fill("500000");
   await page.getByRole("button", { name: "Crear cupón" }).click();
   await expect(page).toHaveURL(/\/admin\/precios\/cupones\/[0-9a-f-]+\?creado=1/);
-
-  await authenticateAdmin(page, 30, financeViewer);
-  await page.goto(`/admin/precios/mayoristas/${saved.id}`);
-  await expect(page.getByRole("heading", { name: "Vista de solo lectura" })).toBeVisible();
-  await page.goto("/admin/venta-asistida");
-  await expect(page).toHaveURL(/\/admin\/login\?reason=security/);
 });
 
 test("assisted admin emits a one-time link and the customer accepts it exactly once", async ({

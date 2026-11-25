@@ -53,12 +53,15 @@ export function Model3d({
   const [status, setStatus] = useState<ViewerStatus>("idle");
   const [elementReady, setElementReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [failedAttempts, setFailedAttempts] = useState(0);
   const viewer = useRef<HTMLElement>(null);
 
   const safeSources =
     isSafeMediaUrl(glbSrc) &&
     (usdzSrc === undefined || isSafeMediaUrl(usdzSrc)) &&
     (posterSrc === undefined || isSafeMediaUrl(posterSrc));
+  const modelSrc =
+    failedAttempts === 0 ? glbSrc : `${glbSrc.replace(/#.*$/, "")}#model-retry=${failedAttempts}`;
 
   useEffect(() => {
     if (status !== "loading" || !safeSources) return;
@@ -106,6 +109,8 @@ export function Model3d({
   }
 
   function start(): void {
+    if (status === "error") setFailedAttempts((value) => value + 1);
+    setElementReady(false);
     setAttempt((value) => value + 1);
     setStatus("loading");
   }
@@ -149,7 +154,7 @@ export function Model3d({
             <ModelViewer
               key={attempt}
               ref={viewer}
-              src={glbSrc}
+              src={modelSrc}
               {...(usdzSrc ? { "ios-src": usdzSrc } : {})}
               {...(posterSrc ? { poster: posterSrc } : {})}
               ar
@@ -187,13 +192,22 @@ export function Model3d({
           role="alert"
         >
           <p>No pudimos cargar el modelo 3D. Revisa tu conexión.</p>
-          <button
-            type="button"
-            onClick={start}
-            className="min-h-11 rounded-md border border-border bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-          >
-            Reintentar
-          </button>
+          <div className="flex flex-wrap justify-center gap-3">
+            <button
+              type="button"
+              onClick={start}
+              className="min-h-11 rounded-md border border-border bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              Reintentar
+            </button>
+            <button
+              type="button"
+              onClick={resetToPoster}
+              className="min-h-11 rounded-md border border-border bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            >
+              Volver a vista fija
+            </button>
+          </div>
         </div>
       ) : null}
     </section>

@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { cacheLife, cacheTag } from "next/cache";
 
@@ -5,6 +6,19 @@ import { storeConfig } from "@mundonettech/config/store";
 import { ProductCard } from "@/components/catalog/product-card";
 import { searchCatalog } from "@/lib/catalog";
 import { getPublicMediaOrigin } from "@/lib/env";
+
+export const metadata: Metadata = {
+  title: "Tecnología que conecta tu mundo",
+  description: storeConfig.description,
+  alternates: { canonical: "/" },
+  openGraph: {
+    type: "website",
+    locale: "es_CO",
+    url: "/",
+    title: storeConfig.name,
+    description: storeConfig.description,
+  },
+};
 
 export default async function HomePage() {
   "use cache";
@@ -75,6 +89,7 @@ export default async function HomePage() {
                 key={product.id}
                 product={product}
                 mediaOrigin={getPublicMediaOrigin()}
+                headingLevel={3}
               />
             ))}
           </div>

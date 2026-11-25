@@ -9,6 +9,7 @@ export async function CmsStepUp({ session }: { session: AdminSession }) {
     session.supabase.auth.mfa.listFactors(),
   ]);
   const factor = factors.data?.totp.find((item) => item.status === "verified");
-  const recent = session.lastMfaAt && now.getTime() - session.lastMfaAt.getTime() <= 600_000;
+  const mfaAge = session.lastMfaAt ? now.getTime() - session.lastMfaAt.getTime() : null;
+  const recent = mfaAge !== null && mfaAge >= -30_000 && mfaAge <= 600_000;
   return !recent && factor ? <StepUpPrompt factorId={factor.id} /> : null;
 }

@@ -1,8 +1,15 @@
 import type { CatalogMedia } from "@mundonettech/db";
-import { buildSpinFrames, Model3d, Spin360, type SpinFrame } from "@mundonettech/media/viewers";
+import {
+  buildPictureSources,
+  buildSpinFrames,
+  Model3d,
+  Spin360,
+  type ResponsiveDerivativeDescriptor,
+  type SpinFrame,
+} from "@mundonettech/media/viewers";
 import Image from "next/image";
 
-import { resolveCatalogMediaUrl } from "@/components/catalog/media-url";
+import { resolveCatalogMediaUrl } from "./media-url";
 
 function resolveSpin360Frames(
   media: CatalogMedia,
@@ -34,21 +41,70 @@ function resolveSpin360Frames(
     .filter((frame): frame is SpinFrame => frame !== null);
 }
 
-function MediaItem({ media, origin }: { media: CatalogMedia; origin: string }) {
+const responsiveImageWidths = [480, 768, 1280, 1920] as const;
+const galleryImageSizes = "(min-width: 1024px) 45vw, 100vw";
+
+function resolveImageSources(media: CatalogMedia, origin: string) {
+  if (media.width === null || media.height === null) return null;
+  const match = /^(.+\/)([1-9][0-9]*)\.webp$/.exec(media.storageKey);
+  const prefix = match?.[1];
+  if (!prefix || Number(match[2]) !== media.width) return null;
+  const primaryWidth = media.width;
+  const primaryHeight = media.height;
+  const widths = [...responsiveImageWidths.filter((width) => width < primaryWidth), primaryWidth];
+  const derivatives: ResponsiveDerivativeDescriptor[] = widths.flatMap((width) => {
+    const height = Math.max(1, Math.round((width * primaryHeight) / primaryWidth));
+    return (["avif", "webp"] as const).map((format) => ({
+      format,
+      width,
+      height,
+      key: `${prefix}${width}.${format}`,
+    }));
+  });
+  try {
+    return buildPictureSources(derivatives, { baseUrl: origin, sizes: galleryImageSizes });
+  } catch {
+    return null;
+  }
+}
+
+function MediaItem({
+  media,
+  origin,
+  priority,
+}: {
+  media: CatalogMedia;
+  origin: string;
+  priority: boolean;
+}) {
   const src = resolveCatalogMediaUrl(media.storageKey, origin);
   if (!src) return <p role="alert">No pudimos cargar este recurso multimedia.</p>;
   const width = media.width ?? 960;
   const height = media.height ?? 720;
   if (media.mediaType === "IMAGE") {
+    const picture = resolveImageSources(media, origin);
     return (
-      <Image
-        src={src}
-        alt={media.altText}
-        width={width}
-        height={height}
-        className="h-auto w-full rounded-xl object-contain"
-        unoptimized
-      />
+      <picture>
+        {picture?.sources.map((source) => (
+          <source
+            key={source.type}
+            type={source.type}
+            srcSet={source.srcSet}
+            {...(source.sizes ? { sizes: source.sizes } : {})}
+          />
+        ))}
+        <Image
+          src={src}
+          alt={media.altText}
+          width={width}
+          height={height}
+          sizes={galleryImageSizes}
+          loading={priority ? "eager" : "lazy"}
+          fetchPriority={priority ? "high" : "auto"}
+          className="h-auto w-full rounded-xl object-contain"
+          unoptimized
+        />
+      </picture>
     );
   }
   if (media.mediaType === "VIDEO") {
@@ -108,6 +164,7 @@ export function ProductMediaGallery({
   origin: string | null;
   productName: string;
 }) {
+  const firstImageId = media.find((item) => item.mediaType === "IMAGE")?.id;
   return (
     <section aria-label={`Galería de ${productName}`} className="space-y-4">
       {media.length === 0 ? (
@@ -125,14 +182,14 @@ export function ProductMediaGallery({
               key={item.id}
               className="overflow-hidden rounded-2xl border border-border bg-card p-3"
             >
-              <MediaItem media={item} origin={origin} />
+              <MediaItem media={item} origin={origin} priority={item.id === firstImageId} />
             </div>
           ) : (
             <figure
               key={item.id}
               className="overflow-hidden rounded-2xl border border-border bg-card p-3"
             >
-              <MediaItem media={item} origin={origin} />
+              <MediaItem media={item} origin={origin} priority={item.id === firstImageId} />
               <figcaption className="sr-only">{item.altText}</figcaption>
             </figure>
           ),

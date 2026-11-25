@@ -11,6 +11,7 @@ import {
 import type { CatalogMutationAudit } from "./catalog-types.js";
 import { Prisma, PrismaClient, type UrlRedirect } from "./generated/client.js";
 import { inInventoryTransaction } from "./inventory-shared.js";
+import { assertAdminActorInTransaction } from "./primitives.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const urlRedirectCacheStateId = "00000000-0000-0000-0000-000000000001";
@@ -141,6 +142,7 @@ async function audit(
   ) {
     throw new UrlRedirectValidationError("Audit hashes must contain 32 bytes.");
   }
+  await assertAdminActorInTransaction(tx, context.actorAdminUserId, "content:write");
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: context.actorAdminUserId,

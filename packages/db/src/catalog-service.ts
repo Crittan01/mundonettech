@@ -16,6 +16,7 @@ import type {
   ProductStatus,
 } from "./generated/client.js";
 import { Prisma } from "./generated/client.js";
+import { assertAdminActorInTransaction } from "./primitives.js";
 import {
   acquireOperationLocks,
   compareStrings,
@@ -532,6 +533,7 @@ async function writeCatalogAudit(
   if (audit.ipHash.length !== 32 || (audit.userAgentHash && audit.userAgentHash.length !== 32)) {
     throw new CatalogQueryError("Audit hashes must contain 32 bytes.");
   }
+  await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,
@@ -1367,8 +1369,13 @@ export class CatalogService {
           0n,
         );
         const basePrice = bundle.priceCents ?? componentsTotal;
-        const effectivePrice =
-          basePrice > bundle.discountCents ? basePrice - bundle.discountCents : 0n;
+        if (
+          bundle.discountCents > basePrice ||
+          basePrice - bundle.discountCents > componentsTotal
+        ) {
+          continue;
+        }
+        const effectivePrice = basePrice - bundle.discountCents;
         bundleMap.set(bundle.id, {
           id: bundle.id,
           slug: bundle.slug,

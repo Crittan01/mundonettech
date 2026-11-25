@@ -27,7 +27,12 @@ const allowedFields = new Set(["file", "altText"]);
 const altTextSchema = z.string().trim().min(1).max(250);
 
 function failure(error: unknown): Response {
-  if (error instanceof AdminAuthorizationError) return adminUploadAuthenticationError(error);
+  if (
+    error instanceof AdminAuthorizationError ||
+    (error instanceof Error && error.name === "AdminActorAuthorizationError")
+  ) {
+    return adminUploadAuthenticationError(error);
+  }
   if (error instanceof CmsConflictError) return adminUploadError(409, "upload_conflict");
   if (
     error instanceof CmsValidationError ||

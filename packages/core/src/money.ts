@@ -1,6 +1,7 @@
 import { roundDivHalfUp } from "./inventory.js";
 
 const maxSignedBigInt = 9_223_372_036_854_775_807n;
+const minSignedBigInt = -9_223_372_036_854_775_808n;
 const copFormatter = new Intl.NumberFormat("es-CO", {
   style: "currency",
   currency: "COP",
@@ -18,8 +19,11 @@ export function formatCopCents(value: string | bigint): string {
 
 export function formatSignedCopCents(value: string | bigint): string {
   const cents = typeof value === "bigint" ? value : BigInt(value);
-  if (cents < -maxSignedBigInt || cents > maxSignedBigInt) {
+  if (cents < minSignedBigInt || cents > maxSignedBigInt) {
     throw new RangeError("COP cents must fit a signed BIGINT.");
+  }
+  if (cents === minSignedBigInt) {
+    return `-${copFormatter.format(roundDivHalfUp(-cents, 100n))}`;
   }
   return cents < 0n ? `-${formatCopCents(-cents)}` : formatCopCents(cents);
 }

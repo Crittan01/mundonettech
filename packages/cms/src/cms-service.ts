@@ -507,7 +507,11 @@ export class CmsService {
     }
   }
 
-  async updatePage(id: string, input: CmsPageInput, context: CmsAudit): Promise<CmsPage> {
+  async updatePage(
+    id: string,
+    input: CmsPageInput,
+    context: CmsAudit,
+  ): Promise<CmsPage & { previousSlug: string }> {
     assertUuid(id, "pageId");
     assertUuid(context.actorAdminUserId, "actorAdminUserId");
     const page = pageInput(input);
@@ -528,7 +532,8 @@ export class CmsService {
           existing.seoTitle === page.seoTitle &&
           existing.seoDescription === page.seoDescription
         ) {
-          return tx.cmsPage.findUniqueOrThrow({ where: { id } });
+          const current = await tx.cmsPage.findUniqueOrThrow({ where: { id } });
+          return { ...current, previousSlug: existing.slug };
         }
         const updated = await tx.cmsPage.update({ where: { id }, data: page });
         await audit(tx, context, "CMS_PAGE_UPDATED", "CmsPage", id, {
@@ -537,7 +542,7 @@ export class CmsService {
           before: pageState(existing),
           after: pageState(updated),
         });
-        return updated;
+        return { ...updated, previousSlug: existing.slug };
       });
     } catch (error) {
       if (hasErrorCode(error, "P2002")) {
@@ -972,27 +977,37 @@ export class CmsService {
         });
       }
       const pages = await tx.$queryRaw<CmsPageAuditRecord[]>`
-        SELECT "id", "slug", "title", "seoTitle", "seoDescription", "status",
-               "publishedAt", "scheduledFor", "deletedAt"
-        FROM "CmsPage"
-        WHERE "status" = 'SCHEDULED' AND "scheduledFor" <= ${now} AND "deletedAt" IS NULL
-        ORDER BY "id"
+        SELECT p."id", p."slug", p."title", p."seoTitle", p."seoDescription", p."status",
+               p."publishedAt", p."scheduledFor", p."deletedAt"
+        FROM "CmsPage" p
+        WHERE p."status" = 'SCHEDULED' AND p."scheduledFor" <= ${now} AND p."deletedAt" IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM "CmsSectionBlock" b
+            JOIN "CmsBlockVersion" v ON v."blockId" = b."id"
+            WHERE b."pageId" = p."id" AND b."isVisible" = TRUE
+              AND v."status" = 'PUBLISHED' AND v."effectiveAt" <= ${now}
+          )
+        ORDER BY p."id"
         LIMIT 100
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF p SKIP LOCKED
       `;
-      let deferred = 0;
+      const deferredPages = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT p."id"
+        FROM "CmsPage" p
+        WHERE p."status" = 'SCHEDULED' AND p."scheduledFor" <= ${now} AND p."deletedAt" IS NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM "CmsSectionBlock" b
+            JOIN "CmsBlockVersion" v ON v."blockId" = b."id"
+            WHERE b."pageId" = p."id" AND b."isVisible" = TRUE
+              AND v."status" = 'PUBLISHED' AND v."effectiveAt" <= ${now}
+          )
+        ORDER BY p."id"
+        LIMIT 100
+        FOR UPDATE OF p SKIP LOCKED
+      `;
       for (const page of pages) {
-        const publishable = await tx.cmsBlockVersion.count({
-          where: {
-            status: "PUBLISHED",
-            effectiveAt: { lte: now },
-            block: { pageId: page.id, isVisible: true },
-          },
-        });
-        if (publishable === 0) {
-          deferred += 1;
-          continue;
-        }
         const updated = await tx.cmsPage.update({
           where: { id: page.id },
           data: { status: "PUBLISHED", publishedAt: now, scheduledFor: null },
@@ -1006,8 +1021,8 @@ export class CmsService {
       }
       return {
         versions: versions.length,
-        pages: pages.length - deferred,
-        pagesDeferred: deferred,
+        pages: pages.length,
+        pagesDeferred: deferredPages.length,
         affectedSlugs: [...affectedSlugs],
       };
     });

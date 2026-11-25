@@ -1,6 +1,7 @@
 "use server";
 
 import {
+  AdminActorAuthorizationError,
   CatalogConflictError,
   CatalogNotFoundError,
   CatalogQueryError,
@@ -88,6 +89,13 @@ const variantSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE"]),
 });
 
+function formBoolean(formData: FormData, key: string): boolean | null {
+  const value = formString(formData, key);
+  if (value === "" || value === "false") return false;
+  if (value === "on" || value === "true") return true;
+  return null;
+}
+
 function baseInput(formData: FormData): CatalogProductBaseInput | null {
   const parsed = baseSchema.safeParse({
     slug: formString(formData, "slug"),
@@ -104,12 +112,12 @@ function baseInput(formData: FormData): CatalogProductBaseInput | null {
     seoTitle: formString(formData, "seoTitle"),
     seoDescription: formString(formData, "seoDescription"),
   });
-  if (!parsed.success) return null;
-  const trackValue = formString(formData, "trackSerial");
+  const trackSerial = formBoolean(formData, "trackSerial");
+  if (!parsed.success || trackSerial === null) return null;
   return {
     ...parsed.data,
     warrantyMonths: Number(parsed.data.warrantyMonths),
-    trackSerial: trackValue === "on" || trackValue === "true",
+    trackSerial,
   };
 }
 
@@ -129,7 +137,12 @@ function variantInput(formData: FormData): CatalogVariantInput | null {
     status: formString(formData, "status"),
   });
   const variantId = formString(formData, "variantId");
-  if (!parsed.success || (variantId && !z.string().uuid().safeParse(variantId).success)) {
+  const isDefault = formBoolean(formData, "isDefault");
+  if (
+    !parsed.success ||
+    isDefault === null ||
+    (variantId && !z.string().uuid().safeParse(variantId).success)
+  ) {
     return null;
   }
   return {
@@ -139,7 +152,7 @@ function variantInput(formData: FormData): CatalogVariantInput | null {
     lengthMillimeters: Number(parsed.data.lengthMillimeters),
     widthMillimeters: Number(parsed.data.widthMillimeters),
     heightMillimeters: Number(parsed.data.heightMillimeters),
-    isDefault: ["on", "true"].includes(formString(formData, "isDefault")),
+    isDefault,
   };
 }
 
@@ -192,7 +205,7 @@ function mutationMessage(error: unknown, values: Record<string, string>): Action
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de guardar este cambio.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para modificar el catálogo.", values);
   }
   if (error instanceof CatalogConflictError) {
@@ -278,6 +291,9 @@ function invalidateCatalog(options: {
   updateTag("catalog:search");
   updateTag("catalog:compare");
   updateTag("catalog:cms-grid");
+  updateTag("merchant-feed");
+  updateTag("meta-catalog-feed");
+  updateTag("sitemap");
   if (options.slug) {
     updateTag(`catalog:product:${options.slug}`);
     if (options.includeReviews) updateTag(`reviews:${options.slug}`);
@@ -548,7 +564,7 @@ function mediaMutationError(error: unknown, values: Record<string, string>): Act
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de modificar los medios.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para modificar el catálogo.", values);
   }
   if (error instanceof ProductMediaNotFoundError) {

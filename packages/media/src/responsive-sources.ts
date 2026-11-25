@@ -44,6 +44,7 @@ export function isSafeMediaUrl(value: string): boolean {
   }
   try {
     const parsed = new URL(value);
+    if (parsed.username || parsed.password) return false;
     if (parsed.protocol === "https:") return true;
     if (parsed.protocol === "http:" && loopbackHostnames.has(parsed.hostname.toLowerCase())) {
       return true;
@@ -80,8 +81,19 @@ function resolveDerivativeUrl(
     return derivative.publicUrl;
   }
   if (baseUrl && derivative.key) {
+    if (
+      derivative.key.trim() !== derivative.key ||
+      derivative.key.length > 500 ||
+      derivative.key.startsWith("/") ||
+      derivative.key.endsWith("/") ||
+      derivative.key.includes("\\") ||
+      /[\u0000-\u001f\u007f]/.test(derivative.key) ||
+      derivative.key.split("/").some((part) => !part || part === "." || part === "..")
+    ) {
+      throw new TypeError("Unsafe derivative storage key.");
+    }
     const cleanBase = baseUrl.replace(/\/$/, "");
-    const encodedKey = derivative.key.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+    const encodedKey = derivative.key.split("/").map(encodeURIComponent).join("/");
     const candidate = `${cleanBase}/${encodedKey}`;
     if (!isSafeMediaUrl(candidate)) {
       throw new TypeError("Unsafe resolved media URL.");
@@ -145,16 +157,18 @@ export function buildSpinFrames(
   if (frames.length < 2 || frames.length > 120) {
     throw new RangeError("SPIN_360 requires between 2 and 120 frames.");
   }
-  return [...frames]
-    .sort((a, b) => a.frame - b.frame)
-    .map((entry) => {
-      const picture = buildPictureSources(entry.derivatives, options);
-      return {
-        src: picture.src,
-        width: picture.width,
-        height: picture.height,
-        ...(options.sizes ? { sizes: options.sizes } : {}),
-        sources: picture.sources,
-      };
-    });
+  const ordered = [...frames].sort((a, b) => a.frame - b.frame);
+  if (ordered.some((entry, index) => !Number.isSafeInteger(entry.frame) || entry.frame !== index)) {
+    throw new RangeError("SPIN_360 frame indices must be unique and contiguous from zero.");
+  }
+  return ordered.map((entry) => {
+    const picture = buildPictureSources(entry.derivatives, options);
+    return {
+      src: picture.src,
+      width: picture.width,
+      height: picture.height,
+      ...(options.sizes ? { sizes: options.sizes } : {}),
+      sources: picture.sources,
+    };
+  });
 }

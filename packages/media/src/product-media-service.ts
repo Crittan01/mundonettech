@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
 
 import { sanitizeAuditValue } from "@mundonettech/core";
-import { Prisma, PrismaClient, type ProductMedia } from "@mundonettech/db";
+import {
+  assertAdminActorInTransaction,
+  Prisma,
+  PrismaClient,
+  type ProductMedia,
+} from "@mundonettech/db";
 
 import { inspectImageMagic } from "./image-safety.js";
 import { validateGlb, validateUsdz } from "./model-safety.js";
 import {
+  MediaSourceValidationError,
   storeImageDerivatives,
   storeModel3d,
   storeSpin360,
@@ -420,6 +426,7 @@ export class ProductMediaService {
   ): Promise<ProductMediaUploadResult> {
     try {
       return await this.db.$transaction(async (tx) => {
+        await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
         const product = await this.lockTarget(tx, target);
         const existing = await tx.productMedia.findFirst({
           where: { storageKey: prepared.storageKey, deletedAt: null },
@@ -516,15 +523,7 @@ export class ProductMediaService {
         { cleanup: (keys) => this.compensate(target.productId, [keys]) },
       );
     } catch (error) {
-      if (error instanceof ProductMediaValidationError) throw error;
-      if (
-        error instanceof TypeError ||
-        error instanceof RangeError ||
-        (error instanceof Error &&
-          /Unsupported|Invalid|SVG|EXIF|pixel|dimension|magic|corrupt|header|ispe/i.test(
-            error.message,
-          ))
-      ) {
+      if (error instanceof MediaSourceValidationError) {
         throw new ProductMediaValidationError(error.message);
       }
       throw error;
@@ -590,9 +589,17 @@ export class ProductMediaService {
     await this.assertTargetExists(target);
     const storage = this.requireStorage();
     const prefix = `${targetPrefix(target, "spin")}-${spinDigest(input.frames)}`;
-    const stored = await storeSpin360(storage, input.frames, prefix, undefined, {
-      cleanup: (keys) => this.compensate(target.productId, [keys]),
-    });
+    let stored;
+    try {
+      stored = await storeSpin360(storage, input.frames, prefix, undefined, {
+        cleanup: (keys) => this.compensate(target.productId, [keys]),
+      });
+    } catch (error) {
+      if (error instanceof MediaSourceValidationError) {
+        throw new ProductMediaValidationError(error.message);
+      }
+      throw error;
+    }
     const objectGroups = stored.map((frame) => frame.derivatives.map((item) => item.key));
     let primary: StoredImageDerivative;
     try {
@@ -710,6 +717,7 @@ export class ProductMediaService {
       throw new ProductMediaValidationError("Invalid product media position.");
     }
     return this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
       const product = await this.lockTarget(tx, { productId, variantId: null });
       const rows = await tx.$queryRaw<ProductMedia[]>`
         SELECT * FROM "ProductMedia"
@@ -790,6 +798,7 @@ export class ProductMediaService {
     assertUuid(mediaId, "mediaId");
     validateAudit(audit);
     return this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
       const product = await this.lockTarget(tx, { productId, variantId: null });
       const rows = await tx.$queryRaw<Array<ProductMedia & { now: Date }>>`
         SELECT "ProductMedia".*, CURRENT_TIMESTAMP AS "now" FROM "ProductMedia"

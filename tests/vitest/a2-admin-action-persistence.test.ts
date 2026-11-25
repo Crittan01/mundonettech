@@ -5,8 +5,10 @@ import pg, { type Client as PgClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as core from "../../packages/core/dist/index.js";
+import * as cmsPackage from "../../packages/cms/dist/index.js";
 import * as dbPackage from "../../packages/db/dist/index.js";
 import * as integrations from "../../packages/integrations/dist/index.js";
+import * as media from "../../packages/media/dist/index.js";
 import {
   actionError,
   actionSuccess,
@@ -53,17 +55,24 @@ let adminId: string;
 let catalog: Awaited<ReturnType<typeof seedCatalogFixture>>;
 let inventory: Awaited<ReturnType<typeof seedInventoryFixture>>;
 let checkout: Awaited<ReturnType<typeof seedCheckoutFixture>>;
+let pricingFixture: Awaited<ReturnType<typeof seedPricingFixture>>;
 let payments: integrations.PaymentService;
 let postSaleAdmin: dbPackage.PostSaleAdminService;
 let crm: dbPackage.CrmService;
 let segments: dbPackage.SegmentationService;
 let vault: integrations.IntegrationCredentialVault;
+let adminCatalog: ActionModule;
+let adminPricing: ActionModule;
+let adminCmsContent: ActionModule;
+let adminRedirects: ActionModule;
 let adminPayments: ActionModule;
 let adminPostSale: ActionModule;
 let adminCrm: ActionModule;
 let adminLifecycle: ActionModule;
 let adminLogistics: ActionModule;
 let adminIntegrations: ActionModule;
+const a4UpdateTag = vi.fn();
+const a4RevalidatePath = vi.fn();
 
 function bytes(): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(randomBytes(32));
@@ -163,7 +172,7 @@ beforeAll(async () => {
   });
   catalog = await seedCatalogFixture(sql);
   inventory = await seedInventoryFixture(sql, catalog);
-  const pricing = await seedPricingFixture(sql, catalog);
+  pricingFixture = await seedPricingFixture(sql, catalog);
   const admin = await database.adminUser.create({
     data: {
       authUserId: randomUUID(),
@@ -176,7 +185,12 @@ beforeAll(async () => {
   adminId = admin.id;
   await sql.query("BEGIN");
   try {
-    checkout = await seedCheckoutFixture(sql, { catalog, inventory, pricing, adminId });
+    checkout = await seedCheckoutFixture(sql, {
+      catalog,
+      inventory,
+      pricing: pricingFixture,
+      adminId,
+    });
     await sql.query("COMMIT");
   } catch (error) {
     await sql.query("ROLLBACK");
@@ -271,6 +285,23 @@ beforeAll(async () => {
       getIntegrationEnvironment: () => "LOCAL",
     },
   });
+  const a4Common = {
+    ...common,
+    "@mundonettech/cms": cmsPackage,
+    "@mundonettech/config/store": {
+      storeConfig: { name: "MundoNetTech", domain: "mundonettech.co" },
+    },
+    "@mundonettech/media": media,
+    "next/cache": { revalidatePath: a4RevalidatePath, updateTag: a4UpdateTag },
+    "next/navigation": { redirect: vi.fn() },
+    "@/lib/admin-pricing-presenters": {
+      bogotaInputValue: (value: Date) => value.toISOString().slice(0, 16),
+    },
+  };
+  adminCatalog = loadActionModule<ActionModule>("admin-catalog", a4Common);
+  adminPricing = loadActionModule<ActionModule>("admin-pricing", a4Common);
+  adminCmsContent = loadActionModule<ActionModule>("admin-cms", a4Common);
+  adminRedirects = loadActionModule<ActionModule>("admin-redirects", a4Common);
 }, 240_000);
 
 afterAll(async () => {
@@ -281,6 +312,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   errors.length = 0;
+  a4UpdateTag.mockClear();
+  a4RevalidatePath.mockClear();
 });
 
 describe("A2 — regresiones de acciones administrativas con persistencia real", () => {
@@ -452,5 +485,144 @@ describe("A2 — regresiones de acciones administrativas con persistencia real",
     expect(credential.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(credential.nonce).toHaveLength(12);
     expect(credential.authTag).toHaveLength(16);
+  });
+
+  it("A4 actualiza un producto en PG17 e invalida los slugs anterior y nuevo", async () => {
+    const before = await database.product.findUniqueOrThrow({ where: { id: catalog.productId } });
+    const nextSlug = `${before.slug}-a4-action`;
+    const form = new FormData();
+    form.set("productId", before.id);
+    form.set("slug", nextSlug);
+    form.set("name", "Audífonos A4 actualizados");
+    form.set("shortDescription", before.shortDescription ?? "Descripción A4");
+    form.set("description", before.description ?? "");
+    form.set("brandId", before.brandId);
+    form.set("categoryId", before.categoryId);
+    form.set("taxGroupId", before.taxGroupId);
+    form.set("status", before.status);
+    form.set("authenticity", before.authenticity);
+    form.set("retractPolicy", before.retractPolicy);
+    form.set("warrantyMonths", String(before.warrantyMonths));
+    form.set("trackSerial", String(before.trackSerial));
+    form.set("seoTitle", "Producto A4 persistido");
+    form.set("seoDescription", "Renombrado con invalidación pública old/new.");
+
+    const result = await required(adminCatalog, "updateCatalogProductAction")(idle, form);
+    expect(result.status, diagnostics(result)).toBe("success");
+    const saved = await database.product.findUniqueOrThrow({ where: { id: before.id } });
+    expect(saved.slug).toBe(nextSlug);
+    expect(saved.name).toBe("Audífonos A4 actualizados");
+    expect(saved.seoTitle).toBe("Producto A4 persistido");
+    expect(a4UpdateTag).toHaveBeenCalledWith(`catalog:product:${before.slug}`);
+    expect(a4UpdateTag).toHaveBeenCalledWith(`catalog:product:${nextSlug}`);
+    expect(a4UpdateTag).toHaveBeenCalledWith(`reviews:${before.slug}`);
+    expect(a4UpdateTag).toHaveBeenCalledWith(`reviews:${nextSlug}`);
+    expect(a4RevalidatePath).toHaveBeenCalledWith(`/admin/catalogo/${before.id}`);
+    expect(
+      await database.adminActionLog.count({
+        where: { targetType: "Product", targetId: before.id, action: "CATALOG_PRODUCT_UPDATED" },
+      }),
+    ).toBe(1);
+  });
+
+  it("A4 conserva un precio mayorista superior a MAX_SAFE_INTEGER como INT8 exacto", async () => {
+    const exactCents = "9007199254740993";
+    const form = new FormData();
+    form.set("id", pricingFixture.wholesaleTierId);
+    form.set("scope", "GLOBAL");
+    form.set("target", "");
+    form.set("minimumQuantity", "2");
+    form.set("unitPriceCents", exactCents);
+    form.set("active", "true");
+
+    const result = await required(adminPricing, "saveWholesaleTierAction")(idle, form);
+    expect(result.status, diagnostics(result)).toBe("success");
+    expect(
+      (
+        await database.wholesaleTier.findUniqueOrThrow({
+          where: { id: pricingFixture.wholesaleTierId },
+        })
+      ).unitPriceCents,
+    ).toBe(BigInt(exactCents));
+    const log = await database.adminActionLog.findFirstOrThrow({
+      where: {
+        targetType: "WholesaleTier",
+        targetId: pricingFixture.wholesaleTierId,
+        action: "WHOLESALE_TIER_UPDATED",
+      },
+    });
+    expect(log.metadata).toMatchObject({ after: { unitPriceCents: exactCents } });
+    expect(a4UpdateTag).toHaveBeenCalledWith("catalog");
+    expect(a4UpdateTag).toHaveBeenCalledWith("merchant-feed");
+    expect(a4UpdateTag).toHaveBeenCalledWith("meta-catalog-feed");
+  });
+
+  it("A4 renombra una página CMS sin alterar su versión e invalida página y sitemap", async () => {
+    const cms = new cmsPackage.CmsService(database, {
+      "store.name": "MundoNetTech",
+      "store.domain": "mundonettech.co",
+    });
+    const originalSlug = `a4-action-${randomUUID()}`;
+    const created = await cms.createPage(
+      { slug: originalSlug, title: "Página A4" },
+      [{ type: "HERO", content: { heading: "Versión original A4" } }],
+      { actorAdminUserId: adminId, ipHash: bytes(), userAgentHash: bytes() },
+    );
+    const nextSlug = `${originalSlug}-renombrada`;
+    const form = new FormData();
+    form.set("pageId", created.id);
+    form.set("slug", nextSlug);
+    form.set("title", "Página A4 renombrada");
+    form.set("seoTitle", "SEO A4");
+    form.set("seoDescription", "Contenido versionado conservado.");
+    form.set("liveEdit", "");
+
+    const result = await required(adminCmsContent, "updateCmsPageAction")(idle, form);
+    expect(result.status, diagnostics(result)).toBe("success");
+    const saved = await database.cmsPage.findUniqueOrThrow({ where: { id: created.id } });
+    expect(saved.slug).toBe(nextSlug);
+    expect(saved.title).toBe("Página A4 renombrada");
+    const version = await database.cmsBlockVersion.findFirstOrThrow({
+      where: { block: { pageId: created.id } },
+    });
+    expect(version.content).toMatchObject({ heading: "Versión original A4" });
+    expect(version.version).toBe(1);
+    expect(a4UpdateTag).toHaveBeenCalledWith(`cms:page:${originalSlug}`);
+    expect(a4UpdateTag).toHaveBeenCalledWith(`cms:page:${nextSlug}`);
+    expect(a4UpdateTag).toHaveBeenCalledWith("seo");
+    expect(a4UpdateTag).toHaveBeenCalledWith("sitemap");
+    expect(
+      await database.adminActionLog.count({
+        where: { targetType: "CmsPage", targetId: created.id, action: "CMS_PAGE_UPDATED" },
+      }),
+    ).toBe(1);
+  });
+
+  it("A4 crea un redirect auditado y avanza una sola generación de caché", async () => {
+    const generation = await database.urlRedirectCacheState.findFirstOrThrow();
+    const fromPath = `/legacy-a4-${randomUUID()}`;
+    const form = new FormData();
+    form.set("fromPath", fromPath);
+    form.set("toPath", "/legal");
+    form.set("statusCode", "308");
+    form.set("active", "true");
+
+    const result = await required(adminRedirects, "createUrlRedirectAction")(idle, form);
+    expect(result.status, diagnostics(result)).toBe("success");
+    const redirect = await database.urlRedirect.findFirstOrThrow({
+      where: { fromPath, deletedAt: null },
+    });
+    expect(redirect.toPath).toBe("/legal");
+    expect(redirect.statusCode).toBe(308);
+    expect(redirect.active).toBe(true);
+    expect((await database.urlRedirectCacheState.findFirstOrThrow()).version).toBe(
+      generation.version + 1n,
+    );
+    expect(a4RevalidatePath).toHaveBeenCalledWith("/admin/contenido/redirecciones");
+    expect(
+      await database.adminActionLog.count({
+        where: { targetType: "UrlRedirect", targetId: redirect.id, action: "URL_REDIRECT_CREATED" },
+      }),
+    ).toBe(1);
   });
 });

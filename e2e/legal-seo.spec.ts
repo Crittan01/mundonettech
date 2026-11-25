@@ -1,6 +1,8 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
+import { legalConfig } from "../config/dist/legal.config.js";
+
 declare global {
   interface Window {
     __legalSeoCspViolations?: string[];
@@ -67,11 +69,22 @@ test("legal center renders eight complete documents, footer access, metadata and
   await expect(page.locator('footer a[href="https://www.sic.gov.co/"]')).toBeVisible();
 
   for (const slug of legalRoutes) {
+    const document = legalConfig.documents.find((candidate) => candidate.slug === slug);
+    if (!document) throw new Error(`Missing legal configuration for ${slug}.`);
     const docResponse = await page.goto(`/legal/${slug}`);
     expect(docResponse?.status()).toBe(200);
-    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-    await expect(page.getByText(/Versión 1\.1\.0 · Vigente desde 2026-11-23/)).toBeVisible();
-    await expect(page.locator("article section").count()).resolves.toBeGreaterThanOrEqual(6);
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText(document.title);
+    await expect(
+      page.getByText(`Versión ${document.version} · Vigente desde ${document.effectiveDate}`),
+    ).toBeVisible();
+    await expect(page.locator("article section")).toHaveCount(document.sections.length);
+    expect(await page.locator("article section h2").allTextContents()).toEqual(
+      document.sections.map((section) => section.title),
+    );
+    await expect(page.locator('meta[name="description"]')).toHaveAttribute(
+      "content",
+      document.summary,
+    );
     await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
       "href",
       `https://mundonettech.co/legal/${slug}`,

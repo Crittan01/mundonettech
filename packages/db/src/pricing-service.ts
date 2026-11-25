@@ -15,7 +15,7 @@ import {
   hasUniqueViolation,
   inInventoryTransaction,
 } from "./inventory-shared.js";
-import { databaseNow } from "./primitives.js";
+import { assertAdminActorInTransaction, databaseNow } from "./primitives.js";
 import type {
   BundleInput,
   CouponInput,
@@ -171,6 +171,7 @@ async function writeAudit(
   ) {
     throw new PricingValidationError("Audit hashes must contain 32 bytes.");
   }
+  await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "pricing:write");
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,

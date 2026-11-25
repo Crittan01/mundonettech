@@ -285,3 +285,61 @@ test("resolves local identifier route aliases, fails closed on wrapped exports, 
   assert.match(result.diagnostics[1].message, /spoofedAdminAction/);
   assert.match(result.diagnostics[2].message, /PUT/);
 });
+
+test("requires the complete reviewed A4 admin upload surface and its own Origin/RBAC/MFA controls", () => {
+  const catalogRoute = "apps/web/app/api/admin/catalog-media/upload/route.ts";
+  const files = {
+    [catalogRoute]: `
+      export async function POST(request) {
+        rejectInvalidAdminUploadOrigin(request);
+        getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
+        readAdminMultipart(request);
+        return Response.json({ ok: true });
+      }
+      async function methodNotAllowed() { return adminMediaMethodNotAllowed(); }
+      export {
+        methodNotAllowed as GET,
+        methodNotAllowed as HEAD,
+        methodNotAllowed as PUT,
+        methodNotAllowed as PATCH,
+        methodNotAllowed as DELETE,
+        methodNotAllowed as OPTIONS,
+      };
+    `,
+  };
+  const postContract = {
+    calls: ["rejectInvalidAdminUploadOrigin", "getAdminSession", "readAdminMultipart"],
+  };
+  const manifest = {
+    [catalogRoute]: {
+      POST: postContract,
+      GET: { calls: ["adminMediaMethodNotAllowed"] },
+      HEAD: { calls: ["adminMediaMethodNotAllowed"] },
+      PUT: { calls: ["adminMediaMethodNotAllowed"] },
+      PATCH: { calls: ["adminMediaMethodNotAllowed"] },
+      DELETE: { calls: ["adminMediaMethodNotAllowed"] },
+      OPTIONS: { calls: ["adminMediaMethodNotAllowed"] },
+    },
+  };
+  const accepted = audit(files, manifest);
+  assert.deepEqual(accepted.diagnostics, []);
+  assert.equal(accepted.stats.routeHandlers, 7);
+
+  const unreviewed = audit(files, { [catalogRoute]: { POST: postContract } });
+  assert.equal(
+    categories(unreviewed).filter((category) => category === "security-surface-inventory").length,
+    6,
+  );
+
+  const missingOrigin = audit(
+    {
+      [catalogRoute]: files[catalogRoute].replace(
+        "rejectInvalidAdminUploadOrigin(request);",
+        "void request;",
+      ),
+    },
+    manifest,
+  );
+  assert.deepEqual(categories(missingOrigin), ["security-surface-control"]);
+  assert.match(missingOrigin.diagnostics[0].message, /rejectInvalidAdminUploadOrigin/);
+});

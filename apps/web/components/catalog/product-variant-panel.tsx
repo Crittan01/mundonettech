@@ -180,7 +180,7 @@ export function ProductVariantPanel({
         </div>
       ) : null}
 
-      <div>
+      <div aria-live="polite" aria-atomic="true">
         <p className="text-3xl font-bold">{formatCopCents(selected.priceCents)}</p>
         {hasStrikethrough && selected.compareAtPriceCents ? (
           <p className="mt-1 text-sm text-muted-foreground">

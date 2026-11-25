@@ -102,6 +102,7 @@ describe("F4A.1 — exact local dates and signed financial presentation", () => 
     expect(formatSignedCopCents(-123_456n)).toBe(`-${formatCopCents(123_456n)}`);
     expect(formatSignedCopCents(0n)).toBe(formatCopCents(0n));
     expect(() => formatCopCents(-1n)).toThrow(RangeError);
-    expect(() => formatSignedCopCents(-9_223_372_036_854_775_808n)).toThrow(RangeError);
+    expect(() => formatSignedCopCents(-9_223_372_036_854_775_808n)).not.toThrow();
+    expect(() => formatSignedCopCents(-9_223_372_036_854_775_809n)).toThrow(RangeError);
   });
 });

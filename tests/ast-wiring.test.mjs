@@ -800,3 +800,116 @@ test("blocks adversarial AST, cache, route, reflection and environment guard byp
   const orphanEnv = messages(result, "environment-orphan").join("\n");
   assert.match(orphanEnv, /\.env\.example:2:.*"ONLY_TEST_READ"/);
 });
+
+test("keeps A4 old/new slug, CMS grid and feed cache families paired across actions and upload routes", () => {
+  const result = audit({
+    "apps/web/lib/catalog-read.ts": `
+      export async function read(slugs: string[], slug: string) {
+        "use cache";
+        cacheTag("catalog", "catalog:search", "catalog:compare", "catalog:cms-grid",
+          \`catalog:product:\${slug}\`, ...slugs.map((item) => \`catalog:product:\${item}\`));
+      }
+    `,
+    "apps/web/lib/cms-read.ts": `
+      export async function read(slug: string) {
+        "use cache";
+        cacheTag("cms", "cms:media", \`cms:page:\${slug}\`);
+      }
+    `,
+    "apps/web/lib/seo-read.ts": `
+      export async function read() {
+        "use cache";
+        cacheTag("seo", "sitemap", "catalog", "cms", "merchant-feed", "meta-catalog-feed");
+      }
+    `,
+    "apps/web/lib/review-read.ts": `
+      export async function read(slug: string) {
+        "use cache";
+        cacheTag("reviews", \`reviews:\${slug}\`);
+      }
+    `,
+    "apps/web/lib/actions/admin-catalog.ts": `
+      "use server";
+      export async function mutate(slugs: string[], previousSlug: string, slug: string) {
+        updateTag("catalog");
+        updateTag("catalog:search");
+        updateTag("catalog:compare");
+        updateTag("catalog:cms-grid");
+        updateTag("reviews");
+        updateTag(\`catalog:product:\${previousSlug}\`);
+        updateTag(\`catalog:product:\${slug}\`);
+        updateTag(\`reviews:\${previousSlug}\`);
+        updateTag(\`reviews:\${slug}\`);
+        updateTag(...slugs.map((item) => \`catalog:product:\${item}\`));
+      }
+    `,
+    "apps/web/lib/actions/admin-cms.ts": `
+      "use server";
+      export async function mutate(previousSlug: string, slug: string) {
+        updateTag("cms");
+        updateTag("cms:media");
+        updateTag("seo");
+        updateTag("sitemap");
+        updateTag(\`cms:page:\${previousSlug}\`);
+        updateTag(\`cms:page:\${slug}\`);
+      }
+    `,
+    "apps/web/lib/actions/admin-pricing.ts": `
+      "use server";
+      export async function mutate() {
+        updateTag("merchant-feed");
+        updateTag("meta-catalog-feed");
+      }
+    `,
+    "apps/web/app/api/admin/catalog-media/upload/route.ts": `
+      export async function POST(slug: string) {
+        revalidateTag("merchant-feed", { expire: 0 });
+        revalidateTag("meta-catalog-feed", { expire: 0 });
+        revalidateTag(\`catalog:product:\${slug}\`, { expire: 0 });
+        return Response.json({ ok: true });
+      }
+    `,
+  });
+
+  assert.deepEqual(findings(result, "cache"), []);
+  assert.deepEqual(findings(result, "cache-parity"), []);
+  assert.deepEqual(findings(result, "cache-directive"), []);
+  assert.deepEqual(findings(result, "cache-profile"), []);
+  for (const family of [
+    "catalog:product:*",
+    "cms:page:*",
+    "reviews:*",
+    "merchant-feed",
+    "meta-catalog-feed",
+    "sitemap",
+  ]) {
+    assert.ok(result.cache.cacheFamilies.includes(family), family);
+    assert.ok(result.cache.invalidationFamilies.includes(family), family);
+  }
+});
+
+test("rejects A4 media revalidation without an explicit profile and unpaired sitemap tags", () => {
+  const result = audit({
+    "apps/web/lib/read.ts": `
+      export async function read(slug: string) {
+        "use cache";
+        cacheTag("catalog", "sitemap", \`cms:page:\${slug}\`);
+      }
+    `,
+    "apps/web/lib/actions/admin-cms.ts": `
+      "use server";
+      export async function mutate(slug: string) {
+        updateTag(\`cms:page:\${slug}\`);
+      }
+    `,
+    "apps/web/app/api/admin/catalog-media/upload/route.ts": `
+      export async function POST() {
+        revalidateTag("catalog");
+        return Response.json({ ok: true });
+      }
+    `,
+  });
+
+  assert.equal(findings(result, "cache-profile").length, 1);
+  assert.match(messages(result, "cache-parity").join("\n"), /cache family "sitemap"/);
+});

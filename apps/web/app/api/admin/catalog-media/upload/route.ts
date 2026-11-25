@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { AdminActorAuthorizationError } from "@mundonettech/db";
 import {
   ProductMediaConflictError,
   ProductMediaNotFoundError,
@@ -59,6 +60,9 @@ function fileExceeds(form: FormData, key: string, maximum: number): boolean {
 
 function failure(error: unknown): Response {
   if (error instanceof AdminAuthorizationError) return adminUploadAuthenticationError(error);
+  if (error instanceof AdminActorAuthorizationError) {
+    return adminUploadError(403, "forbidden");
+  }
   if (error instanceof ProductMediaConflictError) return adminUploadError(409, "upload_conflict");
   if (
     error instanceof ProductMediaValidationError ||

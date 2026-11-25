@@ -41,12 +41,18 @@ export function parseCatalogParams(
   if (rawQuery) {
     if (controlCharPattern.test(rawQuery)) {
       error = "La búsqueda contiene caracteres no permitidos.";
+    } else if (rawQuery.length > 100) {
+      error = "La búsqueda admite como máximo 100 caracteres.";
     } else {
-      q = rawQuery.slice(0, 100);
+      q = rawQuery;
     }
   }
 
-  const page = Number.parseInt(single(raw.page) || "1", 10);
+  const rawPage = single(raw.page);
+  const page = rawPage && /^(?:[1-9]\d{0,3}|10000)$/.test(rawPage) ? Number(rawPage) : 1;
+  if (rawPage && page === 1 && rawPage !== "1") {
+    error = "La página debe ser un número entero entre 1 y 10000.";
+  }
   const sortValue = single(raw.orden);
   const sort = ["relevance", "newest", "price_asc", "price_desc", "name"].includes(sortValue)
     ? (sortValue as CatalogSort)

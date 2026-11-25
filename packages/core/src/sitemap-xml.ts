@@ -1,6 +1,15 @@
 import { absolutePublicUrl, escapeXml } from "./xml.js";
 
 export const sitemapEntriesPerFile = 50_000;
+const changeFrequencies = new Set([
+  "always",
+  "hourly",
+  "daily",
+  "weekly",
+  "monthly",
+  "yearly",
+  "never",
+]);
 
 export interface SitemapXmlEntry {
   readonly url: string;
@@ -47,8 +56,14 @@ export function buildSitemapUrlSet(entries: readonly SitemapXmlEntry[]): string 
       const url = absolutePublicUrl(entry.url, `sitemap[${index}].url`);
       if (seen.has(url)) throw new Error(`Duplicate sitemap URL: ${url}.`);
       seen.add(url);
-      if (entry.priority !== undefined && (entry.priority < 0 || entry.priority > 1)) {
-        throw new RangeError("Sitemap priority must be between 0 and 1.");
+      if (
+        entry.priority !== undefined &&
+        (!Number.isFinite(entry.priority) || entry.priority < 0 || entry.priority > 1)
+      ) {
+        throw new RangeError("Sitemap priority must be a finite number between 0 and 1.");
+      }
+      if (entry.changeFrequency !== undefined && !changeFrequencies.has(entry.changeFrequency)) {
+        throw new TypeError("Invalid sitemap changeFrequency.");
       }
       return [
         "  <url>",
@@ -68,10 +83,15 @@ export function buildSitemapUrlSet(entries: readonly SitemapXmlEntry[]): string 
 }
 
 export function buildSitemapIndex(urls: readonly string[]): string {
-  if (urls.length < 1) throw new RangeError("A sitemap index requires at least one child sitemap.");
+  if (urls.length < 1 || urls.length > sitemapEntriesPerFile) {
+    throw new RangeError("A sitemap index requires between 1 and 50000 child sitemaps.");
+  }
+  const seen = new Set<string>();
   const body = urls
     .map((url, index) => {
       const normalized = absolutePublicUrl(url, `sitemapIndex[${index}]`);
+      if (seen.has(normalized)) throw new Error(`Duplicate sitemap index URL: ${normalized}.`);
+      seen.add(normalized);
       return `  <sitemap><loc>${escapeXml(normalized)}</loc></sitemap>`;
     })
     .join("\n");

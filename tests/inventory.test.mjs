@@ -4,7 +4,7 @@ import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
 
-import { serializeCsv } from "../packages/core/dist/index.js";
+import { parseInventoryStockCsv, serializeCsv } from "../packages/core/dist/index.js";
 import {
   InsufficientStockError,
   InventoryConflictError,
@@ -758,6 +758,14 @@ describe("F1.3 — atomic inventory CSV import and safe export", () => {
     const exported = await exportInventoryStockCsv(db);
     assert.ok(exported.includes(plain.sku));
     assert.ok(exported.startsWith("locationCode,sku,onHand,safetyStock,unitCostCents,serials"));
+    const exportedRows = parseInventoryStockCsv(exported);
+    const exportedTracked = exportedRows.find((row) => row.sku === tracked.sku);
+    assert.ok(exportedTracked);
+    assert.equal(exportedTracked.onHand, 2);
+    assert.deepEqual(
+      exportedTracked.serials,
+      serials.map((identity) => ({ ...identity, imei: null })),
+    );
   });
 
   it("rolls back the entire CSV on unknown identities and protects serialized quantities", async () => {
@@ -810,5 +818,14 @@ describe("F1.3 — atomic inventory CSV import and safe export", () => {
     );
     assert.equal((await stockLevel(tracked.id, fixture.locationId)).onHand, 1);
     assert.equal(await db.serializedUnit.count({ where: { variantId: tracked.id } }), 1);
+  });
+
+  it("fails closed instead of exporting serialized stock with divergent unit parity", async () => {
+    const tracked = await createVariant(true);
+    await createStock(tracked.id, fixture.locationId, 1, 0, 500n);
+    await assert.rejects(
+      exportInventoryStockCsv(db),
+      (error) => error instanceof InventoryConflictError && /parity failed/.test(error.message),
+    );
   });
 });

@@ -2,6 +2,7 @@ import "server-only";
 
 import {
   CatalogService,
+  CatalogQueryError,
   type CatalogBrand,
   type CatalogCategory,
   type CatalogProductDetail,
@@ -102,8 +103,20 @@ async function readComparedProducts(slugs: readonly string[]) {
 export async function compareCatalogProducts(slugs: readonly string[]) {
   const normalized = [
     ...new Set(
-      slugs.map((slug) => normalizeCacheSlug(slug)).filter((slug): slug is string => slug !== null),
+      slugs
+        .map((slug) => slug.trim())
+        .filter(Boolean)
+        .map((slug) => {
+          const normalizedSlug = normalizeCacheSlug(slug);
+          if (!normalizedSlug) {
+            throw new CatalogQueryError("Invalid compared product slug.", "INVALID_SLUG");
+          }
+          return normalizedSlug;
+        }),
     ),
   ].sort();
+  if (normalized.length > 4) {
+    throw new CatalogQueryError("Comparison accepts at most four products.");
+  }
   return readComparedProducts(normalized);
 }

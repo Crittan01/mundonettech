@@ -213,7 +213,11 @@ describe("F1.2 — GLB and USDZ binary safety", () => {
       createGlb({ extras: { nested: { uri: "https://evil.example/ssrf" } } }),
       createGlb({ extensionsRequired: ["KHR_draco_mesh_compression"] }),
       createGlb({ extensionsRequired: ["EXT_meshopt_compression"] }),
+      createGlb({ extensionsUsed: ["KHR_draco_mesh_compression"] }),
+      createGlb({ extensionsUsed: ["EXT_meshopt_compression"] }),
       createGlb({ accessors: [{ bufferView: 99 }] }),
+      createGlb({ accessors: [{ bufferView: 0, byteOffset: -1 }] }),
+      createGlb({ accessors: [{ bufferView: 0, byteOffset: 4 }] }),
       createGlb({ viewLength: 100 }),
       Buffer.from("not-glb"),
     ]) {
@@ -252,6 +256,13 @@ describe("F1.2 — GLB and USDZ binary safety", () => {
         },
       ]),
       createUsdz([{ name: "payload.txt", data: Buffer.from("bad") }]),
+      createUsdz([
+        { name: "textures/", data: Buffer.alloc(0) },
+        { name: "model.usdc", data: Buffer.from("USDC-model") },
+      ]),
+      createUsdz([{ name: "nested/model.usdc", data: Buffer.from("USDC-model") }]),
+      createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-model"), flags: 0x40 }]),
+      createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-model"), flags: 0x2000 }]),
       createUsdz([{ name: "model.usdc", data: Buffer.alloc(1024 * 1024, 0), method: 8 }]),
       createUsdz([{ name: "model.usdc", data: Buffer.from("actual-data"), uncompressedSize: 2 }]),
       createUsdz([

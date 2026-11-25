@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { variantFeedImage } from "../../apps/web/lib/catalog-presenters";
+import { parseCatalogParams } from "../../apps/web/lib/catalog-params";
+
 import {
   buildBreadcrumbJsonLd,
   buildFaqJsonLd,
@@ -232,5 +235,65 @@ describe("F2.3 — Merchant XML and scalable sitemap", () => {
     expect(() =>
       buildSitemapUrlSet([{ url: "https://tienda.example.co", lastModified: "invalid" }]),
     ).toThrow(/lastModified/);
+  });
+});
+
+describe("A4 — Merchant variant media selection", () => {
+  const redMedia: Parameters<typeof variantFeedImage>[0][number] = {
+    id: "media-red",
+    variantId: "variant-red",
+    mediaType: "IMAGE",
+    storageKey: "catalog/product/red.webp",
+    altText: "Audífonos rojos",
+    width: 800,
+    height: 600,
+    focalX: null,
+    focalY: null,
+    frames: [],
+    posterKey: null,
+    usdzKey: null,
+  };
+
+  it("uses only variant or shared media, never another variant's image", () => {
+    const origin = "https://media.example.co";
+    expect(variantFeedImage([redMedia], "variant-black", origin)).toBeNull();
+    expect(variantFeedImage([redMedia], "variant-red", origin)).toBe(
+      "https://media.example.co/catalog/product/red.webp",
+    );
+
+    const sharedMedia = {
+      ...redMedia,
+      id: "media-shared",
+      variantId: null,
+      storageKey: "catalog/product/shared.webp",
+    };
+    expect(variantFeedImage([redMedia, sharedMedia], "variant-black", origin)).toBe(
+      "https://media.example.co/catalog/product/shared.webp",
+    );
+    expect(variantFeedImage([redMedia, sharedMedia], "variant-red", origin)).toBe(
+      "https://media.example.co/catalog/product/red.webp",
+    );
+    expect(variantFeedImage([redMedia, sharedMedia], "variant-red", null)).toBeNull();
+  });
+});
+
+describe("A4 — public catalog GET validation", () => {
+  it.each(["2abc", "1.5", "0", "-1", "10001", "01"])(
+    "rejects non-canonical page %s instead of partially parsing it",
+    (page) => {
+      const parsed = parseCatalogParams({ page });
+      expect(parsed.filters.page).toBe(1);
+      expect(parsed.error).toMatch(/página/);
+    },
+  );
+
+  it("accepts the protocol page boundary and rejects overlong searches", () => {
+    expect(parseCatalogParams({ page: "10000", orden: "newest" }).filters).toMatchObject({
+      page: 10_000,
+      sort: "newest",
+    });
+    const parsed = parseCatalogParams({ q: "x".repeat(101) });
+    expect(parsed.filters.q).toBeUndefined();
+    expect(parsed.error).toMatch(/100 caracteres/);
   });
 });

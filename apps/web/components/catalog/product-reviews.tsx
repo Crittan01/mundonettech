@@ -57,7 +57,7 @@ export function ProductReviews({
           href={`/producto/${slug}?${nextQuery.toString()}#resenas`}
           className="inline-block rounded-md border border-input px-4 py-2 text-sm font-medium"
         >
-          Ver más reseñas
+          Ver siguiente página de reseñas
         </Link>
       ) : null}
     </section>

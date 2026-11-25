@@ -415,6 +415,49 @@ test("scheduled publication invalidates the cached editorial page without changi
   await collector.assertClean();
 });
 
+test("renaming an already public CMS page invalidates old/new URLs and sitemap immediately", async ({
+  page,
+}) => {
+  const collector = await attachSecurityCollectors(page);
+  const previousSlug = publishedSlug;
+  const nextSlug = `${previousSlug}-renombrada`;
+  await authenticateAdmin(page, {
+    subject: actorAuthUserId,
+    email: actorEmail,
+    aal: "aal2",
+    mfaAgeSeconds: 30,
+  });
+
+  await page.goto(`/pagina/${previousSlug}`);
+  await expect(page.getByRole("heading", { level: 1, name: renewedHeading })).toBeVisible();
+  await page.goto(`/admin/contenido/${pageId}`);
+  const form = page.locator("form").filter({
+    has: page.getByRole("button", { name: "Guardar página", exact: true }),
+  });
+  await form.getByLabel("Slug", { exact: true }).fill(nextSlug);
+  await form.getByRole("button", { name: "Guardar página", exact: true }).click();
+  await expect(
+    page.getByText("Página actualizada y cambio registrado en auditoría."),
+  ).toBeVisible();
+  publishedSlug = nextSlug;
+
+  await page.goto(`/pagina/${previousSlug}`);
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
+  await expect(page.locator('meta[name="robots"]').first()).toHaveAttribute("content", /noindex/);
+  await expect(page.getByRole("heading", { name: renewedHeading })).toHaveCount(0);
+  await page.goto(`/pagina/${nextSlug}`);
+  await expect(page.getByRole("heading", { level: 1, name: renewedHeading })).toBeVisible();
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+    "href",
+    `${storeConfig.url}/pagina/${nextSlug}`,
+  );
+  const sitemap = await page.request.get("/sitemap.xml");
+  const xml = await sitemap.text();
+  expect(xml).toContain(`${storeConfig.url}/pagina/${nextSlug}`);
+  expect(xml).not.toContain(`${storeConfig.url}/pagina/${previousSlug}<`);
+  await collector.assertClean();
+});
+
 test("anonymous, malformed, aal1-only and non-editorial roles cannot read drafts or activate Live Edit", async ({
   page,
 }) => {
@@ -725,4 +768,36 @@ test("CMS editor enforces RBAC, step-up MFA, reserved-route guards, immediate re
     }),
   ).toBe(3);
   await collector.assertClean();
+});
+
+test("archiving a public CMS page removes the rendered page and sitemap but preserves immutable versions", async ({
+  page,
+}) => {
+  const beforeVersions = await db.cmsBlockVersion.count({ where: { block: { pageId } } });
+  await authenticateAdmin(page, {
+    subject: actorAuthUserId,
+    email: actorEmail,
+    aal: "aal2",
+    mfaAgeSeconds: 30,
+  });
+  await page.goto(`/pagina/${publishedSlug}`);
+  await expect(page.getByRole("heading", { level: 1, name: renewedHeading })).toBeVisible();
+  await page.goto(`/admin/contenido/${pageId}`);
+  await page.getByRole("button", { name: "Archivar página", exact: true }).click();
+  await expect(page.getByText(/· Archivada ·/)).toBeVisible();
+  expect((await db.cmsPage.findUniqueOrThrow({ where: { id: pageId } })).status).toBe("ARCHIVED");
+
+  const archived = await page.request.get(`/pagina/${publishedSlug}`);
+  const archivedHtml = await archived.text();
+  expect(archivedHtml).toContain("No encontramos esta página");
+  expect(archivedHtml).toMatch(/<meta name="robots" content="[^"]*noindex/);
+  expect(archivedHtml).not.toContain(renewedHeading);
+  const sitemap = await page.request.get("/sitemap.xml");
+  expect(await sitemap.text()).not.toContain(`${storeConfig.url}/pagina/${publishedSlug}<`);
+  expect(await db.cmsBlockVersion.count({ where: { block: { pageId } } })).toBe(beforeVersions);
+  expect(
+    await db.adminActionLog.count({
+      where: { targetType: "CmsPage", targetId: pageId, action: "CMS_PAGE_ARCHIVED" },
+    }),
+  ).toBe(1);
 });

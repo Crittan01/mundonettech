@@ -92,3 +92,84 @@ describe("A2 — redirect no-op and audit sanitizer wiring", () => {
     }
   });
 });
+
+describe("A4 — upload control order and public-cache wiring", () => {
+  it("checks Origin, permission and recent MFA before parsing multipart or initializing R2", () => {
+    const routes = [
+      {
+        file: "apps/web/app/api/admin/catalog-media/upload/route.ts",
+        permission: "catalog:write",
+      },
+      {
+        file: "apps/web/app/api/admin/cms-media/upload/route.ts",
+        permission: "content:write",
+      },
+    ];
+    for (const { file, permission } of routes) {
+      const body = source(file);
+      const start = body.indexOf("export async function POST");
+      const end = body.indexOf("async function methodNotAllowed");
+      const post = body.slice(start, end);
+      const ordered = [
+        "const invalidOrigin = rejectInvalidAdminUploadOrigin(request);",
+        `getAdminSession({ permission: "${permission}", requireRecentMfa: true })`,
+        "const multipart = await readAdminMultipart(request,",
+        "storage = createMediaStorage();",
+      ];
+      let previous = -1;
+      for (const snippet of ordered) {
+        const position = post.indexOf(snippet);
+        expect(position, `${file}: ${snippet}`).toBeGreaterThan(previous);
+        previous = position;
+      }
+      expect(post).toContain("finally {");
+      expect(post).toContain("await storage.destroy()");
+      for (const method of ["GET", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+        expect(body, `${file}: ${method}`).toContain(`methodNotAllowed as ${method}`);
+      }
+    }
+  });
+
+  it("invalidates old/new product and CMS slugs plus all public pricing and media families", () => {
+    const catalog = source("apps/web/lib/actions/admin-catalog.ts");
+    expect(catalog).toContain("previousSlug: updated.previousSlug");
+    expect(catalog).toContain("updateTag(`catalog:product:${options.previousSlug}`)");
+    expect(catalog).toContain("updateTag(`reviews:${options.previousSlug}`)");
+    expect(catalog).toContain('updateTag("catalog:cms-grid")');
+
+    const cms = source("apps/web/lib/actions/admin-cms.ts");
+    expect(cms).toContain("slugs: [page.previousSlug, page.slug]");
+    expect(cms).toContain("page.previousSlug !== page.slug");
+    for (const tag of ["cms", "seo", "sitemap"]) {
+      expect(cms).toContain(`updateTag("${tag}")`);
+    }
+
+    const pricing = source("apps/web/lib/actions/admin-pricing.ts");
+    for (const tag of [
+      "catalog",
+      "catalog:search",
+      "catalog:compare",
+      "catalog:cms-grid",
+      "merchant-feed",
+      "meta-catalog-feed",
+    ]) {
+      expect(pricing).toContain(`updateTag("${tag}")`);
+    }
+
+    const media = source("apps/web/lib/media-revalidation.ts");
+    expect(media).toContain("revalidateTag(`catalog:product:${slug}`, { expire: 0 })");
+    expect(media).toContain('revalidateTag("merchant-feed", { expire: 0 })');
+    expect(media).toContain('revalidateTag("meta-catalog-feed", { expire: 0 })');
+  });
+
+  it("authenticates CMS preview before normalizing the slug or constructing the service", () => {
+    const cms = source("apps/web/lib/cms.ts");
+    const preview = cms.slice(cms.indexOf("export async function getPreviewCmsPage"));
+    const auth = preview.indexOf("await getAdminSession({ permission });");
+    const normalize = preview.indexOf("normalizeCmsSlug(slug)");
+    const service = preview.indexOf("cmsService().getPreviewPage");
+    expect(auth).toBeGreaterThanOrEqual(0);
+    expect(normalize).toBeGreaterThan(auth);
+    expect(service).toBeGreaterThan(normalize);
+  });
+});

@@ -82,6 +82,14 @@ describe("F1.4 — exact COP formatting and query parsing", () => {
     expect(resolveCatalogMediaUrl("/leading.avif", "https://cdn.example.co")).toBeNull();
     expect(resolveCatalogMediaUrl("a//b.avif", "https://cdn.example.co")).toBeNull();
     expect(resolveCatalogMediaUrl("a\\b.avif", "https://cdn.example.co")).toBeNull();
+    expect(resolveCatalogMediaUrl("catalog/p1/480.avif", "http://cdn.example.co")).toBeNull();
+    expect(resolveCatalogMediaUrl("catalog/p1/480.avif", "javascript:alert(1)")).toBeNull();
+    expect(
+      resolveCatalogMediaUrl("catalog/p1/480.avif", "https://user:secret@cdn.example.co"),
+    ).toBeNull();
+    expect(resolveCatalogMediaUrl("catalog/p1/480.avif", "http://127.0.0.1:4110")).toBe(
+      "http://127.0.0.1:4110/catalog/p1/480.avif",
+    );
 
     const form = new FormData();
     form.set("slug", "router-wifi-7");

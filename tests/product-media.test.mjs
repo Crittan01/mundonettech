@@ -5,7 +5,11 @@ import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
 
-import { CatalogService, createDatabaseClient } from "../packages/db/dist/index.js";
+import {
+  AdminActorAuthorizationError,
+  CatalogService,
+  createDatabaseClient,
+} from "../packages/db/dist/index.js";
 import {
   buildSpinFrames,
   ProductMediaNotFoundError,
@@ -16,7 +20,12 @@ import {
 } from "../packages/media/dist/index.js";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
 import { seedCatalogFixture } from "../scripts/lib/catalog-test-fixture.mjs";
-import { createGlb, createPng, createUsdz } from "./helpers/binary-fixtures.mjs";
+import {
+  createGlb,
+  createPng,
+  createPngHeaderOnly,
+  createUsdz,
+} from "./helpers/binary-fixtures.mjs";
 
 let harness;
 let db;
@@ -30,6 +39,7 @@ let storageClient;
 let server;
 let endpoint;
 let failDeletes = false;
+let failPuts = false;
 const objects = new Map();
 
 function requestKey(request) {
@@ -62,6 +72,10 @@ before(
       for await (const chunk of request) chunks.push(chunk);
       const key = requestKey(request);
       if (request.method === "PUT") {
+        if (failPuts) {
+          response.writeHead(500).end("InvalidAccessKeyId");
+          return;
+        }
         objects.set(key, Buffer.concat(chunks));
         response.writeHead(200, { ETag: '"test-etag"' }).end();
       } else if (request.method === "DELETE") {
@@ -359,6 +373,17 @@ describe("ProductMedia SPIN_360 and MODEL_3D end-to-end domain contracts", () =>
       ),
     );
     await assert.rejects(
+      service.uploadSpin360(
+        {
+          productId: fixture.productId,
+          frames: [createPngHeaderOnly(32, 24), createPngHeaderOnly(32, 24)],
+          altText: "PNG truncado con cabecera válida",
+        },
+        audit,
+      ),
+      ProductMediaValidationError,
+    );
+    await assert.rejects(
       service.uploadModel3d(
         {
           productId: fixture.productId,
@@ -380,6 +405,30 @@ describe("ProductMedia SPIN_360 and MODEL_3D end-to-end domain contracts", () =>
 });
 
 describe("ProductMedia compensation and immutable history", () => {
+  it("keeps R2 credential failures separate from source validation errors", async () => {
+    const before = objects.size;
+    failPuts = true;
+    try {
+      await assert.rejects(
+        service.uploadImage(
+          {
+            productId: fixture.productId,
+            bytes: createPng(39, 31),
+            altText: "Fallo de credenciales R2",
+          },
+          audit,
+        ),
+        (error) => {
+          assert.equal(error instanceof ProductMediaValidationError, false);
+          return true;
+        },
+      );
+    } finally {
+      failPuts = false;
+    }
+    assert.equal(objects.size, before);
+  });
+
   it("cleans new unreferenced uploads, preserves archived shared groups and reports double failures", async () => {
     const before = objects.size;
     await assert.rejects(
@@ -625,6 +674,98 @@ describe("A2 — ProductMedia audit redaction and transactional rollback", () =>
     );
     assert.equal(objects.size, objectCount);
     assert.equal(await db.productMedia.count(), mediaCount);
+    assert.equal(await db.adminActionLog.count(), auditCount);
+  });
+
+  it("revalidates actor status and permission inside media and catalog transactions", async () => {
+    const suspended = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `suspended-media-${randomUUID()}@example.test`,
+        displayName: "Suspended Media Admin",
+        role: "STORE_MANAGER",
+        status: "SUSPENDED",
+      },
+    });
+    const reader = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `reader-media-${randomUUID()}@example.test`,
+        displayName: "Reader Media Admin",
+        role: "CMS_EDITOR",
+        status: "ACTIVE",
+      },
+    });
+    const suspendedAudit = { ...audit, actorAdminUserId: suspended.id };
+    const readerAudit = { ...audit, actorAdminUserId: reader.id };
+    const objectCount = objects.size;
+    await assert.rejects(
+      service.uploadImage(
+        {
+          productId: fixture.productId,
+          bytes: createPng(91, 53),
+          altText: "Actor suspendido",
+        },
+        suspendedAudit,
+      ),
+      AdminActorAuthorizationError,
+    );
+    assert.equal(objects.size, objectCount);
+
+    const created = await service.uploadImage(
+      {
+        productId: fixture.productId,
+        bytes: createPng(92, 54),
+        altText: "Control de actor transaccional",
+      },
+      audit,
+    );
+    const auditCount = await db.adminActionLog.count();
+    await assert.rejects(
+      service.update(
+        fixture.productId,
+        created.media.id,
+        { altText: "No debe guardarse", position: created.media.position },
+        suspendedAudit,
+      ),
+      AdminActorAuthorizationError,
+    );
+    await assert.rejects(
+      service.archive(fixture.productId, created.media.id, readerAudit),
+      AdminActorAuthorizationError,
+    );
+    assert.equal(
+      (await db.productMedia.findUniqueOrThrow({ where: { id: created.media.id } })).altText,
+      "Control de actor transaccional",
+    );
+    assert.equal(
+      (await db.productMedia.findUniqueOrThrow({ where: { id: created.media.id } })).deletedAt,
+      null,
+    );
+
+    const variantCount = await db.productVariant.count({ where: { productId: fixture.productId } });
+    await assert.rejects(
+      catalog.upsertVariant(
+        fixture.productId,
+        {
+          sku: `REVOKED-${randomUUID().slice(0, 8).toUpperCase()}`,
+          priceCents: "10000",
+          costCents: "5000",
+          weightGrams: 100,
+          lengthMillimeters: 100,
+          widthMillimeters: 100,
+          heightMillimeters: 100,
+          isDefault: false,
+          status: "ACTIVE",
+        },
+        suspendedAudit,
+      ),
+      AdminActorAuthorizationError,
+    );
+    assert.equal(
+      await db.productVariant.count({ where: { productId: fixture.productId } }),
+      variantCount,
+    );
     assert.equal(await db.adminActionLog.count(), auditCount);
   });
 });

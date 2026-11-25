@@ -341,7 +341,12 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
           </h2>
           <div className="mt-5 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {related.items.map((item) => (
-              <ProductCard key={item.id} product={item} mediaOrigin={mediaOrigin} />
+              <ProductCard
+                key={item.id}
+                product={item}
+                mediaOrigin={mediaOrigin}
+                headingLevel={3}
+              />
             ))}
           </div>
         </section>

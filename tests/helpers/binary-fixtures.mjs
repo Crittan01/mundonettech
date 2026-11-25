@@ -139,6 +139,7 @@ export function createGlb(options = {}) {
   const document = options.rawDocument ?? {
     asset: options.omitAsset ? undefined : { version: options.assetVersion ?? "2.0" },
     ...(options.extensionsRequired ? { extensionsRequired: options.extensionsRequired } : {}),
+    ...(options.extensionsUsed ? { extensionsUsed: options.extensionsUsed } : {}),
     ...(options.extras ? { extras: options.extras } : {}),
     buffers: [
       {

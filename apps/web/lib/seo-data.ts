@@ -12,10 +12,10 @@ import {
   type MetaCatalogFeed,
   type SitemapXmlEntry,
 } from "@mundonettech/core";
-import { CatalogService, type CatalogFeedProduct, type CatalogMedia } from "@mundonettech/db";
+import { CatalogService, type CatalogFeedProduct } from "@mundonettech/db";
 import { cacheLife, cacheTag } from "next/cache";
 
-import { resolveCatalogMediaUrl } from "@/components/catalog/media-url";
+import { variantFeedImage } from "@/lib/catalog-presenters";
 import { getDatabase } from "@/lib/db";
 import { getPublicMediaOrigin } from "@/lib/env";
 import { getLegalDocuments } from "@/lib/legal";
@@ -98,47 +98,6 @@ async function readSitemapEntries(): Promise<SitemapXmlEntry[]> {
 
 export async function getSitemapPartitions() {
   return partitionSitemapEntries(await readSitemapEntries(), sitemapEntriesPerFile);
-}
-
-function firstFeedImage(media: readonly CatalogMedia[], origin: string | null): string | null {
-  if (!origin) return null;
-  for (const item of media) {
-    if (item.mediaType === "IMAGE") {
-      const url = resolveCatalogMediaUrl(item.storageKey, origin);
-      if (url) return url;
-    }
-  }
-  for (const item of media) {
-    const key =
-      item.posterKey ??
-      (item.mediaType === "SPIN_360"
-        ? (item.frames[0]?.derivatives.find((derivative) => derivative.format === "webp")?.key ??
-          item.frames[0]?.key)
-        : null);
-    if (key) {
-      const url = resolveCatalogMediaUrl(key, origin);
-      if (url) return url;
-    }
-  }
-  return null;
-}
-
-function variantFeedImage(
-  media: readonly CatalogMedia[],
-  variantId: string,
-  origin: string | null,
-): string | null {
-  if (!origin || media.length === 0) return null;
-  const variantMedia = media.filter((item) => item.variantId === variantId);
-  const sharedMedia = media.filter((item) => item.variantId === null);
-  const otherMedia = media.filter(
-    (item) => item.variantId !== null && item.variantId !== variantId,
-  );
-  return (
-    firstFeedImage(variantMedia, origin) ??
-    firstFeedImage(sharedMedia, origin) ??
-    firstFeedImage(otherMedia, origin)
-  );
 }
 
 function catalogFeedItems(

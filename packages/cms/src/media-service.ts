@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { maskEmail, maskName, sanitizeAuditValue } from "@mundonettech/core";
-import { Prisma, PrismaClient } from "@mundonettech/db";
+import { assertAdminActorInTransaction, Prisma, PrismaClient } from "@mundonettech/db";
 import {
   R2MediaStorage,
   storeImageDerivatives,
@@ -108,10 +108,18 @@ export class CmsMediaService {
     validateUpload(input);
     const hash = createHash("sha256").update(input.bytes).digest();
     const hashBytes = Uint8Array.from(hash);
-    const existing = await this.db.cmsMedia.findFirst({
+    const candidate = await this.db.cmsMedia.findFirst({
       where: { contentHash: hashBytes, deletedAt: null },
     });
-    if (existing) return { media: existing, reused: true };
+    if (candidate) {
+      const existing = await this.db.$transaction(async (tx) => {
+        await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
+        return tx.cmsMedia.findFirst({
+          where: { contentHash: hashBytes, deletedAt: null },
+        });
+      });
+      if (existing) return { media: existing, reused: true };
+    }
 
     const storage = this.storage;
     if (!storage) throw new CmsValidationError("R2 storage is required for uploads.");
@@ -168,6 +176,7 @@ export class CmsMediaService {
     let failed = false;
     try {
       const media = await this.db.$transaction(async (tx) => {
+        await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
         const created = await tx.cmsMedia.create({
           data: {
             storageKey: primary.key,
@@ -188,7 +197,7 @@ export class CmsMediaService {
             action: "CMS_MEDIA_CREATED",
             targetType: "CmsMedia",
             targetId: created.id,
-            requestId: audit.requestId ?? null,
+            requestId: audit.requestId ?? randomUUID(),
             ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
             userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
             metadata: sanitizeAuditValue({
@@ -256,6 +265,7 @@ export class CmsMediaService {
   async updateAltText(id: string, altText: string, audit: CmsAudit) {
     assertUuid(id, "mediaId");
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     if (
       !altText.trim() ||
       altText.trim() !== altText ||
@@ -282,6 +292,10 @@ export class CmsMediaService {
       `;
       const existing = locked[0];
       if (!existing) throw new CmsNotFoundError("Media not found.");
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
+      if (existing.altText === altText) {
+        return tx.cmsMedia.findUniqueOrThrow({ where: { id } });
+      }
       const updated = await tx.cmsMedia.update({ where: { id }, data: { altText } });
       await tx.adminActionLog.create({
         data: {
@@ -289,6 +303,7 @@ export class CmsMediaService {
           action: "CMS_MEDIA_UPDATED",
           targetType: "CmsMedia",
           targetId: id,
+          requestId: audit.requestId ?? randomUUID(),
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
           metadata: sanitizeAuditValue({
@@ -317,6 +332,7 @@ export class CmsMediaService {
   async archive(id: string, audit: CmsAudit) {
     assertUuid(id, "mediaId");
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     return this.db.$transaction(async (tx) => {
       const locked = await tx.$queryRaw<
         Array<{ id: string; mimeType: string; byteSize: number; now: Date }>
@@ -328,6 +344,7 @@ export class CmsMediaService {
       `;
       const existing = locked[0];
       if (!existing) throw new CmsNotFoundError("Media not found.");
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
 
       const references = await tx.$queryRaw<Array<{ referenced: boolean }>>`
         SELECT EXISTS (
@@ -352,6 +369,7 @@ export class CmsMediaService {
           action: "CMS_MEDIA_ARCHIVED",
           targetType: "CmsMedia",
           targetId: id,
+          requestId: audit.requestId ?? randomUUID(),
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
           metadata: sanitizeAuditValue({

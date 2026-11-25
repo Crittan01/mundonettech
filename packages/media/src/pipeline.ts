@@ -14,6 +14,13 @@ export interface PipelineStorageOptions {
   readonly cleanup?: (keys: readonly string[]) => Promise<void>;
 }
 
+export class MediaSourceValidationError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Invalid media source.", { cause });
+    this.name = "MediaSourceValidationError";
+  }
+}
+
 async function removeObjects(
   storage: R2MediaStorage,
   objects: readonly { key: string }[],
@@ -54,7 +61,12 @@ export async function storeImageDerivatives(
   options: PipelineStorageOptions = {},
 ): Promise<StoredImageDerivative[]> {
   const safePrefix = normalizeStoragePrefix(prefix);
-  const processed = await processImageSafely(input, { ...(widths ? { widths } : {}) });
+  let processed;
+  try {
+    processed = await processImageSafely(input, { ...(widths ? { widths } : {}) });
+  } catch (error) {
+    throw new MediaSourceValidationError(error);
+  }
   const stored: StoredImageDerivative[] = [];
   try {
     for (const derivative of processed.derivatives) {
@@ -96,7 +108,11 @@ export async function storeSpin360(
     throw new RangeError("SPIN_360 requires between 2 and 120 frames.");
   }
   for (const frame of frames) {
-    inspectImageMagic(frame);
+    try {
+      inspectImageMagic(frame);
+    } catch (error) {
+      throw new MediaSourceValidationError(error);
+    }
   }
   const completed: { frame: number; derivatives: StoredImageDerivative[] }[] = [];
   try {

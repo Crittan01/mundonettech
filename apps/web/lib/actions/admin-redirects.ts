@@ -1,5 +1,7 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
   UrlRedirectConflictError,
   UrlRedirectNotFoundError,
@@ -42,6 +44,7 @@ async function authorize(): Promise<{
 function audit(session: AdminSession, request: RequestSecurityContext) {
   return {
     actorAdminUserId: session.profile.id,
+    requestId: randomUUID(),
     ipHash: request.ipHash,
     userAgentHash: request.userAgentHash,
   };
@@ -87,7 +90,10 @@ function errorState(error: unknown, values: Record<string, string>): ActionState
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de guardar esta redirección.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (
+    error instanceof AdminAuthorizationError ||
+    (error instanceof Error && error.name === "AdminActorAuthorizationError")
+  ) {
     return actionError("Tu sesión no está autorizada para administrar redirecciones.", values);
   }
   if (error instanceof UrlRedirectNotFoundError) {

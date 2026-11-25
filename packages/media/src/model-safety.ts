@@ -8,6 +8,7 @@ import { inspectImageMagic } from "./image-safety.js";
 interface GltfDocument {
   asset?: { version?: unknown; minVersion?: unknown };
   extensionsRequired?: unknown;
+  extensionsUsed?: unknown;
   buffers?: Array<{ byteLength: number; uri?: string }>;
   bufferViews?: Array<{ buffer: number; byteOffset?: number; byteLength: number }>;
   accessors?: Array<{ bufferView?: number; byteOffset?: number }>;
@@ -97,14 +98,17 @@ export function validateGlb(input: Uint8Array): ModelSafetyResult {
     throw new Error("GLB requires a valid glTF 2.x asset descriptor.");
   }
 
-  if (document.extensionsRequired !== undefined) {
-    if (!Array.isArray(document.extensionsRequired)) {
-      throw new Error("Invalid glTF extensionsRequired field.");
+  for (const [field, extensions] of [
+    ["extensionsRequired", document.extensionsRequired],
+    ["extensionsUsed", document.extensionsUsed],
+  ] as const) {
+    if (extensions !== undefined && !Array.isArray(extensions)) {
+      throw new Error(`Invalid glTF ${field} field.`);
     }
-    for (const ext of document.extensionsRequired) {
+    for (const ext of extensions ?? []) {
       if (typeof ext !== "string" || forbiddenGlbExtensions.has(ext)) {
         throw new Error(
-          `Unsupported required glTF extension "${String(ext)}"; self-contained GLB without external WASM decoders is required.`,
+          `Unsupported glTF extension "${String(ext)}"; self-contained GLB without external WASM decoders is required.`,
         );
       }
     }
@@ -156,13 +160,17 @@ export function validateGlb(input: Uint8Array): ModelSafetyResult {
   }
 
   for (const accessor of document.accessors ?? []) {
+    const view = accessor.bufferView === undefined ? undefined : views[accessor.bufferView];
+    const byteOffset = accessor.byteOffset ?? 0;
     if (
       typeof accessor !== "object" ||
       accessor === null ||
+      !Number.isSafeInteger(byteOffset) ||
+      byteOffset < 0 ||
       (accessor.bufferView !== undefined &&
-        (!Number.isSafeInteger(accessor.bufferView) || !views[accessor.bufferView]))
+        (!Number.isSafeInteger(accessor.bufferView) || !view || byteOffset >= view.byteLength))
     ) {
-      throw new Error("GLB accessor references an invalid bufferView.");
+      throw new Error("GLB accessor references an invalid bufferView or byteOffset.");
     }
   }
 
@@ -303,8 +311,11 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
       if (unixModeType === 0o120000) {
         throw new Error("Symbolic links inside USDZ archives are forbidden.");
       }
+      if (count === 1 && (isDirectory || !["usdc", "usda"].includes(extension ?? ""))) {
+        throw new Error("USDZ root stage must be the first archive entry.");
+      }
       if (
-        (entry.generalPurposeBitFlag & 1) !== 0 ||
+        (entry.generalPurposeBitFlag & 0x2041) !== 0 ||
         ![0, 8].includes(entry.compressionMethod) ||
         entry.compressedSize < 0 ||
         entry.uncompressedSize < 0 ||
@@ -321,8 +332,8 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
         fileCount += 1;
         const isUsdModel = extension === "usdc" || extension === "usda";
         const expectedTextureFormat = extension ? allowedTextureExtensions[extension] : undefined;
-        if (fileCount === 1 && !isUsdModel) {
-          throw new Error("USDZ root entry must be a .usdc or .usda stage.");
+        if (fileCount === 1 && (!isUsdModel || entry.fileName.includes("/"))) {
+          throw new Error("USDZ root entry must be a top-level .usdc or .usda stage.");
         }
         if (isUsdModel) {
           modelCount += 1;
