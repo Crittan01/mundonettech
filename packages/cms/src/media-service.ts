@@ -118,7 +118,33 @@ export class CmsMediaService {
 
     let stored;
     try {
-      stored = await storeImageDerivatives(storage, input.bytes, "cms");
+      stored = await storeImageDerivatives(storage, input.bytes, "cms", undefined, {
+        cleanup: async (keys) => {
+          if (keys.length === 0) return;
+          let sharedReferenceCount = 1;
+          try {
+            sharedReferenceCount = await this.db.cmsMedia.count({
+              where: {
+                OR: [{ contentHash: hashBytes }, { storageKey: { in: [...keys] } }],
+              },
+            });
+          } catch {
+            sharedReferenceCount = 1;
+          }
+          if (sharedReferenceCount === 0) {
+            const cleanup = await Promise.allSettled(keys.map((key) => storage.delete(key)));
+            const failures = cleanup
+              .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+              .map((result) => result.reason);
+            if (failures.length > 0) {
+              throw new AggregateError(
+                failures,
+                "Some unreferenced CMS R2 objects could not be removed.",
+              );
+            }
+          }
+        },
+      });
     } catch (error) {
       if (error instanceof CmsValidationError) throw error;
       if (error instanceof TypeError || error instanceof RangeError) {
@@ -198,7 +224,7 @@ export class CmsMediaService {
         failed = true;
       }
       if (failed) {
-        let sharedReferenceCount = 0;
+        let sharedReferenceCount = 1;
         try {
           sharedReferenceCount = await this.db.cmsMedia.count({
             where: {
@@ -206,7 +232,7 @@ export class CmsMediaService {
             },
           });
         } catch {
-          sharedReferenceCount = 0;
+          sharedReferenceCount = 1;
         }
         if (sharedReferenceCount === 0) {
           const cleanup = await Promise.allSettled(stored.map((item) => storage.delete(item.key)));
@@ -240,7 +266,21 @@ export class CmsMediaService {
       throw new CmsValidationError("Invalid alt text.");
     }
     return this.db.$transaction(async (tx) => {
-      const existing = await tx.cmsMedia.findFirst({ where: { id, deletedAt: null } });
+      const locked = await tx.$queryRaw<
+        Array<{
+          id: string;
+          mimeType: string;
+          byteSize: number;
+          altText: string;
+          deletedAt: Date | null;
+        }>
+      >`
+        SELECT "id", "mimeType", "byteSize", "altText", "deletedAt"
+        FROM "CmsMedia"
+        WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      const existing = locked[0];
       if (!existing) throw new CmsNotFoundError("Media not found.");
       const updated = await tx.cmsMedia.update({ where: { id }, data: { altText } });
       await tx.adminActionLog.create({

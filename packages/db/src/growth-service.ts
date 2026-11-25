@@ -13,6 +13,7 @@ import {
   type ReferralRejectionReason,
 } from "@mundonettech/core";
 
+import { retryableLockDivergenceError } from "./crm-shared.js";
 import type { Customer, LoyaltyTxnType, Prisma, ReferralStatus } from "./generated/client.js";
 import {
   acquireOperationLocks,
@@ -208,8 +209,16 @@ export class GrowthService {
         throw new GrowthError("NOT_FOUND", "Referral code is not available.");
       }
       const customers = await lockCustomers(tx, [referredCustomerId, referralCode.customerId]);
+      const freshCode = await tx.referralCode.findUnique({ where: { id: referralCode.id } });
+      if (
+        !freshCode ||
+        freshCode.disabledAt !== null ||
+        freshCode.customerId !== referralCode.customerId
+      ) {
+        throw new GrowthError("NOT_FOUND", "Referral code is not available.");
+      }
       const referred = customers.find((customer) => customer.id === referredCustomerId);
-      const referrer = customers.find((customer) => customer.id === referralCode.customerId);
+      const referrer = customers.find((customer) => customer.id === freshCode.customerId);
       if (!activeCustomer(referred)) {
         throw new GrowthError("NOT_FOUND", "Active customer account not found.");
       }
@@ -261,18 +270,48 @@ export class GrowthService {
       throw new GrowthError("CONFLICT", "Loyalty accrual requires a fully paid order.");
     }
     const netMerchandiseCents = order.items.reduce((sum, item) => sum + item.lineTotalCents, 0n);
-    const referral = order.customerId
+    const peekReferral = order.customerId
       ? await tx.referral.findUnique({
           where: { referredCustomerId: order.customerId },
-          include: { code: true },
+          select: { referrerCustomerId: true },
         })
       : null;
     const customers = await lockCustomers(
       tx,
-      [order.customerId, referral?.referrerCustomerId].filter(
+      [order.customerId, peekReferral?.referrerCustomerId].filter(
         (id): id is string => typeof id === "string",
       ),
     );
+    const lockedReferrals = order.customerId
+      ? await tx.$queryRaw<
+          Array<{
+            id: string;
+            codeId: string;
+            referrerCustomerId: string;
+            referredCustomerId: string;
+            status: ReferralStatus;
+          }>
+        >`
+          SELECT "id", "codeId", "referrerCustomerId", "referredCustomerId", "status"::text AS "status"
+          FROM "Referral"
+          WHERE "referredCustomerId" = ${order.customerId}::uuid
+          FOR UPDATE
+        `
+      : [];
+    const referral = lockedReferrals[0] ?? null;
+    if (
+      referral &&
+      referral.status === "ATTRIBUTED" &&
+      !customers.some((customer) => customer.id === referral.referrerCustomerId)
+    ) {
+      throw retryableLockDivergenceError("Referral attribution changed concurrently.");
+    }
+    const referralCode = referral
+      ? await tx.referralCode.findUnique({
+          where: { id: referral.codeId },
+          select: { disabledAt: true },
+        })
+      : null;
     const buyer = customers.find((customer) => customer.id === order.customerId);
     const now = await databaseNow(tx);
     let earnedPoints = 0;
@@ -292,8 +331,8 @@ export class GrowthService {
     if (!referral || referral.status !== "ATTRIBUTED") return { earnedPoints, referralPoints: 0 };
 
     const reject = async (reason: string) => {
-      await tx.referral.update({
-        where: { id: referral.id },
+      await tx.referral.updateMany({
+        where: { id: referral.id, status: "ATTRIBUTED" },
         data: { status: "REJECTED", rejectionReason: reason, orderId: order.id },
       });
     };
@@ -310,7 +349,7 @@ export class GrowthService {
       return { earnedPoints, referralPoints: 0 };
     }
     const referrer = customers.find((customer) => customer.id === referral.referrerCustomerId);
-    if (!activeCustomer(referrer) || referral.code.disabledAt) {
+    if (!activeCustomer(referrer) || !referralCode || referralCode.disabledAt !== null) {
       await reject("REFERRER_UNAVAILABLE");
       return { earnedPoints, referralPoints: 0 };
     }
@@ -330,10 +369,11 @@ export class GrowthService {
       await reject("PREVIOUS_PAID_ORDER");
       return { earnedPoints, referralPoints: 0 };
     }
-    await tx.referral.update({
-      where: { id: referral.id },
+    const qualified = await tx.referral.updateMany({
+      where: { id: referral.id, status: "ATTRIBUTED" },
       data: { status: "QUALIFIED", orderId: order.id, qualifiedAt: now },
     });
+    if (qualified.count !== 1) return { earnedPoints, referralPoints: 0 };
     for (const customerId of [referral.referrerCustomerId, order.customerId!].sort(
       compareStrings,
     )) {

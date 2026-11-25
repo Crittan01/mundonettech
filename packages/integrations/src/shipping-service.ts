@@ -17,10 +17,9 @@ import { assertIntegrationUuid, integrationDigest, integrationText } from "./int
 import {
   assertFulfillmentActor,
   assertPaidOrder,
-  lockFulfillment,
   lockOrder,
-  lockPackage,
-  lockShipment,
+  lockShipmentPackages,
+  lockShippingHierarchy,
   positiveInteger,
   shippingWorkerId,
   writeShippingAudit,
@@ -85,7 +84,7 @@ export class ShippingService {
       const rows = await db.$queryRaw<Array<{ role: string }>>`
         SELECT "role"::text AS "role" FROM "AdminUser"
         WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
-        FOR UPDATE
+        FOR SHARE
       `;
       role = rows[0]?.role;
     } else {
@@ -215,14 +214,15 @@ export class ShippingService {
     await this.ensureFulfillments(shipment.orderId, undefined, audit);
     return this.db.$transaction(async (tx) => {
       await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const fulfillment = await lockFulfillment(tx, shipmentId);
+      const { fulfillment } = await lockShippingHierarchy(tx, {
+        orderId: shipment.orderId,
+        shipmentId,
+      });
       if (fulfillment.status !== "PENDING") {
         if (["PICKING", "PACKED", "LABELLED", "SHIPPED", "DELIVERED"].includes(fulfillment.status))
           return fulfillment.id;
         throw new ShippingConflictError("Fulfillment cannot start picking in its current state.");
       }
-      const order = await lockOrder(tx, fulfillment.orderId);
-      await assertPaidOrder(tx, order);
       await tx.orderFulfillment.update({
         where: { id: fulfillment.id },
         data: { status: "PICKING", version: { increment: 1 } },
@@ -260,12 +260,19 @@ export class ShippingService {
     if (packages.reduce((sum, record) => sum + record.items.length, 0) > 10_000) {
       throw new ShippingValidationError("Package content lines exceed the request resource limit.");
     }
+    const identity = await this.db.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { orderId: true },
+    });
+    if (!identity) throw new ShippingNotFoundError("Shipment not found.");
     return this.db.$transaction(async (tx) => {
       await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const fulfillment = await lockFulfillment(tx, shipmentId);
+      const { fulfillment, shipment } = await lockShippingHierarchy(tx, {
+        orderId: identity.orderId,
+        shipmentId,
+      });
       if (fulfillment.status !== "PICKING")
         throw new ShippingConflictError("Only an active picking fulfillment can be packed.");
-      const shipment = await lockShipment(tx, shipmentId);
       if (shipment.status !== "PENDING")
         throw new ShippingConflictError("Only a pending shipment can be packed.");
       const existingPackages = await tx.shipmentPackage.count({ where: { shipmentId } });
@@ -549,10 +556,21 @@ export class ShippingService {
     packageId: string,
     result: ShippingLabelResult,
     workerId: string,
+    requestStartedAt: Date | null,
     audit?: ShippingAuditContext,
   ): Promise<LabelProcessResult> {
+    const identity = await this.db.shipmentPackage.findUnique({
+      where: { id: packageId },
+      select: { shipmentId: true, shipment: { select: { orderId: true } } },
+    });
+    if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
     return this.db.$transaction(async (tx) => {
-      const record = await lockPackage(tx, packageId);
+      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+        orderId: identity.shipment.orderId,
+        shipmentId: identity.shipmentId,
+        packageId,
+      });
+      if (!record) throw new ShippingNotFoundError("Shipment package not found.");
       if (["LABELLED", "SHIPPED", "DELIVERED"].includes(record.status)) {
         return {
           packageId,
@@ -561,12 +579,22 @@ export class ShippingService {
           replayed: true,
         };
       }
+      if (fulfillment.status === "CANCELLED" || shipment.status === "CANCELLED") {
+        throw new ShippingConflictError("A cancelled shipment cannot accept a provider label.");
+      }
       if (!["CLAIMED", "RECONCILING"].includes(record.status))
         throw new ShippingConflictError("Only a claimed package can accept a provider label.");
-      if (record.status === "CLAIMED" && record.claimedBy !== workerId) {
-        throw new ShippingConflictError(
-          "Package label claim ownership changed before persistence.",
-        );
+      if (requestStartedAt) {
+        if (
+          record.claimedBy !== workerId ||
+          record.requestStartedAt?.getTime() !== requestStartedAt.getTime()
+        ) {
+          throw new ShippingConflictError(
+            "Package label claim ownership changed before persistence.",
+          );
+        }
+      } else if (record.status !== "RECONCILING") {
+        throw new ShippingConflictError("Only reconciliation can persist a label without a claim.");
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
@@ -581,6 +609,7 @@ export class ShippingService {
           claimedBy: null,
           claimedAt: null,
           claimExpiresAt: null,
+          requestStartedAt: null,
           lastError: null,
         },
       });
@@ -594,7 +623,6 @@ export class ShippingService {
           metadata: { carrier: result.carrier, trackingCode: result.trackingCode },
         },
       });
-      const fulfillment = await lockFulfillment(tx, record.shipmentId);
       const pending = await tx.shipmentPackage.count({
         where: {
           shipmentId: record.shipmentId,
@@ -607,7 +635,6 @@ export class ShippingService {
           data: { status: "LABELLED", version: { increment: 1 } },
         });
       }
-      const shipment = await lockShipment(tx, record.shipmentId);
       if (!shipment.trackingCode) {
         await tx.shipment.update({
           where: { id: shipment.id },
@@ -646,12 +673,23 @@ export class ShippingService {
   private async failLabel(
     packageId: string,
     workerId: string,
+    requestStartedAt: Date,
     uncertain: boolean,
     code: string,
     audit?: ShippingAuditContext,
   ): Promise<LabelProcessResult> {
+    const identity = await this.db.shipmentPackage.findUnique({
+      where: { id: packageId },
+      select: { shipmentId: true, shipment: { select: { orderId: true } } },
+    });
+    if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
     return this.db.$transaction(async (tx) => {
-      const record = await lockPackage(tx, packageId);
+      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+        orderId: identity.shipment.orderId,
+        shipmentId: identity.shipmentId,
+        packageId,
+      });
+      if (!record) throw new ShippingNotFoundError("Shipment package not found.");
       if (record.status !== "CLAIMED") {
         return {
           packageId,
@@ -660,7 +698,12 @@ export class ShippingService {
           replayed: true,
         };
       }
-      if (record.claimedBy !== workerId) {
+      if (
+        fulfillment.status === "CANCELLED" ||
+        shipment.status === "CANCELLED" ||
+        record.claimedBy !== workerId ||
+        record.requestStartedAt?.getTime() !== requestStartedAt.getTime()
+      ) {
         throw new ShippingConflictError(
           "Package label claim ownership changed before failure update.",
         );
@@ -677,7 +720,6 @@ export class ShippingService {
           lastError: integrationText(code, "errorCode", 200),
         },
       });
-      const fulfillment = await lockFulfillment(tx, record.shipmentId);
       if (uncertain && fulfillment.status === "PACKED") {
         await tx.orderFulfillment.update({
           where: { id: fulfillment.id },
@@ -732,16 +774,22 @@ export class ShippingService {
       throw new ShippingValidationError("claimSeconds must be between 60 and 900.");
     const claim = await this.db.$transaction(async (tx) => {
       await this.assertHumanActor(tx, audit, true);
-      const peek = await tx.shipmentPackage.findUnique({
+      const identity = await tx.shipmentPackage.findUnique({
         where: { id: packageId },
-        select: { shipmentId: true },
+        select: { shipmentId: true, shipment: { select: { orderId: true } } },
       });
-      if (!peek) throw new ShippingNotFoundError("Shipment package not found.");
-      const fulfillment = await lockFulfillment(tx, peek.shipmentId);
-      const record = await lockPackage(tx, packageId);
+      if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
+      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+        orderId: identity.shipment.orderId,
+        shipmentId: identity.shipmentId,
+        packageId,
+      });
+      if (!record) throw new ShippingNotFoundError("Shipment package not found.");
       if (["LABELLED", "SHIPPED", "DELIVERED"].includes(record.status))
         return { outcome: "REPLAY" as const, record };
       if (record.status === "RECONCILING") return { outcome: "UNCERTAIN" as const, record };
+      if (fulfillment.status === "CANCELLED" || shipment.status === "CANCELLED")
+        throw new ShippingConflictError("A cancelled shipment cannot be claimed.");
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
       const activeClaim = record.claimExpiresAt && record.claimExpiresAt > now;
@@ -757,6 +805,13 @@ export class ShippingService {
             where: { id: fulfillment.id },
             data: { status: "RECONCILING", version: { increment: 1 } },
           });
+        await writeShippingOutbox(tx, {
+          eventType: "shipping.provider.uncertain.v1",
+          aggregateType: "ShipmentPackage",
+          aggregateId: packageId,
+          deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1`,
+          payload: { orderId: fulfillment.orderId, shipmentId: record.shipmentId, packageId },
+        });
         return { outcome: "UNCERTAIN" as const, record };
       }
       if (record.status !== "SEALED" && record.status !== "CLAIMED")
@@ -804,7 +859,7 @@ export class ShippingService {
           metadata: { shipmentId: record.shipmentId, requestKey: record.requestKey },
         });
       }
-      return { outcome: "CLAIMED" as const, record };
+      return { outcome: "CLAIMED" as const, identity, record, claimedAt: now };
     });
     if (claim.outcome === "REPLAY")
       return {
@@ -815,17 +870,40 @@ export class ShippingService {
       };
     if (claim.outcome === "UNCERTAIN")
       return { packageId, status: "RECONCILING", trackingCode: null, replayed: false };
-    await this.db.$transaction(async (tx) => {
-      const startedRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-      await tx.shipmentPackage.updateMany({
-        where: { id: packageId, status: "CLAIMED", claimedBy: workerId, requestStartedAt: null },
-        data: { requestStartedAt: startedRows[0]!.now },
+    const started = await this.db.$transaction(async (tx) => {
+      const { record } = await lockShippingHierarchy(tx, {
+        orderId: claim.identity.shipment.orderId,
+        shipmentId: claim.identity.shipmentId,
+        packageId,
       });
+      if (!record) throw new ShippingNotFoundError("Shipment package not found.");
+      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = nowRows[0]!.now;
+      const fenced = await tx.shipmentPackage.updateMany({
+        where: {
+          id: packageId,
+          status: "CLAIMED",
+          claimedBy: workerId,
+          claimedAt: claim.claimedAt,
+          claimExpiresAt: { gt: now },
+          requestStartedAt: null,
+        },
+        data: { requestStartedAt: now },
+      });
+      return { record, requestStartedAt: fenced.count === 1 ? now : null };
     });
+    if (!started.requestStartedAt) {
+      return {
+        packageId,
+        status: started.record.status,
+        trackingCode: started.record.trackingCode,
+        replayed: true,
+      };
+    }
+    let result: ShippingLabelResult;
     try {
       const { request, provider } = await this.labelRequest(packageId);
-      const result = await provider.createLabel(request);
-      return await this.persistLabel(packageId, result, workerId, audit);
+      result = await provider.createLabel(request);
     } catch (error) {
       const uncertain =
         error instanceof ShippingProviderError &&
@@ -836,8 +914,9 @@ export class ShippingService {
           : error instanceof ShippingValidationError
             ? error.message
             : "PROVIDER_FAILURE";
-      return this.failLabel(packageId, workerId, uncertain, code, audit);
+      return this.failLabel(packageId, workerId, started.requestStartedAt, uncertain, code, audit);
     }
+    return this.persistLabel(packageId, result, workerId, started.requestStartedAt, audit);
   }
 
   async reconcileLabel(
@@ -847,13 +926,27 @@ export class ShippingService {
   ): Promise<LabelProcessResult> {
     assertIntegrationUuid(packageId, "packageId");
     const workerId = shippingWorkerId(workerIdInput);
+    const identity = await this.db.shipmentPackage.findUnique({
+      where: { id: packageId },
+      select: { shipmentId: true, shipment: { select: { orderId: true } } },
+    });
+    if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
     const current = await this.db.$transaction(async (tx) => {
       if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const locked = await lockPackage(tx, packageId);
-      if (["LABELLED", "SHIPPED", "DELIVERED"].includes(locked.status)) {
-        return { done: true as const, record: locked };
+      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+        orderId: identity.shipment.orderId,
+        shipmentId: identity.shipmentId,
+        packageId,
+      });
+      if (!record) throw new ShippingNotFoundError("Shipment package not found.");
+      if (["LABELLED", "SHIPPED", "DELIVERED"].includes(record.status)) {
+        return { done: true as const, record };
       }
-      if (locked.status !== "RECONCILING") {
+      if (
+        fulfillment.status === "CANCELLED" ||
+        shipment.status === "CANCELLED" ||
+        record.status !== "RECONCILING"
+      ) {
         throw new ShippingConflictError("Only an uncertain package requires reconciliation.");
       }
       if (audit) {
@@ -864,7 +957,7 @@ export class ShippingService {
           audit,
         });
       }
-      return { done: false as const, record: locked };
+      return { done: false as const, record };
     });
     if (current.done) {
       return {
@@ -876,17 +969,29 @@ export class ShippingService {
     }
     const { provider } = await this.labelRequest(packageId);
     const result = await provider.findLabel(current.record.requestKey);
-    if (result) return this.persistLabel(packageId, result, workerId, audit);
+    if (result) return this.persistLabel(packageId, result, workerId, null, audit);
     return this.db.$transaction(async (tx) => {
       if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const record = await lockPackage(tx, packageId);
-      if (record.status !== "RECONCILING")
+      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+        orderId: identity.shipment.orderId,
+        shipmentId: identity.shipmentId,
+        packageId,
+      });
+      if (!record) throw new ShippingNotFoundError("Shipment package not found.");
+      if (
+        record.status !== "RECONCILING" ||
+        record.requestStartedAt?.getTime() !== current.record.requestStartedAt?.getTime() ||
+        record.claimedBy !== current.record.claimedBy
+      ) {
         return {
           packageId,
           status: record.status,
           trackingCode: record.trackingCode,
           replayed: true,
         };
+      }
+      if (fulfillment.status === "CANCELLED" || shipment.status === "CANCELLED")
+        throw new ShippingConflictError("A cancelled shipment cannot reconcile a provider label.");
       await tx.shipmentPackage.update({
         where: { id: packageId },
         data: {
@@ -898,7 +1003,6 @@ export class ShippingService {
           lastError: "PROVIDER_CONFIRMED_NOT_FOUND",
         },
       });
-      const fulfillment = await lockFulfillment(tx, record.shipmentId);
       if (fulfillment.status === "RECONCILING")
         await tx.orderFulfillment.update({
           where: { id: fulfillment.id },
@@ -1110,13 +1214,20 @@ export class ShippingService {
     audit: ShippingAuditContext,
   ): Promise<number> {
     assertIntegrationUuid(shipmentId, "shipmentId");
+    const identity = await this.db.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { orderId: true },
+    });
+    if (!identity) throw new ShippingNotFoundError("Shipment not found.");
     return this.db.$transaction(async (tx) => {
       await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const fulfillment = await lockFulfillment(tx, shipmentId);
+      const { fulfillment } = await lockShippingHierarchy(tx, {
+        orderId: identity.orderId,
+        shipmentId,
+      });
       if (fulfillment.status !== "LABELLED") {
         throw new ShippingConflictError("Serial assignment requires a labelled fulfillment.");
       }
-      await lockShipment(tx, shipmentId);
       return this.assignSerialUnitsInTransaction(
         tx,
         shipmentId,
@@ -1135,12 +1246,19 @@ export class ShippingService {
     serialUnitIds?: readonly string[],
   ): Promise<void> {
     assertIntegrationUuid(shipmentId, "shipmentId");
+    const identity = await this.db.shipment.findUnique({
+      where: { id: shipmentId },
+      select: { orderId: true },
+    });
+    if (!identity) throw new ShippingNotFoundError("Shipment not found.");
     await this.db.$transaction(async (tx) => {
       await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const fulfillment = await lockFulfillment(tx, shipmentId);
+      const { fulfillment, shipment } = await lockShippingHierarchy(tx, {
+        orderId: identity.orderId,
+        shipmentId,
+      });
       if (fulfillment.status !== (target === "SHIPPED" ? "LABELLED" : "SHIPPED"))
         throw new ShippingConflictError(`Fulfillment cannot transition to ${target}.`);
-      const shipment = await lockShipment(tx, shipmentId);
       if (target === "SHIPPED" && serialUnitIds) {
         await this.assignSerialUnitsInTransaction(
           tx,
@@ -1151,10 +1269,7 @@ export class ShippingService {
         );
       }
       if (target === "SHIPPED") await this.assertSerialAssignments(tx, shipmentId);
-      const packages = await tx.shipmentPackage.findMany({
-        where: { shipmentId },
-        orderBy: [{ packageNumber: "asc" }, { id: "asc" }],
-      });
+      const packages = await lockShipmentPackages(tx, shipmentId);
       if (
         packages.length === 0 ||
         packages.some((record) => record.status !== (target === "SHIPPED" ? "LABELLED" : "SHIPPED"))

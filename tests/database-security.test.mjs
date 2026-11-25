@@ -16,7 +16,10 @@ import {
   purgeExpiredIdempotencyKeys,
   retryDomainOutbox,
 } from "../packages/db/dist/index.js";
-import { verifySecurityPosture } from "../packages/db/dist/verify-security-posture.js";
+import {
+  constraintGuaranteesNonNegative,
+  verifySecurityPosture,
+} from "../packages/db/dist/verify-security-posture.js";
 import {
   CredentialAlreadyExistsError,
   CredentialConflictError,
@@ -30,7 +33,7 @@ import {
 } from "../packages/integrations/dist/index.js";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
 
-const containerName = "f03-security-test_mundonettech";
+const containerName = "a3-security-test_mundonettech";
 const probeRole = "f03_rls_probe";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -73,6 +76,35 @@ async function expectSqlViolation(promise, code) {
     assert.equal(error.code, code);
     return true;
   });
+}
+
+async function runPostureMutation(statements, assertion) {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  await client.query("BEGIN");
+  try {
+    for (const statement of statements) await client.query(statement);
+    await assertion(await verifySecurityPosture(databaseUrl, client));
+  } finally {
+    await client.query("ROLLBACK").catch(() => undefined);
+    await client.end();
+  }
+}
+
+async function expectPostureMutation(statements, expectedMessages) {
+  const expectedList = Array.isArray(expectedMessages) ? expectedMessages : [expectedMessages];
+  await runPostureMutation(statements, (errors) => {
+    for (const expectedMessage of expectedList) {
+      assert.ok(
+        errors.some((message) => message.includes(expectedMessage)),
+        `expected posture failure containing ${expectedMessage}; found ${JSON.stringify(errors)}`,
+      );
+    }
+  });
+}
+
+async function expectPostureMutationAllowed(statements) {
+  await runPostureMutation(statements, (errors) => assert.deepEqual(errors, []));
 }
 
 async function createAdmin(options = {}) {
@@ -173,7 +205,7 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
     const migrations = await admin.query(
       "SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL",
     );
-    assert.equal(migrations.rows.length, 38);
+    assert.equal(migrations.rows.length, 40);
   });
 
   it("forces RLS on every application table and denies rows even with SQL grants", async () => {
@@ -222,38 +254,400 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
     );
   });
 
-  it("automatically enables and forces RLS for future public tables", async () => {
+  it("enforces RLS after CREATE TABLE, CREATE TABLE AS, and SELECT INTO", async () => {
+    const ddlStatements = [
+      'CREATE TABLE "RlsTriggerProbe" ("id" INTEGER PRIMARY KEY)',
+      'CREATE TABLE "RlsTriggerProbe" AS SELECT 1 AS "id"',
+      'SELECT 1 AS "id" INTO "RlsTriggerProbe"',
+    ];
+
+    for (const [index, statement] of ddlStatements.entries()) {
+      try {
+        await admin.query(statement);
+        const flags = await admin.query(
+          `SELECT relrowsecurity, relforcerowsecurity FROM pg_class
+           WHERE relname = 'RlsTriggerProbe' AND relnamespace = 'public'::regnamespace`,
+        );
+        assert.deepEqual(flags.rows[0], { relrowsecurity: true, relforcerowsecurity: true });
+
+        const apiPrivileges = await admin.query(
+          `SELECT has_table_privilege('anon', '"RlsTriggerProbe"', 'SELECT') AS anon_select,
+                  has_table_privilege('authenticated', '"RlsTriggerProbe"', 'SELECT') AS auth_select,
+                  has_table_privilege('service_role', '"RlsTriggerProbe"', 'SELECT') AS service_select`,
+        );
+        assert.deepEqual(apiPrivileges.rows[0], {
+          anon_select: false,
+          auth_select: false,
+          service_select: false,
+        });
+
+        await admin.query(`GRANT SELECT, INSERT ON "RlsTriggerProbe" TO ${probeRole}`);
+        const visible = await withProbe((client) =>
+          client.query('SELECT * FROM "RlsTriggerProbe"'),
+        );
+        assert.deepEqual(visible.rows, []);
+
+        if (index === 0) {
+          await admin.query(
+            'CREATE POLICY "leak_probe" ON "RlsTriggerProbe" FOR SELECT TO anon USING (true)',
+          );
+          const policyErrors = await verifySecurityPosture(databaseUrl);
+          assert.ok(policyErrors.some((msg) => msg.includes("leak_probe")));
+        }
+      } finally {
+        await admin.query('DROP TABLE IF EXISTS "RlsTriggerProbe"');
+      }
+    }
+  });
+
+  it("revokes future functions while rejecting them in the exact inventory", async () => {
     try {
-      await admin.query('CREATE TABLE "RlsTriggerProbe" ("id" INTEGER PRIMARY KEY)');
-      const flags = await admin.query(
-        `SELECT relrowsecurity, relforcerowsecurity FROM pg_class
-         WHERE relname = 'RlsTriggerProbe' AND relnamespace = 'public'::regnamespace`,
-      );
-      assert.deepEqual(flags.rows[0], { relrowsecurity: true, relforcerowsecurity: true });
-
-      const apiPrivileges = await admin.query(
-        `SELECT has_table_privilege('anon', '"RlsTriggerProbe"', 'SELECT') AS anon_select,
-                has_table_privilege('authenticated', '"RlsTriggerProbe"', 'SELECT') AS auth_select,
-                has_table_privilege('service_role', '"RlsTriggerProbe"', 'SELECT') AS service_select`,
-      );
-      assert.deepEqual(apiPrivileges.rows[0], {
-        anon_select: false,
-        auth_select: false,
-        service_select: false,
-      });
-
-      await admin.query('INSERT INTO "RlsTriggerProbe" VALUES (1)');
-      await admin.query(`GRANT SELECT, INSERT ON "RlsTriggerProbe" TO ${probeRole}`);
-      const visible = await withProbe((client) => client.query('SELECT * FROM "RlsTriggerProbe"'));
-      assert.deepEqual(visible.rows, []);
-
       await admin.query(
-        'CREATE POLICY "leak_probe" ON "RlsTriggerProbe" FOR SELECT TO anon USING (true)',
+        `CREATE FUNCTION "future_revoked_probe"() RETURNS integer
+         LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public
+         AS 'SELECT 1'`,
       );
-      const policyErrors = await verifySecurityPosture(databaseUrl);
-      assert.ok(policyErrors.some((msg) => msg.includes("leak_probe")));
+      const privileges = await admin.query(
+        `SELECT NOT EXISTS (
+           SELECT 1 FROM aclexplode(proc.proacl) AS acl
+           WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+         ) AS public_revoked,
+         has_function_privilege('anon', proc.oid, 'EXECUTE') AS anon_execute,
+         has_function_privilege('authenticated', proc.oid, 'EXECUTE') AS auth_execute,
+         has_function_privilege('service_role', proc.oid, 'EXECUTE') AS service_execute
+         FROM pg_proc proc
+         WHERE proc.oid = '"future_revoked_probe"()'::regprocedure`,
+      );
+      assert.deepEqual(privileges.rows[0], {
+        public_revoked: true,
+        anon_execute: false,
+        auth_execute: false,
+        service_execute: false,
+      });
+      const errors = await verifySecurityPosture(databaseUrl);
+      assert.ok(
+        errors.some((message) =>
+          message.includes("Unexpected public function future_revoked_probe()"),
+        ),
+      );
+      assert.ok(!errors.some((message) => message.includes("can execute future_revoked_probe")));
     } finally {
-      await admin.query('DROP TABLE IF EXISTS "RlsTriggerProbe"');
+      await admin.query('DROP FUNCTION IF EXISTS "future_revoked_probe"()');
+    }
+  });
+
+  it("accepts extension functions in public or extensions without changing the app inventory", async () => {
+    assert.deepEqual(await verifySecurityPosture(databaseUrl), []);
+    const client = new pg.Client({ connectionString: databaseUrl });
+    await client.connect();
+    await client.query("BEGIN");
+    try {
+      await client.query("CREATE SCHEMA IF NOT EXISTS extensions");
+      await client.query("ALTER EXTENSION pgcrypto SET SCHEMA extensions");
+      const locations = await client.query(
+        `SELECT ns.nspname AS schema, count(*)::int AS functions
+         FROM pg_proc proc
+         JOIN pg_namespace ns ON ns.oid = proc.pronamespace
+         WHERE EXISTS (
+           SELECT 1 FROM pg_depend dependency
+           WHERE dependency.classid = 'pg_proc'::regclass
+             AND dependency.objid = proc.oid AND dependency.deptype = 'e'
+             AND dependency.refclassid = 'pg_extension'::regclass
+             AND dependency.refobjid = (SELECT oid FROM pg_extension WHERE extname = 'pgcrypto')
+         ) AND ns.nspname IN ('public', 'extensions')
+         GROUP BY ns.nspname ORDER BY ns.nspname`,
+      );
+      assert.deepEqual(locations.rows, [{ schema: "extensions", functions: 36 }]);
+      assert.deepEqual(await verifySecurityPosture(databaseUrl, client), []);
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      await client.end();
+    }
+  });
+
+  it("rejects -1 for every accepted guard family and exposes unsafe OR branches", async () => {
+    await admin.query("CREATE TEMP TABLE a3_nonnegative_probe (value integer, other boolean)");
+    try {
+      const accepted = [
+        { name: "probe_ge", definition: "CHECK (value >= 0)", valid: 0 },
+        { name: "probe_gt", definition: "CHECK (value > 0)", valid: 1 },
+        {
+          name: "probe_nullable",
+          definition: "CHECK (value IS NULL OR value >= 0)",
+          valid: null,
+        },
+        {
+          name: "probe_conjunction",
+          definition: "CHECK (value >= 0 AND other)",
+          valid: 0,
+        },
+      ];
+      for (const testCase of accepted) {
+        assert.equal(constraintGuaranteesNonNegative(testCase.definition, "value"), true);
+        await admin.query(
+          `ALTER TABLE a3_nonnegative_probe ADD CONSTRAINT "${testCase.name}" ${testCase.definition}`,
+        );
+        await expectSqlViolation(
+          admin.query("INSERT INTO a3_nonnegative_probe VALUES (-1, true)"),
+          "23514",
+        );
+        await admin.query("INSERT INTO a3_nonnegative_probe VALUES ($1, true)", [testCase.valid]);
+        await admin.query("DELETE FROM a3_nonnegative_probe");
+        await admin.query(`ALTER TABLE a3_nonnegative_probe DROP CONSTRAINT "${testCase.name}"`);
+      }
+
+      for (const definition of ["CHECK (value >= 0 OR true)", "CHECK (value >= 0 OR other)"]) {
+        const name = definition.includes("true") ? "probe_or_true" : "probe_or_other";
+        assert.equal(constraintGuaranteesNonNegative(definition, "value"), false);
+        await admin.query(
+          `ALTER TABLE a3_nonnegative_probe ADD CONSTRAINT "${name}" ${definition}`,
+        );
+        const inserted = await admin.query("INSERT INTO a3_nonnegative_probe VALUES (-1, true)");
+        assert.equal(inserted.rowCount, 1);
+        await admin.query("DELETE FROM a3_nonnegative_probe");
+        await admin.query(`ALTER TABLE a3_nonnegative_probe DROP CONSTRAINT "${name}"`);
+      }
+    } finally {
+      await admin.query("DROP TABLE IF EXISTS a3_nonnegative_probe");
+    }
+  });
+
+  it("allows service_role BYPASSRLS only when supautils explicitly reserves it", async () => {
+    await expectPostureMutationAllowed([
+      "SET LOCAL supautils.reserved_roles = 'supabase_admin, service_role*, authenticated*, anon*'",
+      "ALTER ROLE service_role BYPASSRLS",
+    ]);
+  });
+
+  it("accepts closed rollbacks and historical timestamps without accepting unfinished migrations", async () => {
+    await expectPostureMutationAllowed([
+      `INSERT INTO "_prisma_migrations" (
+         "id", "checksum", "migration_name", "started_at", "rolled_back_at", "applied_steps_count"
+       ) VALUES (
+         '${randomUUID()}', '${randomBytes(32).toString("hex")}',
+         '20261124160000_a3_db_constraints_locks', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0
+       )`,
+      `UPDATE "_prisma_migrations" SET "started_at" = '2030-01-01'
+       WHERE "migration_name" = '20261123123000_f6_1_meli_oauth_channel_accounts'`,
+      `UPDATE "_prisma_migrations" SET "started_at" = '2020-01-01'
+       WHERE "migration_name" = '20261123130000_f5_2_completion_acceptance'`,
+    ]);
+  });
+
+  it("fails closed on isolated catalog and privilege mutations", async () => {
+    const mutants = [
+      {
+        statements: [
+          'ALTER TABLE "Customer" DROP CONSTRAINT "Customer_loyaltyPoints_nonnegative"',
+          'ALTER TABLE "Customer" ADD CONSTRAINT "Customer_loyaltyPoints_nonnegative" CHECK (true)',
+        ],
+        expected: [
+          "constraint Customer.Customer_loyaltyPoints_nonnegative differs",
+          "Monetary/stock column Customer.loyaltyPoints has no semantic non-negative CHECK coverage",
+        ],
+      },
+      {
+        statements: [
+          'ALTER TABLE "ProductMedia" DROP CONSTRAINT "ProductMedia_variantId_productId_fkey"',
+          `ALTER TABLE "ProductMedia" ADD CONSTRAINT "ProductMedia_variantId_productId_fkey"
+           FOREIGN KEY ("variantId", "productId") REFERENCES "ProductVariant"("id", "productId")
+           ON UPDATE CASCADE ON DELETE RESTRICT`,
+        ],
+        expected: "constraint ProductMedia.ProductMedia_variantId_productId_fkey differs",
+      },
+      {
+        statements: [
+          'DROP INDEX "Brand_slug_active_key"',
+          `CREATE UNIQUE INDEX "Brand_slug_active_key" ON "Brand"("slug")
+           WHERE "deletedAt" IS NOT NULL`,
+        ],
+        expected: "index Brand_slug_active_key differs",
+      },
+      {
+        statements: [
+          'DROP TRIGGER "AdminActionLog_append_only" ON "AdminActionLog"',
+          `CREATE TRIGGER "AdminActionLog_append_only" BEFORE DELETE OR UPDATE ON "AdminUser"
+           FOR EACH ROW EXECUTE FUNCTION prevent_append_only_mutation()`,
+        ],
+        expected: "Unexpected row trigger AdminUser.AdminActionLog_append_only",
+      },
+      {
+        statements: ['ALTER TABLE "AdminActionLog" DISABLE TRIGGER "AdminActionLog_append_only"'],
+        expected: [
+          "Trigger AdminActionLog.AdminActionLog_append_only is not enabled in origin mode",
+          "row trigger AdminActionLog.AdminActionLog_append_only differs",
+        ],
+      },
+      {
+        statements: ["ALTER EVENT TRIGGER enforce_rls_on_new_table DISABLE"],
+        expected: [
+          "Event trigger enforce_rls_on_new_table is not enabled in origin mode",
+          "event trigger enforce_rls_on_new_table differs",
+        ],
+      },
+      {
+        statements: ['ALTER TABLE "Customer" DISABLE ROW LEVEL SECURITY'],
+        expected: "Public table Customer is not deny-by-default.",
+      },
+      {
+        statements: ['ALTER TABLE "Customer" NO FORCE ROW LEVEL SECURITY'],
+        expected: "Public table Customer is not deny-by-default.",
+      },
+      {
+        statements: ["GRANT USAGE ON SCHEMA public TO anon"],
+        expected: "PostgREST role anon retains public schema privileges.",
+      },
+      {
+        statements: [
+          'CREATE SEQUENCE "PostureSeqProbe"',
+          'GRANT USAGE ON SEQUENCE "PostureSeqProbe" TO anon',
+        ],
+        expected: "PostgREST role anon retains USAGE on sequence PostureSeqProbe.",
+      },
+      {
+        statements: [
+          'GRANT EXECUTE ON FUNCTION "consume_admin_recovery_code"(uuid, bytea, timestamp with time zone) TO anon',
+        ],
+        expected: "PostgREST role anon can execute consume_admin_recovery_code.",
+      },
+      {
+        statements: ['GRANT SELECT ("ciphertext") ON "IntegrationCredential" TO service_role'],
+        expected: [
+          "PostgREST role service_role retains column-level SELECT on IntegrationCredential.",
+          "Role service_role retains column privilege SELECT on IntegrationCredential.ciphertext.",
+        ],
+      },
+      {
+        statements: ["GRANT USAGE ON SCHEMA public TO PUBLIC"],
+        expected: "PUBLIC retains schema privileges on public.",
+      },
+      {
+        statements: ["GRANT service_role TO anon"],
+        expected: "Role anon must not hold membership in role service_role.",
+      },
+      {
+        statements: ["CREATE SCHEMA bad_ext", "ALTER EXTENSION pgcrypto SET SCHEMA bad_ext"],
+        expected: "Extension pgcrypto must be installed in public or extensions; found bad_ext.",
+      },
+      {
+        statements: ['ALTER FUNCTION "enforce_blocked_identity_state"() SECURITY INVOKER'],
+        expected: "public function enforce_blocked_identity_state() differs",
+      },
+      {
+        statements: ['ALTER FUNCTION "set_updated_at"() RESET search_path'],
+        expected: [
+          "Public function set_updated_at() must have a fixed search_path of pg_catalog,public.",
+          "public function set_updated_at() differs",
+        ],
+      },
+      {
+        statements: [
+          'ALTER TABLE "Customer" ADD CONSTRAINT "Customer_not_valid_probe" CHECK ("loyaltyPoints" >= 0) NOT VALID',
+        ],
+        expected: [
+          "Constraint Customer.Customer_not_valid_probe is not validated.",
+          "Unexpected constraint Customer.Customer_not_valid_probe.",
+        ],
+      },
+      {
+        statements: [
+          `UPDATE "_prisma_migrations" SET "rolled_back_at" = CURRENT_TIMESTAMP
+           WHERE "migration_name" = '20261124160000_a3_db_constraints_locks'`,
+        ],
+        expected: [
+          "The Prisma migration chain contains an applied migration marked rolled back.",
+          "Prisma migration sequence differs",
+        ],
+      },
+      {
+        statements: [
+          'CREATE POLICY "probe_non_api_policy" ON "Customer" FOR SELECT TO CURRENT_USER USING (true)',
+        ],
+        expected:
+          "Policy probe_non_api_policy on Customer violates deny-by-default zero-policy posture on schema public.",
+      },
+      {
+        statements: ['CREATE TABLE "UnexpectedProtectedProbe" ("id" integer PRIMARY KEY)'],
+        expected: "Protected table set differs",
+      },
+      {
+        statements: [
+          `INSERT INTO "_prisma_migrations" (
+             "id", "checksum", "migration_name", "finished_at", "started_at", "applied_steps_count"
+           ) VALUES (
+             '${randomUUID()}', '${randomBytes(32).toString("hex")}',
+             '29990101000000_unexpected_migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1
+           )`,
+        ],
+        expected: "Prisma migration sequence differs",
+      },
+      {
+        statements: [
+          `INSERT INTO "_prisma_migrations" (
+             "id", "checksum", "migration_name", "started_at", "applied_steps_count"
+           ) VALUES (
+             '${randomUUID()}', '${randomBytes(32).toString("hex")}',
+             '29990101000000_unfinished_migration', CURRENT_TIMESTAMP, 0
+           )`,
+        ],
+        expected: "unfinished migration",
+      },
+      {
+        statements: ['GRANT MAINTAIN ON "Customer" TO anon'],
+        expected: "retains MAINTAIN on Customer",
+      },
+      {
+        statements: ['ALTER FUNCTION "enforce_blocked_identity_state"() RESET search_path'],
+        expected: "must have a fixed search_path of pg_catalog,public",
+      },
+      {
+        statements: [
+          "SET LOCAL supautils.reserved_roles = 'service_role*, authenticated*, anon*'",
+          "ALTER ROLE anon BYPASSRLS",
+        ],
+        expected: "Role anon must exist without SUPERUSER or BYPASSRLS",
+      },
+      {
+        statements: [
+          "SET LOCAL supautils.reserved_roles = 'service_role*, authenticated*, anon*'",
+          "ALTER ROLE authenticated BYPASSRLS",
+        ],
+        expected: "Role authenticated must exist without SUPERUSER or BYPASSRLS",
+      },
+      {
+        statements: [
+          "SET LOCAL supautils.reserved_roles = 'supabase_admin, authenticated*, anon*'",
+          "ALTER ROLE service_role BYPASSRLS",
+        ],
+        expected: "Role service_role must exist without SUPERUSER or BYPASSRLS",
+      },
+      {
+        statements: [
+          "SET LOCAL supautils.reserved_roles = 'service_role*'",
+          "ALTER ROLE service_role SUPERUSER",
+        ],
+        expected: "Role service_role must exist without SUPERUSER or BYPASSRLS",
+      },
+      {
+        statements: [
+          "SET LOCAL supautils.reserved_roles = 'service_role*'",
+          "ALTER ROLE service_role BYPASSRLS",
+          'GRANT MAINTAIN ON "Customer" TO service_role',
+        ],
+        expected: "retains MAINTAIN on Customer",
+      },
+      {
+        statements: ["ALTER ROLE service_role BYPASSRLS"],
+        expected: "Role service_role must exist without SUPERUSER or BYPASSRLS",
+      },
+      {
+        statements: ["ALTER ROLE service_role SUPERUSER"],
+        expected: "Role service_role must exist without SUPERUSER or BYPASSRLS",
+      },
+    ];
+
+    for (const mutant of mutants) {
+      await expectPostureMutation(mutant.statements, mutant.expected);
     }
   });
 });

@@ -135,19 +135,51 @@ function createCmsHarness(actor?: Actor | null, includeScheduledPage = false) {
     $transaction: async <T>(callback: (transaction: typeof tx) => Promise<T>): Promise<T> =>
       callback(tx),
   };
+  class AdminActorAuthorizationError extends Error {
+    constructor(message = "Actor is not an active authorized administrator.") {
+      super(message);
+      this.name = "AdminActorAuthorizationError";
+    }
+  }
+  const contentWriteRoles = new Set([
+    "SUPERADMIN",
+    "OPERATIONS_MANAGER",
+    "STORE_MANAGER",
+    "CMS_EDITOR",
+  ]);
   const loadedModule = loadTypeScriptModule<{
     readonly CmsService: new (database: unknown) => CmsServiceInstance;
   }>(fileURLToPath(new URL("../../../packages/cms/src/cms-service.ts", import.meta.url)), {
     "@mundonettech/core": { maskEmail, maskName, sanitizeAuditValue },
     "@mundonettech/db": {
+      AdminActorAuthorizationError,
       Prisma: {},
       PrismaClient: class {},
-      assertAdminActorInTransaction: vi.fn(async () => ({
-        id: actorId,
-        authUserId: actorId,
-        email: "ops@example.test",
-        role: "OPERATIONS_MANAGER",
-      })),
+      assertAdminActorInTransaction: vi.fn(
+        async (transaction: { $queryRaw: typeof queryRaw }, id: string) => {
+          const rows = (await transaction.$queryRaw`
+            SELECT "id", "role", "status", "deletedAt"
+            FROM "AdminUser"
+            WHERE "id" = ${id}::uuid
+            FOR SHARE
+          `) as Actor[];
+          const found = rows[0];
+          if (
+            !found ||
+            found.status !== "ACTIVE" ||
+            found.deletedAt !== null ||
+            !contentWriteRoles.has(found.role)
+          ) {
+            throw new AdminActorAuthorizationError();
+          }
+          return {
+            id: found.id,
+            authUserId: found.id,
+            email: "ops@example.test",
+            role: found.role,
+          };
+        },
+      ),
     },
     "./blocks.js": {
       cmsBlockTypes: [],
@@ -184,7 +216,7 @@ describe("A2 CMS scheduled publication actor lock and audit correlation", () => 
     const actorSql = current.queryRaw.mock.calls
       .map((call) => (call[0] as TemplateStringsArray).join("?"))
       .find((sql) => sql.includes('FROM "AdminUser"'));
-    expect(actorSql).toContain("FOR UPDATE");
+    expect(actorSql).toContain("FOR SHARE");
     expect(current.logs).toHaveLength(1);
     expect(current.logs[0]).toMatchObject({
       actorAdminUserId: actorId,

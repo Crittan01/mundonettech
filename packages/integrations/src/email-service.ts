@@ -50,6 +50,7 @@ export interface EmailSendOutcome {
 
 const templateWriters = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"]);
 const finalStatuses = new Set(["BOUNCED", "COMPLAINED", "SUPPRESSED", "CANCELLED", "FAILED"]);
+const sendLeaseMs = 5 * 60_000;
 
 function templateKey(value: string): string {
   if (typeof value !== "string" || !/^[a-z][a-z0-9.-]{1,79}$/.test(value))
@@ -276,6 +277,62 @@ export class EmailService {
     return `${eventId}.${signature}`;
   }
 
+  private async verifyQueueReplay(
+    existing: EmailEvent,
+    params: {
+      key: string;
+      topic: string;
+      recipientEmail: string;
+      input: EmailQueueInput;
+      snapshot: ReturnType<typeof validateEmailTemplate> | null;
+    },
+  ): Promise<{ id: string; status: string }> {
+    let sameSnapshot = true;
+    if (params.snapshot) {
+      const unsubscribeUrl = (existing.variablesSnapshot as Record<string, unknown>).unsubscribeUrl;
+      if (typeof unsubscribeUrl !== "string") {
+        throw new EmailConflictError(
+          "Stored lifecycle email is missing its unsubscribe URL.",
+          "IDEMPOTENCY_CONFLICT",
+        );
+      }
+      const rendered = renderEmailTemplate(params.snapshot, {
+        ...params.input.variables,
+        unsubscribeUrl,
+      });
+      sameSnapshot =
+        existing.subjectSnapshot === rendered.subject &&
+        existing.htmlBodySnapshot === rendered.htmlBody &&
+        existing.textBodySnapshot === rendered.textBody;
+    }
+    const same =
+      existing.templateKey === params.key &&
+      existing.topic === params.topic &&
+      existing.recipientEmail === params.recipientEmail &&
+      existing.credentialId === params.input.credentialId &&
+      (existing.orderId ?? null) === (params.input.orderId ?? null) &&
+      (existing.customerId ?? null) === (params.input.customerId ?? null) &&
+      (existing.abandonedCartId ?? null) === (params.input.abandonedCartId ?? null) &&
+      (existing.lifecycleMessageId ?? null) === (params.input.lifecycleMessageId ?? null) &&
+      sameSnapshot &&
+      Object.entries(params.input.variables).every(
+        ([name, value]) => (existing.variablesSnapshot as Record<string, unknown>)[name] === value,
+      );
+    if (!same)
+      throw new EmailConflictError(
+        "Email idempotency key was already used for another message.",
+        "IDEMPOTENCY_CONFLICT",
+      );
+    if (params.input.lifecycleMessageId) {
+      await new LifecycleService(this.db).markQueued(
+        params.input.lifecycleMessageId,
+        existing.id,
+        existing.status,
+      );
+    }
+    return { id: existing.id, status: existing.status };
+  }
+
   async queue(input: EmailQueueInput): Promise<{ id: string; status: string }> {
     const key = templateKey(input.templateKey);
     const topic = topicKey(input.topic);
@@ -322,52 +379,7 @@ export class EmailService {
       where: { idempotencyKey: input.idempotencyKey },
     });
     if (existing) {
-      let sameSnapshot = true;
-      if (snapshot) {
-        const unsubscribeUrl = (existing.variablesSnapshot as Record<string, unknown>)
-          .unsubscribeUrl;
-        if (typeof unsubscribeUrl !== "string") {
-          throw new EmailConflictError(
-            "Stored lifecycle email is missing its unsubscribe URL.",
-            "IDEMPOTENCY_CONFLICT",
-          );
-        }
-        const rendered = renderEmailTemplate(snapshot, {
-          ...input.variables,
-          unsubscribeUrl,
-        });
-        sameSnapshot =
-          existing.subjectSnapshot === rendered.subject &&
-          existing.htmlBodySnapshot === rendered.htmlBody &&
-          existing.textBodySnapshot === rendered.textBody;
-      }
-      const same =
-        existing.templateKey === key &&
-        existing.topic === topic &&
-        existing.recipientEmail === recipientEmail &&
-        existing.credentialId === input.credentialId &&
-        (existing.orderId ?? null) === (input.orderId ?? null) &&
-        (existing.customerId ?? null) === (input.customerId ?? null) &&
-        (existing.abandonedCartId ?? null) === (input.abandonedCartId ?? null) &&
-        (existing.lifecycleMessageId ?? null) === (input.lifecycleMessageId ?? null) &&
-        sameSnapshot &&
-        Object.entries(input.variables).every(
-          ([name, value]) =>
-            (existing.variablesSnapshot as Record<string, unknown>)[name] === value,
-        );
-      if (!same)
-        throw new EmailConflictError(
-          "Email idempotency key was already used for another message.",
-          "IDEMPOTENCY_CONFLICT",
-        );
-      if (input.lifecycleMessageId) {
-        await new LifecycleService(this.db).markQueued(
-          input.lifecycleMessageId,
-          existing.id,
-          existing.status,
-        );
-      }
-      return { id: existing.id, status: existing.status };
+      return this.verifyQueueReplay(existing, { key, topic, recipientEmail, input, snapshot });
     }
     const credentials = await this.credentials(input.credentialId);
     const override = snapshot
@@ -413,54 +425,79 @@ export class EmailService {
     const suppression = await this.db.emailSuppression.findUnique({
       where: { recipientHash_topic: { recipientHash, topic } },
     });
-    return this.db.$transaction(async (tx) => {
-      const created = await tx.emailEvent.create({
-        data: {
-          id: eventId,
-          orderId: input.orderId ?? null,
-          customerId: input.customerId ?? null,
-          abandonedCartId: input.abandonedCartId ?? null,
-          lifecycleMessageId: input.lifecycleMessageId ?? null,
-          credentialId: input.credentialId,
-          templateKey: key,
-          topic,
-          subjectSnapshot: rendered.subject,
-          htmlBodySnapshot: rendered.htmlBody,
-          textBodySnapshot: rendered.textBody,
-          variablesSnapshot: values,
-          recipientEmail,
-          recipientHash,
-          idempotencyKey: input.idempotencyKey,
-          unsubscribeTokenHash: createHash("sha256").update(token).digest(),
-          status: suppression ? "SUPPRESSED" : "QUEUED",
-          statusRank: suppression ? statusRank("SUPPRESSED") : statusRank("QUEUED"),
-          finalAt: suppression ? new Date() : null,
-        },
-      });
-      if (!suppression) {
-        await tx.domainOutbox.create({
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const created = await tx.emailEvent.create({
           data: {
-            eventType: "email.requested.v1",
-            aggregateType: "EmailEvent",
-            aggregateId: created.id,
-            deduplicationKey: `email:${created.id}:requested:v1`,
-            payload: {
-              emailEventId: created.id,
-              ...(input.orderId ? { orderId: input.orderId } : {}),
-              ...(input.lifecycleMessageId ? { lifecycleMessageId: input.lifecycleMessageId } : {}),
-            },
+            id: eventId,
+            orderId: input.orderId ?? null,
+            customerId: input.customerId ?? null,
+            abandonedCartId: input.abandonedCartId ?? null,
+            lifecycleMessageId: input.lifecycleMessageId ?? null,
+            credentialId: input.credentialId,
+            templateKey: key,
+            topic,
+            subjectSnapshot: rendered.subject,
+            htmlBodySnapshot: rendered.htmlBody,
+            textBodySnapshot: rendered.textBody,
+            variablesSnapshot: values,
+            recipientEmail,
+            recipientHash,
+            idempotencyKey: input.idempotencyKey,
+            unsubscribeTokenHash: createHash("sha256").update(token).digest(),
+            status: suppression ? "SUPPRESSED" : "QUEUED",
+            statusRank: suppression ? statusRank("SUPPRESSED") : statusRank("QUEUED"),
+            finalAt: suppression ? new Date() : null,
           },
         });
+        if (!suppression) {
+          await tx.domainOutbox.create({
+            data: {
+              eventType: "email.requested.v1",
+              aggregateType: "EmailEvent",
+              aggregateId: created.id,
+              deduplicationKey: `email:${created.id}:requested:v1`,
+              payload: {
+                emailEventId: created.id,
+                ...(input.orderId ? { orderId: input.orderId } : {}),
+                ...(input.lifecycleMessageId
+                  ? { lifecycleMessageId: input.lifecycleMessageId }
+                  : {}),
+              },
+            },
+          });
+        }
+        if (input.lifecycleMessageId) {
+          await new LifecycleService(tx).markQueued(
+            input.lifecycleMessageId,
+            created.id,
+            created.status,
+          );
+        }
+        return { id: created.id, status: created.status };
+      });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        const replay = await this.db.emailEvent.findUnique({
+          where: { idempotencyKey: input.idempotencyKey },
+        });
+        if (replay) {
+          return this.verifyQueueReplay(replay, { key, topic, recipientEmail, input, snapshot });
+        }
+        if (input.lifecycleMessageId) {
+          const byLifecycle = await this.db.emailEvent.findUnique({
+            where: { lifecycleMessageId: input.lifecycleMessageId },
+          });
+          if (byLifecycle) {
+            throw new EmailConflictError(
+              "Email idempotency key was already used for another message.",
+              "IDEMPOTENCY_CONFLICT",
+            );
+          }
+        }
       }
-      if (input.lifecycleMessageId) {
-        await new LifecycleService(tx).markQueued(
-          input.lifecycleMessageId,
-          created.id,
-          created.status,
-        );
-      }
-      return { id: created.id, status: created.status };
-    });
+      throw error;
+    }
   }
 
   async queueLifecycle(options: {
@@ -476,6 +513,15 @@ export class EmailService {
     const idempotencyKey = `domain:lifecycle.campaign:${options.lifecycleMessageId}`;
     const existing = await this.db.emailEvent.findUnique({ where: { idempotencyKey } });
     if (existing) {
+      if (
+        existing.credentialId !== options.credentialId ||
+        existing.lifecycleMessageId !== options.lifecycleMessageId
+      ) {
+        throw new EmailConflictError(
+          "Lifecycle email idempotency key was already used for another message.",
+          "IDEMPOTENCY_CONFLICT",
+        );
+      }
       await new LifecycleService(this.db).markQueued(
         options.lifecycleMessageId,
         existing.id,
@@ -484,99 +530,135 @@ export class EmailService {
       return { id: existing.id, status: existing.status };
     }
     const credentials = await this.credentials(options.credentialId);
-    return this.db.$transaction(async (tx) => {
-      const lifecycle = new LifecycleService(tx);
-      const alreadyQueued = await tx.emailEvent.findUnique({ where: { idempotencyKey } });
-      if (alreadyQueued) {
-        await lifecycle.markQueued(
-          options.lifecycleMessageId,
-          alreadyQueued.id,
-          alreadyQueued.status,
-        );
-        return { id: alreadyQueued.id, status: alreadyQueued.status };
-      }
-      const message = await lifecycle.dispatch(options.lifecycleMessageId, options.dispatchVersion);
-      if (!message) return null;
-      const snapshot = validateEmailTemplate({
-        templateKey: "lifecycle.campaign",
-        subject: message.step.subject,
-        htmlBody: message.step.htmlBody,
-        textBody: message.step.textBody,
-        variables: message.step.variables,
-      });
-      let recipientEmail: string;
-      try {
-        recipientEmail = normalizeEmail(message.recipientEmail);
-      } catch {
-        throw new EmailValidationError("recipientEmail must be a valid normalized address.");
-      }
-      const recipientHash = createHash("sha256").update(recipientEmail, "utf8").digest();
-      const eventId = randomUUID();
-      const token = this.unsubscribeToken(
-        credentials.unsubscribeSecret,
-        eventId,
-        recipientHash,
-        "lifecycle",
-      );
-      const unsubscribeUrl = `${this.options.publicSiteUrl}/email/baja/${encodeURIComponent(token)}`;
-      const availableValues: Record<string, string> = {
-        storeName: options.storeName,
-        customerFirstName: message.customerFirstName,
-        accountUrl: options.accountUrl,
-        unsubscribeUrl,
-      };
-      const values = Object.fromEntries(
-        snapshot.variables.map((variable) => {
-          const value = availableValues[variable];
-          if (typeof value !== "string") {
-            throw new EmailValidationError(`Missing lifecycle email variable ${variable}.`);
+    try {
+      return await this.db.$transaction(async (tx) => {
+        const lifecycle = new LifecycleService(tx);
+        const alreadyQueued = await tx.emailEvent.findUnique({ where: { idempotencyKey } });
+        if (alreadyQueued) {
+          if (
+            alreadyQueued.credentialId !== options.credentialId ||
+            alreadyQueued.lifecycleMessageId !== options.lifecycleMessageId
+          ) {
+            throw new EmailConflictError(
+              "Lifecycle email idempotency key was already used for another message.",
+              "IDEMPOTENCY_CONFLICT",
+            );
           }
-          if (variable.endsWith("Url")) publicHttpsUrl(value, `variables.${variable}`);
-          return [variable, value];
-        }),
-      );
-      const rendered = renderEmailTemplate(snapshot, values);
-      const suppression = await tx.emailSuppression.findUnique({
-        where: { recipientHash_topic: { recipientHash, topic: "lifecycle" } },
-      });
-      const created = await tx.emailEvent.create({
-        data: {
-          id: eventId,
-          customerId: message.customerId,
-          lifecycleMessageId: message.id,
-          credentialId: options.credentialId,
+          await lifecycle.markQueued(
+            options.lifecycleMessageId,
+            alreadyQueued.id,
+            alreadyQueued.status,
+          );
+          return { id: alreadyQueued.id, status: alreadyQueued.status };
+        }
+        const message = await lifecycle.dispatch(
+          options.lifecycleMessageId,
+          options.dispatchVersion,
+        );
+        if (!message) return null;
+        const snapshot = validateEmailTemplate({
           templateKey: "lifecycle.campaign",
-          topic: "lifecycle",
-          subjectSnapshot: rendered.subject,
-          htmlBodySnapshot: rendered.htmlBody,
-          textBodySnapshot: rendered.textBody,
-          variablesSnapshot: values,
-          recipientEmail,
+          subject: message.step.subject,
+          htmlBody: message.step.htmlBody,
+          textBody: message.step.textBody,
+          variables: message.step.variables,
+        });
+        let recipientEmail: string;
+        try {
+          recipientEmail = normalizeEmail(message.recipientEmail);
+        } catch {
+          throw new EmailValidationError("recipientEmail must be a valid normalized address.");
+        }
+        const recipientHash = createHash("sha256").update(recipientEmail, "utf8").digest();
+        const eventId = randomUUID();
+        const token = this.unsubscribeToken(
+          credentials.unsubscribeSecret,
+          eventId,
           recipientHash,
-          idempotencyKey,
-          unsubscribeTokenHash: createHash("sha256").update(token).digest(),
-          status: suppression ? "SUPPRESSED" : "QUEUED",
-          statusRank: suppression ? statusRank("SUPPRESSED") : statusRank("QUEUED"),
-          finalAt: suppression ? new Date() : null,
-        },
-      });
-      if (!suppression) {
-        await tx.domainOutbox.create({
+          "lifecycle",
+        );
+        const unsubscribeUrl = `${this.options.publicSiteUrl}/email/baja/${encodeURIComponent(token)}`;
+        const availableValues: Record<string, string> = {
+          storeName: options.storeName,
+          customerFirstName: message.customerFirstName,
+          accountUrl: options.accountUrl,
+          unsubscribeUrl,
+        };
+        const values = Object.fromEntries(
+          snapshot.variables.map((variable) => {
+            const value = availableValues[variable];
+            if (typeof value !== "string") {
+              throw new EmailValidationError(`Missing lifecycle email variable ${variable}.`);
+            }
+            if (variable.endsWith("Url")) publicHttpsUrl(value, `variables.${variable}`);
+            return [variable, value];
+          }),
+        );
+        const rendered = renderEmailTemplate(snapshot, values);
+        const suppression = await tx.emailSuppression.findUnique({
+          where: { recipientHash_topic: { recipientHash, topic: "lifecycle" } },
+        });
+        const created = await tx.emailEvent.create({
           data: {
-            eventType: "email.requested.v1",
-            aggregateType: "EmailEvent",
-            aggregateId: created.id,
-            deduplicationKey: `email:${created.id}:requested:v1`,
-            payload: {
-              emailEventId: created.id,
-              lifecycleMessageId: message.id,
-            },
+            id: eventId,
+            customerId: message.customerId,
+            lifecycleMessageId: message.id,
+            credentialId: options.credentialId,
+            templateKey: "lifecycle.campaign",
+            topic: "lifecycle",
+            subjectSnapshot: rendered.subject,
+            htmlBodySnapshot: rendered.htmlBody,
+            textBodySnapshot: rendered.textBody,
+            variablesSnapshot: values,
+            recipientEmail,
+            recipientHash,
+            idempotencyKey,
+            unsubscribeTokenHash: createHash("sha256").update(token).digest(),
+            status: suppression ? "SUPPRESSED" : "QUEUED",
+            statusRank: suppression ? statusRank("SUPPRESSED") : statusRank("QUEUED"),
+            finalAt: suppression ? new Date() : null,
           },
         });
+        if (!suppression) {
+          await tx.domainOutbox.create({
+            data: {
+              eventType: "email.requested.v1",
+              aggregateType: "EmailEvent",
+              aggregateId: created.id,
+              deduplicationKey: `email:${created.id}:requested:v1`,
+              payload: {
+                emailEventId: created.id,
+                lifecycleMessageId: message.id,
+              },
+            },
+          });
+        }
+        await lifecycle.markQueued(message.id, created.id, created.status);
+        return { id: created.id, status: created.status };
+      });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        const replay = await this.db.emailEvent.findUnique({ where: { idempotencyKey } });
+        if (replay) {
+          if (
+            replay.credentialId !== options.credentialId ||
+            replay.lifecycleMessageId !== options.lifecycleMessageId
+          ) {
+            throw new EmailConflictError(
+              "Lifecycle email idempotency key was already used for another message.",
+              "IDEMPOTENCY_CONFLICT",
+            );
+          }
+          await new LifecycleService(this.db).markQueued(
+            options.lifecycleMessageId,
+            replay.id,
+            replay.status,
+          );
+          return { id: replay.id, status: replay.status };
+        }
       }
-      await lifecycle.markQueued(message.id, created.id, created.status);
-      return { id: created.id, status: created.status };
-    });
+      throw error;
+    }
   }
 
   private async suppressedBeforeSend(claimed: EmailEvent): Promise<EmailSendOutcome | null> {
@@ -648,11 +730,19 @@ export class EmailService {
       }
     }
     if (!outcome) return null;
-    const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-    const now = nowRows[0]!.now;
-    const current = await this.db.$transaction(async (tx) => {
-      await tx.emailEvent.updateMany({
-        where: { id: claimed.id, status: { in: ["QUEUED", "SENDING"] } },
+    const { current, suppressedNow } = await this.db.$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw<
+        EmailEvent[]
+      >`SELECT * FROM "EmailEvent" WHERE "id" = ${claimed.id}::uuid FOR UPDATE`;
+      const locked = lockedRows[0];
+      if (!locked) throw new EmailNotFoundError();
+      if (locked.status !== "SENDING" || locked.attemptCount !== claimed.attemptCount) {
+        return { current: locked, suppressedNow: false };
+      }
+      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = nowRows[0]!.now;
+      const updated = await tx.emailEvent.update({
+        where: { id: claimed.id },
         data: {
           status: "SUPPRESSED",
           statusRank: statusRank("SUPPRESSED"),
@@ -666,13 +756,17 @@ export class EmailService {
           data: { lastReminderActivityAt: lastActivityAt, lastReminderOutcome: outcome },
         });
       }
-      return tx.emailEvent.findUniqueOrThrow({ where: { id: claimed.id } });
+      return { current: updated, suppressedNow: true };
     });
     if (claimed.templateKey === "lifecycle.campaign" && claimed.lifecycleMessageId) {
-      await lifecycle.markEmailSuppressed(
-        claimed.lifecycleMessageId,
-        lifecycleReason ?? "SUPPRESSED",
-      );
+      if (suppressedNow || current.status === "SUPPRESSED") {
+        await lifecycle.markEmailSuppressed(
+          claimed.lifecycleMessageId,
+          lifecycleReason ?? "SUPPRESSED",
+        );
+      } else {
+        await this.reconcileLifecycleTerminal(current);
+      }
     }
     return {
       id: current.id,
@@ -701,15 +795,18 @@ export class EmailService {
   async send(emailEventId: string): Promise<EmailSendOutcome> {
     assertIntegrationUuid(emailEventId, "emailEventId");
     const claimResult = await this.db.$transaction(async (tx) => {
-      const current = await tx.emailEvent.findUnique({ where: { id: emailEventId } });
+      const lockedRows = await tx.$queryRaw<
+        EmailEvent[]
+      >`SELECT * FROM "EmailEvent" WHERE "id" = ${emailEventId}::uuid FOR UPDATE`;
+      const current = lockedRows[0];
       if (!current) throw new EmailNotFoundError();
       if (current.status !== "QUEUED" && current.status !== "SENDING") {
-        return { event: current, deferredByPause: false };
+        return { event: current, claimed: false as const, deferredByPause: false };
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
       if (current.nextAttemptAt && current.nextAttemptAt > now) {
-        return { event: current, deferredByPause: false };
+        return { event: current, claimed: false as const, deferredByPause: false };
       }
       if (current.templateKey === "lifecycle.campaign" && current.lifecycleMessageId) {
         const pausedUntil = await new LifecycleService(tx).deferEmailIfPaused(
@@ -724,31 +821,22 @@ export class EmailService {
               nextAttemptAt: pausedUntil,
             },
           });
-          return { event: deferred, deferredByPause: true };
+          return { event: deferred, claimed: false as const, deferredByPause: true };
         }
       }
-      const updated = await tx.emailEvent.updateMany({
-        where: {
-          id: emailEventId,
-          status: { in: ["QUEUED", "SENDING"] },
-          OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }],
-        },
+      const leased = await tx.emailEvent.update({
+        where: { id: emailEventId },
         data: {
           status: "SENDING",
           statusRank: statusRank("SENDING"),
           attemptCount: { increment: 1 },
-          nextAttemptAt: null,
+          nextAttemptAt: new Date(now.getTime() + sendLeaseMs),
           lastError: null,
         },
       });
-      if (updated.count === 0) {
-        return {
-          event: await tx.emailEvent.findUniqueOrThrow({ where: { id: emailEventId } }),
-          deferredByPause: false,
-        };
-      }
       return {
-        event: await tx.emailEvent.findUniqueOrThrow({ where: { id: emailEventId } }),
+        event: leased,
+        claimed: true as const,
         deferredByPause: false,
       };
     });
@@ -762,10 +850,7 @@ export class EmailService {
         deferredByPause: true,
       };
     }
-    if (
-      claimed.status !== "SENDING" ||
-      (claimed.nextAttemptAt && claimed.nextAttemptAt > new Date())
-    ) {
+    if (!claimResult.claimed) {
       await this.reconcileLifecycleTerminal(claimed);
       return {
         id: claimed.id,
@@ -774,6 +859,7 @@ export class EmailService {
         nextAttemptAt: claimed.nextAttemptAt,
       };
     }
+    const claimedAttemptCount = claimed.attemptCount;
     const suppressed = await this.suppressedBeforeSend(claimed);
     if (suppressed) return suppressed;
     try {
@@ -789,71 +875,115 @@ export class EmailService {
         text: claimed.textBodySnapshot,
         unsubscribeUrl: tokenEventUrl,
       });
-      const sent = await this.db.emailEvent.update({
-        where: { id: emailEventId },
-        data: {
-          status: "SENT",
-          statusRank: statusRank("SENT"),
-          providerMessageId: result.providerMessageId,
-          sentAt: new Date(),
-          nextAttemptAt: null,
-          lastError: null,
-        },
+      const { event: sent, updated } = await this.db.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw<
+          EmailEvent[]
+        >`SELECT * FROM "EmailEvent" WHERE "id" = ${emailEventId}::uuid FOR UPDATE`;
+        const current = lockedRows[0];
+        if (!current) throw new EmailNotFoundError();
+        if (current.status !== "SENDING" || current.attemptCount !== claimedAttemptCount) {
+          return { event: current, updated: false };
+        }
+        const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+        const now = nowRows[0]!.now;
+        const saved = await tx.emailEvent.update({
+          where: { id: emailEventId },
+          data: {
+            status: "SENT",
+            statusRank: statusRank("SENT"),
+            providerMessageId: result.providerMessageId,
+            sentAt: now,
+            nextAttemptAt: null,
+            lastError: null,
+          },
+        });
+        return { event: saved, updated: true };
       });
-      if (sent.lifecycleMessageId) {
+      if (updated && sent.lifecycleMessageId) {
         await new LifecycleService(this.db).markEmailSent(sent.lifecycleMessageId, sent.id);
+      } else if (!updated) {
+        await this.reconcileLifecycleTerminal(sent);
       }
       return {
         id: sent.id,
         status: sent.status,
         providerMessageId: sent.providerMessageId,
-        nextAttemptAt: null,
+        nextAttemptAt: sent.nextAttemptAt,
       };
     } catch (error) {
       if (!(error instanceof EmailProviderError)) throw error;
       const transient = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
       const code = errorCode(error);
       if (transient) {
-        const delay = Math.min(15 * 60_000, 5_000 * 2 ** Math.min(claimed.attemptCount, 8));
-        const nextAttemptAt = new Date(Date.now() + delay);
-        const retry = await this.db.emailEvent.update({
-          where: { id: emailEventId },
-          data: {
-            status: "SENDING",
-            statusRank: statusRank("SENDING"),
-            nextAttemptAt,
-            lastError: code,
-          },
+        const { event: retry, updated } = await this.db.$transaction(async (tx) => {
+          const lockedRows = await tx.$queryRaw<
+            EmailEvent[]
+          >`SELECT * FROM "EmailEvent" WHERE "id" = ${emailEventId}::uuid FOR UPDATE`;
+          const current = lockedRows[0];
+          if (!current) throw new EmailNotFoundError();
+          if (current.status !== "SENDING" || current.attemptCount !== claimedAttemptCount) {
+            return { event: current, updated: false };
+          }
+          const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+          const now = nowRows[0]!.now;
+          const delay = Math.min(15 * 60_000, 5_000 * 2 ** Math.min(claimedAttemptCount, 8));
+          const nextAttemptAt = new Date(now.getTime() + delay);
+          const saved = await tx.emailEvent.update({
+            where: { id: emailEventId },
+            data: {
+              status: "SENDING",
+              statusRank: statusRank("SENDING"),
+              nextAttemptAt,
+              lastError: code,
+            },
+          });
+          return { event: saved, updated: true };
         });
+        if (!updated) await this.reconcileLifecycleTerminal(retry);
         return {
           id: retry.id,
           status: retry.status,
           providerMessageId: retry.providerMessageId,
-          nextAttemptAt,
+          nextAttemptAt: retry.nextAttemptAt,
         };
       }
-      const failed = await this.db.emailEvent.update({
-        where: { id: emailEventId },
-        data: {
-          status: "FAILED",
-          statusRank: statusRank("FAILED"),
-          finalAt: new Date(),
-          lastError: code,
-          nextAttemptAt: null,
-        },
+      const { event: failed, updated } = await this.db.$transaction(async (tx) => {
+        const lockedRows = await tx.$queryRaw<
+          EmailEvent[]
+        >`SELECT * FROM "EmailEvent" WHERE "id" = ${emailEventId}::uuid FOR UPDATE`;
+        const current = lockedRows[0];
+        if (!current) throw new EmailNotFoundError();
+        if (current.status !== "SENDING" || current.attemptCount !== claimedAttemptCount) {
+          return { event: current, updated: false };
+        }
+        const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+        const now = nowRows[0]!.now;
+        const saved = await tx.emailEvent.update({
+          where: { id: emailEventId },
+          data: {
+            status: "FAILED",
+            statusRank: statusRank("FAILED"),
+            finalAt: now,
+            lastError: code,
+            nextAttemptAt: null,
+          },
+        });
+        return { event: saved, updated: true };
       });
-      if (failed.lifecycleMessageId) {
+      if (updated && failed.lifecycleMessageId) {
         await new LifecycleService(this.db).markEmailFailed(
           failed.lifecycleMessageId,
           failed.id,
           code,
         );
+      } else if (!updated) {
+        await this.reconcileLifecycleTerminal(failed);
       }
       return {
         id: failed.id,
         status: failed.status,
         providerMessageId: failed.providerMessageId,
-        nextAttemptAt: null,
+        nextAttemptAt: failed.nextAttemptAt,
       };
     }
   }
@@ -877,36 +1007,42 @@ export class EmailService {
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
       throw new EmailValidationError("Unsubscribe token is invalid.");
     return this.db.$transaction(async (tx) => {
+      const lockedRows = await tx.$queryRaw<
+        EmailEvent[]
+      >`SELECT * FROM "EmailEvent" WHERE "id" = ${eventId}::uuid FOR UPDATE`;
+      const locked = lockedRows[0];
+      if (!locked) throw new EmailNotFoundError("Unsubscribe link is no longer available.");
       const inserted = await tx.$queryRaw<Array<{ id: string }>>`
         INSERT INTO "EmailSuppression" ("recipientHash", "topic", "reason", "sourceEventId")
-        VALUES (${event.recipientHash}, ${event.topic}, 'UNSUBSCRIBE', ${event.id}::uuid)
+        VALUES (${locked.recipientHash}, ${locked.topic}, 'UNSUBSCRIBE', ${locked.id}::uuid)
         ON CONFLICT ("recipientHash", "topic") DO NOTHING RETURNING "id"
       `;
-      if (["QUEUED", "SENDING"].includes(event.status)) {
+      if (locked.status === "QUEUED" || locked.status === "SENDING") {
+        const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
         await tx.emailEvent.update({
-          where: { id: event.id },
+          where: { id: locked.id },
           data: {
             status: "SUPPRESSED",
             statusRank: statusRank("SUPPRESSED"),
-            finalAt: new Date(),
+            finalAt: nowRows[0]!.now,
             nextAttemptAt: null,
           },
         });
       }
-      if (event.abandonedCartId) {
+      if (locked.abandonedCartId) {
         await tx.$executeRaw`
           UPDATE "AbandonedCart" SET
             "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
             "lastReminderOutcome" = 'SUPPRESSED'
-          WHERE "id" = ${event.abandonedCartId}::uuid
+          WHERE "id" = ${locked.abandonedCartId}::uuid
         `;
       }
-      if (event.lifecycleMessageId) {
-        await new LifecycleService(tx).markEmailSuppressed(event.lifecycleMessageId, "SUPPRESSED");
-      } else if (event.topic === "lifecycle" && event.customerId) {
-        await new LifecycleService(tx).suppressCustomerTopic(event.customerId, "SUPPRESSED");
+      if (locked.lifecycleMessageId) {
+        await new LifecycleService(tx).markEmailSuppressed(locked.lifecycleMessageId, "SUPPRESSED");
+      } else if (locked.topic === "lifecycle" && locked.customerId) {
+        await new LifecycleService(tx).suppressCustomerTopic(locked.customerId, "SUPPRESSED");
       }
-      return { eventId: event.id, topic: event.topic, replayed: inserted.length === 0 };
+      return { eventId: locked.id, topic: locked.topic, replayed: inserted.length === 0 };
     });
   }
 
@@ -993,14 +1129,13 @@ export class EmailService {
     if (existing) return existing;
     try {
       return await this.db.$transaction(async (tx) => {
-        const email = await tx.emailEvent.findUnique({
-          where: {
-            credentialId_providerMessageId: {
-              credentialId,
-              providerMessageId: event.providerMessageId,
-            },
-          },
-        });
+        const lockedEmails = await tx.$queryRaw<EmailEvent[]>`
+          SELECT * FROM "EmailEvent"
+          WHERE "credentialId" = ${credentialId}::uuid
+            AND "providerMessageId" = ${event.providerMessageId}
+          FOR UPDATE
+        `;
+        const email = lockedEmails[0] ?? null;
         await tx.emailWebhookEvent.create({
           data: {
             credentialId,

@@ -59,6 +59,18 @@ export class PaymentRefundService {
     return refund;
   }
 
+  private async lockPaymentTransaction(
+    tx: Parameters<Parameters<typeof inInventoryTransaction>[1]>[0],
+    transactionId: string,
+  ): Promise<PaymentTransactionModel> {
+    const rows = await tx.$queryRaw<
+      PaymentTransactionModel[]
+    >`SELECT * FROM "PaymentTransaction" WHERE "id" = ${transactionId}::uuid FOR UPDATE`;
+    const transaction = rows[0];
+    if (!transaction) throw new PaymentNotFoundError("Payment transaction not found.");
+    return transaction;
+  }
+
   private async providerFor(attempt: PaymentAttempt): Promise<PaymentProviderPort> {
     if (attempt.provider === PaymentProvider.WOMPI) {
       if (!this.options.vault || !attempt.credentialId) {
@@ -164,6 +176,7 @@ export class PaymentRefundService {
         `provider-refund:${transactionId}`,
       ]);
       await lockPaymentOrder(tx, peek.attempt.orderId);
+      await this.lockPaymentTransaction(tx, transactionId);
       const transaction = await tx.paymentTransaction.findUnique({
         where: { id: transactionId },
         include: { attempt: { include: { transactions: true } } },
@@ -171,68 +184,128 @@ export class PaymentRefundService {
       if (!transaction) throw new PaymentNotFoundError("Refund transaction not found.");
       if (transaction.kind !== "REFUND")
         throw new PaymentConflictError("Transaction is not a refund.");
-      if (transaction.status === "SUCCEEDED") return null;
+      if (transaction.status === "SUCCEEDED") {
+        return { kind: "FINALIZE" as const, refundId: transaction.refundId };
+      }
       if (transaction.status === "PROCESSING") {
         throw new PaymentConflictError(
           "Provider outcome is uncertain; reconcile it before retrying.",
           "PROVIDER_UNCERTAIN",
         );
       }
-      if (
-        transaction.attempt.provider === PaymentProvider.WOMPI ||
-        transaction.status === "FAILED"
-      ) {
+      if (transaction.status === "CANCELLED") {
+        return { kind: "NONE" as const };
+      }
+      if (transaction.attempt.provider === PaymentProvider.STORE_CREDIT) {
+        if (!transaction.attempt.storeCreditAccountId || !transaction.refundId) {
+          throw new PaymentConflictError(
+            "Store credit refund is missing its account or order refund.",
+          );
+        }
+        if (transaction.status === "FAILED") {
+          await tx.paymentTransaction.update({
+            where: { id: transaction.id },
+            data: { status: "PROCESSING", completedAt: null },
+          });
+        }
+        const now = await databaseNow(tx);
+        await appendStoreCreditEntry(tx, {
+          accountId: transaction.attempt.storeCreditAccountId,
+          type: "REFUND",
+          operationKey: `store-credit:refund:${transaction.id}`,
+          requestHash: paymentDigest({ operation: "REFUND", transactionId: transaction.id }),
+          amountCents: transaction.amountCents,
+          reason: "Credit restored by order refund.",
+          paymentAttemptId: transaction.attemptId,
+          refundId: transaction.refundId,
+          actorAdminUserId: audit.actorAdminUserId,
+        });
         await tx.paymentTransaction.update({
           where: { id: transaction.id },
           data: {
-            status: "PROCESSING",
-            ...(transaction.attempt.provider === PaymentProvider.WOMPI
-              ? { providerReference: `refund:${transaction.id}` }
-              : {}),
-            completedAt: null,
+            status: "SUCCEEDED",
+            externalId: `store-credit-refund:${transaction.id}`,
+            providerReference: transaction.attempt.reference,
+            statusMessage: "Store credit restored in the customer ledger.",
+            completedAt: now,
           },
         });
+        return { kind: "FINALIZE" as const, refundId: transaction.refundId };
       }
-      return transaction;
+      if (transaction.attempt.provider !== PaymentProvider.WOMPI) {
+        if (transaction.status === "FAILED") {
+          throw new PaymentConflictError(
+            "Offline refund failed and cannot be retried automatically.",
+          );
+        }
+        return { kind: "NONE" as const };
+      }
+      await tx.paymentTransaction.update({
+        where: { id: transaction.id },
+        data: {
+          status: "PROCESSING",
+          providerReference: `refund:${transaction.id}`,
+          completedAt: null,
+        },
+      });
+      return { kind: "EXECUTE" as const, transaction };
     });
-    if (!prepared) return;
-    const provider = await this.providerFor(prepared.attempt);
+    if (prepared.kind === "NONE") return;
+    if (prepared.kind === "FINALIZE") {
+      if (prepared.refundId) await this.finalizeRefund(prepared.refundId, audit);
+      return;
+    }
+    const target = prepared.transaction;
+    const provider = await this.providerFor(target.attempt);
     let result: ProviderOperationResult;
     try {
       result = await provider.refund({
-        transactionId: prepared.id,
-        paymentReference: prepared.attempt.reference,
+        transactionId: target.id,
+        paymentReference: target.attempt.reference,
         externalCaptureId:
-          prepared.attempt.transactions.find(
+          target.attempt.transactions.find(
             (item) => item.kind === "CAPTURE" && item.status === "SUCCEEDED",
           )?.externalId ?? null,
-        amountCents: prepared.amountCents,
-        reason: prepared.refundId ? `Order refund ${prepared.refundId}` : "Order refund",
+        amountCents: target.amountCents,
+        reason: target.refundId ? `Order refund ${target.refundId}` : "Order refund",
       });
     } catch (error) {
       if (error instanceof PaymentProviderError && error.code === "HTTP_ERROR") {
-        await inInventoryTransaction(this.db, async (tx) => {
-          await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
-          await lockPaymentOrder(tx, prepared.attempt.orderId);
-          await tx.paymentTransaction.update({
-            where: { id: prepared.id },
-            data: {
-              status: "FAILED",
-              statusMessage: error.code,
-              completedAt: await databaseNow(tx),
-            },
-          });
+        const outcome = await inInventoryTransaction(this.db, async (tx) => {
+          await acquireOperationLocks(tx, [`order-payment:${target.attempt.orderId}`]);
+          await lockPaymentOrder(tx, target.attempt.orderId);
+          const current = await this.lockPaymentTransaction(tx, target.id);
+          if (current.status === "SUCCEEDED") return { alreadySucceeded: true as const };
+          if (current.status === "PROCESSING") {
+            await tx.paymentTransaction.update({
+              where: { id: target.id },
+              data: {
+                status: "FAILED",
+                statusMessage: error.code,
+                completedAt: await databaseNow(tx),
+              },
+            });
+          }
+          return { alreadySucceeded: false as const };
         });
-        await this.finalizeRefund(prepared.refundId!, audit);
+        await this.finalizeRefund(target.refundId!, audit);
+        if (outcome.alreadySucceeded) return;
       }
       throw error;
     }
-    if (prepared.attempt.provider !== PaymentProvider.WOMPI && result.status === "PENDING") return;
+    if (target.attempt.provider !== PaymentProvider.WOMPI && result.status === "PENDING") return;
     await inInventoryTransaction(this.db, async (tx) => {
-      await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
-      await lockPaymentOrder(tx, prepared.attempt.orderId);
+      await acquireOperationLocks(tx, [`order-payment:${target.attempt.orderId}`]);
+      await lockPaymentOrder(tx, target.attempt.orderId);
+      const locked = await this.lockPaymentTransaction(tx, target.id);
+      if (locked.status === "SUCCEEDED") return;
+      const allowedStatuses =
+        target.attempt.provider === PaymentProvider.WOMPI
+          ? ["PROCESSING"]
+          : ["PROCESSING", "PENDING"];
+      if (!allowedStatuses.includes(locked.status)) return;
       const current = await tx.paymentTransaction.findUniqueOrThrow({
-        where: { id: prepared.id },
+        where: { id: target.id },
         include: { attempt: true },
       });
       const now = await databaseNow(tx);
@@ -283,7 +356,7 @@ export class PaymentRefundService {
         });
       }
     });
-    await this.finalizeRefund(prepared.refundId!, audit);
+    await this.finalizeRefund(target.refundId!, audit);
   }
 
   async refund(refundId: string, audit: PaymentAuditContext): Promise<RefundExecutionResult> {
@@ -666,35 +739,67 @@ export class PaymentRefundService {
       });
     } catch (error) {
       if (error instanceof PaymentProviderError && error.code === "HTTP_ERROR") {
-        await inInventoryTransaction(this.db, async (tx) => {
+        const outcome = await inInventoryTransaction(this.db, async (tx) => {
           await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
           await lockPaymentOrder(tx, prepared.attempt.orderId);
-          await tx.paymentTransaction.update({
-            where: { id: prepared.transaction.id },
-            data: {
-              status: "FAILED",
-              statusMessage: error.code,
-              completedAt: await databaseNow(tx),
-            },
-          });
-          await writePaymentAudit(tx, {
-            action: "PAYMENT_VOID_RESULT_RECORDED",
-            targetType: "PaymentAttempt",
-            targetId: prepared.attempt.id,
-            audit,
-            metadata: {
-              orderId: prepared.attempt.orderId,
-              amountCents: prepared.attempt.amountCents.toString(),
-              status: "FAILED",
-            },
-          });
+          const current = await this.lockPaymentTransaction(tx, prepared.transaction.id);
+          if (current.status === "SUCCEEDED") {
+            await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, current.id);
+            await refreshOrderPaymentStatus(tx, prepared.attempt.orderId);
+            return { alreadySucceeded: true as const };
+          }
+          if (current.status === "PROCESSING") {
+            await tx.paymentTransaction.update({
+              where: { id: prepared.transaction.id },
+              data: {
+                status: "FAILED",
+                statusMessage: error.code,
+                completedAt: await databaseNow(tx),
+              },
+            });
+            await writePaymentAudit(tx, {
+              action: "PAYMENT_VOID_RESULT_RECORDED",
+              targetType: "PaymentAttempt",
+              targetId: prepared.attempt.id,
+              audit,
+              metadata: {
+                orderId: prepared.attempt.orderId,
+                amountCents: prepared.attempt.amountCents.toString(),
+                status: "FAILED",
+              },
+            });
+          }
+          return { alreadySucceeded: false as const };
         });
+        if (outcome.alreadySucceeded) {
+          return {
+            refundId: paymentAttemptId,
+            status: "COMPLETED",
+            transactionIds: [prepared.transaction.id],
+            pendingTransactionIds: [],
+          };
+        }
       }
       throw error;
     }
-    await inInventoryTransaction(this.db, async (tx) => {
+    const finalOutcome = await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`order-payment:${prepared.attempt.orderId}`]);
       await lockPaymentOrder(tx, prepared.attempt.orderId);
+      const current = await this.lockPaymentTransaction(tx, prepared.transaction.id);
+      if (current.status === "SUCCEEDED") {
+        await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, current.id);
+        await refreshOrderPaymentStatus(tx, prepared.attempt.orderId);
+        return {
+          status: "COMPLETED" as const,
+          pending: false,
+        };
+      }
+      if (current.status !== "PROCESSING") {
+        return {
+          status: current.status === "CANCELLED" ? ("CANCELLED" as const) : ("FAILED" as const),
+          pending: false,
+        };
+      }
       const now = await databaseNow(tx);
       await tx.paymentTransaction.update({
         where: { id: prepared.transaction.id },
@@ -726,12 +831,16 @@ export class PaymentRefundService {
           amountCents: prepared.attempt.amountCents.toString(),
         },
       });
+      return {
+        status: result.status,
+        pending: result.status !== "SUCCEEDED",
+      };
     });
     return {
       refundId: paymentAttemptId,
-      status: result.status,
+      status: finalOutcome.status,
       transactionIds: [prepared.transaction.id],
-      pendingTransactionIds: result.status === "SUCCEEDED" ? [] : [prepared.transaction.id],
+      pendingTransactionIds: finalOutcome.pending ? [prepared.transaction.id] : [],
     };
   }
 }

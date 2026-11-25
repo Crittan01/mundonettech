@@ -120,6 +120,7 @@ model CouponUsage {
   @@index([couponId, customerId, status, expiresAt])
   @@index([cartId, status])
   @@index([orderId, status])
+  @@index([customerId])
   @@map("CouponUsage")
 }
 

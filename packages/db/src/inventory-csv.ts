@@ -9,6 +9,8 @@ import type { DatabaseExecutor } from "./primitives.js";
 import {
   InventoryConflictError,
   InventoryNotFoundError,
+  activeLocations,
+  activeVariants,
   acquireOperationLocks,
   compareStrings,
   costWhenDepleted,
@@ -80,21 +82,42 @@ export async function importInventoryStockCsv(
 
       const locationCodes = [...new Set(rows.map((row) => row.locationCode))];
       const skus = [...new Set(rows.map((row) => row.sku))];
-      const [locations, variants] = await Promise.all([
-        tx.stockLocation.findMany({ where: { code: { in: locationCodes }, deletedAt: null } }),
+      const [locationLookup, variantLookup] = await Promise.all([
+        tx.stockLocation.findMany({
+          where: { code: { in: locationCodes }, deletedAt: null },
+          select: { id: true, code: true },
+        }),
         tx.productVariant.findMany({
           where: { sku: { in: skus }, deletedAt: null, product: { deletedAt: null } },
-          include: { product: true },
+          select: { id: true, sku: true },
         }),
       ]);
-      if (locations.length !== locationCodes.length) {
+      if (locationLookup.length !== locationCodes.length) {
         throw new InventoryNotFoundError("CSV references a missing or deleted location code.");
       }
-      if (variants.length !== skus.length) {
+      if (variantLookup.length !== skus.length) {
         throw new InventoryNotFoundError("CSV references a missing or deleted SKU.");
       }
-      const locationByCode = new Map(locations.map((location) => [location.code, location]));
-      const variantBySku = new Map(variants.map((variant) => [variant.sku, variant]));
+      const lockedVariants = await activeVariants(
+        tx,
+        variantLookup.map((variant) => variant.id),
+      );
+      const lockedLocations = await activeLocations(
+        tx,
+        locationLookup.map((location) => location.id),
+      );
+      const locationByCode = new Map(
+        [...lockedLocations.values()].map((location) => [location.code, location]),
+      );
+      const variantBySku = new Map(
+        [...lockedVariants.values()].map((variant) => [variant.sku, variant]),
+      );
+      if (locationByCode.size !== locationCodes.length) {
+        throw new InventoryNotFoundError("CSV references a missing or deleted location code.");
+      }
+      if (variantBySku.size !== skus.length) {
+        throw new InventoryNotFoundError("CSV references a missing or deleted SKU.");
+      }
       const resolved = rows
         .map((row) => {
           const location = locationByCode.get(row.locationCode);

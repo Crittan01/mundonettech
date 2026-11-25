@@ -2,20 +2,25 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readdirSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ephemeralPostgresFlags, waitForPostgresReady } from "./lib/postgres-test-harness.mjs";
 import { assertSafeTestDatabase, assertSafeTestEnvironment } from "./lib/test-environment.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
-function resolveTestFiles(cliArgs) {
+export function resolveTestFiles(cliArgs, root = repositoryRoot) {
   if (cliArgs.length > 0) return cliArgs;
-  const testsDir = path.join(repositoryRoot, "tests");
-  return readdirSync(testsDir)
-    .filter((entry) => entry.endsWith(".test.mjs"))
+  const testsDir = path.join(root, "tests");
+  const discover = (directory) =>
+    readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) return discover(entryPath);
+      return entry.isFile() && entry.name.endsWith(".test.mjs") ? [entryPath] : [];
+    });
+  return discover(testsDir)
     .sort()
-    .map((entry) => path.join("tests", entry));
+    .map((file) => path.relative(root, file).split(path.sep).join("/"));
 }
 
 function runPodman(args) {
@@ -79,44 +84,50 @@ async function startSharedSuiteContainer() {
   return { databaseUrl, stop };
 }
 
-const files = resolveTestFiles(process.argv.slice(2));
-let suiteContainer;
-if (process.env.TEST_DATABASE_URL) {
-  assertSafeTestEnvironment(process.env, process.env.TEST_DATABASE_URL);
-} else {
-  suiteContainer = await startSharedSuiteContainer();
-}
-
-const cleanupSignals = ["SIGINT", "SIGTERM"];
-const handleSignal = (signal) => {
-  suiteContainer?.stop();
-  process.exit(signal === "SIGINT" ? 130 : 143);
-};
-for (const signal of cleanupSignals) {
-  process.once(signal, handleSignal);
-}
-
-try {
-  const child = spawn(process.execPath, ["--test", "--test-concurrency=1", ...files], {
-    cwd: repositoryRoot,
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      NODE_ENV: "test",
-      EMAIL_SEND_DISABLED: "1",
-      TEST_DATABASE_URL: process.env.TEST_DATABASE_URL ?? suiteContainer.databaseUrl,
-    },
-  });
-  process.exitCode = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code, signal) => {
-      if (signal) reject(new Error(`Integration suite terminated by ${signal}.`));
-      else resolve(code ?? 1);
-    });
-  });
-} finally {
-  for (const signal of cleanupSignals) {
-    process.removeListener(signal, handleSignal);
+async function main() {
+  const files = resolveTestFiles(process.argv.slice(2));
+  let suiteContainer;
+  if (process.env.TEST_DATABASE_URL) {
+    assertSafeTestEnvironment(process.env, process.env.TEST_DATABASE_URL);
+  } else {
+    suiteContainer = await startSharedSuiteContainer();
   }
-  suiteContainer?.stop();
+
+  const cleanupSignals = ["SIGINT", "SIGTERM"];
+  const handleSignal = (signal) => {
+    suiteContainer?.stop();
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  for (const signal of cleanupSignals) {
+    process.once(signal, handleSignal);
+  }
+
+  try {
+    const child = spawn(process.execPath, ["--test", "--test-concurrency=1", ...files], {
+      cwd: repositoryRoot,
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        EMAIL_SEND_DISABLED: "1",
+        TEST_DATABASE_URL: process.env.TEST_DATABASE_URL ?? suiteContainer.databaseUrl,
+      },
+    });
+    process.exitCode = await new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => {
+        if (signal) reject(new Error(`Integration suite terminated by ${signal}.`));
+        else resolve(code ?? 1);
+      });
+    });
+  } finally {
+    for (const signal of cleanupSignals) {
+      process.removeListener(signal, handleSignal);
+    }
+    suiteContainer?.stop();
+  }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
 }

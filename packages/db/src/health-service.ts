@@ -10,7 +10,7 @@ import type {
   OperationalHealthStatusValue,
   RecoveryBucketCheckView,
 } from "./health-types.js";
-import { assertUuid } from "./inventory-shared.js";
+import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 
 const backupFreshnessMs = 36 * 60 * 60 * 1000;
 const drillMaximumAgeMs = 31 * 24 * 60 * 60 * 1000;
@@ -201,8 +201,8 @@ export class OperationalHealthService {
   constructor(private readonly db: PrismaClient) {}
 
   async capture(environment: IntegrationEnvironment): Promise<HealthCaptureResult> {
-    return this.db.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`operational-health:${environment}`}, 0))`;
+    return inInventoryTransaction(this.db, async (tx) => {
+      await acquireOperationLocks(tx, ["operational-health", `operational-health:${environment}`]);
       const rows = await tx.$queryRaw<HealthRow[]>`
         SELECT
           CURRENT_TIMESTAMP AS "capturedAt",

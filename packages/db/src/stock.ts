@@ -146,16 +146,14 @@ export async function reserveStock(
     const replay = await findReplay(tx, operationKey, hash);
     if (replay) return operationResult(tx, operationKey, replay, true);
 
-    const [variants, locations] = await Promise.all([
-      activeVariants(
-        tx,
-        items.map((item) => item.variantId),
-      ),
-      activeLocations(
-        tx,
-        items.map((item) => item.locationId),
-      ),
-    ]);
+    const variants = await activeVariants(
+      tx,
+      items.map((item) => item.variantId),
+    );
+    const locations = await activeLocations(
+      tx,
+      items.map((item) => item.locationId),
+    );
     for (const item of items) {
       if (locations.get(item.locationId)?.type === "QUARANTINE") {
         throw new InventoryConflictError("Quarantine stock cannot be reserved for sale.");
@@ -430,16 +428,14 @@ export async function transferStock(
     const replay = await findReplay(tx, operationKey, hash);
     if (replay) return operationResult(tx, operationKey, replay, true);
 
-    const [variants, locations] = await Promise.all([
-      activeVariants(
-        tx,
-        items.map((item) => item.variantId),
-      ),
-      activeLocations(
-        tx,
-        items.flatMap((item) => [item.fromLocationId, item.toLocationId]),
-      ),
-    ]);
+    const variants = await activeVariants(
+      tx,
+      items.map((item) => item.variantId),
+    );
+    const locations = await activeLocations(
+      tx,
+      items.flatMap((item) => [item.fromLocationId, item.toLocationId]),
+    );
     if (locations.size === 0) throw new InventoryNotFoundError("Stock locations not found.");
     const levels = await lockStockLevels(tx, stockMovements, true);
     const ledgerEntries: LedgerEntryInput[] = [];

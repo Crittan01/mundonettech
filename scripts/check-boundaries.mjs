@@ -18,10 +18,65 @@ const notImplementedThrowPattern =
   /\bthrow\s+new\s+\w*Error\(\s*["'`][^"'`]*(?:not\s+implemented|pendiente|todo|stub)\b/giu;
 const prismaModelBlockPattern = /\bmodel\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([\s\S]*?)\n\}/g;
 const monetaryFieldNamePattern =
-  /(?:Cents$|^(?:price|unitPrice|compareAtPrice|cost|unitCost|subtotal|total|discount|tax|shippingFee|amount|refundAmount|balance|creditAmount)$)/;
+  /(?:Cents$|^(?:price|cost|subtotal|total|discount|tax|fee|amount|balance|credit|revenue|proceeds|charge)$|(?:^|[a-z0-9])(?:Price|Cost|Subtotal|Total|Discount|Tax|Fee|Amount|Balance|Credit|Revenue|Proceeds|Charge)$)/;
 const floatMoneyNamePattern =
   /(?:price|cost|amount|subtotal|total|tax|discount|fee|refund|credit|balance|revenue|cents)/i;
-const softDeleteNaturalKeyPattern = /^(?:slug|sku|code|fromPath|email|authUserId)$/;
+const softDeleteTotalUniqueExceptions = new Set([
+  "Category.materializedPath",
+  "ProductVariant.id.productId",
+]);
+
+function isSoftDeleteUniqueCandidate(fieldName) {
+  return fieldName !== "id" && !/^(?:createdAt|updatedAt|deletedAt)$/.test(fieldName);
+}
+
+function isSoftDeleteTotalUniqueException(modelName, fields) {
+  return softDeleteTotalUniqueExceptions.has(`${modelName}.${fields.join(".")}`);
+}
+
+function prismaStatements(body, bodyStart) {
+  const statements = [];
+  let statement = "";
+  let statementStart = bodyStart;
+  let parentheses = 0;
+  let brackets = 0;
+  let offset = bodyStart;
+
+  for (const rawLine of body.split(/\r\n|\r|\n/)) {
+    if (!statement) statementStart = offset;
+    statement += `${rawLine}\n`;
+    let quoted = false;
+    let escaped = false;
+    for (let index = 0; index < rawLine.length; index += 1) {
+      const character = rawLine[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (quoted && character === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (character === '"') {
+        quoted = !quoted;
+        continue;
+      }
+      if (!quoted && character === "/" && rawLine[index + 1] === "/") break;
+      if (quoted) continue;
+      if (character === "(") parentheses += 1;
+      if (character === ")") parentheses -= 1;
+      if (character === "[") brackets += 1;
+      if (character === "]") brackets -= 1;
+    }
+    offset += rawLine.length + 1;
+    if (parentheses === 0 && brackets === 0) {
+      statements.push({ text: statement.trim(), start: statementStart });
+      statement = "";
+    }
+  }
+  if (statement) statements.push({ text: statement.trim(), start: statementStart });
+  return statements;
+}
 
 function staticModuleText(node) {
   if (!node) return null;
@@ -215,23 +270,20 @@ export function findPrismaSchemaViolations(file, text) {
     const body = modelMatch[2] ?? "";
     const bodyStart = (modelMatch.index ?? 0) + modelMatch[0].indexOf(body);
     const hasDeletedAt = /^\s*deletedAt\s+DateTime\?/m.test(body);
-    const lines = body.split(/\r\n|\r|\n/);
-    let offset = 0;
 
-    for (const rawLine of lines) {
-      const trimmed = rawLine.trim();
-      const lineIndex = bodyStart + offset;
-      offset += rawLine.length + 1;
-
+    for (const statement of prismaStatements(body, bodyStart)) {
+      const trimmed = statement.text;
+      const lineIndex = statement.start;
       if (!trimmed || trimmed.startsWith("//")) continue;
 
       if (trimmed.startsWith("@@unique")) {
         if (hasDeletedAt) {
-          const colsMatch = /@@unique\(\s*\[([^\]]+)\]/.exec(trimmed);
+          const colsMatch = /^@@unique\(\s*\[([\s\S]*?)\]/.exec(trimmed);
           const cols = (colsMatch?.[1] ?? "")
             .split(",")
-            .map((col) => col.trim().replace(/\([^)]*\)/g, ""));
-          if (cols.some((col) => softDeleteNaturalKeyPattern.test(col))) {
+            .map((col) => col.trim().replace(/\([^)]*\)/g, ""))
+            .filter(Boolean);
+          if (!isSoftDeleteTotalUniqueException(modelName, cols)) {
             errors.push(
               `${file}:${lineNumberAt(text, lineIndex)}: model ${modelName} has deletedAt; declare partial unique index WHERE "deletedAt" IS NULL in SQL migration instead of @@unique (ADR-004).`,
             );
@@ -242,9 +294,8 @@ export function findPrismaSchemaViolations(file, text) {
 
       if (trimmed.startsWith("@@")) continue;
 
-      const fieldMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(\?|\[\])?(.*)$/.exec(
-        trimmed,
-      );
+      const fieldMatch =
+        /^([A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z_][A-Za-z0-9_]*)(\?|\[\])?([\s\S]*)$/.exec(trimmed);
       if (!fieldMatch) continue;
       const [, fieldName = "", fieldType = "", , attributes = ""] = fieldMatch;
 
@@ -261,7 +312,8 @@ export function findPrismaSchemaViolations(file, text) {
 
       if (
         hasDeletedAt &&
-        softDeleteNaturalKeyPattern.test(fieldName) &&
+        isSoftDeleteUniqueCandidate(fieldName) &&
+        !isSoftDeleteTotalUniqueException(modelName, [fieldName]) &&
         /\B@unique\b/.test(attributes)
       ) {
         errors.push(

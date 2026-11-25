@@ -212,7 +212,7 @@ describe("A2 Wompi payload-bound replay protection", () => {
     }
   });
 
-  it("does not let a late failure recording overwrite a concurrently completed terminal event", async () => {
+  it("returns a replay when a concurrent worker completed the same terminal event", async () => {
     const terminal: StoredWebhook = {
       id: "webhook-id",
       eventKey,
@@ -226,7 +226,7 @@ describe("A2 Wompi payload-bound replay protection", () => {
     const { service } = createService({ first: event(terminal.payloadHash) }, state.tx);
     await expect(
       service.process({ body: "first", environment: "LOCAL", credentialId }),
-    ).rejects.toThrow("concurrent unique insertion");
+    ).resolves.toMatchObject({ status: "PROCESSED", replayed: true });
     expect(state.upsert).not.toHaveBeenCalled();
     expect(terminal.status).toBe("PROCESSED");
   });

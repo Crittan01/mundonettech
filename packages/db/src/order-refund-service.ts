@@ -7,8 +7,13 @@ import {
   roundDivHalfUp,
 } from "@mundonettech/core";
 
-import type { Order, OrderRefund, PrismaClient } from "./generated/client.js";
-import { isAdminSelfDealingCustomer, type DatabaseExecutor } from "./primitives.js";
+import type { Order, OrderRefund, Prisma, PrismaClient } from "./generated/client.js";
+import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
+  isAdminSelfDealingCustomer,
+  type DatabaseExecutor,
+} from "./primitives.js";
 import {
   acquireOperationLocks,
   assertUuid,
@@ -24,7 +29,21 @@ import type {
 } from "./order-types.js";
 
 const activeRefundStatuses = ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] as const;
-const refundActorRoles = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"]);
+
+async function verifyRefundActor(
+  tx: Prisma.TransactionClient,
+  actorAdminUserId: string,
+  errorMessage: string,
+) {
+  try {
+    return await assertAdminActorInTransaction(tx, actorAdminUserId, "payments:write");
+  } catch (error) {
+    if (error instanceof AdminActorAuthorizationError) {
+      throw new RefundConflictError(errorMessage);
+    }
+    throw error;
+  }
+}
 
 export class RefundValidationError extends Error {
   constructor(message: string) {
@@ -172,13 +191,11 @@ export class OrderRefundService {
 
     try {
       return await inInventoryTransaction(db, async (tx) => {
-        const actor = await tx.adminUser.findFirst({
-          where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-          select: { id: true, authUserId: true, email: true, role: true },
-        });
-        if (!actor || !refundActorRoles.has(actor.role)) {
-          throw new RefundConflictError("The administrator is not authorized to request refunds.");
-        }
+        const actor = await verifyRefundActor(
+          tx,
+          actorAdminUserId,
+          "The administrator is not authorized to request refunds.",
+        );
         await acquireOperationLocks(tx, [`order-refund:${input.orderId}`]);
         const orderRows = await tx.$queryRaw<
           Order[]
@@ -443,22 +460,26 @@ export class OrderRefundService {
         select: { orderId: true },
       });
       if (!peek) throw new RefundNotFoundError("Refund request not found.");
+      const requiresOrderLock = targetStatus === "APPROVED" || targetStatus === "CANCELLED";
       await acquireOperationLocks(
         tx,
-        targetStatus === "CANCELLED"
+        requiresOrderLock
           ? [`order-payment:${peek.orderId}`, `order-refund:${peek.orderId}`]
           : [`order-refund:${peek.orderId}`],
       );
-      if (targetStatus === "CANCELLED") {
-        await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${peek.orderId}::uuid FOR UPDATE`;
+      let lockedOrder: Order | null = null;
+      if (requiresOrderLock) {
+        const orderRows = await tx.$queryRaw<Order[]>`
+          SELECT * FROM "Order" WHERE "id" = ${peek.orderId}::uuid FOR UPDATE
+        `;
+        lockedOrder = orderRows[0] ?? null;
+        if (!lockedOrder) throw new RefundNotFoundError();
       }
-      const actor = await tx.adminUser.findFirst({
-        where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { id: true, authUserId: true, email: true, role: true },
-      });
-      if (!actor || !refundActorRoles.has(actor.role)) {
-        throw new RefundConflictError("The administrator is not authorized to manage refunds.");
-      }
+      const actor = await verifyRefundActor(
+        tx,
+        actorAdminUserId,
+        "The administrator is not authorized to manage refunds.",
+      );
       const rows = await tx.$queryRaw<
         OrderRefund[]
       >`SELECT * FROM "OrderRefund" WHERE "id" = ${input.refundId}::uuid FOR UPDATE`;
@@ -471,6 +492,15 @@ export class OrderRefundService {
         throw new RefundConflictError(
           `Cannot transition refund from ${existing.status} to ${targetStatus}.`,
         );
+      }
+      if (
+        targetStatus === "APPROVED" &&
+        (!lockedOrder ||
+          lockedOrder.orderStatus === "PENDING" ||
+          lockedOrder.orderStatus === "CANCELLED" ||
+          !["PARTIALLY_PAID", "PAID", "PARTIALLY_REFUNDED"].includes(lockedOrder.paymentStatus))
+      ) {
+        throw new RefundConflictError("Refund approval requires a paid, non-cancelled order.");
       }
       if (!allowLinkedPostSale && (targetStatus === "REJECTED" || targetStatus === "CANCELLED")) {
         const [linkedReturn, linkedWarranty] = await Promise.all([

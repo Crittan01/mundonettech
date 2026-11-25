@@ -392,7 +392,19 @@ describe("F3.4 Flex quote and checkout conversion", () => {
     assert.equal(order.deliveryLongitudeE6, point.longitudeE6);
     assert.equal(order.shipments[0].localDeliveryZoneId, zone.id);
     assert.equal(order.shipments[0].items[0].declaredValueCents, 100_000n);
-    await new LocalDeliveryService(db).archive(zone.id, zone.updatedAt, {
+    const deliveryService = new LocalDeliveryService(db);
+    await assert.rejects(
+      deliveryService.archive(zone.id, zone.updatedAt, {
+        ...audit,
+        actorAdminUserId: settingsAdmin,
+      }),
+      /open shipments/i,
+    );
+    await db.shipment.update({
+      where: { id: order.shipments[0].id },
+      data: { status: "CANCELLED", cancelledAt: new Date() },
+    });
+    await deliveryService.archive(zone.id, zone.updatedAt, {
       ...audit,
       actorAdminUserId: settingsAdmin,
     });

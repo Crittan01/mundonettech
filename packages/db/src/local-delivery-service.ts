@@ -7,8 +7,33 @@ import {
   type DeliveryPoint,
 } from "@mundonettech/core";
 
-import { Prisma, type LocalDeliveryZone, type PrismaClient } from "./generated/client.js";
-import { assertUuid, compareStrings } from "./inventory-shared.js";
+import type { LocalDeliveryZone, Prisma, PrismaClient } from "./generated/client.js";
+import {
+  assertUuid,
+  compareStrings,
+  hasUniqueViolation,
+  inInventoryTransaction,
+} from "./inventory-shared.js";
+import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
+  databaseNow,
+} from "./primitives.js";
+
+async function verifyDeliveryActor(
+  tx: Prisma.TransactionClient,
+  actorAdminUserId: string,
+  errorMessage: string,
+) {
+  try {
+    return await assertAdminActorInTransaction(tx, actorAdminUserId, "settings:write");
+  } catch (error) {
+    if (error instanceof AdminActorAuthorizationError) {
+      throw new LocalDeliveryValidationError(errorMessage);
+    }
+    throw error;
+  }
+}
 
 export class LocalDeliveryValidationError extends Error {
   constructor(message: string) {
@@ -169,14 +194,6 @@ export class LocalDeliveryService {
   ): Promise<LocalDeliveryZone> {
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
     if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
-    const actor = await this.db.adminUser.findFirst({
-      where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-      select: { role: true },
-    });
-    if (!actor || !["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(actor.role))
-      throw new LocalDeliveryValidationError(
-        "Administrator is not authorized to manage delivery zones.",
-      );
     const code = text(input.code, "code", 40, 2).toUpperCase();
     if (!/^[A-Z0-9][A-Z0-9_-]{1,39}$/.test(code))
       throw new LocalDeliveryValidationError(
@@ -200,14 +217,31 @@ export class LocalDeliveryService {
       input.deliveryPromiseMinutes > 10080
     )
       throw new LocalDeliveryValidationError("deliveryPromiseMinutes must be between 5 and 10080.");
-    const existingMunicipalities = await this.db.daneMunicipality.count({
-      where: { code: { in: [...municipalities] } },
-    });
-    if (existingMunicipalities !== municipalities.length)
-      throw new LocalDeliveryValidationError(
-        "Every local delivery municipality must exist in the DANE catalog.",
+    if (input.id) {
+      assertUuid(input.id, "id");
+      if (
+        !(input.expectedUpdatedAt instanceof Date) ||
+        Number.isNaN(input.expectedUpdatedAt.getTime())
+      )
+        throw new LocalDeliveryValidationError(
+          "expectedUpdatedAt is required when editing a zone.",
+        );
+    }
+    const ipHash = auditHash(audit.ipHash, "ipHash");
+    const userAgentHash = auditHash(audit.userAgentHash, "userAgentHash");
+    return inInventoryTransaction(this.db, async (tx) => {
+      await verifyDeliveryActor(
+        tx,
+        audit.actorAdminUserId,
+        "Administrator is not authorized to manage delivery zones.",
       );
-    return this.db.$transaction(async (tx) => {
+      const existingMunicipalities = await tx.daneMunicipality.count({
+        where: { code: { in: [...municipalities] } },
+      });
+      if (existingMunicipalities !== municipalities.length)
+        throw new LocalDeliveryValidationError(
+          "Every local delivery municipality must exist in the DANE catalog.",
+        );
       const data = {
         code,
         name,
@@ -224,34 +258,26 @@ export class LocalDeliveryService {
         updatedByAdminUserId: audit.actorAdminUserId,
       };
       let saved: LocalDeliveryZone;
-      if (input.id) {
-        assertUuid(input.id, "id");
-        if (
-          !(input.expectedUpdatedAt instanceof Date) ||
-          Number.isNaN(input.expectedUpdatedAt.getTime())
-        )
-          throw new LocalDeliveryValidationError(
-            "expectedUpdatedAt is required when editing a zone.",
-          );
-        const updated = await tx.localDeliveryZone.updateMany({
-          where: { id: input.id, updatedAt: input.expectedUpdatedAt, deletedAt: null },
-          data,
-        });
-        if (updated.count !== 1)
-          throw new LocalDeliveryConflictError(
-            "The zone changed concurrently or is archived; reload before saving.",
-          );
-        saved = await tx.localDeliveryZone.findUniqueOrThrow({ where: { id: input.id } });
-      } else {
-        try {
+      try {
+        if (input.id) {
+          const updated = await tx.localDeliveryZone.updateMany({
+            where: { id: input.id, updatedAt: input.expectedUpdatedAt!, deletedAt: null },
+            data,
+          });
+          if (updated.count !== 1)
+            throw new LocalDeliveryConflictError(
+              "The zone changed concurrently or is archived; reload before saving.",
+            );
+          saved = await tx.localDeliveryZone.findUniqueOrThrow({ where: { id: input.id } });
+        } else {
           saved = await tx.localDeliveryZone.create({
             data: { ...data, createdByAdminUserId: audit.actorAdminUserId },
           });
-        } catch (error) {
-          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002")
-            throw new LocalDeliveryConflictError("An active zone already uses this code.");
-          throw error;
         }
+      } catch (error) {
+        if (hasUniqueViolation(error))
+          throw new LocalDeliveryConflictError("An active zone already uses this code.");
+        throw error;
       }
       await tx.adminActionLog.create({
         data: {
@@ -260,8 +286,8 @@ export class LocalDeliveryService {
           targetType: "LocalDeliveryZone",
           targetId: saved.id,
           requestId: audit.requestId ?? null,
-          ipHash: auditHash(audit.ipHash, "ipHash"),
-          userAgentHash: auditHash(audit.userAgentHash, "userAgentHash"),
+          ipHash,
+          userAgentHash,
           metadata: {
             code,
             active: saved.active,
@@ -276,23 +302,33 @@ export class LocalDeliveryService {
 
   async archive(id: string, expectedUpdatedAt: Date, audit: DeliveryMutationAudit): Promise<void> {
     assertUuid(id, "id");
+    assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     if (!(expectedUpdatedAt instanceof Date) || Number.isNaN(expectedUpdatedAt.getTime()))
       throw new LocalDeliveryValidationError("expectedUpdatedAt must be valid.");
-    await this.db.$transaction(async (tx) => {
-      const actor = await tx.adminUser.findFirst({
-        where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { role: true },
+    const ipHash = auditHash(audit.ipHash, "ipHash");
+    const userAgentHash = auditHash(audit.userAgentHash, "userAgentHash");
+    await inInventoryTransaction(this.db, async (tx) => {
+      await verifyDeliveryActor(
+        tx,
+        audit.actorAdminUserId,
+        "Administrator is not authorized to archive delivery zones.",
+      );
+      const openShipment = await tx.shipment.findFirst({
+        where: { localDeliveryZoneId: id, status: { in: ["PENDING", "READY", "SHIPPED"] } },
+        select: { id: true },
       });
-      if (!actor || !["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(actor.role)) {
-        throw new LocalDeliveryValidationError(
-          "Administrator is not authorized to archive delivery zones.",
+      if (openShipment) {
+        throw new LocalDeliveryConflictError(
+          "Cannot archive a local delivery zone with open shipments.",
         );
       }
+      const now = await databaseNow(tx);
       const updated = await tx.localDeliveryZone.updateMany({
         where: { id, updatedAt: expectedUpdatedAt, deletedAt: null },
         data: {
           active: false,
-          deletedAt: new Date(),
+          deletedAt: now,
           updatedByAdminUserId: audit.actorAdminUserId,
         },
       });
@@ -307,8 +343,8 @@ export class LocalDeliveryService {
           targetType: "LocalDeliveryZone",
           targetId: id,
           requestId: audit.requestId ?? null,
-          ipHash: auditHash(audit.ipHash, "ipHash"),
-          userAgentHash: auditHash(audit.userAgentHash, "userAgentHash"),
+          ipHash,
+          userAgentHash,
           metadata: {},
         },
       });

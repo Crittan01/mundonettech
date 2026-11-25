@@ -107,7 +107,7 @@ model SerializedUnit {
   @@index([reservationKey, variantId, locationId])
   @@index([orderId])
   @@index([channelOrderId])
-  @@index([shipmentId, variantId, id])
+  @@index([shipmentId, variantId, id], map: "SerializedUnit_shipmentId_variantId_idx")
   @@index([purchaseOrderItemId])
   @@map("SerializedUnit")
 }
@@ -141,6 +141,7 @@ model InventoryLedger {
 
   @@unique([operationKey, operationSequence])
   @@index([variantId, locationId, occurredAt, id])
+  @@index([locationId, occurredAt])
   @@index([orderId, occurredAt])
   @@index([channelOrderId, occurredAt])
   @@index([purchaseOrderItemId, occurredAt])

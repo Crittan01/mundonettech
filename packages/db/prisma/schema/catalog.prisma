@@ -299,6 +299,7 @@ model ProductVariantOption {
 
   @@unique([variantId, optionDefinitionId])
   @@unique([variantId, optionValueId])
+  @@index([optionDefinitionId])
   @@index([optionValueId])
   @@map("ProductVariantOption")
 }
@@ -363,6 +364,7 @@ model CategoryAttribute {
 
   @@unique([categoryId, attributeId])
   @@unique([categoryId, position])
+  @@index([attributeId])
   @@map("CategoryAttribute")
 }
 
@@ -484,6 +486,7 @@ model BackInStockSubscription {
 
   @@index([variantId, email])
   @@index([status, variantId])
+  @@index([customerId])
   @@map("BackInStockSubscription")
 }
 

@@ -459,21 +459,39 @@ export class SegmentationService {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new LifecycleError("VALIDATION", "Segment refresh limit must be between 1 and 100.");
     }
-    const segments = await this.db.customerSegment.findMany({
-      where: { status: "ACTIVE" },
-      select: { id: true },
-      orderBy: [{ lastRefreshedAt: { sort: "asc", nulls: "first" } }, { id: "asc" }],
-      take: limit,
-    });
     const totals = { segments: 0, entered: 0, exited: 0, cancelled: 0 };
-    for (const segment of segments) {
-      const result = await inInventoryTransaction(this.db, (tx) =>
-        this.refreshInTransaction(tx, segment.id),
-      );
-      totals.segments += 1;
-      totals.entered += result.entered;
-      totals.exited += result.exited;
-      totals.cancelled += result.cancelled;
+    const attempted = new Set<string>();
+    while (totals.segments < limit && attempted.size < limit * 2) {
+      const remaining = limit - totals.segments;
+      const segments = await this.db.customerSegment.findMany({
+        where: {
+          status: "ACTIVE",
+          ...(attempted.size > 0 ? { id: { notIn: [...attempted] } } : {}),
+        },
+        select: { id: true },
+        orderBy: [{ lastRefreshedAt: { sort: "asc", nulls: "first" } }, { id: "asc" }],
+        take: remaining,
+      });
+      if (segments.length === 0) break;
+      for (const segment of segments) {
+        attempted.add(segment.id);
+        try {
+          const result = await inInventoryTransaction(this.db, async (tx) => {
+            const lockRows = await tx.$queryRaw<Array<{ locked: boolean }>>`
+              SELECT pg_try_advisory_xact_lock(hashtextextended(${`customer-segment:${segment.id}`}, 0)) AS locked
+            `;
+            if (!lockRows[0]?.locked) return null;
+            return this.refreshInTransaction(tx, segment.id);
+          });
+          if (!result) continue;
+          totals.segments += 1;
+          totals.entered += result.entered;
+          totals.exited += result.exited;
+          totals.cancelled += result.cancelled;
+        } catch {
+          continue;
+        }
+      }
     }
     return totals;
   }

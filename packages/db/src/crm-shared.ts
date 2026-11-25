@@ -337,15 +337,20 @@ export async function redactCrmOpportunitiesInTransaction(
   }
 }
 
-export async function suppressCustomerCrmLineageInTransaction(
+export function retryableLockDivergenceError(message: string): Error & { readonly code: "40001" } {
+  const error = new Error(message) as Error & { code: "40001" };
+  error.code = "40001";
+  return error;
+}
+
+export async function findCustomerCrmLineageIds(
   tx: Prisma.TransactionClient,
-  customerId: string,
-  now: Date,
+  customerIds: readonly string[],
 ): Promise<string[]> {
-  assertUuid(customerId, "customerId");
-  const lineageRows = await tx.$queryRaw<Array<{ id: string }>>`
+  if (customerIds.length === 0) return [];
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
     WITH RECURSIVE seed AS (
-      SELECT "id", "mergedIntoContactId" FROM "Contact" WHERE "customerId" = ${customerId}::uuid
+      SELECT "id", "mergedIntoContactId" FROM "Contact" WHERE "customerId" = ANY(${[...customerIds]}::uuid[])
     ),
     ancestors AS (
       SELECT "id", "mergedIntoContactId" FROM seed
@@ -363,8 +368,17 @@ export async function suppressCustomerCrmLineageInTransaction(
     )
     SELECT "id" FROM full_lineage ORDER BY "id"
   `;
-  if (lineageRows.length === 0) return [];
-  const lineageIds = lineageRows.map((item) => item.id);
+  return rows.map((item) => item.id);
+}
+
+export async function suppressCustomerCrmLineageInTransaction(
+  tx: Prisma.TransactionClient,
+  customerId: string,
+  now: Date,
+): Promise<string[]> {
+  assertUuid(customerId, "customerId");
+  const lineageIds = await findCustomerCrmLineageIds(tx, [customerId]);
+  if (lineageIds.length === 0) return [];
   await acquireOperationLocks(
     tx,
     lineageIds.map((id) => `crm-contact:${id}`),
@@ -372,6 +386,14 @@ export async function suppressCustomerCrmLineageInTransaction(
   const contacts = await tx.$queryRaw<
     Contact[]
   >`SELECT * FROM "Contact" WHERE "id" IN (SELECT * FROM unnest(${lineageIds}::uuid[])) ORDER BY "id" FOR UPDATE`;
+  const verifiedLineageIds = await findCustomerCrmLineageIds(tx, [customerId]);
+  if (
+    contacts.length !== lineageIds.length ||
+    verifiedLineageIds.length !== lineageIds.length ||
+    verifiedLineageIds.some((id, index) => id !== lineageIds[index])
+  ) {
+    throw retryableLockDivergenceError("The customer CRM lineage changed concurrently.");
+  }
   const openOpportunity = await tx.opportunity.findFirst({
     where: {
       contactId: { in: lineageIds },

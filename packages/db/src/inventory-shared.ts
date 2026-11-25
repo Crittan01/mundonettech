@@ -12,7 +12,7 @@ import {
 import type { DatabaseExecutor } from "./primitives.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const retryableErrorCodes = new Set(["P1001", "P1017", "P2024", "40001", "40P01"]);
+const retryableErrorCodes = new Set(["P1001", "P1017", "P2024", "P2034", "40001", "40P01"]);
 const uniqueViolationCodes = new Set(["P2002", "23505"]);
 
 export function compareStrings(left: string, right: string): number {
@@ -174,6 +174,9 @@ function findMatchingCode(error: unknown, codes: ReadonlySet<string>, depth = 0)
   if (typeof error !== "object" || error === null || depth > 6) return null;
   const record = error as Record<string, unknown>;
   if (typeof record.code === "string" && codes.has(record.code)) return record.code;
+  if (typeof record.originalCode === "string" && codes.has(record.originalCode)) {
+    return record.originalCode;
+  }
   for (const property of ["cause", "meta", "driverAdapterError"] as const) {
     const nested = findMatchingCode(record[property], codes, depth + 1);
     if (nested) return nested;
@@ -267,6 +270,45 @@ export async function activeVariants(
   variantIds: readonly string[],
 ): Promise<Map<string, VariantWithProduct>> {
   const uniqueIds = [...new Set(variantIds)].sort((left, right) => compareStrings(left, right));
+  if (uniqueIds.length === 0) return new Map();
+  const productIdRows = await tx.$queryRaw<Array<{ productId: string }>>`
+    SELECT DISTINCT "productId"
+    FROM "ProductVariant"
+    WHERE "id" = ANY(${uniqueIds}::uuid[])
+    ORDER BY "productId" ASC
+  `;
+  const productIds = productIdRows.map((row) => row.productId);
+  if (productIds.length > 0) {
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "Product"
+      WHERE "id" = ANY(${productIds}::uuid[])
+        AND "deletedAt" IS NULL
+      ORDER BY "id" ASC
+      FOR SHARE
+    `;
+  }
+  const lockedVariantRows = await tx.$queryRaw<Array<{ id: string; productId: string }>>`
+    SELECT variant."id", variant."productId"
+    FROM "ProductVariant" AS variant
+    JOIN "Product" AS product ON product."id" = variant."productId"
+    WHERE variant."id" = ANY(${uniqueIds}::uuid[])
+      AND variant."deletedAt" IS NULL
+      AND product."deletedAt" IS NULL
+    ORDER BY variant."id" ASC
+    FOR SHARE OF variant
+  `;
+  if (lockedVariantRows.length !== uniqueIds.length) {
+    throw new InventoryNotFoundError("An active product variant is missing.");
+  }
+  const lockedProductIds = new Set(productIds);
+  if (lockedVariantRows.some((row) => !lockedProductIds.has(row.productId))) {
+    const retry = new Error("Variant product changed before lock acquisition.") as Error & {
+      code: string;
+    };
+    retry.code = "40001";
+    throw retry;
+  }
   const variants = await tx.productVariant.findMany({
     where: { id: { in: uniqueIds }, deletedAt: null, product: { deletedAt: null } },
     include: { product: true },
@@ -282,10 +324,15 @@ export async function activeLocations(
   locationIds: readonly string[],
 ): Promise<Map<string, { id: string; code: string; type: string }>> {
   const uniqueIds = [...new Set(locationIds)].sort((left, right) => compareStrings(left, right));
-  const locations = await tx.stockLocation.findMany({
-    where: { id: { in: uniqueIds }, deletedAt: null },
-    select: { id: true, code: true, type: true },
-  });
+  if (uniqueIds.length === 0) return new Map();
+  const locations = await tx.$queryRaw<Array<{ id: string; code: string; type: string }>>`
+    SELECT "id", "code", "type"::text AS "type"
+    FROM "StockLocation"
+    WHERE "id" = ANY(${uniqueIds}::uuid[])
+      AND "deletedAt" IS NULL
+    ORDER BY "id" ASC
+    FOR SHARE
+  `;
   if (locations.length !== uniqueIds.length) {
     throw new InventoryNotFoundError("An active stock location is missing.");
   }

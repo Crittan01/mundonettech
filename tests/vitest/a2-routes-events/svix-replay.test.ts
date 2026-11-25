@@ -201,6 +201,7 @@ function createHarness(
     emailEvent: { findUnique: vi.fn(async () => email), update },
     emailWebhookEvent: { create },
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(async () => [{ id: email.id }]),
   };
   const db = {
     emailWebhookEvent: { findUnique },
@@ -315,6 +316,7 @@ describe("A2 Svix payload-bound replay and unique conflicts", () => {
       emailEvent: { findUnique: vi.fn(async () => email), update },
       emailWebhookEvent: { create },
       $executeRaw: vi.fn(),
+      $queryRaw: vi.fn(async () => [{ id: email.id }]),
     };
     const db = {
       emailWebhookEvent: { findUnique },

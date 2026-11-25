@@ -18,9 +18,11 @@ import {
   crmRetentionReviewAt,
   normalizeCrmContactInput,
   normalizeCrmOrganizationInput,
+  retryableLockDivergenceError,
 } from "./crm-shared.js";
 import { IdempotencyStatus } from "./generated/client.js";
 import type {
+  Contact,
   Opportunity,
   OpportunityProposal,
   PriceList,
@@ -275,7 +277,7 @@ export class B2bService {
   }
 
   private async lockedSettings(tx: Prisma.TransactionClient) {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('store-settings-default'))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext('store-settings-default'))`;
     const stored = await tx.storeSettings.findUnique({ where: { key: "default" } });
     return validateDefaults(stored ? settingsFromRecord(stored) : this.defaults);
   }
@@ -340,6 +342,31 @@ export class B2bService {
         },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       });
+      if (contact) {
+        await acquireOperationLocks(tx, [`crm-contact:${contact.id}`]);
+        const lockedContacts = await tx.$queryRaw<
+          Contact[]
+        >`SELECT * FROM "Contact" WHERE "id" = ${contact.id}::uuid FOR UPDATE`;
+        const lockedContact = lockedContacts[0];
+        if (
+          lockedContact &&
+          lockedContact.status === "ACTIVE" &&
+          lockedContact.deletedAt === null &&
+          lockedContact.organizationId === organization.id
+        ) {
+          contact = lockedContact;
+        } else {
+          contact = null;
+        }
+      }
+      const lockedOrgs = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Organization"
+        WHERE "id" = ${organization.id}::uuid AND "deletedAt" IS NULL
+        FOR SHARE
+      `;
+      if (!lockedOrgs[0]) {
+        throw retryableLockDivergenceError("The organization was archived concurrently.");
+      }
       if (!contact) {
         contact = await tx.contact.create({
           data: {
@@ -1425,48 +1452,67 @@ export class B2bService {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new B2bError("VALIDATION", "Expiry batch limit must be between 1 and 500.");
     }
-    const candidates = await this.db.opportunityProposal.findMany({
-      where: { status: "SENT", expiresAt: { lte: await b2bNow(this.db) } },
-      select: { id: true, opportunityId: true },
-      orderBy: [{ expiresAt: "asc" }, { id: "asc" }],
-      take: limit,
-    });
+    const now = await b2bNow(this.db);
     let expired = 0;
-    for (const candidate of candidates) {
-      const changed = await inInventoryTransaction(this.db, async (tx) => {
-        await acquireOperationLocks(tx, [`b2b-opportunity:${candidate.opportunityId}`]);
-        await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "Opportunity" WHERE "id" = ${candidate.opportunityId}::uuid FOR UPDATE
-        `;
-        const rows = await tx.$queryRaw<
-          Array<{ id: string; opportunityId: string; cartId: string | null; version: number }>
-        >`
-          SELECT "id", "opportunityId", "cartId", "version" FROM "OpportunityProposal"
-          WHERE "id" = ${candidate.id}::uuid AND "status" = 'SENT' AND "expiresAt" <= CURRENT_TIMESTAMP
-          FOR UPDATE
-        `;
-        const proposal = rows[0];
-        if (!proposal) return false;
-        if (proposal.cartId)
-          await tx.cart.updateMany({
-            where: { id: proposal.cartId, status: "ACTIVE" },
-            data: { status: "CANCELLED" },
-          });
-        await tx.opportunityProposal.update({
-          where: { id: proposal.id },
-          data: { status: "EXPIRED" },
-        });
-        await tx.opportunity.updateMany({
-          where: {
-            id: proposal.opportunityId,
-            status: "PROPOSAL_SENT",
-            currentVersion: proposal.version,
-          },
-          data: { status: "QUALIFYING", version: { increment: 1 } },
-        });
-        return true;
+    const attempted = new Set<string>();
+    while (expired < limit && attempted.size < limit * 2) {
+      const remaining = limit - expired;
+      const candidates = await this.db.opportunityProposal.findMany({
+        where: {
+          status: "SENT",
+          expiresAt: { lte: now },
+          ...(attempted.size > 0 ? { id: { notIn: [...attempted] } } : {}),
+        },
+        select: { id: true, opportunityId: true },
+        orderBy: [{ expiresAt: "asc" }, { id: "asc" }],
+        take: remaining,
       });
-      if (changed) expired += 1;
+      if (candidates.length === 0) break;
+      for (const candidate of candidates) {
+        attempted.add(candidate.id);
+        try {
+          const changed = await inInventoryTransaction(this.db, async (tx) => {
+            const lockRows = await tx.$queryRaw<Array<{ locked: boolean }>>`
+              SELECT pg_try_advisory_xact_lock(hashtextextended(${`b2b-opportunity:${candidate.opportunityId}`}, 0)) AS locked
+            `;
+            if (!lockRows[0]?.locked) return false;
+            const oppRows = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT "id" FROM "Opportunity" WHERE "id" = ${candidate.opportunityId}::uuid FOR UPDATE SKIP LOCKED
+            `;
+            if (!oppRows[0]) return false;
+            const rows = await tx.$queryRaw<
+              Array<{ id: string; opportunityId: string; cartId: string | null; version: number }>
+            >`
+              SELECT "id", "opportunityId", "cartId", "version" FROM "OpportunityProposal"
+              WHERE "id" = ${candidate.id}::uuid AND "status" = 'SENT' AND "expiresAt" <= CURRENT_TIMESTAMP
+              FOR UPDATE SKIP LOCKED
+            `;
+            const proposal = rows[0];
+            if (!proposal) return false;
+            if (proposal.cartId)
+              await tx.cart.updateMany({
+                where: { id: proposal.cartId, status: "ACTIVE" },
+                data: { status: "CANCELLED" },
+              });
+            await tx.opportunityProposal.update({
+              where: { id: proposal.id },
+              data: { status: "EXPIRED" },
+            });
+            await tx.opportunity.updateMany({
+              where: {
+                id: proposal.opportunityId,
+                status: "PROPOSAL_SENT",
+                currentVersion: proposal.version,
+              },
+              data: { status: "QUALIFYING", version: { increment: 1 } },
+            });
+            return true;
+          });
+          if (changed) expired += 1;
+        } catch {
+          continue;
+        }
+      }
     }
     return expired;
   }

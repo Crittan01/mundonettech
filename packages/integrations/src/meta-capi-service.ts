@@ -57,6 +57,7 @@ export interface MetaCapiServiceOptions {
   readonly publicSiteUrl: string;
   readonly vault: {
     reveal(id: string): Promise<Uint8Array>;
+    revealRecord?(record: import("@mundonettech/db").IntegrationCredential): Uint8Array;
   };
   readonly client?: MetaConversionsApiClient;
   readonly apiUrl?: string;
@@ -236,6 +237,24 @@ export class MetaCapiService {
     };
   }
 
+  private async credentialFromRecord(record: import("@mundonettech/db").IntegrationCredential) {
+    if (
+      record.provider !== "meta" ||
+      record.environment !== this.options.environment ||
+      record.revokedAt !== null
+    ) {
+      throw new CredentialRevokedError();
+    }
+    const plaintext = this.options.vault.revealRecord
+      ? this.options.vault.revealRecord(record)
+      : await this.options.vault.reveal(record.id);
+    try {
+      return parseMetaCredentials(plaintext, this.options.environment);
+    } finally {
+      plaintext.fill(0);
+    }
+  }
+
   private async credential(credentialId: string) {
     const record = await this.db.integrationCredential.findFirst({
       where: {
@@ -246,12 +265,7 @@ export class MetaCapiService {
       },
     });
     if (!record) throw new CredentialRevokedError();
-    const plaintext = await this.options.vault.reveal(record.id);
-    try {
-      return parseMetaCredentials(plaintext, this.options.environment);
-    } finally {
-      plaintext.fill(0);
-    }
+    return this.credentialFromRecord(record);
   }
 
   async enqueuePurchase(input: { orderId: string; paidAt: Date }): Promise<MetaCapiEnqueueResult> {
@@ -776,7 +790,6 @@ export class MetaCapiService {
       );
     }
     return this.db.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR UPDATE`;
       const actor = await tx.adminUser.findFirst({
         where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
         select: { id: true, role: true },
@@ -832,7 +845,7 @@ export class MetaCapiService {
         WHERE "id" = ${input.audit.actorAdminUserId}::uuid
           AND "status" = 'ACTIVE'
           AND "deletedAt" IS NULL
-        FOR UPDATE
+        FOR SHARE
       `;
       const actor = actorRows[0];
       if (
@@ -925,7 +938,6 @@ export class MetaCapiService {
             environment: this.options.environment,
             revokedAt: null,
           },
-          select: { id: true },
         });
         if (!activeCredentialRow) {
           throw new MetaCapiServiceError(
@@ -935,7 +947,7 @@ export class MetaCapiService {
         }
         let activeCredential: { pixelId: string; testEventCode: string | null };
         try {
-          activeCredential = await this.credential(activeCredentialRow.id);
+          activeCredential = await this.credentialFromRecord(activeCredentialRow);
         } catch {
           throw new MetaCapiServiceError(
             "CONFLICT",
@@ -1112,11 +1124,15 @@ export class MetaCapiService {
       where: {
         customerId,
         status: "UNCERTAIN",
-        ...revocationCondition,
-        OR: [
-          { externalIdHash: { not: null } },
-          { emailHash: { not: null } },
-          { phoneHash: { not: null } },
+        AND: [
+          revocationCondition,
+          {
+            OR: [
+              { externalIdHash: { not: null } },
+              { emailHash: { not: null } },
+              { phoneHash: { not: null } },
+            ],
+          },
         ],
       },
       data: {

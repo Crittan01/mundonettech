@@ -348,13 +348,13 @@ export class ProductMediaService {
     const storage = this.requireStorage();
     const keys = [...new Set(objectGroups.flatMap((group) => [...group]))];
     if (keys.length === 0) return;
-    await this.db.$transaction(
+    const deletable = await this.db.$transaction(
       async (tx) => {
         await tx.$queryRaw`
-        SELECT "id" FROM "Product" WHERE "id" = ${productId}::uuid FOR UPDATE
-      `;
+          SELECT "id" FROM "Product" WHERE "id" = ${productId}::uuid FOR UPDATE
+        `;
         const referenced = await this.referencedKeys(tx, keys);
-        const deletable = [
+        return [
           ...new Set(
             objectGroups.flatMap((group) =>
               group.some((key) => referenced.has(key))
@@ -363,21 +363,21 @@ export class ProductMediaService {
             ),
           ),
         ];
-        const failures: unknown[] = [];
-        const concurrency = 8;
-        for (let index = 0; index < deletable.length; index += concurrency) {
-          const batch = deletable.slice(index, index + concurrency);
-          const results = await Promise.allSettled(batch.map((key) => storage.delete(key)));
-          for (const result of results) {
-            if (result.status === "rejected") failures.push(result.reason);
-          }
-        }
-        if (failures.length > 0) {
-          throw new AggregateError(failures, "Some unreferenced R2 objects could not be removed.");
-        }
       },
       { maxWait: 10_000, timeout: 30_000 },
     );
+    const failures: unknown[] = [];
+    const concurrency = 8;
+    for (let index = 0; index < deletable.length; index += concurrency) {
+      const batch = deletable.slice(index, index + concurrency);
+      const results = await Promise.allSettled(batch.map((key) => storage.delete(key)));
+      for (const result of results) {
+        if (result.status === "rejected") failures.push(result.reason);
+      }
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, "Some unreferenced R2 objects could not be removed.");
+    }
   }
 
   private async failUpload(

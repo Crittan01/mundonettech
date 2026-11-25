@@ -152,6 +152,8 @@ model Order {
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
   @@index([paymentStatus, reservationExpiresAt])
   @@index([municipalityCode])
+  @@index([clickCollectLocationId])
+  @@index([couponId])
   @@map("Order")
 }
 
@@ -188,6 +190,7 @@ model OrderItem {
 
   @@index([orderId, id])
   @@index([variantId, orderId])
+  @@index([bundleId])
   @@map("OrderItem")
 }
 
@@ -237,7 +240,7 @@ model TaxInvoice {
   prefix             String                 @db.VarChar(20)
   number             Int
   fullNumber         String                 @db.VarChar(40)
-  cufe               String                 @db.Char(96)
+  cufe               String                 @unique @db.Char(96)
   currency           String                 @default("COP") @db.Char(3)
   subtotalCents      BigInt
   discountCents      BigInt
@@ -275,7 +278,7 @@ model CreditNote {
   prefix             String                @db.VarChar(20)
   number             Int
   fullNumber         String                @db.VarChar(40)
-  cude               String                @db.Char(96)
+  cude               String                @unique @db.Char(96)
   currency           String                @default("COP") @db.Char(3)
   subtotalCents      BigInt
   discountCents      BigInt
@@ -434,6 +437,7 @@ model Cart {
   @@index([customerId, status, updatedAt])
   @@index([kind, status, updatedAt])
   @@index([status, expiresAt])
+  @@index([couponId])
   @@map("Cart")
 }
 

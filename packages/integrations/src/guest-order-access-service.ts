@@ -9,7 +9,11 @@ import {
 
 import { normalizeOperationKey } from "@mundonettech/core";
 import type { PrismaClient } from "@mundonettech/db";
-import { acquireOperationLocks, inInventoryTransaction } from "@mundonettech/db";
+import {
+  acquireOperationLocks,
+  hasUniqueViolation,
+  inInventoryTransaction,
+} from "@mundonettech/db";
 
 import { EmailProviderError, type EmailCredentials, type EmailProvider } from "./email-types.js";
 import { assertIntegrationUuid } from "./integration-utils.js";
@@ -105,83 +109,132 @@ export class GuestOrderAccessService {
     const receiptHash = tokenHash(input.token);
     const ipHash = hash32(input.ipHash);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
-    const prepared = await inInventoryTransaction(this.db, async (tx) => {
-      const receipt = await tx.orderReceipt.findFirst({
-        where: { accessTokenHash: receiptHash },
-        include: { order: true },
-      });
-      if (!receipt?.order.emailSnapshot || receipt.order.anonymizedAt) {
-        return null;
-      }
-      const order = receipt.order;
-      await acquireOperationLocks(tx, [`guest-order:${order.id}`]);
-      const existing = await tx.guestOrderChallenge.findUnique({ where: { idempotencyKey } });
-      if (existing) {
-        if (
-          existing.orderId !== order.id ||
-          !timingSafeEqual(Uint8Array.from(existing.requestIpHash), ipHash)
-        ) {
+    let prepared: {
+      challengeId: string;
+      orderId: string;
+      orderNumber: string;
+      email: string;
+      code: string | null;
+      status: string;
+    } | null;
+    try {
+      prepared = await inInventoryTransaction(this.db, async (tx) => {
+        const receipt = await tx.orderReceipt.findFirst({
+          where: { accessTokenHash: receiptHash },
+          include: { order: true },
+        });
+        if (!receipt?.order.emailSnapshot || receipt.order.anonymizedAt) {
+          return null;
+        }
+        const order = receipt.order;
+        await acquireOperationLocks(tx, [`guest-order:${order.id}`]);
+        const existing = await tx.guestOrderChallenge.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          if (
+            existing.orderId !== order.id ||
+            !timingSafeEqual(Uint8Array.from(existing.requestIpHash), ipHash)
+          ) {
+            throw new GuestOrderAccessError(
+              "CONFLICT",
+              "The guest access idempotency key belongs to another request.",
+            );
+          }
+          return {
+            challengeId: existing.id,
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            email: order.emailSnapshot!,
+            code: null,
+            status: existing.status,
+          };
+        }
+        const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+        const now = nowRows[0]!.now;
+        const cooldownStart = new Date(now.getTime() - 60_000);
+        const [orderRecent, ipRecent, latestSent] = await Promise.all([
+          tx.guestOrderChallenge.count({
+            where: { orderId: order.id, createdAt: { gte: new Date(now.getTime() - 3_600_000) } },
+          }),
+          tx.guestOrderChallenge.count({
+            where: {
+              requestIpHash: ipHash,
+              createdAt: { gte: new Date(now.getTime() - 3_600_000) },
+            },
+          }),
+          tx.guestOrderChallenge.findFirst({
+            where: {
+              orderId: order.id,
+              OR: [
+                { lastSentAt: { gte: cooldownStart } },
+                { status: "PENDING", createdAt: { gte: cooldownStart } },
+              ],
+            },
+            select: { id: true },
+          }),
+        ]);
+        if (orderRecent >= 5 || ipRecent >= 20) {
           throw new GuestOrderAccessError(
-            "CONFLICT",
-            "The guest access idempotency key belongs to another request.",
+            "RATE_LIMIT",
+            "Too many guest access codes were requested.",
           );
         }
+        if (latestSent)
+          throw new GuestOrderAccessError("COOLDOWN", "Wait before requesting another code.");
+        await tx.guestOrderChallenge.updateMany({
+          where: { orderId: order.id, status: { in: ["PENDING", "SENT", "FAILED"] } },
+          data: { status: "EXPIRED" },
+        });
+        const id = randomUUID();
+        const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+        await tx.guestOrderChallenge.create({
+          data: {
+            id,
+            orderId: order.id,
+            idempotencyKey,
+            codeHash: this.codeHash(id, order.id, code),
+            requestIpHash: ipHash,
+            expiresAt: new Date(now.getTime() + 10 * 60_000),
+          },
+        });
         return {
-          challengeId: existing.id,
+          challengeId: id,
           orderId: order.id,
           orderNumber: order.orderNumber,
           email: order.emailSnapshot!,
-          code: null,
-          status: existing.status,
+          code,
+          status: "PENDING" as const,
         };
-      }
-      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-      const now = nowRows[0]!.now;
-      const [orderRecent, ipRecent, latestSent] = await Promise.all([
-        tx.guestOrderChallenge.count({
-          where: { orderId: order.id, createdAt: { gte: new Date(now.getTime() - 3_600_000) } },
-        }),
-        tx.guestOrderChallenge.count({
-          where: { requestIpHash: ipHash, createdAt: { gte: new Date(now.getTime() - 3_600_000) } },
-        }),
-        tx.guestOrderChallenge.findFirst({
-          where: { orderId: order.id, lastSentAt: { gte: new Date(now.getTime() - 60_000) } },
-          select: { id: true },
-        }),
-      ]);
-      if (orderRecent >= 5 || ipRecent >= 20) {
-        throw new GuestOrderAccessError(
-          "RATE_LIMIT",
-          "Too many guest access codes were requested.",
-        );
-      }
-      if (latestSent)
-        throw new GuestOrderAccessError("COOLDOWN", "Wait before requesting another code.");
-      await tx.guestOrderChallenge.updateMany({
-        where: { orderId: order.id, status: { in: ["PENDING", "SENT", "FAILED"] } },
-        data: { status: "EXPIRED" },
       });
-      const id = randomUUID();
-      const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
-      await tx.guestOrderChallenge.create({
-        data: {
-          id,
-          orderId: order.id,
-          idempotencyKey,
-          codeHash: this.codeHash(id, order.id, code),
-          requestIpHash: ipHash,
-          expiresAt: new Date(now.getTime() + 10 * 60_000),
-        },
-      });
-      return {
-        challengeId: id,
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        email: order.emailSnapshot!,
-        code,
-        status: "PENDING" as const,
-      };
-    });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        const [receipt, existing] = await Promise.all([
+          this.db.orderReceipt.findFirst({
+            where: { accessTokenHash: receiptHash },
+            select: { orderId: true },
+          }),
+          this.db.guestOrderChallenge.findUnique({ where: { idempotencyKey } }),
+        ]);
+        if (existing) {
+          if (
+            !receipt ||
+            existing.orderId !== receipt.orderId ||
+            !timingSafeEqual(Uint8Array.from(existing.requestIpHash), ipHash)
+          ) {
+            throw new GuestOrderAccessError(
+              "CONFLICT",
+              "The guest access idempotency key belongs to another request.",
+            );
+          }
+          return {
+            accepted: true as const,
+            challengeId: existing.id,
+            delivered: existing.status === "SENT",
+            replayed: true,
+          };
+        }
+      }
+      throw error;
+    }
     if (!prepared)
       return { accepted: true as const, challengeId: null, delivered: false, replayed: false };
     if (!prepared.code) {
@@ -207,8 +260,8 @@ export class GuestOrderAccessService {
       const sentNowRows = await this.db.$queryRaw<
         Array<{ now: Date }>
       >`SELECT CURRENT_TIMESTAMP AS now`;
-      await this.db.guestOrderChallenge.update({
-        where: { id: prepared.challengeId },
+      const updated = await this.db.guestOrderChallenge.updateMany({
+        where: { id: prepared.challengeId, status: "PENDING" },
         data: {
           status: "SENT",
           lastSentAt: sentNowRows[0]!.now,
@@ -219,7 +272,7 @@ export class GuestOrderAccessService {
       return {
         accepted: true as const,
         challengeId: prepared.challengeId,
-        delivered: true,
+        delivered: updated.count === 1,
         replayed: false,
       };
     } catch (error) {

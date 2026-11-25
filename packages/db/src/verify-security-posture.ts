@@ -2,721 +2,341 @@ import { pathToFileURL } from "node:url";
 
 import pg from "pg";
 
-const requiredTables = [
-  "AdminUser",
-  "AdminRecoveryCode",
-  "AdminActionLog",
-  "SecurityEvent",
-  "Notification",
-  "NotificationRead",
-  "DailyFunnelMetric",
-  "FiscalWatchSnapshot",
-  "BackupRun",
-  "DisasterRecoveryDrill",
-  "RecoveryBucketCheck",
-  "OperationalHealthSnapshot",
-  "ChannelAccount",
-  "ChannelOAuthAttempt",
-  "ChannelListing",
-  "ChannelOffer",
-  "ChannelSyncJob",
-  "ChannelPack",
-  "ChannelOrder",
-  "ChannelShipment",
-  "ChannelLedgerEntry",
-  "MetaCapiEvent",
-  "Customer",
-  "Consent",
-  "Organization",
-  "Contact",
-  "ContactIdentity",
-  "IdentityMergeCandidate",
-  "ContactActivity",
-  "Task",
-  "IntegrationCredential",
-  "DomainOutbox",
-  "IdempotencyKey",
-  "TaxGroup",
-  "Brand",
-  "Category",
-  "Collection",
-  "CollectionProduct",
-  "Product",
-  "OptionDefinition",
-  "OptionValue",
-  "ProductVariant",
-  "ProductVariantOption",
-  "ProductMedia",
-  "AttributeDefinition",
-  "CategoryAttribute",
-  "ProductAttributeValue",
-  "CompatibilityDevice",
-  "ProductCompatibility",
-  "Bundle",
-  "BundleItem",
-  "WishlistItem",
-  "BackInStockSubscription",
-  "UrlRedirect",
-  "UrlRedirectCacheState",
-  "StockLocation",
-  "StockLevel",
-  "SerializedUnit",
-  "InventoryLedger",
-  "Supplier",
-  "PurchaseOrder",
-  "PurchaseOrderItem",
-  "Order",
-  "StoreSettings",
-  "CmsPage",
-  "CmsSectionBlock",
-  "CmsBlockVersion",
-  "CmsMedia",
-  "WholesaleTier",
-  "Coupon",
-  "CouponProduct",
-  "CouponCategory",
-  "Cart",
-  "CartItem",
-  "CouponUsage",
-  "OrderItem",
-  "OrderItemTaxLine",
-  "OrderItemReservation",
-  "OrderReceipt",
-  "OrderStatusEvent",
-  "AbandonedCart",
-  "OrderNumberSequence",
-  "DaneDepartment",
-  "DaneMunicipality",
-  "Shipment",
-  "ShipmentItem",
-  "OrderRefund",
-  "OrderRefundItem",
-  "PaymentAttempt",
-  "PaymentTransaction",
-  "PaymentWebhookEvent",
-  "BlockedIdentity",
-  "RemittanceBatch",
-  "CodReconciliation",
-  "StoreCreditAccount",
-  "StoreCreditEntry",
-  "LocalDeliveryZone",
-  "OrderFulfillment",
-  "ShipmentPackage",
-  "ShipmentPackageItem",
-  "ShipmentEvent",
-  "EmailTemplateOverride",
-  "EmailEvent",
-  "EmailSuppression",
-  "EmailWebhookEvent",
-  "TaxInvoice",
-  "CreditNote",
-  "Address",
-  "GuestOrderChallenge",
-  "GuestOrderSession",
-  "ReturnRequest",
-  "ReturnRequestItem",
-  "ReturnRequestUnit",
-  "WarrantyClaim",
-  "SupportTicket",
-  "SupportTicketMessage",
-  "Review",
-  "PriceList",
-  "PriceListItem",
-  "Opportunity",
-  "OpportunityProposal",
-  "OpportunityProposalItem",
-  "OpportunityCopilotRun",
-  "ReferralCode",
-  "Referral",
-  "LoyaltyTxn",
-  "CustomerSegment",
-  "CustomerSegmentMembership",
-  "LifecycleJourney",
-  "LifecycleStep",
-  "LifecycleEnrollment",
-  "LifecycleMessage",
-  "OperationRateLimit",
-] as const;
-const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
-const nonBypassRoles = ["anon", "authenticated"] as const;
-const requiredConstraints = [
-  "AdminRecoveryCode_codeHash_length",
-  "AdminActionLog_metadata_object",
-  "Customer_loyaltyPoints_nonnegative",
-  "Consent_revocation_consistent",
-  "IntegrationCredential_nonce_length",
-  "IntegrationCredential_ciphertext_length",
-  "IntegrationCredential_authTag_length",
-  "DomainOutbox_claim_consistent",
-  "IdempotencyKey_requestHash_length",
-  "SecurityEvent_dedupMinute_matches",
-  "TaxGroup_rateBps_valid",
-  "TaxGroup_uvt_treatment_valid",
-  "ProductVariant_price_nonnegative",
-  "ProductVariant_cost_nonnegative",
-  "ProductVariant_compare_order",
-  "ProductMedia_variantId_productId_fkey",
-  "ProductMedia_focal_valid",
-  "ProductMedia_frames_valid",
-  "ProductMedia_posterKey_not_blank",
-  "ProductMedia_mime_valid",
-  "ProductMedia_usdzKey_valid",
-  "ProductMedia_keys_safe",
-  "ProductAttributeValue_exactly_one",
-  "Bundle_price_nonnegative",
-  "Bundle_discount_nonnegative",
-  "Bundle_discount_valid",
-  "BackInStockSubscription_status_timestamps",
-  "UrlRedirect_status_valid",
-  "UrlRedirectCacheState_singleton",
-  "UrlRedirectCacheState_version_nonnegative",
-  "StockLevel_committed_within_onHand",
-  "StockLevel_safetyStock_nonnegative",
-  "StockLevel_weightedAvgCost_nonnegative",
-  "SerializedUnit_status_consistent",
-  "InventoryLedger_operationHash_length",
-  "InventoryLedger_movement_valid",
-  "PurchaseOrderItem_unitCost_nonnegative",
-  "PurchaseOrderItem_quantityReceived_valid",
-  "PurchaseOrder_status_timestamps",
-  "Order_total_balanced",
-  "StoreSettings_key_valid",
-  "StoreSettings_revenue_threshold_positive",
-  "StoreSettings_currency_valid",
-  "StoreSettings_timeZone_valid",
-  "StoreSettings_order_prefix_valid",
-  "StoreSettings_order_padding_valid",
-  "CmsPage_slug_valid",
-  "CmsPage_title_not_blank",
-  "CmsPage_seo_not_blank",
-  "CmsPage_publication_consistent",
-  "CmsSectionBlock_type_valid",
-  "CmsSectionBlock_position_nonnegative",
-  "CmsBlockVersion_version_positive",
-  "CmsBlockVersion_content_object",
-  "CmsBlockVersion_publication_consistent",
-  "CmsBlockVersion_contentHash_length",
-  "CmsMedia_storageKey_safe",
-  "CmsMedia_contentHash_length",
-  "CmsMedia_filename_not_blank",
-  "CmsMedia_mime_valid",
-  "CmsMedia_alt_not_blank",
-  "CmsMedia_byteSize_positive",
-  "CmsMedia_dimensions_valid",
-  "CmsMedia_derivatives_array",
-  "WholesaleTier_scope_target_valid",
-  "WholesaleTier_minimumQuantity_positive",
-  "WholesaleTier_unitPrice_nonnegative",
-  "Coupon_code_valid",
-  "Coupon_name_not_blank",
-  "Coupon_discount_value_valid",
-  "Coupon_maximumDiscount_nonnegative",
-  "Coupon_minimumSubtotal_nonnegative",
-  "Coupon_schedule_valid",
-  "Coupon_usage_limits_valid",
-  "Cart_accessTokenHash_length",
-  "Cart_assistedTokenHash_length",
-  "Cart_assisted_consistent",
-  "Cart_money_nonnegative",
-  "Cart_total_balanced",
-  "Cart_itemCount_nonnegative",
-  "Cart_pricingIssues_array",
-  "CartItem_quantity_positive",
-  "CartItem_bundle_consistent",
-  "CartItem_snapshots_not_blank",
-  "CartItem_money_nonnegative",
-  "CartItem_total_balanced",
-  "CouponUsage_status_timestamps",
-  "CouponUsage_expiration_after_reservation",
-  "StoreSettings_uvt_value_valid",
-  "StoreSettings_shipping_nonnegative",
-  "StoreSettings_reservation_minutes_valid",
-  "Order_checkout_money_nonnegative",
-  "Order_discount_components_balanced",
-  "Order_checkout_snapshot_complete",
-  "Order_acceptance_valid",
-  "OrderItem_total_balanced",
-  "OrderItemTaxLine_tax_balanced",
-  "OrderItemReservation_cost_nonnegative",
-  "OrderReceipt_contentHash_length",
-  "OrderReceipt_total_balanced",
-  "AbandonedCart_status_timestamps",
-  "OrderNumberSequence_values_valid",
-  "DaneDepartment_values_valid",
-  "DaneMunicipality_values_valid",
-  "Shipment_status_timestamps",
-  "OrderRefund_requestHash_length",
-  "OrderRefund_total_balanced",
-  "OrderRefundItem_total_balanced",
-  "PaymentAttempt_requestHash_length",
-  "PaymentAttempt_amount_positive",
-  "PaymentAttempt_provider_configuration",
-  "PaymentAttempt_completion_consistent",
-  "PaymentTransaction_requestHash_length",
-  "PaymentTransaction_amount_positive",
-  "PaymentTransaction_completion_consistent",
-  "PaymentWebhookEvent_payloadHash_length",
-  "BlockedIdentity_identityHash_length",
-  "BlockedIdentity_unblock_consistent",
-  "RemittanceBatch_money_nonnegative",
-  "CodReconciliation_money_nonnegative",
-  "CodReconciliation_reconciled_consistent",
-  "StoreCreditAccount_money_nonnegative",
-  "StoreCreditEntry_sequence_positive",
-  "StoreCreditEntry_requestHash_length",
-  "StoreCreditEntry_amount_positive",
-  "RemittanceBatch_requestHash_length",
-  "StoreCreditEntry_reference_consistent",
-  "Order_delivery_coordinates_valid",
-  "Order_buyer_document_valid",
-  "Order_buyer_fiscal_regime_valid",
-  "DomainOutbox_failure_consistent",
-  "ShipmentItem_declared_value_nonnegative",
-  "LocalDeliveryZone_money_nonnegative",
-  "LocalDeliveryZone_polygon_array",
-  "OrderFulfillment_provider_configuration",
-  "ShipmentPackage_dimensions_positive",
-  "ShipmentPackage_requestHash_length",
-  "ShipmentPackage_claim_consistent",
-  "ShipmentPackage_label_consistent",
-  "ShipmentPackage_delivery_consistent",
-  "ShipmentPackageItem_quantity_positive",
-  "ShipmentPackageItem_declared_value_nonnegative",
-  "ShipmentEvent_metadata_object",
-  "EmailTemplateOverride_variables_array",
-  "EmailEvent_hashes_length",
-  "EmailEvent_status_rank_valid",
-  "EmailEvent_final_consistent",
-  "EmailEvent_content_snapshot_valid",
-  "EmailSuppression_recipientHash_length",
-  "EmailWebhookEvent_payloadHash_length",
-  "TaxInvoice_money_nonnegative",
-  "TaxInvoice_total_balanced",
-  "TaxInvoice_accepted_consistent",
-  "TaxInvoice_claim_consistent",
-  "CreditNote_money_nonnegative",
-  "CreditNote_total_balanced",
-  "CreditNote_accepted_consistent",
-  "CreditNote_claim_consistent",
-  "Notification_identity_valid",
-  "Notification_href_safe",
-  "Notification_entity_consistent",
-  "DailyFunnelMetric_source_valid",
-  "DailyFunnelMetric_counters_nonnegative",
-  "FiscalWatchSnapshot_years_valid",
-  "FiscalWatchSnapshot_threshold_valid",
-  "FiscalWatchSnapshot_money_nonnegative",
-  "FiscalWatchSnapshot_net_balanced",
-  "FiscalWatchSnapshot_threshold_consistent",
-  "BackupRun_status_consistent",
-  "BackupRun_timestamps_valid",
-  "BackupRun_keys_safe",
-  "BackupRun_failure_code_valid",
-  "DisasterRecoveryDrill_status_consistent",
-  "DisasterRecoveryDrill_timestamps_valid",
-  "DisasterRecoveryDrill_failure_code_valid",
-  "RecoveryBucketCheck_exactly_one_parent",
-  "RecoveryBucketCheck_bucket_valid",
-  "RecoveryBucketCheck_evidence_valid",
-  "OperationalHealthSnapshot_capture_key_matches",
-  "OperationalHealthSnapshot_counters_nonnegative",
-  "OperationalHealthSnapshot_database_consistent",
-  "OperationalHealthSnapshot_outbox_consistent",
-  "ChannelAccount_site_valid",
-  "ChannelAccount_external_id_valid",
-  "ChannelAccount_label_valid",
-  "ChannelAccount_scopes_valid",
-  "ChannelAccount_active_scopes",
-  "ChannelAccount_status_consistent",
-  "ChannelAccount_disconnection_valid",
-  "ChannelAccount_refresh_claim_consistent",
-  "ChannelAccount_version_nonnegative",
-  "ChannelAccount_refresh_error_valid",
-  "ChannelOAuthAttempt_site_valid",
-  "ChannelOAuthAttempt_label_valid",
-  "ChannelOAuthAttempt_state_hash_valid",
-  "ChannelOAuthAttempt_expiry_valid",
-  "ChannelOAuthAttempt_status_consistent",
-  "ChannelOAuthAttempt_completion_valid",
-  "ChannelOAuthAttempt_failure_code_valid",
-  "ChannelListing_external_ids_valid",
-  "ChannelListing_category_valid",
-  "ChannelListing_family_name_valid",
-  "ChannelListing_warehouse_consistent",
-  "ChannelListing_source_hash_length",
-  "ChannelListing_version_nonnegative",
-  "ChannelListing_quantities_nonnegative",
-  "ChannelListing_stock_version_nonnegative",
-  "ChannelListing_claim_consistent",
-  "ChannelListing_status_consistent",
-  "ChannelListing_provider_error_valid",
-  "ChannelOffer_external_item_valid",
-  "ChannelOffer_listing_type_valid",
-  "ChannelOffer_money_nonnegative",
-  "ChannelOffer_commission_valid",
-  "ChannelOffer_whole_cop_price",
-  "ChannelOffer_pricing_mode_consistent",
-  "ChannelOffer_fee_thresholds",
-  "ChannelOffer_money_balanced",
-  "ChannelOffer_stock_quantity_nonnegative",
-  "ChannelOffer_source_hash_length",
-  "ChannelOffer_version_nonnegative",
-  "ChannelOffer_status_consistent",
-  "ChannelSyncJob_deduplication_valid",
-  "ChannelSyncJob_request_hash_length",
-  "ChannelSyncJob_payload_object",
-  "ChannelSyncJob_attempts_valid",
-  "ChannelSyncJob_claim_consistent",
-  "ChannelSyncJob_status_consistent",
-  "ChannelSyncJob_failure_code_valid",
-  "ChannelPack_external_id_valid",
-  "ChannelPack_source_hash_length",
-  "ChannelPack_timestamps_valid",
-  "ChannelOrder_external_ids_valid",
-  "ChannelOrder_remote_status_valid",
-  "ChannelOrder_money_nonnegative",
-  "ChannelOrder_quantity_positive",
-  "ChannelOrder_gross_balanced",
-  "ChannelOrder_currency_cop",
-  "ChannelOrder_source_hash_length",
-  "ChannelOrder_version_nonnegative",
-  "ChannelOrder_error_codes_valid",
-  "ChannelOrder_reconciliation_consistent",
-  "ChannelOrder_stock_consistent",
-  "ChannelOrder_status_stock_valid",
-  "ChannelShipment_external_ids_valid",
-  "ChannelShipment_cost_nonnegative",
-  "ChannelShipment_source_hash_length",
-  "ChannelShipment_tracking_valid",
-  "ChannelShipment_status_timestamps",
-  "ChannelLedgerEntry_amount_positive",
-  "ChannelLedgerEntry_currency_cop",
-  "ChannelLedgerEntry_source_hash_length",
-  "ChannelLedgerEntry_deduplication_valid",
-  "ChannelLedgerEntry_payment_id_valid",
-  "ChannelLedgerEntry_parent_valid",
-  "ChannelLedgerEntry_direction_valid",
-  "ChannelLedgerEntry_manual_evidence",
-  "MetaCapiEvent_identity_valid",
-  "MetaCapiEvent_money_nonnegative",
-  "MetaCapiEvent_currency_cop",
-  "MetaCapiEvent_contents_valid",
-  "MetaCapiEvent_hashes_length",
-  "MetaCapiEvent_attempts_valid",
-  "MetaCapiEvent_claim_consistent",
-  "MetaCapiEvent_status_consistent",
-  "MetaCapiEvent_failure_code_valid",
-  "MetaCapiEvent_reconciliation_consistent",
-  "MetaCapiEvent_environment_test_valid",
-  "Address_identity_valid",
-  "GuestOrderChallenge_hashes_length",
-  "GuestOrderChallenge_attempts_valid",
-  "GuestOrderChallenge_status_consistent",
-  "GuestOrderSession_tokenHash_length",
-  "ReturnRequest_requester_valid",
-  "ReturnRequest_requestHash_length",
-  "ReturnRequest_refund_deadline_valid",
-  "ReturnRequestItem_quantity_positive",
-  "WarrantyClaim_requester_valid",
-  "WarrantyClaim_requestHash_length",
-  "SupportTicket_requester_valid",
-  "SupportTicket_ticketNumber_valid",
-  "SupportTicket_sla_valid",
-  "SupportTicketMessage_author_valid",
-  "SupportTicketMessage_body_valid",
-  "Review_requester_valid",
-  "Review_rating_valid",
-  "Review_content_valid",
-  "Review_moderation_consistent",
-  "Organization_identity_valid",
-  "Organization_version_nonnegative",
-  "Contact_identity_valid",
-  "Contact_status_consistent",
-  "Contact_verification_consistent",
-  "Contact_retention_valid",
-  "Contact_suppression_reason_valid",
-  "Contact_version_nonnegative",
-  "ContactIdentity_valueHash_length",
-  "ContactIdentity_value_valid",
-  "ContactIdentity_retirement_valid",
-  "IdentityMergeCandidate_pair_valid",
-  "IdentityMergeCandidate_arrays_valid",
-  "IdentityMergeCandidate_state_consistent",
-  "IdentityMergeCandidate_versions_nonnegative",
-  "IdentityMergeCandidate_note_valid",
-  "ContactActivity_content_valid",
-  "ContactActivity_redaction_consistent",
-  "Task_content_valid",
-  "Task_completion_consistent",
-  "Task_version_nonnegative",
-  "PriceList_identity_valid",
-  "PriceList_state_consistent",
-  "PriceListItem_unitPrice_nonnegative",
-  "Opportunity_hashes_length",
-  "Opportunity_anonymization_consistent",
-  "OpportunityProposal_total_balanced",
-  "OpportunityProposal_issue_consistent",
-  "OpportunityProposalItem_total_balanced",
-  "OpportunityCopilotRun_completion_consistent",
-  "Cart_b2b_consistent",
-  "ReferralCode_identity_valid",
-  "ReferralCode_disablement_valid",
-  "Referral_parties_distinct",
-  "Referral_rejection_reason_valid",
-  "Referral_status_consistent",
-  "LoyaltyTxn_points_nonzero",
-  "LoyaltyTxn_balance_nonnegative",
-  "LoyaltyTxn_operation_key_valid",
-  "LoyaltyTxn_references_consistent",
-  "AbandonedCart_reminders_valid",
-  "EmailEvent_growth_relation_valid",
-  "CustomerSegment_definitionHash_length",
-  "CustomerSegment_status_consistent",
-  "CustomerSegmentMembership_sequence_positive",
-  "CustomerSegmentMembership_definitionHash_length",
-  "CustomerSegmentMembership_metrics_object",
-  "CustomerSegmentMembership_reason_valid",
-  "LifecycleJourney_version_nonnegative",
-  "LifecycleJourney_status_consistent",
-  "LifecycleStep_position_valid",
-  "LifecycleStep_offset_valid",
-  "LifecycleStep_variables_array",
-  "LifecycleEnrollment_status_consistent",
-  "LifecycleMessage_dispatch_version_nonnegative",
-  "LifecycleMessage_status_consistent",
-  "OperationRateLimit_operation_check",
-  "OperationRateLimit_subjectHash_check",
-  "OperationRateLimit_ipHash_check",
-  "OperationRateLimit_ip_subject_check",
-  "OperationRateLimit_count_check",
-  "OperationRateLimit_expiration_check",
-] as const;
-const requiredPartialIndexes = [
-  "AdminUser_email_active_key",
-  "AdminUser_authUserId_active_key",
-  "Customer_email_active_key",
-  "Customer_authUserId_active_key",
-  "IntegrationCredential_provider_environment_accountName_key",
-  "Brand_slug_active_key",
-  "Category_slug_active_key",
-  "Collection_slug_active_key",
-  "Product_slug_active_key",
-  "ProductVariant_sku_active_key",
-  "ProductVariant_gtin_active_key",
-  "ProductVariant_ean_active_key",
-  "ProductVariant_one_default_active_key",
-  "ProductMedia_storageKey_active_key",
-  "ProductMedia_posterKey_active_key",
-  "ProductMedia_usdzKey_active_key",
-  "AttributeDefinition_key_active_key",
-  "CompatibilityDevice_slug_active_key",
-  "Bundle_slug_active_key",
-  "BackInStockSubscription_variantId_email_active_key",
-  "UrlRedirect_fromPath_active_key",
-  "StockLocation_code_active_key",
-  "Supplier_code_active_key",
-  "Supplier_taxId_active_key",
-  "SerializedUnit_variantId_imei_key",
-  "SerializedUnit_imei_active_key",
-  "CmsPage_slug_active_key",
-  "CmsMedia_storageKey_active_key",
-  "CmsMedia_contentHash_active_key",
-  "WholesaleTier_scope_target_active_key",
-  "Coupon_code_active_key",
-  "Cart_assistedTokenHash_key",
-  "CartItem_standalone_variant_key",
-  "CartItem_bundle_variant_key",
-  "CouponUsage_one_reservation_per_cart_key",
-  "Order_cartId_key",
-  "Order_reservationKey_key",
-  "OrderItem_sourceCartItemId_key",
-  "BlockedIdentity_kind_identityHash_active_key",
-  "PaymentTransaction_one_capture_per_attempt_key",
-  "PaymentTransaction_one_void_per_attempt_key",
-  "LocalDeliveryZone_code_active_key",
-  "ShipmentPackage_one_active_claim_key",
-  "EmailTemplateOverride_one_published_key",
-  "Address_one_default_active_key",
-  "Organization_taxId_active_key",
-  "Contact_customer_active_key",
-  "IdentityMergeCandidate_pending_pair_key",
-  "PriceList_code_active_key",
-  "OpportunityProposal_publicTokenHash_key",
-  "OpportunityProposal_orderId_key",
-  "OpportunityProposal_cartId_key",
-  "ChannelOAuthAttempt_one_active_per_account_key",
-  "ChannelShipment_packId_key",
-  "ChannelShipment_accountId_externalOrderId_single_key",
-  "IntegrationCredential_meta_active_unique",
-] as const;
-const requiredTotalUniqueIndexes = [
-  "ChannelListing_externalUserProductId_key",
-  "ChannelListing_accountId_variantId_key",
-  "ChannelOffer_externalItemId_key",
-  "ChannelOffer_listingId_listingTypeId_logisticType_key",
-  "ChannelSyncJob_deduplicationKey_key",
-  "ChannelPack_accountId_externalPackId_key",
-  "ChannelOrder_accountId_externalOrderId_key",
-  "ChannelOrder_reservationKey_key",
-  "ChannelShipment_accountId_externalShipmentId_key",
-  "ChannelLedgerEntry_deduplicationKey_key",
-  "MetaCapiEvent_eventId_key",
-  "MetaCapiEvent_orderId_key",
-  "OperationRateLimit_bucket_key",
-] as const;
-const requiredCatalogIndexes = [
-  "Product_searchVector_idx",
-  "ProductVariant_active_price_idx",
-  "ProductVariant_product_active_price_idx",
-  "ProductAttributeValue_product_attribute_normalized_idx",
-] as const;
-const requiredSecurityTriggers = [
-  "AdminActionLog_append_only",
-  "AdminActionLog_self_dealing",
-  "AdminRecoveryCode_immutable_consumption",
-  "Consent_append_only",
-  "Consent_validate_revocation",
-  "IntegrationCredential_immutable_identity",
-  "SecurityEvent_append_only",
-  "SecurityEvent_dedup_minute",
-  "Category_maintain_tree",
-  "ProductVariant_validate_identity",
-  "ProductVariantOption_validate",
-  "ProductAttributeValue_normalize",
-  "UrlRedirect_validate",
-  "Product_search_after_write",
-  "Brand_search_after_write",
-  "ProductVariant_search_after_write",
-  "ProductAttributeValue_search_after_write",
-  "AttributeDefinition_search_after_write",
-  "StockLevel_validate",
-  "StockLocation_validate_lifecycle",
-  "Supplier_validate_lifecycle",
-  "ProductVariant_validate_inventory_lifecycle",
-  "Product_validate_inventory_lifecycle",
-  "SerializedUnit_validate",
-  "InventoryLedger_validate",
-  "InventoryLedger_append_only",
-  "PurchaseOrder_enforce_state",
-  "PurchaseOrderItem_enforce_state",
-  "CmsBlockVersion_immutable_history",
-  "CmsMedia_immutable_identity",
-  "CouponUsage_enforce_transition",
-  "Order_protect_snapshots",
-  "OrderReceipt_validate",
-  "OrderRefundItem_validate",
-  "Order_validate_balance",
-  "OrderRefund_enforce_state",
-  "Shipment_enforce_state",
-  "OrderRefund_validate_totals",
-  "PaymentAttempt_validate",
-  "PaymentAttempt_enforce_state",
-  "PaymentAttempt_validate_totals",
-  "PaymentTransaction_validate",
-  "PaymentTransaction_enforce_state",
-  "PaymentTransaction_validate_totals",
-  "PaymentWebhookEvent_enforce_state",
-  "BlockedIdentity_enforce_state",
-  "CodReconciliation_validate",
-  "CodReconciliation_enforce_state",
-  "RemittanceBatch_enforce_state",
-  "StoreCreditAccount_enforce_state",
-  "StoreCreditAccount_validate_opening",
-  "StoreCreditEntry_validate",
-  "StoreCreditEntry_append_only",
-  "Order_enforce_payment_transition",
-  "Order_validate_payment_totals",
-  "Order_enforce_f3_4_snapshots",
-  "Shipment_enforce_logistics",
-  "OrderFulfillment_enforce_state",
-  "ShipmentPackage_enforce_state",
-  "ShipmentPackageItem_append_only",
-  "ShipmentPackage_validate_balance",
-  "ShipmentPackageItem_validate_balance",
-  "ShipmentEvent_append_only",
-  "EmailTemplateOverride_enforce_state",
-  "EmailEvent_enforce_state",
-  "EmailEvent_enforce_content_snapshot",
-  "EmailSuppression_append_only",
-  "EmailWebhookEvent_enforce_state",
-  "TaxInvoice_enforce_state",
-  "TaxInvoice_validate_document",
-  "CreditNote_enforce_state",
-  "CreditNote_validate_document",
-  "SerializedUnit_validate_shipment",
-  "Shipment_validate_serial_assignments",
-  "Notification_enforce_state",
-  "NotificationRead_append_only",
-  "DailyFunnelMetric_enforce",
-  "FiscalWatchSnapshot_enforce",
-  "Customer_enforce_anonymization",
-  "Address_validate",
-  "GuestOrderChallenge_enforce_state",
-  "GuestOrderSession_enforce_state",
-  "ReturnRequest_validate_requester",
-  "ReturnRequestItem_validate",
-  "ReturnRequestUnit_validate",
-  "ReturnRequest_enforce_state",
-  "WarrantyClaim_validate_requester",
-  "WarrantyClaim_validate_serial",
-  "WarrantyClaim_enforce_state",
-  "SupportTicket_validate_requester",
-  "SupportTicketMessage_validate",
-  "SupportTicketMessage_append_only",
-  "SupportTicket_enforce_state",
-  "Review_validate_requester",
-  "Review_enforce_moderation",
-  "Organization_prevent_delete",
-  "Contact_enforce_state",
-  "ContactIdentity_enforce_state",
-  "IdentityMergeCandidate_enforce_state",
-  "ContactActivity_enforce_state",
-  "Task_enforce_state",
-  "PriceListItem_enforce_mutable",
-  "PriceList_enforce_state",
-  "Organization_enforce_price_list",
-  "Opportunity_enforce_state",
-  "OpportunityProposal_enforce_state",
-  "OpportunityProposalItem_immutable_update",
-  "OpportunityProposalItem_immutable_delete",
-  "OpportunityCopilotRun_enforce_state",
-  "ReferralCode_enforce_state",
-  "Referral_enforce_state",
-  "LoyaltyTxn_validate",
-  "LoyaltyTxn_append_only",
-  "EmailEvent_validate_growth_relation",
-  "CustomerSegment_enforce_state",
-  "CustomerSegmentMembership_append_only",
-  "LifecycleJourney_enforce_state",
-  "LifecycleStep_enforce_state",
-  "LifecycleEnrollment_enforce_state",
-  "LifecycleMessage_enforce_state",
-  "ChannelAccount_credential_binding",
-  "ChannelOAuthAttempt_credential_binding",
-  "ChannelAccount_enforce_state",
-  "ChannelOAuthAttempt_enforce_state",
-  "IntegrationCredential_channel_binding",
-  "ChannelOAuthAttempt_credential_revocation",
-  "ChannelListing_enforce_state",
-  "ChannelOffer_enforce_state",
-  "ChannelSyncJob_enforce_state",
-  "ChannelPack_enforce_state",
-  "ChannelShipment_enforce_state",
-  "ChannelOrder_enforce_state",
-  "ChannelLedgerEntry_append_only",
-  "MetaCapiEvent_enforce_state",
-] as const;
-const requiredEventTriggers = [
-  "enforce_rls_on_new_table",
-  "revoke_postgrest_on_new_function",
-] as const;
+import { securityPostureManifest } from "./security-posture-manifest.js";
 
-export async function verifySecurityPosture(databaseUrl: string): Promise<string[]> {
-  const client = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5_000 });
+const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
+const postgrestRoles = [...dataApiRoles, "authenticator"] as const;
+const requiredSearchPath = ["search_path=pg_catalog,public"] as const;
+const monetaryColumnPattern =
+  /(?:Cents$|^(?:price|cost|subtotal|total|discount|tax|fee|amount|balance|credit|revenue|proceeds|charge)$|(?:^|[a-z0-9])(?:Price|Cost|Subtotal|Total|Discount|Tax|Fee|Amount|Balance|Credit|Revenue|Proceeds|Charge)$)/;
+const guardedNumericColumnPattern = /^.+$/u;
+
+type ConstraintRow = {
+  table: string;
+  name: string;
+  kind: string;
+  columns: readonly string[];
+  referencedTable: string | null;
+  referencedColumns: readonly string[];
+  deleteAction: string | null;
+  validated: boolean;
+  definition: string;
+};
+
+type FunctionRow = {
+  identity: string;
+  kind: string;
+  securityDefiner: boolean;
+  owner: string;
+  searchPath: readonly string[];
+};
+
+type IndexRow = {
+  name: string;
+  table: string;
+  method: string;
+  unique: boolean;
+  valid: boolean;
+  ready: boolean;
+  columns: readonly string[];
+  predicate: string | null;
+  definition: string;
+};
+
+type TriggerRow = {
+  table: string;
+  name: string;
+  function: string;
+  timing: string;
+  level: string;
+  events: readonly string[];
+  enabled: string;
+  deferrable: boolean;
+  initiallyDeferred: boolean;
+  definition: string;
+};
+
+type EventTriggerRow = {
+  name: string;
+  event: string;
+  function: string;
+  enabled: string;
+  platform: boolean;
+};
+
+function normalizeSql(value: string | null): string | null {
+  if (value === null) return null;
+  return value
+    .replace(/\s+/gu, " ")
+    .replace(/\s*([(),])\s*/gu, "$1")
+    .trim();
+}
+
+type NonNegativeProof = "none" | "null" | "bound";
+
+function stripOuterParentheses(expression: string): string {
+  let result = expression.trim();
+  for (;;) {
+    if (!result.startsWith("(") || !result.endsWith(")")) return result;
+    let depth = 0;
+    let quote: '"' | "'" | null = null;
+    let wraps = true;
+    for (let index = 0; index < result.length; index += 1) {
+      const character = result[index];
+      if (quote) {
+        if (character === quote) {
+          if (result[index + 1] === quote) index += 1;
+          else quote = null;
+        }
+        continue;
+      }
+      if (character === '"' || character === "'") {
+        quote = character;
+      } else if (character === "(") {
+        depth += 1;
+      } else if (character === ")") {
+        depth -= 1;
+        if (depth === 0 && index !== result.length - 1) {
+          wraps = false;
+          break;
+        }
+      }
+    }
+    if (!wraps || depth !== 0) return result;
+    result = result.slice(1, -1).trim();
+  }
+}
+
+function splitTopLevelBoolean(expression: string, keyword: "AND" | "OR"): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  const boundary = (character: string | undefined): boolean =>
+    character === undefined || !/[A-Za-z0-9_$]/u.test(character);
+
+  for (let index = 0; index < expression.length; index += 1) {
+    const character = expression[index];
+    if (quote) {
+      if (character === quote) {
+        if (expression[index + 1] === quote) index += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === "(") {
+      depth += 1;
+      continue;
+    }
+    if (character === ")") {
+      depth -= 1;
+      continue;
+    }
+    if (
+      depth === 0 &&
+      expression.slice(index, index + keyword.length).toUpperCase() === keyword &&
+      boundary(expression[index - 1]) &&
+      boundary(expression[index + keyword.length])
+    ) {
+      parts.push(expression.slice(start, index));
+      start = index + keyword.length;
+      index = start - 1;
+    }
+  }
+  if (parts.length === 0) return [expression];
+  parts.push(expression.slice(start));
+  return parts;
+}
+
+const sqlIdentifier = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`;
+
+function identifierName(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith('"') ? trimmed.slice(1, -1).replaceAll('""', '"') : trimmed;
+}
+
+function numericLiteral(value: string): number | null {
+  const withoutCast = stripOuterParentheses(value)
+    .replace(/::\s*"?[A-Za-z_][A-Za-z0-9_ ."]*"?(?:\([0-9, ]+\))?\s*$/u, "")
+    .trim();
+  const normalized = stripOuterParentheses(withoutCast);
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u.test(normalized)) return null;
+  return Number(normalized);
+}
+
+function nonNegativeAtom(expression: string, column: string): NonNegativeProof {
+  const atom = stripOuterParentheses(expression);
+  const nullMatch = new RegExp(`^(${sqlIdentifier})\\s+IS\\s+NULL$`, "iu").exec(atom);
+  if (nullMatch?.[1] && identifierName(nullMatch[1]) === column) return "null";
+
+  const anyArray = new RegExp(
+    `^(${sqlIdentifier})\\s*=\\s*ANY\\s*\\(\\s*ARRAY\\s*\\[([\\s\\S]+)\\](?:::[A-Za-z_][A-Za-z0-9_ \\[\\]]*)?\\s*\\)$`,
+    "iu",
+  ).exec(atom);
+  if (anyArray?.[1] && identifierName(anyArray[1]) === column) {
+    const items = (anyArray[2] ?? "").split(",");
+    if (
+      items.length > 0 &&
+      items.every((item) => {
+        const literal = numericLiteral(item);
+        return literal !== null && literal >= 0;
+      })
+    ) {
+      return "bound";
+    }
+    return "none";
+  }
+
+  const direct = new RegExp(`^(${sqlIdentifier})\\s*(>=|>|<=|<|=)\\s*([\\s\\S]+)$`, "iu").exec(
+    atom,
+  );
+  if (direct?.[1] && identifierName(direct[1]) === column) {
+    const literal = numericLiteral(direct[3] ?? "");
+    if (
+      literal !== null &&
+      literal >= 0 &&
+      (direct[2] === ">=" || direct[2] === ">" || direct[2] === "=")
+    ) {
+      return "bound";
+    }
+    return "none";
+  }
+
+  const reversed = new RegExp(`^([\\s\\S]+?)\\s*(<=|<|>=|>|=)\\s*(${sqlIdentifier})$`, "iu").exec(
+    atom,
+  );
+  if (reversed?.[3] && identifierName(reversed[3]) === column) {
+    const literal = numericLiteral(reversed[1] ?? "");
+    if (
+      literal !== null &&
+      literal >= 0 &&
+      (reversed[2] === "<=" || reversed[2] === "<" || reversed[2] === "=")
+    ) {
+      return "bound";
+    }
+  }
+  return "none";
+}
+
+function nonNegativeProof(expression: string, column: string): NonNegativeProof {
+  const normalized = stripOuterParentheses(expression);
+  const alternatives = splitTopLevelBoolean(normalized, "OR");
+  if (alternatives.length > 1) {
+    let proof: NonNegativeProof = "null";
+    for (const alternative of alternatives) {
+      const alternativeProof = nonNegativeProof(alternative, column);
+      if (alternativeProof === "none") return "none";
+      if (alternativeProof === "bound") proof = "bound";
+    }
+    return proof;
+  }
+
+  const conjunctions = splitTopLevelBoolean(normalized, "AND");
+  if (conjunctions.length > 1) {
+    let proof: NonNegativeProof = "none";
+    for (const conjunction of conjunctions) {
+      const conjunctionProof = nonNegativeProof(conjunction, column);
+      if (conjunctionProof === "bound") return "bound";
+      if (conjunctionProof === "null") proof = "null";
+    }
+    return proof;
+  }
+  return nonNegativeAtom(normalized, column);
+}
+
+export function constraintGuaranteesNonNegative(definition: string, column: string): boolean {
+  const expression = definition.replace(/^\s*CHECK\s*/iu, "");
+  return nonNegativeProof(expression, column) === "bound";
+}
+
+function canonicalConstraint(row: ConstraintRow): unknown {
+  return { ...row, definition: normalizeSql(row.definition) };
+}
+
+function canonicalIndex(row: IndexRow): unknown {
+  return {
+    ...row,
+    predicate: normalizeSql(row.predicate),
+    definition: normalizeSql(row.definition),
+  };
+}
+
+function canonicalTrigger(row: TriggerRow): unknown {
+  return { ...row, definition: normalizeSql(row.definition) };
+}
+
+function compareExact<Row>(
+  errors: string[],
+  label: string,
+  expectedRows: readonly Row[],
+  actualRows: readonly Row[],
+  key: (row: Row) => string,
+  canonical: (row: Row) => unknown = (row) => row,
+): void {
+  const expected = new Map<string, Row>();
+  const actual = new Map<string, Row>();
+
+  for (const row of expectedRows) {
+    const rowKey = key(row);
+    if (expected.has(rowKey)) errors.push(`Duplicate ${label} manifest entry ${rowKey}.`);
+    expected.set(rowKey, row);
+  }
+  for (const row of actualRows) {
+    const rowKey = key(row);
+    if (actual.has(rowKey)) errors.push(`Duplicate ${label} found: ${rowKey}.`);
+    actual.set(rowKey, row);
+  }
+
+  for (const [rowKey, expectedRow] of expected) {
+    const actualRow = actual.get(rowKey);
+    if (!actualRow) {
+      errors.push(`Missing ${label} ${rowKey}.`);
+    } else if (JSON.stringify(canonical(expectedRow)) !== JSON.stringify(canonical(actualRow))) {
+      errors.push(
+        `${label} ${rowKey} differs: expected ${JSON.stringify(canonical(expectedRow))}; found ${JSON.stringify(canonical(actualRow))}.`,
+      );
+    }
+  }
+  for (const rowKey of actual.keys()) {
+    if (!expected.has(rowKey)) errors.push(`Unexpected ${label} ${rowKey}.`);
+  }
+}
+
+function compareSequence(
+  errors: string[],
+  label: string,
+  expected: readonly string[],
+  actual: readonly string[],
+): void {
+  if (
+    expected.length === actual.length &&
+    expected.every((value, index) => value === actual[index])
+  ) {
+    return;
+  }
+  const missing = expected.filter((value) => !actual.includes(value));
+  const extra = actual.filter((value) => !expected.includes(value));
+  errors.push(
+    `${label} differs from its exact manifest (missing: ${JSON.stringify(missing)}; unexpected: ${JSON.stringify(extra)}; expected order: ${JSON.stringify(expected)}; actual order: ${JSON.stringify(actual)}).`,
+  );
+}
+
+export async function verifySecurityPosture(
+  databaseUrl: string,
+  existingClient?: pg.Client,
+): Promise<string[]> {
+  const ownsClient = existingClient === undefined;
+  const client =
+    existingClient ??
+    new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5_000 });
   const errors: string[] = [];
 
   try {
-    await client.connect();
+    if (ownsClient) await client.connect();
     const version = await client.query<{ server_version: string; server_version_num: string }>(
       "SELECT current_setting('server_version') AS server_version, current_setting('server_version_num') AS server_version_num",
     );
@@ -733,15 +353,64 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
       role_name: string;
       rolsuper: boolean;
       rolbypassrls: boolean;
+      rolinherit: boolean;
     }>(
-      `SELECT rolname AS role_name, rolsuper, rolbypassrls
+      `SELECT rolname AS role_name, rolsuper, rolbypassrls, rolinherit
        FROM pg_roles WHERE rolname = ANY($1::text[])`,
-      [nonBypassRoles],
+      [postgrestRoles],
     );
-    for (const role of nonBypassRoles) {
+    const platformRoles = await client.query<{ reserved_roles: string | null }>(
+      "SELECT current_setting('supautils.reserved_roles', true) AS reserved_roles",
+    );
+    const reservedRoles = new Set(
+      (platformRoles.rows[0]?.reserved_roles ?? "")
+        .split(",")
+        .map((entry) => entry.trim().replace(/\*$/u, ""))
+        .filter(Boolean),
+    );
+    for (const role of dataApiRoles) {
       const row = roleFlags.rows.find((item) => item.role_name === role);
-      if (!row || row.rolsuper || row.rolbypassrls) {
-        errors.push(`Role ${role} must exist without SUPERUSER or BYPASSRLS.`);
+      const reservedBypass = role === "service_role" && reservedRoles.has(role);
+      if (!row || row.rolsuper || (row.rolbypassrls && !reservedBypass)) {
+        errors.push(
+          `Role ${role} must exist without SUPERUSER or BYPASSRLS${role === "service_role" ? " unless BYPASSRLS is explicitly reserved by supautils for service_role" : ""}.`,
+        );
+      }
+    }
+    const authenticatorRole = roleFlags.rows.find((item) => item.role_name === "authenticator");
+    if (
+      authenticatorRole &&
+      (authenticatorRole.rolsuper || authenticatorRole.rolbypassrls || authenticatorRole.rolinherit)
+    ) {
+      errors.push("Role authenticator must not have SUPERUSER, BYPASSRLS, or INHERIT.");
+    }
+
+    const dataApiMemberships = await client.query<{ member_name: string; role_name: string }>(
+      `SELECT member_role.rolname AS member_name, granted_role.rolname AS role_name
+       FROM pg_auth_members membership
+       JOIN pg_roles member_role ON member_role.oid = membership.member
+       JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+       WHERE member_role.rolname = ANY($1::text[])
+       ORDER BY member_role.rolname, granted_role.rolname`,
+      [dataApiRoles],
+    );
+    for (const row of dataApiMemberships.rows) {
+      errors.push(`Role ${row.member_name} must not hold membership in role ${row.role_name}.`);
+    }
+
+    if (authenticatorRole) {
+      const authenticatorMemberships = await client.query<{ role_name: string }>(
+        `SELECT granted_role.rolname AS role_name
+         FROM pg_auth_members membership
+         JOIN pg_roles member_role ON member_role.oid = membership.member
+         JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+         WHERE member_role.rolname = 'authenticator'
+           AND NOT (granted_role.rolname = ANY($1::text[]))
+         ORDER BY granted_role.rolname`,
+        [dataApiRoles],
+      );
+      for (const row of authenticatorMemberships.rows) {
+        errors.push(`Role authenticator holds unexpected membership in role ${row.role_name}.`);
       }
     }
 
@@ -758,17 +427,13 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
          AND cls.relname <> '_prisma_migrations'
        ORDER BY cls.relname`,
     );
-    const tableRows = tables.rows;
-
-    for (const requiredTable of requiredTables) {
-      const table = tableRows.find((row) => row.table_name === requiredTable);
-      if (!table) {
-        errors.push(`Missing required table ${requiredTable}.`);
-      } else if (!table.row_security || !table.force_row_security) {
-        errors.push(`${requiredTable} must have RLS enabled and forced.`);
-      }
-    }
-    for (const table of tableRows) {
+    compareSequence(
+      errors,
+      "Protected table set",
+      securityPostureManifest.tables,
+      tables.rows.map((row) => row.table_name),
+    );
+    for (const table of tables.rows) {
       if (!table.row_security || !table.force_row_security) {
         errors.push(`Public table ${table.table_name} is not deny-by-default.`);
       }
@@ -783,19 +448,11 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
        JOIN pg_class cls ON cls.oid = pol.polrelid
        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
        WHERE ns.nspname = 'public'
-         AND (
-           pol.polroles = '{0}'::oid[] OR
-           EXISTS (
-             SELECT 1 FROM pg_roles r
-             WHERE r.oid = ANY(pol.polroles)
-               AND r.rolname = ANY($1::text[])
-           )
-         )`,
-      [dataApiRoles],
+       ORDER BY cls.relname, pol.polname`,
     );
     for (const row of exposedPolicies.rows) {
       errors.push(
-        `Policy ${row.policy_name} on ${row.table_name} exposes public schema data to PUBLIC or Data API roles.`,
+        `Policy ${row.policy_name} on ${row.table_name} violates deny-by-default zero-policy posture on schema public.`,
       );
     }
 
@@ -808,12 +465,18 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
               has_schema_privilege(role.oid, 'public', 'USAGE') AS has_usage,
               has_schema_privilege(role.oid, 'public', 'CREATE') AS has_create
        FROM pg_roles role WHERE role.rolname = ANY($1::text[])`,
-      [dataApiRoles],
+      [postgrestRoles],
     );
     for (const role of dataApiRoles) {
       const row = schemaPrivileges.rows.find((item) => item.role_name === role);
       if (!row || row.has_usage || row.has_create) {
         errors.push(`PostgREST role ${role} retains public schema privileges.`);
+      }
+    }
+    if (authenticatorRole) {
+      const authSchema = schemaPrivileges.rows.find((item) => item.role_name === "authenticator");
+      if (authSchema && (authSchema.has_usage || authSchema.has_create)) {
+        errors.push("PostgREST role authenticator retains public schema privileges.");
       }
     }
 
@@ -827,16 +490,66 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
        CROSS JOIN pg_class cls
        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
        CROSS JOIN LATERAL unnest(ARRAY[
-         'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'
+         'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER', 'MAINTAIN'
        ]) AS privilege
        WHERE role.rolname = ANY($1::text[])
          AND ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f')
-         AND has_table_privilege(role.oid, cls.oid, privilege)`,
-      [dataApiRoles],
+         AND has_table_privilege(role.oid, cls.oid, privilege)
+       ORDER BY role.rolname, cls.relname, privilege`,
+      [postgrestRoles],
     );
     for (const row of relationPrivileges.rows) {
       errors.push(
         `PostgREST role ${row.role_name} retains ${row.privilege} on ${row.relation_name}.`,
+      );
+    }
+
+    const anyColumnPrivileges = await client.query<{
+      role_name: string;
+      relation_name: string;
+      privilege: string;
+    }>(
+      `SELECT role.rolname AS role_name, cls.relname AS relation_name, privilege
+       FROM pg_roles role
+       CROSS JOIN pg_class cls
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       CROSS JOIN LATERAL unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']) AS privilege
+       WHERE role.rolname = ANY($1::text[])
+         AND ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND has_any_column_privilege(role.oid, cls.oid, privilege)
+       ORDER BY role.rolname, cls.relname, privilege`,
+      [postgrestRoles],
+    );
+    for (const row of anyColumnPrivileges.rows) {
+      errors.push(
+        `PostgREST role ${row.role_name} retains column-level ${row.privilege} on ${row.relation_name}.`,
+      );
+    }
+
+    const explicitColumnPrivileges = await client.query<{
+      relation_name: string;
+      column_name: string;
+      grantee_name: string;
+      privilege: string;
+    }>(
+      `SELECT cls.relname AS relation_name, att.attname AS column_name,
+              COALESCE(grantee.rolname, 'PUBLIC') AS grantee_name, acl.privilege_type AS privilege
+       FROM pg_attribute att
+       JOIN pg_class cls ON cls.oid = att.attrelid
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       CROSS JOIN LATERAL aclexplode(att.attacl) AS acl
+       LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+       WHERE ns.nspname = 'public'
+         AND cls.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND att.attnum > 0 AND NOT att.attisdropped
+         AND att.attacl IS NOT NULL
+         AND (acl.grantee = 0 OR grantee.rolname = ANY($1::text[]))
+       ORDER BY cls.relname, att.attname, grantee_name, acl.privilege_type`,
+      [postgrestRoles],
+    );
+    for (const row of explicitColumnPrivileges.rows) {
+      errors.push(
+        `Role ${row.grantee_name} retains column privilege ${row.privilege} on ${row.relation_name}.${row.column_name}.`,
       );
     }
 
@@ -852,13 +565,118 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
        CROSS JOIN LATERAL unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) AS privilege
        WHERE role.rolname = ANY($1::text[])
          AND ns.nspname = 'public' AND cls.relkind = 'S'
-         AND has_sequence_privilege(role.oid, cls.oid, privilege)`,
-      [dataApiRoles],
+         AND has_sequence_privilege(role.oid, cls.oid, privilege)
+       ORDER BY role.rolname, cls.relname, privilege`,
+      [postgrestRoles],
     );
     for (const row of sequencePrivileges.rows) {
       errors.push(
         `PostgREST role ${row.role_name} retains ${row.privilege} on sequence ${row.sequence_name}.`,
       );
+    }
+
+    const defaultAclExposure = await client.query<{
+      grantor_name: string;
+      object_type: string;
+      grantee_name: string;
+      privilege: string;
+    }>(
+      `SELECT grantor.rolname AS grantor_name, default_acl.defaclobjtype AS object_type,
+              COALESCE(grantee.rolname, 'PUBLIC') AS grantee_name, acl.privilege_type AS privilege
+       FROM pg_default_acl default_acl
+       JOIN pg_namespace ns ON ns.oid = default_acl.defaclnamespace
+       JOIN pg_roles grantor ON grantor.oid = default_acl.defaclrole
+       CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS acl
+       LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+       WHERE ns.nspname = 'public'
+         AND grantor.rolname <> 'supabase_admin'
+         AND (acl.grantee = 0 OR grantee.rolname = ANY($1::text[]))
+       ORDER BY grantor.rolname, default_acl.defaclobjtype, grantee_name, acl.privilege_type`,
+      [postgrestRoles],
+    );
+    for (const row of defaultAclExposure.rows) {
+      errors.push(
+        `Default privilege in public from ${row.grantor_name} exposes ${row.object_type} (${row.privilege}) to ${row.grantee_name}.`,
+      );
+    }
+
+    const allowedExtensionNames = securityPostureManifest.requiredExtensions.map(
+      (extension) => extension.name,
+    );
+    const installedExtensions = await client.query<{ name: string; schema: string }>(
+      `SELECT extension.extname AS name, ns.nspname AS schema
+       FROM pg_extension extension
+       JOIN pg_namespace ns ON ns.oid = extension.extnamespace
+       WHERE extension.extname = ANY($1::text[])`,
+      [allowedExtensionNames],
+    );
+    for (const required of securityPostureManifest.requiredExtensions) {
+      const installed = installedExtensions.rows.find(
+        (extension) => extension.name === required.name,
+      );
+      if (!installed) {
+        errors.push(`Required PostgreSQL extension ${required.name} is not installed.`);
+      } else if (!required.allowedSchemas.some((schema) => schema === installed.schema)) {
+        errors.push(
+          `Extension ${required.name} must be installed in public or extensions; found ${installed.schema}.`,
+        );
+      }
+    }
+
+    const unexpectedPublicExtensions = await client.query<{ name: string }>(
+      `SELECT extension.extname AS name
+       FROM pg_extension extension
+       JOIN pg_namespace ns ON ns.oid = extension.extnamespace
+       WHERE ns.nspname = 'public'
+         AND NOT (extension.extname = ANY($1::text[]))
+       ORDER BY extension.extname`,
+      [allowedExtensionNames],
+    );
+    for (const row of unexpectedPublicExtensions.rows) {
+      errors.push(`Unexpected PostgreSQL extension ${row.name} is installed in schema public.`);
+    }
+
+    const functions = await client.query<FunctionRow>(
+      `SELECT proc.oid::regprocedure::text AS identity, proc.prokind AS kind,
+              proc.prosecdef AS "securityDefiner", role.rolname AS owner,
+              COALESCE((
+                SELECT array_agg('search_path=' || regexp_replace(split_part(config, '=', 2), '\\s+', '', 'g'))
+                FROM unnest(proc.proconfig) AS config
+                WHERE config LIKE 'search_path=%'
+              ), '{}'::text[]) AS "searchPath"
+       FROM pg_proc proc
+       JOIN pg_namespace ns ON ns.oid = proc.pronamespace
+       JOIN pg_roles role ON role.oid = proc.proowner
+       WHERE ns.nspname = 'public'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM pg_depend dependency
+           JOIN pg_extension extension ON extension.oid = dependency.refobjid
+           WHERE dependency.classid = 'pg_proc'::regclass
+             AND dependency.objid = proc.oid
+             AND dependency.deptype = 'e'
+             AND dependency.refclassid = 'pg_extension'::regclass
+             AND extension.extname = ANY($1::text[])
+         )
+       ORDER BY identity`,
+      [allowedExtensionNames],
+    );
+    compareExact(
+      errors,
+      "public function",
+      securityPostureManifest.functions,
+      functions.rows,
+      (row) => row.identity,
+    );
+    for (const row of functions.rows) {
+      if (
+        row.searchPath.length !== requiredSearchPath.length ||
+        row.searchPath.some((value, index) => value !== requiredSearchPath[index])
+      ) {
+        errors.push(
+          `Public function ${row.identity} must have a fixed search_path of pg_catalog,public.`,
+        );
+      }
     }
 
     const functionPrivileges = await client.query<{ role_name: string; function_name: string }>(
@@ -868,134 +686,271 @@ export async function verifySecurityPosture(databaseUrl: string): Promise<string
        JOIN pg_namespace ns ON ns.oid = proc.pronamespace
        WHERE role.rolname = ANY($1::text[])
          AND ns.nspname = 'public'
-         AND has_function_privilege(role.oid, proc.oid, 'EXECUTE')`,
-      [dataApiRoles],
+         AND has_function_privilege(role.oid, proc.oid, 'EXECUTE')
+       ORDER BY role.rolname, proc.proname`,
+      [postgrestRoles],
     );
     for (const row of functionPrivileges.rows) {
       errors.push(`PostgREST role ${row.role_name} can execute ${row.function_name}.`);
     }
 
-    const publicPrivileges = await client.query<{
-      schema_usage: boolean;
-      relation_name: string | null;
-      function_name: string | null;
+    const publicSchemaPrivileges = await client.query<{
+      has_usage: boolean;
+      has_create: boolean;
     }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM pg_namespace ns
-         CROSS JOIN LATERAL aclexplode(ns.nspacl) AS acl
-         WHERE ns.nspname = 'public' AND acl.grantee = 0
-           AND acl.privilege_type IN ('USAGE', 'CREATE')
-       ) AS schema_usage,
-       (SELECT cls.relname FROM pg_class cls
-        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
-        WHERE ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
-          AND EXISTS (
-            SELECT 1 FROM aclexplode(cls.relacl) AS acl
-            WHERE acl.grantee = 0
-          ) LIMIT 1) AS relation_name,
-       (SELECT proc.proname FROM pg_proc proc
-        JOIN pg_namespace ns ON ns.oid = proc.pronamespace
-        WHERE ns.nspname = 'public' AND (
-          proc.proacl IS NULL OR EXISTS (
-            SELECT 1 FROM aclexplode(proc.proacl) AS acl
-            WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
-          )
-        ) LIMIT 1) AS function_name`,
+      `SELECT has_schema_privilege('public', 'public', 'USAGE') AS has_usage,
+              has_schema_privilege('public', 'public', 'CREATE') AS has_create`,
     );
-    const publicRow = publicPrivileges.rows[0];
-    if (publicRow?.schema_usage || publicRow?.relation_name || publicRow?.function_name) {
-      const target = publicRow.relation_name ?? publicRow.function_name;
-      errors.push(
-        `PUBLIC retains schema, relation, or function privileges${target ? ` (${target})` : ""}.`,
-      );
+    const publicSchemaRow = publicSchemaPrivileges.rows[0];
+    if (publicSchemaRow && (publicSchemaRow.has_usage || publicSchemaRow.has_create)) {
+      errors.push("PUBLIC retains schema privileges on public.");
     }
 
-    const eventTriggers = await client.query<{ name: string; enabled: string }>(
-      "SELECT evtname AS name, evtenabled AS enabled FROM pg_event_trigger WHERE evtname = ANY($1::text[])",
-      [requiredEventTriggers],
+    const publicRelationPrivileges = await client.query<{
+      relation_name: string;
+      privilege: string;
+    }>(
+      `SELECT cls.relname AS relation_name, acl.privilege_type AS privilege
+       FROM pg_class cls
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       CROSS JOIN LATERAL aclexplode(cls.relacl) AS acl
+       WHERE ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+         AND acl.grantee = 0
+       ORDER BY cls.relname, acl.privilege_type`,
     );
-    for (const requiredTrigger of requiredEventTriggers) {
-      const trigger = eventTriggers.rows.find((item) => item.name === requiredTrigger);
-      if (!trigger || trigger.enabled !== "O") {
-        errors.push(`Event trigger ${requiredTrigger} is missing or disabled.`);
+    for (const row of publicRelationPrivileges.rows) {
+      errors.push(`PUBLIC retains ${row.privilege} on relation ${row.relation_name}.`);
+    }
+
+    const publicFunctionPrivileges = await client.query<{ function_name: string }>(
+      `SELECT proc.oid::regprocedure::text AS function_name
+       FROM pg_proc proc
+       JOIN pg_namespace ns ON ns.oid = proc.pronamespace
+       WHERE ns.nspname = 'public'
+         AND (
+           proc.proacl IS NULL OR EXISTS (
+             SELECT 1 FROM aclexplode(proc.proacl) AS acl
+             WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+           )
+         )
+       ORDER BY function_name`,
+    );
+    for (const row of publicFunctionPrivileges.rows) {
+      errors.push(`PUBLIC retains EXECUTE on routine ${row.function_name}.`);
+    }
+
+    const eventTriggers = await client.query<EventTriggerRow>(
+      `SELECT evt.evtname AS name, evt.evtevent AS event,
+              ns.nspname || '.' || regexp_replace(
+                evt.evtfoid::regprocedure::text, '^' || ns.nspname || '\\.', ''
+              ) AS function,
+              evt.evtenabled AS enabled,
+              ns.nspname <> 'public' AS platform
+       FROM pg_event_trigger evt
+       JOIN pg_proc proc ON proc.oid = evt.evtfoid
+       JOIN pg_namespace ns ON ns.oid = proc.pronamespace
+       ORDER BY evt.evtname`,
+    );
+    const supabasePlatform = await client.query<{ present: boolean }>(
+      "SELECT to_regrole('supabase_admin') IS NOT NULL AND to_regprocedure('extensions.pgrst_ddl_watch()') IS NOT NULL AS present",
+    );
+    const expectedEventTriggers = securityPostureManifest.eventTriggers.filter(
+      (trigger) => supabasePlatform.rows[0]?.present === true || !trigger.platform,
+    );
+    compareExact(
+      errors,
+      "event trigger",
+      expectedEventTriggers,
+      eventTriggers.rows,
+      (row) => row.name,
+    );
+    for (const eventTrigger of eventTriggers.rows) {
+      if (eventTrigger.enabled !== "O") {
+        errors.push(
+          `Event trigger ${eventTrigger.name} is not enabled in origin mode (found ${eventTrigger.enabled}).`,
+        );
       }
     }
 
-    const rowTriggers = await client.query<{ trigger_name: string; enabled: string }>(
-      `SELECT tg.tgname AS trigger_name, tg.tgenabled AS enabled
+    const triggers = await client.query<TriggerRow>(
+      `SELECT cls.relname AS table, tg.tgname AS name,
+              tg.tgfoid::regprocedure::text AS function,
+              CASE WHEN tg.tgtype & 64 <> 0 THEN 'INSTEAD OF'
+                   WHEN tg.tgtype & 2 <> 0 THEN 'BEFORE' ELSE 'AFTER' END AS timing,
+              CASE WHEN tg.tgtype & 1 <> 0 THEN 'ROW' ELSE 'STATEMENT' END AS level,
+              ARRAY_REMOVE(ARRAY[
+                CASE WHEN tg.tgtype & 4 <> 0 THEN 'INSERT' END,
+                CASE WHEN tg.tgtype & 8 <> 0 THEN 'DELETE' END,
+                CASE WHEN tg.tgtype & 16 <> 0 THEN 'UPDATE' END,
+                CASE WHEN tg.tgtype & 32 <> 0 THEN 'TRUNCATE' END
+              ], NULL) AS events,
+              tg.tgenabled AS enabled, tg.tgdeferrable AS deferrable,
+              tg.tginitdeferred AS "initiallyDeferred",
+              pg_get_triggerdef(tg.oid, true) AS definition
        FROM pg_trigger tg
        JOIN pg_class cls ON cls.oid = tg.tgrelid
        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
        WHERE ns.nspname = 'public' AND NOT tg.tgisinternal
-         AND tg.tgname = ANY($1::text[])`,
-      [requiredSecurityTriggers],
+       ORDER BY cls.relname, tg.tgname`,
     );
-    for (const requiredTrigger of requiredSecurityTriggers) {
-      const row = rowTriggers.rows.find((item) => item.trigger_name === requiredTrigger);
-      if (!row || row.enabled !== "O") {
-        errors.push(`Security trigger ${requiredTrigger} is missing or disabled.`);
+    compareExact(
+      errors,
+      "row trigger",
+      securityPostureManifest.triggers,
+      triggers.rows,
+      (row) => `${row.table}.${row.name}`,
+      canonicalTrigger,
+    );
+    for (const trigger of triggers.rows) {
+      if (trigger.enabled !== "O") {
+        errors.push(
+          `Trigger ${trigger.table}.${trigger.name} is not enabled in origin mode (found ${trigger.enabled}).`,
+        );
       }
     }
 
-    const constraints = await client.query<{ constraint_name: string }>(
-      `SELECT conname AS constraint_name FROM pg_constraint
-       WHERE connamespace = 'public'::regnamespace AND conname = ANY($1::text[])`,
-      [requiredConstraints],
+    const constraints = await client.query<ConstraintRow>(
+      `SELECT cls.relname AS table, con.conname AS name, con.contype AS kind,
+              COALESCE((
+                SELECT array_agg(att.attname::text ORDER BY keys.ordinality)
+                FROM unnest(con.conkey) WITH ORDINALITY AS keys(attnum, ordinality)
+                JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = keys.attnum
+              ), '{}'::text[]) AS columns,
+              refcls.relname AS "referencedTable",
+              COALESCE((
+                SELECT array_agg(att.attname::text ORDER BY keys.ordinality)
+                FROM unnest(con.confkey) WITH ORDINALITY AS keys(attnum, ordinality)
+                JOIN pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = keys.attnum
+              ), '{}'::text[]) AS "referencedColumns",
+              CASE con.confdeltype
+                WHEN 'a' THEN 'NO ACTION' WHEN 'r' THEN 'RESTRICT' WHEN 'c' THEN 'CASCADE'
+                WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT'
+              END AS "deleteAction",
+              con.convalidated AS validated,
+              pg_get_constraintdef(con.oid, true) AS definition
+       FROM pg_constraint con
+       JOIN pg_class cls ON cls.oid = con.conrelid
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       LEFT JOIN pg_class refcls ON refcls.oid = con.confrelid
+       WHERE ns.nspname = 'public' AND con.contype IN ('c', 'f')
+       ORDER BY cls.relname, con.conname`,
     );
-    for (const required of requiredConstraints) {
-      if (!constraints.rows.some((row) => row.constraint_name === required)) {
-        errors.push(`Missing integrity constraint ${required}.`);
+    compareExact(
+      errors,
+      "constraint",
+      securityPostureManifest.constraints,
+      constraints.rows,
+      (row) => `${row.table}.${row.name}`,
+      canonicalConstraint,
+    );
+    for (const constraint of constraints.rows) {
+      if (!constraint.validated) {
+        errors.push(`Constraint ${constraint.table}.${constraint.name} is not validated.`);
       }
     }
 
-    const indexes = await client.query<{ index_name: string; index_definition: string }>(
-      `SELECT indexname AS index_name, indexdef AS index_definition
-       FROM pg_indexes
-       WHERE schemaname = 'public'
-         AND indexname = ANY($1::text[])`,
-      [[...requiredPartialIndexes, ...requiredTotalUniqueIndexes, ...requiredCatalogIndexes]],
+    const numericColumns = await client.query<{ table: string; column: string; type: string }>(
+      `SELECT cls.relname AS table, att.attname AS column, typ.typname AS type
+       FROM pg_attribute att
+       JOIN pg_class cls ON cls.oid = att.attrelid
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       JOIN pg_type typ ON typ.oid = att.atttypid
+       WHERE ns.nspname = 'public' AND cls.relkind IN ('r', 'p')
+         AND cls.relname <> '_prisma_migrations'
+         AND att.attnum > 0 AND NOT att.attisdropped
+         AND typ.typname IN ('int2', 'int4', 'int8', 'numeric', 'float4', 'float8')
+       ORDER BY cls.relname, att.attname`,
     );
-    for (const required of requiredPartialIndexes) {
-      const index = indexes.rows.find((row) => row.index_name === required);
-      if (
-        !index ||
-        !index.index_definition.startsWith("CREATE UNIQUE INDEX") ||
-        !index.index_definition.includes(" WHERE ")
-      ) {
-        errors.push(`Missing partial unique index ${required}.`);
+    const signedColumns = new Set(
+      securityPostureManifest.signedColumns.map((row) => `${row.table}.${row.column}`),
+    );
+    const guardedColumns = new Set<string>();
+    for (const row of numericColumns.rows) {
+      const key = `${row.table}.${row.column}`;
+      if (monetaryColumnPattern.test(row.column) && row.type !== "int8") {
+        errors.push(
+          `Monetary column ${key} must use int8 (BIGINT) COP cents instead of ${row.type}.`,
+        );
+      }
+      if (!guardedNumericColumnPattern.test(row.column)) continue;
+      guardedColumns.add(key);
+      if (signedColumns.has(key)) continue;
+      const hasNonNegativeCheck = constraints.rows.some(
+        (constraint) =>
+          constraint.kind === "c" &&
+          constraint.validated === true &&
+          constraint.table === row.table &&
+          constraintGuaranteesNonNegative(constraint.definition, row.column),
+      );
+      if (!hasNonNegativeCheck) {
+        errors.push(`Monetary/stock column ${key} has no semantic non-negative CHECK coverage.`);
       }
     }
-    for (const required of requiredTotalUniqueIndexes) {
-      const index = indexes.rows.find((row) => row.index_name === required);
-      if (!index || !index.index_definition.startsWith("CREATE UNIQUE INDEX")) {
-        errors.push(`Missing unique index ${required}.`);
-      }
-    }
-    for (const required of requiredCatalogIndexes) {
-      const index = indexes.rows.find((row) => row.index_name === required);
-      if (!index) errors.push(`Missing catalog index ${required}.`);
-      if (
-        required === "Product_searchVector_idx" &&
-        index &&
-        !/USING gin/i.test(index.index_definition)
-      ) {
-        errors.push("Product_searchVector_idx must use GIN.");
+    for (const key of signedColumns) {
+      if (!guardedColumns.has(key)) {
+        errors.push(`Signed numeric exception ${key} no longer exists.`);
       }
     }
 
-    const migrations = await client.query<{ total: number; healthy: number }>(
-      `SELECT count(*)::int AS total,
-              count(*) FILTER (WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL)::int AS healthy
-       FROM _prisma_migrations`,
+    const indexes = await client.query<IndexRow>(
+      `SELECT idx.relname AS name, cls.relname AS table, am.amname AS method,
+              indexdef.indisunique AS unique, indexdef.indisvalid AS valid,
+              indexdef.indisready AS ready,
+              ARRAY(
+                SELECT pg_get_indexdef(indexdef.indexrelid, keys.position, true)
+                FROM generate_series(1, indexdef.indnkeyatts) AS keys(position)
+              ) AS columns,
+              pg_get_expr(indexdef.indpred, indexdef.indrelid, true) AS predicate,
+              pg_get_indexdef(indexdef.indexrelid) AS definition
+       FROM pg_index indexdef
+       JOIN pg_class idx ON idx.oid = indexdef.indexrelid
+       JOIN pg_class cls ON cls.oid = indexdef.indrelid
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       JOIN pg_am am ON am.oid = idx.relam
+       WHERE ns.nspname = 'public'
+       ORDER BY idx.relname`,
     );
-    const migration = migrations.rows[0];
-    if (!migration || migration.total === 0 || migration.total !== migration.healthy) {
-      errors.push("The Prisma migration chain contains missing, failed, or rolled-back entries.");
+    compareExact(
+      errors,
+      "index",
+      securityPostureManifest.indexes,
+      indexes.rows,
+      (row) => row.name,
+      canonicalIndex,
+    );
+    for (const row of indexes.rows) {
+      if (!row.valid || !row.ready) {
+        errors.push(`Index ${row.name} on ${row.table} is not valid and ready.`);
+      }
+    }
+
+    const migrations = await client.query<{
+      migration_name: string;
+      finished_at: Date | null;
+      rolled_back_at: Date | null;
+    }>(
+      `SELECT migration_name, finished_at, rolled_back_at
+       FROM _prisma_migrations ORDER BY migration_name`,
+    );
+    const appliedMigrations = migrations.rows.filter(
+      (row) => row.finished_at !== null && row.rolled_back_at === null,
+    );
+    compareSequence(
+      errors,
+      "Prisma migration sequence",
+      securityPostureManifest.migrations,
+      appliedMigrations.map((row) => row.migration_name),
+    );
+    if (migrations.rows.some((row) => row.finished_at === null && row.rolled_back_at === null)) {
+      errors.push("The Prisma migration chain contains an unfinished migration.");
+    }
+    if (migrations.rows.some((row) => row.finished_at !== null && row.rolled_back_at !== null)) {
+      errors.push("The Prisma migration chain contains an applied migration marked rolled back.");
     }
   } catch (error) {
     errors.push(error instanceof Error ? error.message : "Unknown database verification error.");
   } finally {
-    await client.end().catch(() => undefined);
+    if (ownsClient) await client.end().catch(() => undefined);
   }
 
   return errors;
@@ -1011,7 +966,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exitCode = 1;
   } else {
     console.log(
-      `Database security posture verified on PostgreSQL 17: ${requiredTables.length} protected tables.`,
+      `Database security posture verified on PostgreSQL 17: ${securityPostureManifest.tables.length} protected tables.`,
     );
   }
 }

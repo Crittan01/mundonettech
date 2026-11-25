@@ -18,7 +18,12 @@ import {
   lifecycleVersion,
   type LifecycleAudit,
 } from "./lifecycle-shared.js";
-import { Prisma } from "./generated/client.js";
+import {
+  Prisma,
+  type LifecycleEnrollmentStatus,
+  type LifecycleMessage,
+} from "./generated/client.js";
+import { retryableLockDivergenceError } from "./crm-shared.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 import type { DatabaseExecutor } from "./primitives.js";
 import { marketingEmailConsentGranted } from "./growth-service.js";
@@ -132,6 +137,7 @@ export class LifecycleService {
     const values = this.input(input);
     return inInventoryTransaction(this.db, async (tx) => {
       await lifecycleActor(tx, audit, "crm:write");
+      await acquireOperationLocks(tx, [`customer-segment:${values.segmentId}`]);
       await this.assertSegment(tx, values.segmentId, false);
       const journey = await tx.lifecycleJourney.create({
         data: {
@@ -158,7 +164,10 @@ export class LifecycleService {
     const values = this.input(input);
     return inInventoryTransaction(this.db, async (tx) => {
       await lifecycleActor(tx, audit, "crm:write");
-      await acquireOperationLocks(tx, [`lifecycle-journey:${input.journeyId}`]);
+      await acquireOperationLocks(tx, [
+        `customer-segment:${values.segmentId}`,
+        `lifecycle-journey:${input.journeyId}`,
+      ]);
       const current = await tx.lifecycleJourney.findUnique({ where: { id: input.journeyId } });
       if (!current) throw new LifecycleError("NOT_FOUND", "Lifecycle journey not found.");
       if (current.status !== "DRAFT" || current.version !== input.expectedVersion) {
@@ -288,9 +297,15 @@ export class LifecycleService {
       if (input.action === "ARCHIVE") {
         const enrollments = await tx.lifecycleEnrollment.findMany({
           where: { journeyId: current.id, status: "ACTIVE" },
-          select: { id: true },
+          select: { id: true, customerId: true },
           orderBy: { id: "asc" },
         });
+        if (enrollments.length > 0) {
+          await acquireOperationLocks(
+            tx,
+            enrollments.map((enrollment) => `growth-customer:${enrollment.customerId}`),
+          );
+        }
         for (const enrollment of enrollments) {
           if (await cancelLifecycleEnrollment(tx, enrollment.id, now, "JOURNEY_ARCHIVED")) {
             cancelled += 1;
@@ -377,7 +392,15 @@ export class LifecycleService {
 
   private async enrollForJourney(journeyId: string, limit: number) {
     return inInventoryTransaction(this.db, async (tx) => {
-      await acquireOperationLocks(tx, [`lifecycle-journey:${journeyId}`]);
+      const peek = await tx.lifecycleJourney.findUnique({
+        where: { id: journeyId },
+        select: { segmentId: true },
+      });
+      if (!peek) return { enrolled: 0 };
+      await acquireOperationLocks(tx, [
+        `customer-segment:${peek.segmentId}`,
+        `lifecycle-journey:${journeyId}`,
+      ]);
       const journey = await tx.lifecycleJourney.findUnique({
         where: { id: journeyId },
         include: { steps: { orderBy: { position: "asc" } } },
@@ -385,10 +408,12 @@ export class LifecycleService {
       if (!journey || journey.status !== "ACTIVE" || journey.segmentVersion === null) {
         return { enrolled: 0 };
       }
+      if (journey.segmentId !== peek.segmentId) {
+        throw retryableLockDivergenceError("The lifecycle journey segment changed concurrently.");
+      }
       if (journey.steps.length === 0) {
         throw new LifecycleError("CONFLICT", "An active journey has no steps.");
       }
-      await acquireOperationLocks(tx, [`customer-segment:${journey.segmentId}`]);
       const segment = await tx.customerSegment.findUnique({
         where: { id: journey.segmentId },
         select: { status: true, version: true },
@@ -548,68 +573,129 @@ export class LifecycleService {
     return this.eligibilityInTransaction(this.db, messageId);
   }
 
+  private async lockMessageChain(
+    tx: Prisma.TransactionClient,
+    messageId: string,
+  ): Promise<{
+    readonly enrollment: { readonly id: string; readonly status: LifecycleEnrollmentStatus };
+    readonly message: LifecycleMessage;
+  } | null> {
+    const peek = await tx.lifecycleMessage.findUnique({
+      where: { id: messageId },
+      select: { id: true, customerId: true, enrollmentId: true },
+    });
+    if (!peek) return null;
+    await acquireOperationLocks(tx, [`growth-customer:${peek.customerId}`]);
+    const enrollments = await tx.$queryRaw<
+      Array<{ id: string; status: LifecycleEnrollmentStatus }>
+    >`
+      SELECT "id", "status"::text AS "status"
+      FROM "LifecycleEnrollment"
+      WHERE "id" = ${peek.enrollmentId}::uuid
+      FOR UPDATE
+    `;
+    const enrollment = enrollments[0];
+    if (!enrollment) return null;
+    const messages = await tx.$queryRaw<LifecycleMessage[]>`
+      SELECT * FROM "LifecycleMessage" WHERE "id" = ${messageId}::uuid FOR UPDATE
+    `;
+    const message = messages[0];
+    if (!message) return null;
+    return { enrollment, message };
+  }
+
   async dispatchDueMessages(limit = 100) {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new LifecycleError("VALIDATION", "Dispatch limit must be between 1 and 500.");
     }
     const now = await databaseNow(this.db);
-    const candidates = await this.db.lifecycleMessage.findMany({
-      where: {
-        status: "SCHEDULED",
-        scheduledAt: { lte: now },
-        enrollment: { status: "ACTIVE", journey: { status: "ACTIVE" } },
-        customer: { status: "ACTIVE", deletedAt: null },
-      },
-      select: { id: true },
-      orderBy: [{ scheduledAt: "asc" }, { id: "asc" }],
-      take: limit,
-    });
     const result = { dispatched: 0, cancelled: 0, held: 0 };
-    for (const candidate of candidates) {
-      const outcome = await inInventoryTransaction(this.db, async (tx) => {
-        const eligibility = await this.eligibilityInTransaction(tx, candidate.id);
-        if (eligibility.reason === "PAUSED") return "HELD" as const;
-        if (eligibility.reason === "MISSING" || eligibility.reason === "ENROLLMENT_INACTIVE") {
-          return "HELD" as const;
-        }
-        if (eligibility.reason !== "ELIGIBLE") {
-          if (eligibility.enrollmentId) {
-            await cancelLifecycleEnrollment(
-              tx,
-              eligibility.enrollmentId,
-              await databaseNow(tx),
-              consentRevocationReason(eligibility.reason),
-            );
-            return "CANCELLED" as const;
-          }
-          return "HELD" as const;
-        }
-        const claimed = await tx.lifecycleMessage.updateMany({
-          where: { id: candidate.id, status: "SCHEDULED", scheduledAt: { lte: now } },
-          data: { status: "DISPATCHING", dispatchVersion: { increment: 1 } },
-        });
-        if (claimed.count === 0) return "HELD" as const;
-        const dispatch = await tx.lifecycleMessage.findUniqueOrThrow({
-          where: { id: candidate.id },
-          select: { dispatchVersion: true },
-        });
-        await tx.domainOutbox.create({
-          data: {
-            eventType: "lifecycle.message.dispatch.v1",
-            aggregateType: "LifecycleMessage",
-            aggregateId: candidate.id,
-            deduplicationKey: `lifecycle:message:${candidate.id}:dispatch:v${dispatch.dispatchVersion}`,
-            payload: {
-              lifecycleMessageId: candidate.id,
-              dispatchVersion: dispatch.dispatchVersion,
-            },
-          },
-        });
-        return "DISPATCHED" as const;
+    const attempted = new Set<string>();
+    while (
+      result.dispatched + result.cancelled + result.held < limit &&
+      attempted.size < limit * 2
+    ) {
+      const remaining = limit - (result.dispatched + result.cancelled + result.held);
+      const candidates = await this.db.lifecycleMessage.findMany({
+        where: {
+          status: "SCHEDULED",
+          scheduledAt: { lte: now },
+          enrollment: { status: "ACTIVE", journey: { status: "ACTIVE" } },
+          customer: { status: "ACTIVE", deletedAt: null },
+          ...(attempted.size > 0 ? { id: { notIn: [...attempted] } } : {}),
+        },
+        select: { id: true, customerId: true, enrollmentId: true },
+        orderBy: [{ scheduledAt: "asc" }, { id: "asc" }],
+        take: remaining,
       });
-      if (outcome === "DISPATCHED") result.dispatched += 1;
-      if (outcome === "CANCELLED") result.cancelled += 1;
-      if (outcome === "HELD") result.held += 1;
+      if (candidates.length === 0) break;
+      for (const candidate of candidates) {
+        attempted.add(candidate.id);
+        try {
+          const outcome = await inInventoryTransaction(this.db, async (tx) => {
+            const lockRows = await tx.$queryRaw<Array<{ locked: boolean }>>`
+              SELECT pg_try_advisory_xact_lock(hashtextextended(${`growth-customer:${candidate.customerId}`}, 0)) AS locked
+            `;
+            if (!lockRows[0]?.locked) return "SKIPPED" as const;
+            const enrollmentRows = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT "id" FROM "LifecycleEnrollment"
+              WHERE "id" = ${candidate.enrollmentId}::uuid
+              FOR UPDATE SKIP LOCKED
+            `;
+            if (!enrollmentRows[0]) return "SKIPPED" as const;
+            const messageRows = await tx.$queryRaw<Array<{ id: string }>>`
+              SELECT "id" FROM "LifecycleMessage"
+              WHERE "id" = ${candidate.id}::uuid
+              FOR UPDATE SKIP LOCKED
+            `;
+            if (!messageRows[0]) return "SKIPPED" as const;
+            const eligibility = await this.eligibilityInTransaction(tx, candidate.id);
+            if (eligibility.reason === "PAUSED") return "HELD" as const;
+            if (eligibility.reason === "MISSING" || eligibility.reason === "ENROLLMENT_INACTIVE") {
+              return "HELD" as const;
+            }
+            if (eligibility.reason !== "ELIGIBLE") {
+              if (eligibility.enrollmentId) {
+                await cancelLifecycleEnrollment(
+                  tx,
+                  eligibility.enrollmentId,
+                  await databaseNow(tx),
+                  consentRevocationReason(eligibility.reason),
+                );
+                return "CANCELLED" as const;
+              }
+              return "HELD" as const;
+            }
+            const claimed = await tx.lifecycleMessage.updateMany({
+              where: { id: candidate.id, status: "SCHEDULED", scheduledAt: { lte: now } },
+              data: { status: "DISPATCHING", dispatchVersion: { increment: 1 } },
+            });
+            if (claimed.count === 0) return "HELD" as const;
+            const dispatch = await tx.lifecycleMessage.findUniqueOrThrow({
+              where: { id: candidate.id },
+              select: { dispatchVersion: true },
+            });
+            await tx.domainOutbox.create({
+              data: {
+                eventType: "lifecycle.message.dispatch.v1",
+                aggregateType: "LifecycleMessage",
+                aggregateId: candidate.id,
+                deduplicationKey: `lifecycle:message:${candidate.id}:dispatch:v${dispatch.dispatchVersion}`,
+                payload: {
+                  lifecycleMessageId: candidate.id,
+                  dispatchVersion: dispatch.dispatchVersion,
+                },
+              },
+            });
+            return "DISPATCHED" as const;
+          });
+          if (outcome === "DISPATCHED") result.dispatched += 1;
+          if (outcome === "CANCELLED") result.cancelled += 1;
+          if (outcome === "HELD") result.held += 1;
+        } catch {
+          continue;
+        }
+      }
     }
     return result;
   }
@@ -651,6 +737,8 @@ export class LifecycleService {
       throw new LifecycleError("VALIDATION", "dispatchVersion must be a positive integer.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
+      const locked = await this.lockMessageChain(tx, messageId);
+      if (!locked) return null;
       const message = await this.messageWithRelations(tx, messageId);
       if (
         !message ||
@@ -717,6 +805,18 @@ export class LifecycleService {
       throw new LifecycleError("VALIDATION", "Lifecycle email queue outcome is invalid.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
+      const locked = await this.lockMessageChain(tx, messageId);
+      if (!locked) {
+        const emailCheck = await tx.emailEvent.findUnique({ where: { id: emailEventId } });
+        if (!emailCheck || emailCheck.lifecycleMessageId !== messageId) {
+          throw new LifecycleError(
+            "CONFLICT",
+            "Email event does not belong to the lifecycle message.",
+          );
+        }
+        throw new LifecycleError("NOT_FOUND", "Lifecycle message not found.");
+      }
+      const { enrollment, message } = locked;
       const email = await tx.emailEvent.findUnique({ where: { id: emailEventId } });
       if (!email || email.lifecycleMessageId !== messageId) {
         throw new LifecycleError(
@@ -726,15 +826,11 @@ export class LifecycleService {
       }
       const effectiveStatus = email.status;
       const now = await databaseNow(tx);
-      const message = await tx.lifecycleMessage.findUnique({ where: { id: messageId } });
-      if (!message) throw new LifecycleError("NOT_FOUND", "Lifecycle message not found.");
       if (["SUPPRESSED", "BOUNCED", "COMPLAINED"].includes(effectiveStatus)) {
-        if (["DISPATCHING", "QUEUED"].includes(message.status)) {
-          await tx.lifecycleMessage.update({
-            where: { id: messageId },
-            data: { status: "SUPPRESSED", processedAt: now },
-          });
-        }
+        await tx.lifecycleMessage.updateMany({
+          where: { id: messageId, status: { in: ["DISPATCHING", "QUEUED"] } },
+          data: { status: "SUPPRESSED", processedAt: now },
+        });
         await suppressCustomerLifecycleTopicInTransaction(
           tx,
           message.customerId,
@@ -744,24 +840,26 @@ export class LifecycleService {
         return "SUPPRESSED" as const;
       }
       if (effectiveStatus === "CANCELLED") {
-        if (["SCHEDULED", "DISPATCHING", "QUEUED"].includes(message.status)) {
-          await tx.lifecycleMessage.update({
-            where: { id: messageId },
-            data: { status: "CANCELLED", processedAt: now },
-          });
-        }
+        await tx.lifecycleMessage.updateMany({
+          where: { id: messageId, status: { in: ["SCHEDULED", "DISPATCHING", "QUEUED"] } },
+          data: { status: "CANCELLED", processedAt: now },
+        });
         await cancelLifecycleEnrollment(tx, message.enrollmentId, now, "CUSTOMER_INACTIVE");
         return "CANCELLED" as const;
       }
       if (effectiveStatus === "FAILED") {
-        if (["DISPATCHING", "QUEUED"].includes(message.status)) {
-          await tx.lifecycleMessage.update({
-            where: { id: messageId },
-            data: {
-              status: "FAILED",
-              processedAt: now,
-              lastError: (email.lastError ?? "PROVIDER_FAILURE").slice(0, 500),
-            },
+        const failed = await tx.lifecycleMessage.updateMany({
+          where: { id: messageId, status: { in: ["DISPATCHING", "QUEUED"] } },
+          data: {
+            status: "FAILED",
+            processedAt: now,
+            lastError: (email.lastError ?? "PROVIDER_FAILURE").slice(0, 500),
+          },
+        });
+        if (failed.count === 1) {
+          await tx.lifecycleEnrollment.updateMany({
+            where: { id: message.enrollmentId, status: "ACTIVE" },
+            data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_FAILED" },
           });
           await tx.lifecycleMessage.updateMany({
             where: {
@@ -770,21 +868,20 @@ export class LifecycleService {
             },
             data: { status: "CANCELLED", processedAt: now },
           });
-          await tx.lifecycleEnrollment.updateMany({
-            where: { id: message.enrollmentId, status: "ACTIVE" },
-            data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_FAILED" },
-          });
         }
         return "FAILED" as const;
       }
-      if (message.status === "DISPATCHING") {
-        await tx.lifecycleMessage.update({
-          where: { id: messageId },
-          data: { status: "QUEUED", processedAt: now },
-        });
+      if (enrollment.status !== "ACTIVE") {
+        if (message.status === "SUPPRESSED") return "SUPPRESSED" as const;
+        if (message.status === "FAILED") return "FAILED" as const;
+        return "CANCELLED" as const;
       }
+      const queued = await tx.lifecycleMessage.updateMany({
+        where: { id: messageId, status: "DISPATCHING", enrollment: { status: "ACTIVE" } },
+        data: { status: "QUEUED", processedAt: now },
+      });
       if (
-        ["DISPATCHING", "QUEUED"].includes(message.status) &&
+        (queued.count === 1 || message.status === "QUEUED") &&
         ["SENT", "DELIVERY_DELAYED", "DELIVERED"].includes(effectiveStatus)
       ) {
         await new LifecycleService(tx).markEmailSent(messageId, email.id);
@@ -797,6 +894,9 @@ export class LifecycleService {
     assertUuid(messageId, "messageId");
     assertUuid(emailEventId, "emailEventId");
     return inInventoryTransaction(this.db, async (tx) => {
+      const locked = await this.lockMessageChain(tx, messageId);
+      if (!locked) return false;
+      const { enrollment, message } = locked;
       const email = await tx.emailEvent.findUnique({ where: { id: emailEventId } });
       if (
         !email ||
@@ -805,11 +905,7 @@ export class LifecycleService {
       ) {
         return false;
       }
-      const message = await tx.lifecycleMessage.findUnique({
-        where: { id: messageId },
-        include: { enrollment: { select: { id: true, status: true } } },
-      });
-      if (!message || message.status !== "QUEUED" || message.enrollment.status !== "ACTIVE") {
+      if (message.status !== "QUEUED" || enrollment.status !== "ACTIVE") {
         return false;
       }
       const [remainingMessages, pendingEmails] = await Promise.all([
@@ -824,11 +920,11 @@ export class LifecycleService {
         }),
       ]);
       if (remainingMessages > 0 || pendingEmails > 0) return false;
-      await tx.lifecycleEnrollment.update({
-        where: { id: message.enrollmentId },
+      const completed = await tx.lifecycleEnrollment.updateMany({
+        where: { id: message.enrollmentId, status: "ACTIVE" },
         data: { status: "COMPLETED", completedAt: await databaseNow(tx) },
       });
-      return true;
+      return completed.count === 1;
     });
   }
 
@@ -836,23 +932,25 @@ export class LifecycleService {
     assertUuid(messageId, "messageId");
     assertUuid(emailEventId, "emailEventId");
     return inInventoryTransaction(this.db, async (tx) => {
+      const locked = await this.lockMessageChain(tx, messageId);
+      if (!locked) return false;
+      const { message } = locked;
       const email = await tx.emailEvent.findUnique({ where: { id: emailEventId } });
       if (!email || email.lifecycleMessageId !== messageId || email.status !== "FAILED")
         return false;
-      const message = await tx.lifecycleMessage.findUnique({ where: { id: messageId } });
-      if (!message || message.status !== "QUEUED") return false;
+      if (message.status !== "QUEUED") return false;
       const now = await databaseNow(tx);
-      await tx.lifecycleMessage.update({
-        where: { id: messageId },
+      await tx.lifecycleEnrollment.updateMany({
+        where: { id: message.enrollmentId, status: "ACTIVE" },
+        data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_FAILED" },
+      });
+      await tx.lifecycleMessage.updateMany({
+        where: { id: messageId, status: "QUEUED" },
         data: { status: "FAILED", processedAt: now, lastError: error.slice(0, 500) },
       });
       await tx.lifecycleMessage.updateMany({
         where: { enrollmentId: message.enrollmentId, status: { in: ["SCHEDULED", "DISPATCHING"] } },
         data: { status: "CANCELLED", processedAt: now },
-      });
-      await tx.lifecycleEnrollment.updateMany({
-        where: { id: message.enrollmentId, status: "ACTIVE" },
-        data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_FAILED" },
       });
       return true;
     });
@@ -861,24 +959,26 @@ export class LifecycleService {
   async markDispatchFailed(messageId: string, error: string) {
     assertUuid(messageId, "messageId");
     return inInventoryTransaction(this.db, async (tx) => {
-      const message = await tx.lifecycleMessage.findUnique({ where: { id: messageId } });
-      if (!message || message.status !== "DISPATCHING") return false;
+      const locked = await this.lockMessageChain(tx, messageId);
+      if (!locked) return false;
+      const { message } = locked;
+      if (message.status !== "DISPATCHING") return false;
       const now = await databaseNow(tx);
-      await tx.emailEvent.updateMany({
-        where: { lifecycleMessageId: messageId, status: { in: ["QUEUED", "SENDING"] } },
-        data: { status: "CANCELLED", statusRank: 70, finalAt: now, nextAttemptAt: null },
+      await tx.lifecycleEnrollment.updateMany({
+        where: { id: message.enrollmentId, status: "ACTIVE" },
+        data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_DISPATCH_FAILED" },
       });
-      await tx.lifecycleMessage.update({
-        where: { id: messageId },
+      await tx.lifecycleMessage.updateMany({
+        where: { id: messageId, status: "DISPATCHING" },
         data: { status: "FAILED", processedAt: now, lastError: error.slice(0, 500) },
       });
       await tx.lifecycleMessage.updateMany({
         where: { enrollmentId: message.enrollmentId, status: { in: ["SCHEDULED", "DISPATCHING"] } },
         data: { status: "CANCELLED", processedAt: now },
       });
-      await tx.lifecycleEnrollment.updateMany({
-        where: { id: message.enrollmentId, status: "ACTIVE" },
-        data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_DISPATCH_FAILED" },
+      await tx.emailEvent.updateMany({
+        where: { lifecycleMessageId: messageId, status: { in: ["QUEUED", "SENDING"] } },
+        data: { status: "CANCELLED", statusRank: 70, finalAt: now, nextAttemptAt: null },
       });
       return true;
     });
@@ -895,17 +995,18 @@ export class LifecycleService {
   async markEmailSuppressed(messageId: string, reason: LifecycleCancellationReason) {
     assertUuid(messageId, "messageId");
     return inInventoryTransaction(this.db, async (tx) => {
-      const message = await tx.lifecycleMessage.findUnique({ where: { id: messageId } });
-      if (!message) return;
+      const locked = await this.lockMessageChain(tx, messageId);
+      if (!locked) return;
+      const { message } = locked;
       const now = await databaseNow(tx);
       if (["QUEUED", "DISPATCHING"].includes(message.status)) {
-        await tx.lifecycleMessage.update({
-          where: { id: messageId },
+        await tx.lifecycleMessage.updateMany({
+          where: { id: messageId, status: { in: ["QUEUED", "DISPATCHING"] } },
           data: { status: "SUPPRESSED", processedAt: now },
         });
       } else if (message.status === "SCHEDULED") {
-        await tx.lifecycleMessage.update({
-          where: { id: messageId },
+        await tx.lifecycleMessage.updateMany({
+          where: { id: messageId, status: "SCHEDULED" },
           data: { status: "CANCELLED", processedAt: now },
         });
       }

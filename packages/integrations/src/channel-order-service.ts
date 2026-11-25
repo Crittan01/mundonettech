@@ -169,6 +169,7 @@ export interface ChannelStockLocationChoice {
 }
 
 type AccountWithCredential = ChannelAccount & { credential: IntegrationCredential };
+type AccountSyncFence = Pick<ChannelAccount, "id" | "credentialId" | "version">;
 type OrderWithRelations = ChannelOrder & {
   pack: ChannelPack | null;
   shipment: ChannelShipment | null;
@@ -485,6 +486,29 @@ export class ChannelOrderService {
     }
   }
 
+  private async assertAccountFence(
+    tx: Prisma.TransactionClient,
+    accountId: string,
+    expected?: AccountSyncFence,
+  ): Promise<void> {
+    await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${accountId}::uuid FOR UPDATE`;
+    const current = await tx.channelAccount.findUnique({ where: { id: accountId } });
+    if (current && current.environment !== this.options.ring.environment) {
+      throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.");
+    }
+    if (
+      !current ||
+      current.status !== "ACTIVE" ||
+      (expected !== undefined &&
+        (current.credentialId !== expected.credentialId || current.version !== expected.version))
+    ) {
+      throw new ChannelOrderError(
+        "CONFLICT",
+        "The channel changed during synchronization; retry with its current credential.",
+      );
+    }
+  }
+
   async synchronizeResource(options: {
     readonly accountId: string;
     readonly kind: MercadoLibreResourceKind;
@@ -497,19 +521,35 @@ export class ChannelOrderService {
     }
     const account = await this.account(options.accountId);
     const credential = this.reveal(account);
-    if (options.kind === "orders") {
-      const result = await this.syncOrder(account, credential, options.externalId, options.audit);
-      return {
-        accountId: account.id,
-        kind: options.kind,
-        externalId: options.externalId,
-        orderIds: [result.orderId],
-        shipmentId: result.shipmentId,
-        stale: result.stale,
-      };
-    }
-    if (options.kind === "packs") {
-      const result = await this.syncPack(account, credential, options.externalId, options.audit);
+    try {
+      if (options.kind === "orders") {
+        const result = await this.syncOrder(account, credential, options.externalId, options.audit);
+        return {
+          accountId: account.id,
+          kind: options.kind,
+          externalId: options.externalId,
+          orderIds: [result.orderId],
+          shipmentId: result.shipmentId,
+          stale: result.stale,
+        };
+      }
+      if (options.kind === "packs") {
+        const result = await this.syncPack(account, credential, options.externalId, options.audit);
+        return {
+          accountId: account.id,
+          kind: options.kind,
+          externalId: options.externalId,
+          orderIds: result.orderIds,
+          shipmentId: result.shipmentId,
+          stale: result.stale,
+        };
+      }
+      const result = await this.syncShipment(
+        account,
+        credential,
+        options.externalId,
+        options.audit,
+      );
       return {
         accountId: account.id,
         kind: options.kind,
@@ -518,16 +558,12 @@ export class ChannelOrderService {
         shipmentId: result.shipmentId,
         stale: result.stale,
       };
+    } catch (error) {
+      if (error instanceof MercadoLibreCatalogError && error.code === "UNAUTHORIZED") {
+        await this.revokeOnUnauthorized(account, options.audit);
+      }
+      throw error;
     }
-    const result = await this.syncShipment(account, credential, options.externalId, options.audit);
-    return {
-      accountId: account.id,
-      kind: options.kind,
-      externalId: options.externalId,
-      orderIds: result.orderIds,
-      shipmentId: result.shipmentId,
-      stale: result.stale,
-    };
   }
 
   async synchronizeOrder(
@@ -555,6 +591,7 @@ export class ChannelOrderService {
     const snapshot = await this.client.getPack(credential, externalPackId);
     const hash = digest(snapshot);
     const stale = await inInventoryTransaction(this.db, async (tx) => {
+      await this.assertAccountFence(tx, account.id, account);
       await acquireOperationLocks(tx, [`channel-pack:${account.id}:${externalPackId}`]);
       const existing = await tx.channelPack.findUnique({
         where: { accountId_externalPackId: { accountId: account.id, externalPackId } },
@@ -666,7 +703,10 @@ export class ChannelOrderService {
       );
       shipmentId = shipment.shipmentId;
     } else {
-      await this.reprocessStock(persisted.orderId, audit, { remoteChanged: persisted.changed });
+      await this.reprocessStock(persisted.orderId, audit, {
+        account,
+        remoteChanged: persisted.changed,
+      });
     }
     return { orderId: persisted.orderId, shipmentId, stale: false, changed: persisted.changed };
   }
@@ -717,6 +757,7 @@ export class ChannelOrderService {
     if (!persisted.stale) {
       for (const orderId of persisted.orderIds) {
         await this.reprocessStock(orderId, audit, {
+          account,
           remoteChanged:
             persisted.changed || context.orderChanged === true || syncedOrderChanges.has(orderId),
         });
@@ -737,7 +778,21 @@ export class ChannelOrderService {
     const hash = digest(snapshot);
     const hashHex = Buffer.from(hash).toString("hex");
     return inInventoryTransaction(this.db, async (tx) => {
+      await this.assertAccountFence(tx, account.id, account);
       await acquireOperationLocks(tx, [`channel-order:${account.id}:${snapshot.externalId}`]);
+      const existingPeek = await tx.channelOrder.findUnique({
+        where: {
+          accountId_externalOrderId: {
+            accountId: account.id,
+            externalOrderId: snapshot.externalId,
+          },
+        },
+        select: { id: true },
+      });
+      if (existingPeek) {
+        await acquireOperationLocks(tx, [`channel-order-id:${existingPeek.id}`]);
+        await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${existingPeek.id}::uuid FOR UPDATE`;
+      }
       const existing = await tx.channelOrder.findUnique({
         where: {
           accountId_externalOrderId: {
@@ -1079,6 +1134,7 @@ export class ChannelOrderService {
     const hash = digest(snapshot);
     const hashHex = Buffer.from(hash).toString("hex");
     return inInventoryTransaction(this.db, async (tx) => {
+      await this.assertAccountFence(tx, account.id, account);
       await acquireOperationLocks(tx, [`channel-shipment:${account.id}:${snapshot.externalId}`]);
       const existing = await tx.channelShipment.findUnique({
         where: {
@@ -1134,17 +1190,36 @@ export class ChannelOrderService {
       if (order?.packId && pack && order.packId !== pack.id) {
         throw new ChannelOrderError("CONFLICT", "The shipment and order packs do not match.");
       }
-      const linkedOrders = pack
+      const candidateOrders = pack
         ? await tx.channelOrder.findMany({
             where: { accountId: account.id, packId: pack.id },
+            select: { id: true },
           })
-        : snapshot.externalOrderId
-          ? [order]
+        : snapshot.externalOrderId && order
+          ? [{ id: order.id }]
           : [];
-      if (linkedOrders.length === 0 || linkedOrders.some((candidate) => !candidate)) {
+      if (candidateOrders.length === 0) {
         throw new ChannelOrderError("NOT_FOUND", "No persisted orders own this shipment.");
       }
-      if (order && !linkedOrders.some((candidate) => candidate?.id === order.id)) {
+      const linkedOrderIds = [...new Set(candidateOrders.map((candidate) => candidate.id))].sort();
+      await acquireOperationLocks(
+        tx,
+        linkedOrderIds.map((id) => `channel-order-id:${id}`),
+      );
+      await tx.$executeRaw`
+        SELECT "id" FROM "ChannelOrder"
+        WHERE "id" = ANY(${linkedOrderIds}::uuid[])
+        ORDER BY "id"
+        FOR UPDATE
+      `;
+      const linkedOrders = await tx.channelOrder.findMany({
+        where: { id: { in: linkedOrderIds } },
+        orderBy: { id: "asc" },
+      });
+      if (linkedOrders.length !== linkedOrderIds.length) {
+        throw new ChannelOrderError("NOT_FOUND", "No persisted orders own this shipment.");
+      }
+      if (order && !linkedOrders.some((candidate) => candidate.id === order.id)) {
         throw new ChannelOrderError("CONFLICT", "The shipment order is outside its pack.");
       }
       const parent = pack ? { packId: pack.id } : { orderId: linkedOrders[0]!.id };
@@ -1294,11 +1369,21 @@ export class ChannelOrderService {
   private async reprocessStock(
     orderId: string,
     audit: ChannelAuditContext,
-    options: { readonly remoteChanged?: boolean } = {},
+    options: { readonly account?: AccountSyncFence; readonly remoteChanged?: boolean } = {},
   ): Promise<void> {
     assertUuid(orderId, "orderId");
+    const target = await this.db.channelOrder.findUnique({
+      where: { id: orderId },
+      select: { accountId: true },
+    });
+    if (!target) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
+    if (options.account && target.accountId !== options.account.id) {
+      throw new ChannelOrderError("CONFLICT", "The order belongs to another channel account.");
+    }
     await inInventoryTransaction(this.db, async (tx) => {
+      await this.assertAccountFence(tx, target.accountId, options.account);
       await acquireOperationLocks(tx, [`channel-order-id:${orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
       let order = (await tx.channelOrder.findUnique({
         where: { id: orderId },
         include: {
@@ -1585,6 +1670,7 @@ export class ChannelOrderService {
     await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
     await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
         where: { id: options.orderId },
         include: { account: true, offer: true },
@@ -1687,6 +1773,7 @@ export class ChannelOrderService {
     await this.actor(this.db, options.audit.actorAdminUserId, "finance:read");
     await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
         where: { id: options.orderId },
         include: { account: true },
@@ -1758,6 +1845,7 @@ export class ChannelOrderService {
       await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
       await this.actor(tx, options.audit.actorAdminUserId, "finance:read");
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
         where: { id: options.orderId },
         include: { account: true },
@@ -1883,17 +1971,33 @@ export class ChannelOrderService {
     };
   }
 
-  private async revokeOnUnauthorized(accountId: string, audit: ChannelAuditContext): Promise<void> {
+  private async revokeOnUnauthorized(
+    snapshot: AccountSyncFence,
+    audit: ChannelAuditContext,
+  ): Promise<void> {
     await inInventoryTransaction(this.db, async (tx) => {
-      const account = await tx.channelAccount.findUnique({ where: { id: accountId } });
-      if (!account || account.status !== "ACTIVE") return;
+      await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${snapshot.id}::uuid FOR UPDATE`;
+      const account = await tx.channelAccount.findUnique({ where: { id: snapshot.id } });
+      if (
+        !account ||
+        account.status !== "ACTIVE" ||
+        account.credentialId !== snapshot.credentialId ||
+        account.version !== snapshot.version
+      ) {
+        return;
+      }
       const now = await this.now(tx);
       await tx.integrationCredential.updateMany({
-        where: { id: account.credentialId, revokedAt: null },
+        where: { id: snapshot.credentialId, revokedAt: null },
         data: { revokedAt: now, updatedAt: now },
       });
-      await tx.channelAccount.update({
-        where: { id: account.id },
+      const revoked = await tx.channelAccount.updateMany({
+        where: {
+          id: snapshot.id,
+          status: "ACTIVE",
+          credentialId: snapshot.credentialId,
+          version: snapshot.version,
+        },
         data: {
           status: "REAUTH_REQUIRED",
           tokenExpiresAt: null,
@@ -1905,6 +2009,12 @@ export class ChannelOrderService {
           updatedAt: now,
         },
       });
+      if (revoked.count !== 1) {
+        throw new ChannelOrderError(
+          "CONFLICT",
+          "The channel credential changed during revocation.",
+        );
+      }
       await this.audit(tx, audit, "CHANNEL_ACCOUNT_ACCESS_REVOKED", "ChannelAccount", account.id, {
         reasonCode: "CHANNEL_API_UNAUTHORIZED",
       });
@@ -1977,17 +2087,17 @@ export class ChannelOrderService {
           error instanceof MercadoLibreCatalogError || error instanceof ChannelOrderError
             ? error.code
             : "CHANNEL_SYNC_UNCERTAIN";
-        if (code === "UNAUTHORIZED") {
-          const resource = this.resourcePayload(event.payload);
-          await this.revokeOnUnauthorized(resource.accountId, {
-            ...audit,
-            requestId: randomUUID(),
-          }).catch(() => undefined);
-        }
         const terminal = event.attempts >= 8 || code === "UNAUTHORIZED" || code === "INVALID_INPUT";
         if (terminal) {
-          await failDomainOutbox(this.db, { id: event.id, workerId, error: code.slice(0, 100) });
-          failed += 1;
+          const failedNow = await failDomainOutbox(this.db, {
+            id: event.id,
+            workerId,
+            error: code.slice(0, 100),
+          });
+          if (failedNow) {
+            failed += 1;
+            failures.push({ eventId: event.id, code });
+          }
         } else {
           await retryDomainOutbox(this.db, {
             id: event.id,
@@ -1996,8 +2106,8 @@ export class ChannelOrderService {
             error: code.slice(0, 100),
           });
           retries += 1;
+          failures.push({ eventId: event.id, code });
         }
-        failures.push({ eventId: event.id, code });
       }
     }
     return { claimed: events.length, completed, retries, failed, failures };

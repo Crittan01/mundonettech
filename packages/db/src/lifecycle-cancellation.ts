@@ -1,5 +1,5 @@
 import type { LifecycleEnrollmentStatus, Prisma } from "./generated/client.js";
-import { assertUuid } from "./inventory-shared.js";
+import { acquireOperationLocks, assertUuid } from "./inventory-shared.js";
 
 export type LifecycleCancellationReason =
   | "CONSENT_REVOKED"
@@ -17,21 +17,31 @@ export async function cancelLifecycleEnrollment(
   reason: LifecycleCancellationReason,
 ): Promise<boolean> {
   assertUuid(enrollmentId, "enrollmentId");
-  const enrollment = await tx.lifecycleEnrollment.findUnique({
+  const peek = await tx.lifecycleEnrollment.findUnique({
     where: { id: enrollmentId },
-    select: { id: true, status: true },
+    select: { id: true, customerId: true },
   });
+  if (!peek) return false;
+  await acquireOperationLocks(tx, [`growth-customer:${peek.customerId}`]);
+  const lockedEnrollments = await tx.$queryRaw<
+    Array<{ id: string; status: LifecycleEnrollmentStatus }>
+  >`
+    SELECT "id", "status"::text AS "status"
+    FROM "LifecycleEnrollment"
+    WHERE "id" = ${enrollmentId}::uuid
+    FOR UPDATE
+  `;
+  const enrollment = lockedEnrollments[0];
   if (!enrollment) return false;
   if (enrollment.status !== ("ACTIVE" satisfies LifecycleEnrollmentStatus)) return false;
+  await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "LifecycleMessage"
+    WHERE "enrollmentId" = ${enrollmentId}::uuid
+    ORDER BY "id"
+    FOR UPDATE
+  `;
   const targetEmailStatus =
     reason === "SUPPRESSED" || reason === "CONSENT_REVOKED" ? "SUPPRESSED" : "CANCELLED";
-  await tx.emailEvent.updateMany({
-    where: {
-      lifecycleMessage: { enrollmentId },
-      status: { in: ["QUEUED", "SENDING"] },
-    },
-    data: { status: targetEmailStatus, statusRank: 70, finalAt: now, nextAttemptAt: null },
-  });
   if (targetEmailStatus === "SUPPRESSED") {
     await tx.lifecycleMessage.updateMany({
       where: {
@@ -45,6 +55,13 @@ export async function cancelLifecycleEnrollment(
   await tx.lifecycleMessage.updateMany({
     where: { enrollmentId, status: { in: ["SCHEDULED", "DISPATCHING", "QUEUED"] } },
     data: { status: "CANCELLED", processedAt: now, lastError: null },
+  });
+  await tx.emailEvent.updateMany({
+    where: {
+      lifecycleMessage: { enrollmentId },
+      status: { in: ["QUEUED", "SENDING"] },
+    },
+    data: { status: targetEmailStatus, statusRank: 70, finalAt: now, nextAttemptAt: null },
   });
   await tx.lifecycleEnrollment.update({
     where: { id: enrollmentId },
@@ -60,6 +77,33 @@ export async function suppressCustomerLifecycleTopicInTransaction(
   reason: "SUPPRESSED" | "CONSENT_REVOKED" | "CUSTOMER_INACTIVE",
 ): Promise<number> {
   assertUuid(customerId, "customerId");
+  await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
+  const enrollments = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "LifecycleEnrollment"
+    WHERE "customerId" = ${customerId}::uuid AND "status" = 'ACTIVE'
+    ORDER BY "id"
+    FOR UPDATE
+  `;
+  await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "LifecycleMessage"
+    WHERE "customerId" = ${customerId}::uuid AND "status" IN ('SCHEDULED', 'DISPATCHING', 'QUEUED')
+    ORDER BY "id"
+    FOR UPDATE
+  `;
+  let cancelled = 0;
+  for (const enrollment of enrollments) {
+    if (await cancelLifecycleEnrollment(tx, enrollment.id, now, reason)) {
+      cancelled += 1;
+    }
+  }
+  await tx.lifecycleMessage.updateMany({
+    where: {
+      customerId,
+      status: { in: ["DISPATCHING", "QUEUED"] },
+      emailEvent: { status: { in: ["QUEUED", "SENDING", "SUPPRESSED", "BOUNCED", "COMPLAINED"] } },
+    },
+    data: { status: "SUPPRESSED", processedAt: now, lastError: null },
+  });
   await tx.emailEvent.updateMany({
     where: {
       customerId,
@@ -68,25 +112,6 @@ export async function suppressCustomerLifecycleTopicInTransaction(
     },
     data: { status: "SUPPRESSED", statusRank: 70, finalAt: now, nextAttemptAt: null },
   });
-  await tx.lifecycleMessage.updateMany({
-    where: {
-      customerId,
-      status: { in: ["DISPATCHING", "QUEUED"] },
-      emailEvent: { status: { in: ["SUPPRESSED", "BOUNCED", "COMPLAINED"] } },
-    },
-    data: { status: "SUPPRESSED", processedAt: now, lastError: null },
-  });
-  const enrollments = await tx.lifecycleEnrollment.findMany({
-    where: { customerId, status: "ACTIVE" },
-    select: { id: true },
-    orderBy: { id: "asc" },
-  });
-  let cancelled = 0;
-  for (const enrollment of enrollments) {
-    if (await cancelLifecycleEnrollment(tx, enrollment.id, now, reason)) {
-      cancelled += 1;
-    }
-  }
   return cancelled;
 }
 
@@ -123,11 +148,13 @@ export async function suppressLifecycleCustomerInTransaction(
   now: Date,
 ): Promise<void> {
   assertUuid(customerId, "customerId");
-  const enrollments = await tx.lifecycleEnrollment.findMany({
-    where: { customerId, status: "ACTIVE" },
-    select: { id: true },
-    orderBy: { id: "asc" },
-  });
+  await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
+  const enrollments = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "LifecycleEnrollment"
+    WHERE "customerId" = ${customerId}::uuid AND "status" = 'ACTIVE'
+    ORDER BY "id"
+    FOR UPDATE
+  `;
   for (const enrollment of enrollments) {
     await cancelLifecycleEnrollment(tx, enrollment.id, now, "ANONYMIZED");
   }

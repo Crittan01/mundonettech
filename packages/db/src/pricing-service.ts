@@ -432,13 +432,54 @@ export class PricingService {
           unitPriceCents,
           active: input.active,
         };
-        const existing = id
-          ? await tx.wholesaleTier.findFirst({ where: { id, deletedAt: null } })
+        const peeked = id
+          ? await tx.wholesaleTier.findFirst({
+              where: { id, deletedAt: null },
+              select: {
+                scope: true,
+                variantId: true,
+                productId: true,
+                categoryId: true,
+                minimumQuantity: true,
+              },
+            })
           : null;
-        if (id && !existing) throw new PricingNotFoundError("Wholesale tier not found.");
+        if (id && !peeked) throw new PricingNotFoundError("Wholesale tier not found.");
+        const newKey = `wholesale:${input.scope}:${JSON.stringify(target)}:${minimumQuantity}`;
+        const peekedKey = peeked
+          ? `wholesale:${peeked.scope}:${JSON.stringify({
+              variantId: peeked.variantId,
+              productId: peeked.productId,
+              categoryId: peeked.categoryId,
+            })}:${peeked.minimumQuantity}`
+          : null;
         await acquireOperationLocks(tx, [
-          `wholesale:${input.scope}:${JSON.stringify(target)}:${minimumQuantity}`,
+          newKey,
+          ...(peekedKey ? [peekedKey] : []),
+          ...(id ? [`wholesale-tier:${id}`] : []),
         ]);
+        let existing: WholesaleTier | null = null;
+        if (id) {
+          const existingRows = await tx.$queryRaw<WholesaleTier[]>`
+            SELECT * FROM "WholesaleTier"
+            WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
+            FOR UPDATE
+          `;
+          existing = existingRows[0] ?? null;
+          if (!existing) throw new PricingNotFoundError("Wholesale tier not found.");
+          const existingKey = `wholesale:${existing.scope}:${JSON.stringify({
+            variantId: existing.variantId,
+            productId: existing.productId,
+            categoryId: existing.categoryId,
+          })}:${existing.minimumQuantity}`;
+          if (existingKey !== peekedKey) {
+            const retry = new Error(
+              "Wholesale tier identity changed before lock acquisition.",
+            ) as Error & { code: string };
+            retry.code = "40001";
+            throw retry;
+          }
+        }
         const saved = existing
           ? await tx.wholesaleTier.update({ where: { id: existing.id }, data })
           : await tx.wholesaleTier.create({ data });
@@ -463,16 +504,43 @@ export class PricingService {
   async archiveWholesaleTier(id: string, audit: PricingMutationAudit) {
     assertUuid(id, "wholesaleTierId");
     return inInventoryTransaction(this.db, async (tx) => {
-      const existing = await tx.wholesaleTier.findFirst({ where: { id, deletedAt: null } });
+      const peeked = await tx.wholesaleTier.findFirst({
+        where: { id, deletedAt: null },
+        select: {
+          scope: true,
+          variantId: true,
+          productId: true,
+          categoryId: true,
+          minimumQuantity: true,
+        },
+      });
+      if (!peeked) throw new PricingNotFoundError("Wholesale tier not found.");
+      const peekedTarget = {
+        variantId: peeked.variantId,
+        productId: peeked.productId,
+        categoryId: peeked.categoryId,
+      };
+      const peekedKey = `wholesale:${peeked.scope}:${JSON.stringify(peekedTarget)}:${peeked.minimumQuantity}`;
+      await acquireOperationLocks(tx, [`wholesale-tier:${id}`, peekedKey]);
+      const existingRows = await tx.$queryRaw<WholesaleTier[]>`
+        SELECT * FROM "WholesaleTier"
+        WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      const existing = existingRows[0];
       if (!existing) throw new PricingNotFoundError("Wholesale tier not found.");
-      const target = {
+      const existingKey = `wholesale:${existing.scope}:${JSON.stringify({
         variantId: existing.variantId,
         productId: existing.productId,
         categoryId: existing.categoryId,
-      };
-      await acquireOperationLocks(tx, [
-        `wholesale:${existing.scope}:${JSON.stringify(target)}:${existing.minimumQuantity}`,
-      ]);
+      })}:${existing.minimumQuantity}`;
+      if (existingKey !== peekedKey) {
+        const retry = new Error(
+          "Wholesale tier identity changed before lock acquisition.",
+        ) as Error & { code: string };
+        retry.code = "40001";
+        throw retry;
+      }
       const now = await databaseNow(tx);
       const updated = await tx.wholesaleTier.update({
         where: { id },
@@ -511,8 +579,19 @@ export class PricingService {
     const categorySlugs = normalizeSlugs(input.categorySlugs, "categorySlugs");
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
-        await acquireOperationLocks(tx, [`coupon-code:${data.code}`]);
-        const restrictions = await resolveCouponRestrictions(tx, productSlugs, categorySlugs);
+        const peekedCode = id
+          ? ((
+              await tx.coupon.findFirst({
+                where: { id, deletedAt: null },
+                select: { code: true },
+              })
+            )?.code ?? null)
+          : null;
+        await acquireOperationLocks(tx, [
+          `coupon-code:${data.code}`,
+          ...(peekedCode ? [`coupon-code:${peekedCode}`] : []),
+          ...(id ? [`coupon-redemption:${id}`, `coupon-write:${id}`] : []),
+        ]);
         const existing = id
           ? await tx.coupon.findFirst({
               where: { id, deletedAt: null },
@@ -523,7 +602,14 @@ export class PricingService {
             })
           : null;
         if (id && !existing) throw new PricingNotFoundError("Coupon not found.");
-        if (existing) await acquireOperationLocks(tx, [`coupon-write:${existing.id}`]);
+        if (existing && existing.code !== peekedCode) {
+          const retry = new Error("Coupon code changed before locks were acquired.") as Error & {
+            code: string;
+          };
+          retry.code = "40001";
+          throw retry;
+        }
+        const restrictions = await resolveCouponRestrictions(tx, productSlugs, categorySlugs);
         const saved = existing
           ? await tx.coupon.update({
               where: { id: existing.id },
@@ -589,13 +675,13 @@ export class PricingService {
       const beforeProductIds = existing.products.map((entry) => entry.productId);
       const beforeCategoryIds = existing.categories.map((entry) => entry.categoryId);
       const now = await databaseNow(tx);
-      const updated = await tx.coupon.update({
-        where: { id },
-        data: { status: "ARCHIVED", deletedAt: now },
-      });
       const released = await tx.couponUsage.updateMany({
         where: { couponId: id, status: "RESERVED" },
         data: { status: "RELEASED", releasedAt: now },
+      });
+      const updated = await tx.coupon.update({
+        where: { id },
+        data: { status: "ARCHIVED", deletedAt: now },
       });
       await writeAudit(tx, audit, "COUPON_ARCHIVED", "Coupon", id, {
         before: couponAuditState(existing, beforeProductIds, beforeCategoryIds),

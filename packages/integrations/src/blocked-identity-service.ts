@@ -98,6 +98,16 @@ export class BlockedIdentityService {
       });
     } catch (error) {
       if (hasUniqueViolation(error)) {
+        const existing = await this.db.blockedIdentity.findFirst({
+          where: { kind: options.kind, identityHash, active: true },
+        });
+        if (
+          existing &&
+          existing.reason === reason &&
+          existing.expiresAt?.getTime() === options.expiresAt?.getTime()
+        ) {
+          return descriptor(existing);
+        }
         throw new PaymentConflictError(
           "An active block already exists for this identity.",
           "DUPLICATE_REFERENCE",
@@ -139,22 +149,25 @@ export class BlockedIdentityService {
       const existing = await tx.blockedIdentity.findUnique({ where: { id } });
       if (!existing) throw new PaymentNotFoundError("Blocked identity not found.");
       if (!existing.active) return descriptor(existing);
-      const updated = await tx.blockedIdentity.update({
-        where: { id },
+      const updated = await tx.blockedIdentity.updateMany({
+        where: { id, active: true },
         data: {
           active: false,
           unblockedAt: await databaseNow(tx),
           unblockedByAdminUserId: audit.actorAdminUserId,
         },
       });
-      await writePaymentAudit(tx, {
-        action: "PAYMENT_IDENTITY_UNBLOCKED",
-        targetType: "BlockedIdentity",
-        targetId: id,
-        audit,
-        metadata: { kind: existing.kind },
-      });
-      return descriptor(updated);
+      if (updated.count === 1) {
+        await writePaymentAudit(tx, {
+          action: "PAYMENT_IDENTITY_UNBLOCKED",
+          targetType: "BlockedIdentity",
+          targetId: id,
+          audit,
+          metadata: { kind: existing.kind },
+        });
+      }
+      const current = await tx.blockedIdentity.findUniqueOrThrow({ where: { id } });
+      return descriptor(current);
     });
   }
 

@@ -687,10 +687,21 @@ export class DomainEventWorker {
       eventTypes: supportedEvents,
       limit,
     });
+    const batchStartedAtMs = Date.now();
+    const leaseSafetyMarginMs = 5_000;
     let completed = 0;
     let retries = 0;
     let failed = 0;
     for (const event of events) {
+      const estimatedNowMs = event.claimedAt
+        ? event.claimedAt.getTime() + Math.max(0, Date.now() - batchStartedAtMs)
+        : Date.now();
+      if (
+        event.claimExpiresAt &&
+        event.claimExpiresAt.getTime() <= estimatedNowMs + leaseSafetyMarginMs
+      ) {
+        break;
+      }
       try {
         await this.handle(event);
         if (
@@ -700,7 +711,7 @@ export class DomainEventWorker {
         completed += 1;
       } catch (error) {
         if (error instanceof PausedDomainEventError) {
-          await this.db.$executeRaw`
+          const deferredCount = await this.db.$executeRaw`
             UPDATE "DomainOutbox"
             SET "availableAt" = ${error.availableAt},
                 "claimedAt" = NULL,
@@ -714,35 +725,37 @@ export class DomainEventWorker {
               AND "processedAt" IS NULL
               AND "failedAt" IS NULL
           `;
-          retries += 1;
+          if (deferredCount > 0) retries += 1;
         } else if (event.attempts >= this.maximumAttempts) {
-          await failDomainOutbox(this.db, {
+          const failedNow = await failDomainOutbox(this.db, {
             id: event.id,
             workerId: this.options.workerId,
             error: this.errorText(error),
           });
-          if (event.eventType === "lifecycle.message.dispatch.v1") {
-            const messageId = recordValue(event.payload)?.lifecycleMessageId;
-            if (typeof messageId === "string") {
-              await new LifecycleService(this.db).markDispatchFailed(
-                messageId,
-                this.errorText(error),
-              );
+          if (failedNow) {
+            if (event.eventType === "lifecycle.message.dispatch.v1") {
+              const messageId = recordValue(event.payload)?.lifecycleMessageId;
+              if (typeof messageId === "string") {
+                await new LifecycleService(this.db).markDispatchFailed(
+                  messageId,
+                  this.errorText(error),
+                );
+              }
             }
+            failed += 1;
           }
-          failed += 1;
         } else {
           const availableAt =
             error instanceof RetryableDomainEventError
               ? error.availableAt
               : this.retryAt(event.attempts);
-          await retryDomainOutbox(this.db, {
+          const retriedNow = await retryDomainOutbox(this.db, {
             id: event.id,
             workerId: this.options.workerId,
             availableAt,
             error: this.errorText(error),
           });
-          retries += 1;
+          if (retriedNow) retries += 1;
         }
       }
     }
