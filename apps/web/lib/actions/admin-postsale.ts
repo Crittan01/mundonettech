@@ -240,10 +240,6 @@ export async function moderateReviewAction(
       "expectedUpdatedAt",
     ]);
     const reviewId = z.string().uuid().parse(formString(formData, "reviewId"));
-    const review = await getDatabase().review.findUnique({
-      where: { id: reviewId },
-      select: { product: { select: { slug: true } } },
-    });
     const result = await new PostSaleAdminService(getDatabase()).moderateReview({
       reviewId,
       status: z.enum(["PUBLISHED", "REJECTED"]).parse(formString(formData, "status")),
@@ -254,11 +250,9 @@ export async function moderateReviewAction(
       audit: auditContext,
     });
     revalidateAdmin();
-    if (review) {
-      updateTag("reviews");
-      updateTag(`reviews:${review.product.slug}`);
-      revalidatePath(`/producto/${review.product.slug}`);
-    }
+    updateTag("reviews");
+    updateTag(`reviews:${result.productSlug}`);
+    revalidatePath(`/producto/${result.productSlug}`);
     return actionSuccess(
       result.replayed
         ? "La moderación ya estaba aplicada."

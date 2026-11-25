@@ -60,16 +60,20 @@ export function ReturnRequestForm({
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [replacements, setReplacements] = useState<Record<string, string>>({});
   const [serials, setSerials] = useState<Record<string, string[]>>({});
-  const selected = deliveries
-    .filter((item) => (quantities[item.shipmentItemId] ?? 0) > 0)
-    .map((item) => ({
-      shipmentItemId: item.shipmentItemId,
-      quantity: quantities[item.shipmentItemId]!,
-      ...(kind === "EXCHANGE"
-        ? { replacementVariantId: replacements[item.shipmentItemId] ?? item.replacements[0]?.id }
-        : {}),
-      serializedUnitIds: serials[item.shipmentItemId] ?? [],
-    }));
+  const selected = deliveries.flatMap((item) => {
+    const quantity = quantities[item.shipmentItemId] ?? 0;
+    if (quantity <= 0 || (kind === "EXCHANGE" && item.replacements.length === 0)) return [];
+    return [
+      {
+        shipmentItemId: item.shipmentItemId,
+        quantity,
+        ...(kind === "EXCHANGE"
+          ? { replacementVariantId: replacements[item.shipmentItemId] ?? item.replacements[0]?.id }
+          : {}),
+        serializedUnitIds: serials[item.shipmentItemId] ?? [],
+      },
+    ];
+  });
   const invalid = selected.some((selectedItem) => {
     const delivery = deliveries.find(
       (item) => item.shipmentItemId === selectedItem.shipmentItemId,
@@ -494,7 +498,13 @@ export function GuestOrderAccessForms({
     initialActionState,
   );
   const [requestKey, setRequestKey] = useState(idempotencyKey);
-  const challengeId = requestState.values?.challengeId ?? verifyState.values?.challengeId ?? "";
+  const challengeId = requestState.values?.challengeId
+    ? requestState.status === "success"
+      ? requestState.values.challengeId
+      : ""
+    : requestState.status === "success"
+      ? ""
+      : (verifyState.values?.challengeId ?? "");
   return (
     <div className="mx-auto grid w-full max-w-4xl gap-6 lg:grid-cols-2">
       <form

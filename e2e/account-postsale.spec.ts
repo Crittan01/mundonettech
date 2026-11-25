@@ -635,3 +635,191 @@ test("review pagination preserves only the validated non-default variant", async
     "true",
   );
 });
+
+test("exchange form discards stale quantities from lines without replacement variants", async ({
+  page,
+}) => {
+  const suffix = randomUUID().slice(0, 8);
+  const template = await db.product.findFirstOrThrow({
+    where: { status: "ACTIVE", deletedAt: null },
+    select: { brandId: true, categoryId: true, taxGroupId: true },
+  });
+  const createProduct = async (kind: "exchangeable" | "single") => {
+    const slug = `a6-${kind}-${suffix}`;
+    const product = await db.product.create({
+      data: {
+        slug,
+        name: kind === "exchangeable" ? `Producto cambiable ${suffix}` : `Producto único ${suffix}`,
+        brandId: template.brandId,
+        categoryId: template.categoryId,
+        taxGroupId: template.taxGroupId,
+        status: "ACTIVE",
+        authenticity: "ORIGINAL",
+        warrantyMonths: 12,
+        trackSerial: false,
+        variants: {
+          create: [
+            {
+              sku: `A6-${kind}-ORIGINAL-${suffix}`.toUpperCase(),
+              isDefault: true,
+              status: "ACTIVE",
+              priceCents: kind === "exchangeable" ? 40_000_000n : 25_000_000n,
+              costCents: 20_000_000n,
+              weightGrams: 200,
+              lengthMillimeters: 100,
+              widthMillimeters: 80,
+              heightMillimeters: 40,
+            },
+            ...(kind === "exchangeable"
+              ? [
+                  {
+                    sku: `A6-${kind}-ALTERNATE-${suffix}`.toUpperCase(),
+                    isDefault: false,
+                    status: "ACTIVE" as const,
+                    priceCents: 42_000_000n,
+                    costCents: 21_000_000n,
+                    weightGrams: 210,
+                    lengthMillimeters: 100,
+                    widthMillimeters: 80,
+                    heightMillimeters: 40,
+                  },
+                ]
+              : []),
+          ],
+        },
+      },
+      include: { variants: true },
+    });
+    return product;
+  };
+  const [exchangeable, single] = await Promise.all([
+    createProduct("exchangeable"),
+    createProduct("single"),
+  ]);
+  const totalCents = 65_000_000n;
+  const createdOrder = await db.order.create({
+    data: {
+      orderNumber: `E2E-A6-EXCHANGE-${suffix}`.toUpperCase(),
+      customerId: customer.id,
+      orderStatus: "CONFIRMED",
+      paymentStatus: "PAID",
+      fulfillmentStatus: "FULFILLED",
+      fulfillmentMethod: "HOME_DELIVERY",
+      taxRegime: "NO_RESPONSABLE_IVA",
+      emailSnapshot: customer.email,
+      recipientNameSnapshot: "Cuenta E2E",
+      phoneE164Snapshot: "+573001234567",
+      buyerDocumentTypeSnapshot: "13",
+      buyerDocumentNumberSnapshot: "1020304050",
+      subtotalCents: totalCents,
+      totalCents,
+      confirmedAt: new Date(),
+    },
+  });
+  const createItem = async (
+    product: typeof exchangeable,
+    titleSnapshot: string,
+    unitPriceCents: bigint,
+  ) => {
+    const variant = product.variants.find((candidate) => candidate.isDefault)!;
+    return db.orderItem.create({
+      data: {
+        orderId: createdOrder.id,
+        variantId: variant.id,
+        quantity: 1,
+        titleSnapshot,
+        productSlugSnapshot: product.slug,
+        skuSnapshot: variant.sku,
+        unitPriceCents,
+        unitCostWacCents: variant.costCents,
+        discountCents: 0n,
+        lineTotalCents: unitPriceCents,
+        taxCents: 0n,
+      },
+    });
+  };
+  const [exchangeableItem, singleItem] = await Promise.all([
+    createItem(exchangeable, exchangeable.name, 40_000_000n),
+    createItem(single, single.name, 25_000_000n),
+  ]);
+  const location = await db.stockLocation.create({
+    data: {
+      code: `E2E-A6-EXCHANGE-${suffix}`.toUpperCase(),
+      name: "Origen de cambios E2E",
+      type: "LOCAL_MAIN",
+    },
+  });
+  await db.stockLevel.createMany({
+    data: [...exchangeable.variants, ...single.variants].map((variant) => ({
+      locationId: location.id,
+      variantId: variant.id,
+      onHand: 10,
+      committed: 0,
+      safetyStock: 0,
+      weightedAvgCostCents: variant.costCents,
+    })),
+  });
+  const shipment = await db.shipment.create({
+    data: {
+      orderId: createdOrder.id,
+      originLocationId: location.id,
+      kind: "DELIVERY",
+      promisedAt: new Date(Date.now() + 86_400_000),
+      items: {
+        create: [
+          {
+            orderItemId: exchangeableItem.id,
+            quantity: 1,
+            declaredValueCents: 40_000_000n,
+          },
+          { orderItemId: singleItem.id, quantity: 1, declaredValueCents: 25_000_000n },
+        ],
+      },
+    },
+    include: { items: true },
+  });
+  await db.shipment.update({
+    where: { id: shipment.id },
+    data: { status: "READY", readyAt: new Date() },
+  });
+  await db.shipment.update({
+    where: { id: shipment.id },
+    data: { status: "SHIPPED", shippedAt: new Date() },
+  });
+  await db.shipment.update({
+    where: { id: shipment.id },
+    data: { status: "DELIVERED", deliveredAt: new Date() },
+  });
+
+  await authenticate(page, customer, "customer");
+  await page.goto(`/mi-cuenta/pedidos/${createdOrder.id}`);
+  const quantities = page.getByLabel("Cantidad", { exact: true });
+  await expect(quantities).toHaveCount(2);
+  await quantities.nth(0).fill("1");
+  await quantities.nth(1).fill("1");
+  await page.getByLabel("Tipo de solicitud").selectOption("EXCHANGE");
+
+  const selectedItems = JSON.parse(await page.locator('input[name="items"]').inputValue()) as {
+    shipmentItemId: string;
+    quantity: number;
+    replacementVariantId?: string;
+  }[];
+  expect(selectedItems).toHaveLength(1);
+  expect(selectedItems[0]).toMatchObject({
+    shipmentItemId: shipment.items.find((item) => item.orderItemId === exchangeableItem.id)!.id,
+    quantity: 1,
+    replacementVariantId: exchangeable.variants.find((variant) => !variant.isDefault)!.id,
+  });
+  await page
+    .getByLabel("Motivo detallado")
+    .fill("Solicito cambiar únicamente la línea que tiene una variante alterna disponible.");
+  await page.getByRole("button", { name: "Radicar solicitud de posventa" }).click();
+  await expect(page.getByText("Cambio · Solicitud recibida")).toBeVisible();
+  const persisted = await db.returnRequest.findFirstOrThrow({
+    where: { orderId: createdOrder.id },
+    include: { items: true },
+  });
+  expect(persisted.kind).toBe("EXCHANGE");
+  expect(persisted.items).toHaveLength(1);
+  expect(persisted.items[0]).toMatchObject({ orderItemId: exchangeableItem.id, quantity: 1 });
+});

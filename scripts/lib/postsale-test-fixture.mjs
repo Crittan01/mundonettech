@@ -98,7 +98,7 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
   const returnRequestId = randomUUID();
   await client.query(
     `INSERT INTO "ReturnRequest" ("id", "orderId", "requesterCustomerId", "idempotencyKey", "requestHash", "kind", "status", "reason", "retractRefundDueAt")
-     VALUES ($1, $2, $3, $4, $5, 'REFUND', 'REJECTED', 'Solicitud parcial dentro de la ventana legal de retracto.', CURRENT_TIMESTAMP + INTERVAL '15 days')`,
+     VALUES ($1, $2, $3, $4, $5, 'REFUND', 'REQUESTED', 'Solicitud parcial dentro de la ventana legal de retracto.', CURRENT_TIMESTAMP + INTERVAL '15 days')`,
     [
       returnRequestId,
       orderId,
@@ -116,6 +116,33 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
   await client.query(
     `INSERT INTO "ReturnRequestUnit" ("returnRequestItemId", "serializedUnitId") VALUES ($1, $2)`,
     [returnItemId, serializedUnitIds[0]],
+  );
+  await client.query(
+    `UPDATE "ReturnRequest" SET "status" = 'REJECTED', "version" = 1 WHERE "id" = $1`,
+    [returnRequestId],
+  );
+
+  const requestedReturnId = randomUUID();
+  await client.query(
+    `INSERT INTO "ReturnRequest" ("id", "orderId", "requesterCustomerId", "idempotencyKey", "requestHash", "kind", "reason", "retractRefundDueAt")
+     VALUES ($1, $2, $3, $4, $5, 'REFUND', 'Solicitud activa para la sonda RLS.', CURRENT_TIMESTAMP + INTERVAL '15 days')`,
+    [
+      requestedReturnId,
+      orderId,
+      catalog.customerId,
+      `matrix-return-requested-${randomUUID()}`,
+      randomBytes(32),
+    ],
+  );
+  const requestedReturnItemId = randomUUID();
+  await client.query(
+    `INSERT INTO "ReturnRequestItem" ("id", "returnRequestId", "orderItemId", "shipmentItemId", "quantity", "deliveredAt", "retractDueAt")
+     VALUES ($1, $2, $3, $4, 1, $5, CURRENT_TIMESTAMP + INTERVAL '5 days')`,
+    [requestedReturnItemId, requestedReturnId, orderItemId, shipmentItemId, deliveredAt],
+  );
+  await client.query(
+    `INSERT INTO "ReturnRequestUnit" ("returnRequestItemId", "serializedUnitId") VALUES ($1, $2)`,
+    [requestedReturnItemId, serializedUnitIds[1]],
   );
 
   await client.query(
@@ -169,6 +196,7 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
     shipmentItemId,
     returnRequestId,
     returnItemId,
+    requestedReturnItemId,
     ticketId,
   };
 }

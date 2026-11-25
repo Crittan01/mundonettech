@@ -202,6 +202,7 @@ export async function proxy(request: NextRequest) {
       setAll(cookiesToSet) {
         const priorCookies = response.cookies.getAll();
         for (const { name, value } of cookiesToSet) request.cookies.set(name, value);
+        requestHeaders.set("cookie", request.cookies.toString());
         response = NextResponse.next({ request: { headers: requestHeaders } });
         for (const cookie of priorCookies) {
           response.cookies.set(cookie);

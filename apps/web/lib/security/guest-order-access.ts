@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { PostSaleActor } from "@mundonettech/db";
+import { GuestOrderAccessError } from "@mundonettech/integrations";
 import { cookies } from "next/headers";
 import { connection } from "next/server";
 
@@ -36,7 +37,10 @@ export async function getGuestOrderAccess(
       actor: { kind: "GUEST", guestSessionId: session.sessionId },
       orderId: session.orderId,
     };
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof GuestOrderAccessError && ["INVALID", "EXPIRED"].includes(error.code)) {
+      return null;
+    }
+    throw error;
   }
 }

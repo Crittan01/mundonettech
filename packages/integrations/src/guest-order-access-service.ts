@@ -11,6 +11,7 @@ import { normalizeOperationKey } from "@mundonettech/core";
 import type { IntegrationEnvironment, PrismaClient } from "@mundonettech/db";
 import {
   acquireOperationLocks,
+  consumeOperationRateLimit,
   hasUniqueViolation,
   inInventoryTransaction,
 } from "@mundonettech/db";
@@ -153,18 +154,26 @@ export class GuestOrderAccessService {
             status: existing.status,
           };
         }
+        const ipRate = await consumeOperationRateLimit(tx, {
+          operation: "guest-order-code",
+          subject: { type: "IP" },
+          ipHash,
+          limit: 20,
+          windowSeconds: 3_600,
+          throwOnLimit: false,
+        });
+        if (!ipRate.allowed) {
+          throw new GuestOrderAccessError(
+            "RATE_LIMIT",
+            "Too many guest access codes were requested.",
+          );
+        }
         const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
         const now = nowRows[0]!.now;
         const cooldownStart = new Date(now.getTime() - 60_000);
-        const [orderRecent, ipRecent, latestSent] = await Promise.all([
+        const [orderRecent, latestSent] = await Promise.all([
           tx.guestOrderChallenge.count({
             where: { orderId: order.id, createdAt: { gte: new Date(now.getTime() - 3_600_000) } },
-          }),
-          tx.guestOrderChallenge.count({
-            where: {
-              requestIpHash: ipHash,
-              createdAt: { gte: new Date(now.getTime() - 3_600_000) },
-            },
           }),
           tx.guestOrderChallenge.findFirst({
             where: {
@@ -177,7 +186,7 @@ export class GuestOrderAccessService {
             select: { id: true },
           }),
         ]);
-        if (orderRecent >= 5 || ipRecent >= 20) {
+        if (orderRecent >= 5) {
           throw new GuestOrderAccessError(
             "RATE_LIMIT",
             "Too many guest access codes were requested.",

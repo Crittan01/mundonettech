@@ -1,24 +1,26 @@
-import { randomUUID } from "node:crypto";
+import {
+  maskEmail,
+  maskName,
+  normalizeOperationKey,
+  type AdminPermission,
+} from "@mundonettech/core";
 
-import { maskEmail, normalizeOperationKey } from "@mundonettech/core";
-
-import type { AdminUser, Prisma, PrismaClient } from "./generated/client.js";
+import type { Prisma, PrismaClient } from "./generated/client.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 import { OrderRefundService } from "./order-refund-service.js";
 import type { RefundAudit } from "./order-types.js";
 import { PostSaleError } from "./postsale-service.js";
+import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
+  isAdminSelfDealingCustomer,
+  recordAdminAction,
+  type VerifiedAdminActor,
+} from "./primitives.js";
 
 export interface PostSaleAdminAudit extends RefundAudit {
   readonly requestId?: string;
 }
-
-const postSaleWriters = new Set([
-  "SUPERADMIN",
-  "OPERATIONS_MANAGER",
-  "STORE_MANAGER",
-  "CUSTOMER_SUPPORT",
-]);
-const reviewWriters = new Set([...postSaleWriters, "CMS_EDITOR"]);
 
 function note(value: unknown, required = false): string | null {
   if ((value === null || value === undefined || value === "") && !required) return null;
@@ -35,10 +37,23 @@ function note(value: unknown, required = false): string | null {
 }
 
 function version(value: number): number {
-  if (!Number.isInteger(value) || value < 0) {
-    throw new PostSaleError("VALIDATION", "expectedVersion must be nonnegative.");
+  if (!Number.isInteger(value) || value < 0 || value > 2_147_483_647) {
+    throw new PostSaleError("VALIDATION", "expectedVersion must be a nonnegative 32-bit integer.");
   }
   return value;
+}
+
+function validateAudit(audit: PostSaleAdminAudit): void {
+  assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+  if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
+  if (
+    !(audit.ipHash instanceof Uint8Array) ||
+    audit.ipHash.length !== 32 ||
+    (audit.userAgentHash !== null &&
+      (!(audit.userAgentHash instanceof Uint8Array) || audit.userAgentHash.length !== 32))
+  ) {
+    throw new PostSaleError("VALIDATION", "Audit hashes must contain 32 bytes.");
+  }
 }
 
 export class PostSaleAdminService {
@@ -46,20 +61,20 @@ export class PostSaleAdminService {
 
   private async actor(
     tx: Prisma.TransactionClient,
-    audit: PostSaleAdminAudit,
-    review = false,
-  ): Promise<AdminUser> {
-    assertUuid(audit.actorAdminUserId, "actorAdminUserId");
-    const actor = await tx.adminUser.findFirst({
-      where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-    });
-    if (!actor || !(review ? reviewWriters : postSaleWriters).has(actor.role)) {
-      throw new PostSaleError(
-        "FORBIDDEN",
-        "The administrator is not authorized for post-sale moderation.",
-      );
+    actorAdminUserId: string,
+    permission: AdminPermission,
+  ): Promise<VerifiedAdminActor> {
+    try {
+      return await assertAdminActorInTransaction(tx, actorAdminUserId, permission);
+    } catch (error) {
+      if (error instanceof AdminActorAuthorizationError) {
+        throw new PostSaleError(
+          "FORBIDDEN",
+          "The administrator is not authorized for post-sale moderation.",
+        );
+      }
+      throw error;
     }
-    return actor;
   }
 
   private async log(
@@ -69,93 +84,128 @@ export class PostSaleAdminService {
     targetType: string,
     targetId: string,
     metadata: Prisma.JsonObject,
+    selfDealing: boolean,
   ) {
-    await tx.adminActionLog.create({
-      data: {
-        actorAdminUserId: audit.actorAdminUserId,
-        action,
-        targetType,
-        targetId,
-        requestId: audit.requestId ?? randomUUID(),
-        ipHash: Uint8Array.from(audit.ipHash),
-        userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
-        metadata,
-      },
+    await recordAdminAction(tx, audit, action, targetType, targetId, metadata, { selfDealing });
+  }
+
+  async reviewQueue(actorAdminUserId: string) {
+    assertUuid(actorAdminUserId, "actorAdminUserId");
+    return inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, actorAdminUserId, "reviews:read");
+      return tx.review.findMany({
+        select: {
+          id: true,
+          rating: true,
+          title: true,
+          body: true,
+          authorDisplayName: true,
+          status: true,
+          moderationNote: true,
+          createdAt: true,
+          updatedAt: true,
+          product: { select: { name: true, slug: true } },
+          orderItem: {
+            select: { titleSnapshot: true, order: { select: { orderNumber: true } } },
+          },
+        },
+        orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+        take: 200,
+      });
     });
   }
 
-  async reviewQueue() {
-    return this.db.review.findMany({
-      include: {
-        product: { select: { name: true, slug: true } },
-        orderItem: { select: { titleSnapshot: true, order: { select: { orderNumber: true } } } },
-      },
-      orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-      take: 200,
-    });
-  }
-
-  async queue() {
-    const [returns, warranties, tickets, reviews] = await Promise.all([
-      this.db.returnRequest.findMany({
-        include: {
-          order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
-          items: {
-            include: {
-              orderItem: {
-                select: {
-                  titleSnapshot: true,
-                  skuSnapshot: true,
-                  variant: { select: { product: { select: { retractPolicy: true } } } },
+  async queue(actorAdminUserId: string) {
+    assertUuid(actorAdminUserId, "actorAdminUserId");
+    return inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, actorAdminUserId, "postsale:read");
+      const [returns, warranties, tickets] = await Promise.all([
+        tx.returnRequest.findMany({
+          select: {
+            id: true,
+            kind: true,
+            status: true,
+            reason: true,
+            retractRefundDueAt: true,
+            version: true,
+            createdAt: true,
+            order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+            items: {
+              select: {
+                id: true,
+                quantity: true,
+                deliveredAt: true,
+                orderItem: {
+                  select: {
+                    titleSnapshot: true,
+                    skuSnapshot: true,
+                    variant: { select: { product: { select: { retractPolicy: true } } } },
+                  },
+                },
+                replacementVariant: { select: { sku: true } },
+                units: {
+                  select: {
+                    serializedUnit: { select: { id: true, serial: true, imei: true } },
+                  },
                 },
               },
-              replacementVariant: { select: { sku: true } },
-              units: {
-                include: { serializedUnit: { select: { id: true, serial: true, imei: true } } },
-              },
             },
+            refund: { select: { id: true, status: true, totalCents: true } },
           },
-          refund: { select: { id: true, status: true, totalCents: true } },
-        },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-        take: 200,
-      }),
-      this.db.warrantyClaim.findMany({
-        include: {
-          order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
-          orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
-          serializedUnit: { select: { serial: true, imei: true } },
-          refund: { select: { id: true, status: true, totalCents: true } },
-        },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-        take: 200,
-      }),
-      this.db.supportTicket.findMany({
-        include: {
-          order: { select: { id: true, orderNumber: true } },
-          messages: { orderBy: { createdAt: "asc" } },
-          assignedTo: { select: { id: true, displayName: true } },
-        },
-        orderBy: [{ status: "asc" }, { slaDueAt: "asc" }, { id: "asc" }],
-        take: 200,
-      }),
-      this.reviewQueue(),
-    ]);
-    return {
-      returns: returns.map((item) => ({
-        ...item,
-        order: { ...item.order, emailSnapshot: maskEmail(item.order.emailSnapshot) },
-      })),
-      warranties: warranties.map((item) => ({
-        ...item,
-        order: { ...item.order, emailSnapshot: maskEmail(item.order.emailSnapshot) },
-      })),
-      tickets: tickets.map((item) => ({
-        ...item,
-        contactEmailSnapshot: maskEmail(item.contactEmailSnapshot),
-      })),
-      reviews,
-    };
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          take: 200,
+        }),
+        tx.warrantyClaim.findMany({
+          select: {
+            id: true,
+            remedy: true,
+            status: true,
+            issueDescription: true,
+            warrantyDueAt: true,
+            version: true,
+            createdAt: true,
+            order: { select: { id: true, orderNumber: true } },
+            orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
+            serializedUnit: { select: { serial: true, imei: true } },
+            refund: { select: { id: true, status: true, totalCents: true } },
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          take: 200,
+        }),
+        tx.supportTicket.findMany({
+          select: {
+            id: true,
+            ticketNumber: true,
+            status: true,
+            subject: true,
+            contactEmailSnapshot: true,
+            slaDueAt: true,
+            version: true,
+            messages: {
+              select: { id: true, authorType: true, body: true, createdAt: true },
+              orderBy: { createdAt: "asc" },
+            },
+            assignedTo: { select: { displayName: true } },
+          },
+          orderBy: [{ status: "asc" }, { slaDueAt: "asc" }, { id: "asc" }],
+          take: 200,
+        }),
+      ]);
+      return {
+        returns: returns.map((item) => ({
+          ...item,
+          order: { ...item.order, emailSnapshot: maskEmail(item.order.emailSnapshot) },
+        })),
+        warranties,
+        tickets: tickets.map((item) => ({
+          ...item,
+          contactEmailSnapshot: maskEmail(item.contactEmailSnapshot),
+          assignedTo: item.assignedTo
+            ? { displayName: maskName(item.assignedTo.displayName) }
+            : null,
+        })),
+      };
+    });
   }
 
   async transitionReturn(input: {
@@ -166,10 +216,11 @@ export class PostSaleAdminService {
     audit: PostSaleAdminAudit;
   }) {
     assertUuid(input.returnRequestId, "returnRequestId");
+    validateAudit(input.audit);
     const expectedVersion = version(input.expectedVersion);
     const resolutionNote = note(input.note, input.transition === "COMPLETE");
     return inInventoryTransaction(this.db, async (tx) => {
-      await this.actor(tx, input.audit);
+      const actor = await this.actor(tx, input.audit.actorAdminUserId, "postsale:write");
       const peek = await tx.returnRequest.findUnique({
         where: { id: input.returnRequestId },
         select: { orderId: true },
@@ -183,7 +234,11 @@ export class PostSaleAdminService {
       ]);
       const current = await tx.returnRequest.findUnique({
         where: { id: input.returnRequestId },
-        include: { items: { include: { units: true } }, refund: true },
+        include: {
+          order: { select: { customerId: true, emailSnapshot: true } },
+          items: { include: { units: true } },
+          refund: true,
+        },
       });
       if (!current) throw new PostSaleError("NOT_FOUND", "Return request not found.");
       const target = (
@@ -229,17 +284,21 @@ export class PostSaleAdminService {
         });
         refundId = refund.id;
       }
-      if (
-        input.transition === "CANCEL" &&
-        current.refund &&
-        current.refund.status !== "CANCELLED"
-      ) {
-        await new OrderRefundService(this.db).cancelInTransaction(tx, {
-          refundId: current.refund.id,
-          ...(resolutionNote ? { note: resolutionNote } : {}),
-          audit: input.audit,
-          allowLinkedPostSale: true,
-        });
+      if (input.transition === "CANCEL" && current.refund) {
+        if (["PROCESSING", "COMPLETED"].includes(current.refund.status)) {
+          throw new PostSaleError(
+            "CONFLICT",
+            "A processing or completed refund blocks return cancellation.",
+          );
+        }
+        if (["REQUESTED", "APPROVED", "FAILED"].includes(current.refund.status)) {
+          await new OrderRefundService(this.db).cancelInTransaction(tx, {
+            refundId: current.refund.id,
+            ...(resolutionNote ? { note: resolutionNote } : {}),
+            audit: input.audit,
+            allowLinkedPostSale: true,
+          });
+        }
       }
       if (input.transition === "RECEIVE") {
         const unitIds = current.items
@@ -277,6 +336,10 @@ export class PostSaleAdminService {
           version: { increment: 1 },
         },
       });
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: current.order.customerId ?? current.requesterCustomerId,
+        email: current.order.emailSnapshot,
+      });
       await this.log(
         tx,
         input.audit,
@@ -289,6 +352,7 @@ export class PostSaleAdminService {
           status: target,
           ...(refundId ? { refundId } : {}),
         },
+        selfDealing,
       );
       await tx.domainOutbox.create({
         data: {
@@ -311,10 +375,11 @@ export class PostSaleAdminService {
     audit: PostSaleAdminAudit;
   }) {
     assertUuid(input.warrantyClaimId, "warrantyClaimId");
+    validateAudit(input.audit);
     const expectedVersion = version(input.expectedVersion);
     const resolutionNote = note(input.note, input.transition === "RESOLVE");
     return inInventoryTransaction(this.db, async (tx) => {
-      await this.actor(tx, input.audit);
+      const actor = await this.actor(tx, input.audit.actorAdminUserId, "postsale:write");
       const peek = await tx.warrantyClaim.findUnique({
         where: { id: input.warrantyClaimId },
         select: { orderId: true },
@@ -328,7 +393,10 @@ export class PostSaleAdminService {
       ]);
       const current = await tx.warrantyClaim.findUnique({
         where: { id: input.warrantyClaimId },
-        include: { refund: true },
+        include: {
+          order: { select: { customerId: true, emailSnapshot: true } },
+          refund: true,
+        },
       });
       if (!current) throw new PostSaleError("NOT_FOUND", "Warranty claim not found.");
       const target = (
@@ -372,17 +440,21 @@ export class PostSaleAdminService {
         });
         refundId = refund.id;
       }
-      if (
-        input.transition === "CANCEL" &&
-        current.refund &&
-        current.refund.status !== "CANCELLED"
-      ) {
-        await new OrderRefundService(this.db).cancelInTransaction(tx, {
-          refundId: current.refund.id,
-          ...(resolutionNote ? { note: resolutionNote } : {}),
-          audit: input.audit,
-          allowLinkedPostSale: true,
-        });
+      if (input.transition === "CANCEL" && current.refund) {
+        if (["PROCESSING", "COMPLETED"].includes(current.refund.status)) {
+          throw new PostSaleError(
+            "CONFLICT",
+            "A processing or completed refund blocks warranty cancellation.",
+          );
+        }
+        if (["REQUESTED", "APPROVED", "FAILED"].includes(current.refund.status)) {
+          await new OrderRefundService(this.db).cancelInTransaction(tx, {
+            refundId: current.refund.id,
+            ...(resolutionNote ? { note: resolutionNote } : {}),
+            audit: input.audit,
+            allowLinkedPostSale: true,
+          });
+        }
       }
       if (
         input.transition === "RESOLVE" &&
@@ -393,6 +465,18 @@ export class PostSaleAdminService {
           "CONFLICT",
           "The linked refund must be completed before resolving the warranty.",
         );
+      }
+      if (input.transition === "RESOLVE" && ["REFUND", "REPLACEMENT"].includes(current.remedy)) {
+        const returned = await tx.serializedUnit.updateMany({
+          where: { id: current.serializedUnitId, orderId: current.orderId, status: "SOLD" },
+          data: { status: "RETURNED" },
+        });
+        if (returned.count !== 1) {
+          throw new PostSaleError(
+            "CONFLICT",
+            "The warranty serial must be returned before resolution.",
+          );
+        }
       }
       const updated = await tx.warrantyClaim.update({
         where: { id: current.id },
@@ -406,6 +490,10 @@ export class PostSaleAdminService {
           version: { increment: 1 },
         },
       });
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: current.order.customerId ?? current.requesterCustomerId,
+        email: current.order.emailSnapshot,
+      });
       await this.log(
         tx,
         input.audit,
@@ -418,6 +506,7 @@ export class PostSaleAdminService {
           status: target,
           ...(refundId ? { refundId } : {}),
         },
+        selfDealing,
       );
       await tx.domainOutbox.create({
         data: {
@@ -441,6 +530,7 @@ export class PostSaleAdminService {
     audit: PostSaleAdminAudit;
   }) {
     assertUuid(input.ticketId, "ticketId");
+    validateAudit(input.audit);
     if (
       typeof input.body !== "string" ||
       input.body.trim() !== input.body ||
@@ -457,9 +547,12 @@ export class PostSaleAdminService {
     const expectedVersion = version(input.expectedVersion);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
     return inInventoryTransaction(this.db, async (tx) => {
-      await this.actor(tx, input.audit);
+      const actor = await this.actor(tx, input.audit.actorAdminUserId, "postsale:write");
       await acquireOperationLocks(tx, [`support:${input.ticketId}`]);
-      const current = await tx.supportTicket.findUnique({ where: { id: input.ticketId } });
+      const current = await tx.supportTicket.findUnique({
+        where: { id: input.ticketId },
+        include: { order: { select: { customerId: true, emailSnapshot: true } } },
+      });
       if (!current) throw new PostSaleError("NOT_FOUND", "Support ticket not found.");
       const existing = await tx.supportTicketMessage.findUnique({ where: { idempotencyKey } });
       if (existing) {
@@ -500,11 +593,23 @@ export class PostSaleAdminService {
           version: { increment: 1 },
         },
       });
-      await this.log(tx, input.audit, "SUPPORT_TICKET_REPLIED", "SupportTicket", current.id, {
-        previousStatus: current.status,
-        status: input.status,
-        messageId: message.id,
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: current.order?.customerId ?? current.requesterCustomerId,
+        email: current.order?.emailSnapshot ?? current.contactEmailSnapshot,
       });
+      await this.log(
+        tx,
+        input.audit,
+        "SUPPORT_TICKET_REPLIED",
+        "SupportTicket",
+        current.id,
+        {
+          previousStatus: current.status,
+          status: input.status,
+          messageId: message.id,
+        },
+        selfDealing,
+      );
       await tx.domainOutbox.create({
         data: {
           eventType: "support.ticket.updated.v1",
@@ -528,11 +633,15 @@ export class PostSaleAdminService {
     audit: PostSaleAdminAudit;
   }) {
     assertUuid(input.ticketId, "ticketId");
+    validateAudit(input.audit);
     const expectedVersion = version(input.expectedVersion);
     return inInventoryTransaction(this.db, async (tx) => {
-      await this.actor(tx, input.audit);
+      const actor = await this.actor(tx, input.audit.actorAdminUserId, "postsale:write");
       await acquireOperationLocks(tx, [`support:${input.ticketId}`]);
-      const current = await tx.supportTicket.findUnique({ where: { id: input.ticketId } });
+      const current = await tx.supportTicket.findUnique({
+        where: { id: input.ticketId },
+        include: { order: { select: { customerId: true, emailSnapshot: true } } },
+      });
       if (!current) throw new PostSaleError("NOT_FOUND", "Support ticket not found.");
       if (current.status === "CLOSED")
         return { id: current.id, status: current.status, replayed: true };
@@ -545,10 +654,22 @@ export class PostSaleAdminService {
         where: { id: current.id },
         data: { status: "CLOSED", closedAt: nowRows[0]!.now, version: { increment: 1 } },
       });
-      await this.log(tx, input.audit, "SUPPORT_TICKET_CLOSED", "SupportTicket", current.id, {
-        previousStatus: current.status,
-        status: "CLOSED",
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: current.order?.customerId ?? current.requesterCustomerId,
+        email: current.order?.emailSnapshot ?? current.contactEmailSnapshot,
       });
+      await this.log(
+        tx,
+        input.audit,
+        "SUPPORT_TICKET_CLOSED",
+        "SupportTicket",
+        current.id,
+        {
+          previousStatus: current.status,
+          status: "CLOSED",
+        },
+        selfDealing,
+      );
       return { id: updated.id, status: updated.status, replayed: false };
     });
   }
@@ -561,6 +682,7 @@ export class PostSaleAdminService {
     audit: PostSaleAdminAudit;
   }) {
     assertUuid(input.reviewId, "reviewId");
+    validateAudit(input.audit);
     const moderationNote = note(input.note, input.status === "REJECTED");
     if (
       !(input.expectedUpdatedAt instanceof Date) ||
@@ -569,15 +691,38 @@ export class PostSaleAdminService {
       throw new PostSaleError("VALIDATION", "expectedUpdatedAt is invalid.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
-      await this.actor(tx, input.audit, true);
+      const actor = await this.actor(tx, input.audit.actorAdminUserId, "reviews:write");
       await acquireOperationLocks(tx, [`review:${input.reviewId}`]);
-      const current = await tx.review.findUnique({ where: { id: input.reviewId } });
+      const current = await tx.review.findUnique({
+        where: { id: input.reviewId },
+        include: {
+          product: { select: { slug: true } },
+          orderItem: {
+            select: {
+              order: { select: { customerId: true, emailSnapshot: true } },
+              shipmentItems: {
+                where: { shipment: { status: "DELIVERED", deliveredAt: { not: null } } },
+                select: { id: true },
+                take: 1,
+              },
+            },
+          },
+        },
+      });
       if (!current) throw new PostSaleError("NOT_FOUND", "Review not found.");
+      if (input.status === "PUBLISHED" && current.orderItem.shipmentItems.length === 0) {
+        throw new PostSaleError("CONFLICT", "Reviews require a delivered order item.");
+      }
       if (
         current.status === input.status &&
         current.moderatedByAdminUserId === input.audit.actorAdminUserId
       ) {
-        return { id: current.id, status: current.status, replayed: true };
+        return {
+          id: current.id,
+          status: current.status,
+          productSlug: current.product.slug,
+          replayed: true,
+        };
       }
       if (current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime()) {
         throw new PostSaleError("CONFLICT", "The review changed in another session.");
@@ -592,12 +737,29 @@ export class PostSaleAdminService {
           moderatedAt: nowRows[0]!.now,
         },
       });
-      await this.log(tx, input.audit, `REVIEW_${input.status}`, "Review", current.id, {
-        productId: current.productId,
-        previousStatus: current.status,
-        status: input.status,
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: current.orderItem.order.customerId ?? current.requesterCustomerId,
+        email: current.orderItem.order.emailSnapshot,
       });
-      return { id: updated.id, status: updated.status, replayed: false };
+      await this.log(
+        tx,
+        input.audit,
+        `REVIEW_${input.status}`,
+        "Review",
+        current.id,
+        {
+          productId: current.productId,
+          previousStatus: current.status,
+          status: input.status,
+        },
+        selfDealing,
+      );
+      return {
+        id: updated.id,
+        status: updated.status,
+        productSlug: current.product.slug,
+        replayed: false,
+      };
     });
   }
 }

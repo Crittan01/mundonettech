@@ -293,15 +293,15 @@ async function createCapture(client, orderId, adminUserId, amount = 100000) {
 
 async function createCompletedRefund(
   client,
-  { orderId, orderItemId, attemptId, adminUserId, amount },
+  { orderId, orderItemId, attemptId, adminUserId, amount, reason = "ADJUSTMENT" },
 ) {
   const refundId = randomUUID();
   await client.query(
     `INSERT INTO "OrderRefund" (
        "id", "orderId", "idempotencyKey", "requestHash", "reason", "status",
        "subtotalCents", "taxCents", "shippingCents", "totalCents", "requestedByAdminUserId"
-     ) VALUES ($1, $2, $3, $4, 'ADJUSTMENT', 'REQUESTED', $5, 0, 0, $5, $6)`,
-    [refundId, orderId, `a3-refund-${randomUUID()}`, randomBytes(32), amount, adminUserId],
+     ) VALUES ($1, $2, $3, $4, $7::"OrderRefundReason", 'REQUESTED', $5, 0, 0, $5, $6)`,
+    [refundId, orderId, `a3-refund-${randomUUID()}`, randomBytes(32), amount, adminUserId, reason],
   );
   await client.query(
     `INSERT INTO "OrderRefundItem" (
@@ -325,6 +325,224 @@ async function createCompletedRefund(
     [refundId],
   );
   return refundId;
+}
+
+async function createA6PostSaleFixture(client, { trackSerial = false } = {}) {
+  const catalog = await createCatalogFixture(client);
+  const locationId = await createLocationWithZeroStock(client, catalog.variantId);
+  if (trackSerial) {
+    await client.query(`UPDATE "Product" SET "trackSerial" = true WHERE "id" = $1`, [
+      catalog.productId,
+    ]);
+  }
+  const order = await createOrder(client, {
+    variantId: catalog.variantId,
+    originLocationId: locationId,
+    shipmentStatus: trackSerial ? "READY" : "DELIVERED",
+  });
+  const shipmentItemId = randomUUID();
+  await client.query(
+    `INSERT INTO "ShipmentItem" ("id", "shipmentId", "orderItemId", "quantity")
+     VALUES ($1, $2, $3, 1)`,
+    [shipmentItemId, order.shipmentId, order.orderItemId],
+  );
+  const adminUserId = await createAdmin(client);
+  const attemptId = await createCapture(client, order.id, adminUserId);
+  const challengeId = randomUUID();
+  await client.query(
+    `INSERT INTO "GuestOrderChallenge" (
+       "id", "orderId", "idempotencyKey", "codeHash", "requestIpHash", "status",
+       "providerMessageId", "lastSentAt", "expiresAt", "consumedAt"
+     ) VALUES (
+       $1, $2, $3, $4, $5, 'CONSUMED', $6, CURRENT_TIMESTAMP,
+       CURRENT_TIMESTAMP + INTERVAL '15 minutes', CURRENT_TIMESTAMP
+     )`,
+    [
+      challengeId,
+      order.id,
+      `a6-challenge-${randomUUID()}`,
+      randomBytes(32),
+      randomBytes(32),
+      `message-${randomUUID()}`,
+    ],
+  );
+  const guestSessionId = randomUUID();
+  await client.query(
+    `INSERT INTO "GuestOrderSession" (
+       "id", "orderId", "challengeId", "tokenHash", "expiresAt"
+     ) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP + INTERVAL '1 hour')`,
+    [guestSessionId, order.id, challengeId, randomBytes(32)],
+  );
+  const serializedUnitId = trackSerial ? randomUUID() : null;
+  if (serializedUnitId) {
+    await client.query(
+      `INSERT INTO "SerializedUnit" (
+         "id", "variantId", "locationId", "orderId", "shipmentId", "serial", "status", "soldAt"
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'SOLD', CURRENT_TIMESTAMP)`,
+      [
+        serializedUnitId,
+        catalog.variantId,
+        locationId,
+        order.id,
+        order.shipmentId,
+        `A6-${randomUUID().toUpperCase()}`,
+      ],
+    );
+  }
+  if (trackSerial) {
+    const deliveredAt = new Date();
+    await client.query(
+      `UPDATE "Shipment" SET "status" = 'SHIPPED', "shippedAt" = $2 WHERE "id" = $1`,
+      [order.shipmentId, deliveredAt],
+    );
+    await client.query(
+      `UPDATE "Shipment" SET "status" = 'DELIVERED', "deliveredAt" = $2 WHERE "id" = $1`,
+      [order.shipmentId, deliveredAt],
+    );
+  }
+  const delivered = await client.query(`SELECT "deliveredAt" FROM "Shipment" WHERE "id" = $1`, [
+    order.shipmentId,
+  ]);
+  return {
+    ...catalog,
+    ...order,
+    locationId,
+    shipmentItemId,
+    deliveredAt: delivered.rows[0].deliveredAt,
+    adminUserId,
+    attemptId,
+    challengeId,
+    guestSessionId,
+    serializedUnitId,
+  };
+}
+
+async function createA6Return(
+  client,
+  fixture,
+  { withSerial = false, kind = "REFUND", replacementVariantId = null } = {},
+) {
+  const delivery = await client.query(
+    `SELECT shipment."orderId", shipment."status", shipment."deliveredAt", shipment_item."orderItemId"
+     FROM "Shipment" shipment
+     JOIN "ShipmentItem" shipment_item ON shipment_item."shipmentId" = shipment."id"
+     WHERE shipment_item."id" = $1`,
+    [fixture.shipmentItemId],
+  );
+  assert.equal(delivery.rows[0].orderId, fixture.id);
+  assert.equal(delivery.rows[0].orderItemId, fixture.orderItemId);
+  assert.equal(delivery.rows[0].status, "DELIVERED");
+  assert.equal(delivery.rows[0].deliveredAt.toISOString(), fixture.deliveredAt.toISOString());
+  const returnRequestId = randomUUID();
+  await client.query(
+    `INSERT INTO "ReturnRequest" (
+       "id", "orderId", "requesterGuestSessionId", "idempotencyKey", "requestHash",
+       "kind", "reason", "retractRefundDueAt"
+     ) VALUES ($1, $2, $3, $4, $5, $6::"ReturnRequestKind", 'Retracto estructural A6', $7)`,
+    [
+      returnRequestId,
+      fixture.id,
+      fixture.guestSessionId,
+      `a6-return-${randomUUID()}`,
+      randomBytes(32),
+      kind,
+      kind === "REFUND" ? new Date(fixture.deliveredAt.getTime() + 15 * 86_400_000) : null,
+    ],
+  );
+  const eligibility = await client.query(
+    `SELECT order_item."variantId", shipment."orderId", shipment_item."orderItemId",
+            shipment."status", shipment."deliveredAt" AS actual_delivery,
+            $4::timestamptz AS parameter_delivery, shipment."deliveredAt" = $4::timestamptz AS delivered_matches,
+            $5::timestamptz > $4::timestamptz AS window_valid
+     FROM "ShipmentItem" shipment_item
+     JOIN "Shipment" shipment ON shipment."id" = shipment_item."shipmentId"
+     JOIN "OrderItem" order_item ON order_item."id" = shipment_item."orderItemId"
+     WHERE shipment_item."id" = $1 AND order_item."id" = $2 AND shipment."orderId" = $3`,
+    [
+      fixture.shipmentItemId,
+      fixture.orderItemId,
+      fixture.id,
+      fixture.deliveredAt,
+      new Date(fixture.deliveredAt.getTime() + 5 * 86_400_000),
+    ],
+  );
+  assert.ok(eligibility.rows[0].variantId);
+  assert.equal(eligibility.rows[0].orderId, fixture.id);
+  assert.equal(eligibility.rows[0].orderItemId, fixture.orderItemId);
+  assert.equal(eligibility.rows[0].status, "DELIVERED");
+  assert.equal(
+    eligibility.rows[0].actual_delivery.toISOString(),
+    eligibility.rows[0].parameter_delivery.toISOString(),
+  );
+  assert.equal(eligibility.rows[0].delivered_matches, true);
+  assert.equal(eligibility.rows[0].window_valid, true);
+  const returnRequestItemId = randomUUID();
+  await client.query(
+    `INSERT INTO "ReturnRequestItem" (
+       "id", "returnRequestId", "orderItemId", "shipmentItemId", "quantity", "replacementVariantId",
+       "deliveredAt", "retractDueAt"
+     ) VALUES ($1, $2, $3, $4, 1, $5, $6, $7)`,
+    [
+      returnRequestItemId,
+      returnRequestId,
+      fixture.orderItemId,
+      fixture.shipmentItemId,
+      replacementVariantId,
+      fixture.deliveredAt,
+      new Date(fixture.deliveredAt.getTime() + 5 * 86_400_000),
+    ],
+  );
+  if (withSerial) {
+    await client.query(
+      `INSERT INTO "ReturnRequestUnit" ("returnRequestItemId", "serializedUnitId")
+       VALUES ($1, $2)`,
+      [returnRequestItemId, fixture.serializedUnitId],
+    );
+  }
+  return { returnRequestId, returnRequestItemId };
+}
+
+async function createA6ApprovedRefund(client, fixture, reason) {
+  const refundId = randomUUID();
+  await client.query(
+    `INSERT INTO "OrderRefund" (
+       "id", "orderId", "idempotencyKey", "requestHash", "reason", "status",
+       "subtotalCents", "taxCents", "shippingCents", "totalCents", "requestedByAdminUserId"
+     ) VALUES ($1, $2, $3, $4, $5::"OrderRefundReason", 'REQUESTED', 100000, 0, 0, 100000, $6)`,
+    [
+      refundId,
+      fixture.id,
+      `a6-refund-${randomUUID()}`,
+      randomBytes(32),
+      reason,
+      fixture.adminUserId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO "OrderRefundItem" (
+       "refundId", "orderItemId", "quantity", "subtotalCents", "taxCents", "totalCents"
+     ) VALUES ($1, $2, 1, 100000, 0, 100000)`,
+    [refundId, fixture.orderItemId],
+  );
+  await client.query(`UPDATE "OrderRefund" SET "status" = 'APPROVED' WHERE "id" = $1`, [refundId]);
+  return refundId;
+}
+
+async function completeA6Refund(client, fixture, refundId) {
+  await client.query(`UPDATE "OrderRefund" SET "status" = 'PROCESSING' WHERE "id" = $1`, [
+    refundId,
+  ]);
+  await client.query(
+    `INSERT INTO "PaymentTransaction" (
+       "attemptId", "refundId", "provider", "kind", "status", "amountCents",
+       "externalId", "requestHash", "completedAt"
+     ) VALUES ($1, $2, 'BANK_TRANSFER', 'REFUND', 'SUCCEEDED', 100000, $3, $4, CURRENT_TIMESTAMP)`,
+    [fixture.attemptId, refundId, `a6-refund-${randomUUID()}`, randomBytes(32)],
+  );
+  await client.query(
+    `UPDATE "OrderRefund" SET "status" = 'COMPLETED', "processedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+    [refundId],
+  );
 }
 
 async function createCancelledRefund(client, { orderId, orderItemId, adminUserId, amount }) {
@@ -448,6 +666,7 @@ describe("A3 — Prisma/SQL index and constraint parity", () => {
         ["CreditNote", "CreditNote_cude_key", true],
         ["ReturnRequestItem", "ReturnRequestItem_shipmentItemId_returnRequestId_idx", false],
         ["WarrantyClaim", "WarrantyClaim_orderItemId_status_createdAt_idx", false],
+        ["WarrantyClaim", "WarrantyClaim_one_active_serial_key", true],
         ["ProductAttributeValue", "ProductAttributeValue_attributeId_normalizedValue_idx", false],
         [
           "ProductAttributeValue",
@@ -1693,6 +1912,299 @@ describe("A3 — hardened URL redirect, UVT, soft-delete lifecycle, and updatedA
       );
       assert.ok(updated.rows[0].updatedAt instanceof Date);
       assert.ok(updated.rows[0].updatedAt.getTime() > inserted.rows[0].updatedAt.getTime());
+    });
+  });
+});
+
+describe("A6 — post-sale, serial and financial structural integrity", () => {
+  it("requires a consumed challenge when inserting a guest order session", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA6PostSaleFixture(client);
+      const pendingChallengeId = randomUUID();
+      await client.query(
+        `INSERT INTO "GuestOrderChallenge" (
+           "id", "orderId", "idempotencyKey", "codeHash", "requestIpHash", "expiresAt"
+         ) VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP + INTERVAL '15 minutes')`,
+        [
+          pendingChallengeId,
+          fixture.id,
+          `a6-pending-${randomUUID()}`,
+          randomBytes(32),
+          randomBytes(32),
+        ],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "GuestOrderSession" ("orderId", "challengeId", "tokenHash", "expiresAt")
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP + INTERVAL '1 hour')`,
+        [fixture.id, pendingChallengeId, randomBytes(32)],
+        "23514",
+      );
+      const valid = await client.query(`SELECT "id" FROM "GuestOrderSession" WHERE "id" = $1`, [
+        fixture.guestSessionId,
+      ]);
+      assert.equal(valid.rowCount, 1);
+    });
+  });
+
+  it("requires exact serial coverage and monotonic serialized-unit transitions", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA6PostSaleFixture(client, { trackSerial: true });
+      const returned = await createA6Return(client, fixture);
+      await expectSqlViolation(client, `SET CONSTRAINTS ALL IMMEDIATE`, [], "23514");
+      await client.query(
+        `INSERT INTO "ReturnRequestUnit" ("returnRequestItemId", "serializedUnitId")
+         VALUES ($1, $2)`,
+        [returned.returnRequestItemId, fixture.serializedUnitId],
+      );
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      await expectSqlViolation(
+        client,
+        `UPDATE "SerializedUnit" SET "status" = 'IN_STOCK', "orderId" = NULL, "soldAt" = NULL
+         WHERE "id" = $1`,
+        [fixture.serializedUnitId],
+        "55000",
+      );
+      await client.query(`UPDATE "SerializedUnit" SET "status" = 'RETURNED' WHERE "id" = $1`, [
+        fixture.serializedUnitId,
+      ]);
+    });
+  });
+
+  it("bounds accumulated return quantities by the delivered shipment item", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA6PostSaleFixture(client);
+      await createA6Return(client, fixture);
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      const secondReturnId = randomUUID();
+      await client.query(
+        `INSERT INTO "ReturnRequest" (
+           "id", "orderId", "requesterGuestSessionId", "idempotencyKey", "requestHash",
+           "kind", "reason", "retractRefundDueAt"
+         ) VALUES ($1, $2, $3, $4, $5, 'REFUND', 'Segunda devolución A6', $6)`,
+        [
+          secondReturnId,
+          fixture.id,
+          fixture.guestSessionId,
+          `a6-return-${randomUUID()}`,
+          randomBytes(32),
+          new Date(fixture.deliveredAt.getTime() + 15 * 86_400_000),
+        ],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "ReturnRequestItem" (
+           "returnRequestId", "orderItemId", "shipmentItemId", "quantity", "deliveredAt", "retractDueAt"
+         ) VALUES ($1, $2, $3, 1, $4, $5)`,
+        [
+          secondReturnId,
+          fixture.orderItemId,
+          fixture.shipmentItemId,
+          fixture.deliveredAt,
+          new Date(fixture.deliveredAt.getTime() + 5 * 86_400_000),
+        ],
+        "23514",
+      );
+    });
+  });
+
+  it("completes an exchange without requiring or comparing a refund", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA6PostSaleFixture(client);
+      const replacementVariantId = randomUUID();
+      await client.query(
+        `INSERT INTO "ProductVariant" (
+           "id", "productId", "sku", "priceCents", "costCents", "weightGrams",
+           "lengthMillimeters", "widthMillimeters", "heightMillimeters", "status"
+         ) VALUES ($1, $2, $3, 100000, 60000, 100, 100, 100, 100, 'ACTIVE')`,
+        [replacementVariantId, fixture.productId, `A6-REPLACEMENT-${randomUUID()}`],
+      );
+      const returned = await createA6Return(client, fixture, {
+        kind: "EXCHANGE",
+        replacementVariantId,
+      });
+      await client.query(
+        `UPDATE "ReturnRequest"
+         SET "status" = 'AWAITING_RETURN', "reviewedByAdminUserId" = $1,
+             "reviewedAt" = CURRENT_TIMESTAMP, "version" = 1
+         WHERE "id" = $2`,
+        [fixture.adminUserId, returned.returnRequestId],
+      );
+      await client.query(
+        `UPDATE "ReturnRequest"
+         SET "status" = 'RECEIVED', "receivedAt" = CURRENT_TIMESTAMP, "version" = 2
+         WHERE "id" = $1`,
+        [returned.returnRequestId],
+      );
+      await client.query(
+        `UPDATE "ReturnRequest"
+         SET "status" = 'COMPLETED', "completedAt" = CURRENT_TIMESTAMP, "version" = 3
+         WHERE "id" = $1`,
+        [returned.returnRequestId],
+      );
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      const completed = await client.query(
+        `SELECT "status", "refundId" FROM "ReturnRequest" WHERE "id" = $1`,
+        [returned.returnRequestId],
+      );
+      assert.equal(completed.rows[0].status, "COMPLETED");
+      assert.equal(completed.rows[0].refundId, null);
+    });
+  });
+
+  it("closes a return only after its exact provider refund and rejects later financial drift", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA6PostSaleFixture(client);
+      const returned = await createA6Return(client, fixture);
+      const refundId = await createA6ApprovedRefund(client, fixture, "RETRACT");
+      await client.query(
+        `UPDATE "ReturnRequest"
+         SET "status" = 'AWAITING_RETURN', "refundId" = $1, "reviewedByAdminUserId" = $2,
+             "reviewedAt" = CURRENT_TIMESTAMP, "version" = 1
+         WHERE "id" = $3`,
+        [refundId, fixture.adminUserId, returned.returnRequestId],
+      );
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      await client.query(
+        `UPDATE "ReturnRequest"
+         SET "status" = 'RECEIVED', "receivedAt" = CURRENT_TIMESTAMP, "version" = 2
+         WHERE "id" = $1`,
+        [returned.returnRequestId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "ReturnRequest"
+         SET "status" = 'COMPLETED', "completedAt" = CURRENT_TIMESTAMP, "version" = 3
+         WHERE "id" = $1`,
+        [returned.returnRequestId],
+        "23514",
+      );
+      await completeA6Refund(client, fixture, refundId);
+      await client.query(
+        `UPDATE "ReturnRequest"
+         SET "status" = 'COMPLETED', "completedAt" = CURRENT_TIMESTAMP, "version" = 3
+         WHERE "id" = $1`,
+        [returned.returnRequestId],
+      );
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      await client.query(`SET CONSTRAINTS ALL DEFERRED`);
+      await client.query(
+        `INSERT INTO "PaymentTransaction" (
+           "attemptId", "refundId", "provider", "kind", "status", "amountCents",
+           "externalId", "requestHash", "completedAt"
+         ) VALUES ($1, $2, 'BANK_TRANSFER', 'REFUND', 'SUCCEEDED', 1, $3, $4, CURRENT_TIMESTAMP)`,
+        [fixture.attemptId, refundId, `a6-extra-${randomUUID()}`, randomBytes(32)],
+      );
+      await expectSqlViolation(client, `SET CONSTRAINTS ALL IMMEDIATE`, [], "23514");
+    });
+  });
+
+  it("closes a refund warranty only after payment and permits one active claim per serial", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA6PostSaleFixture(client, { trackSerial: true });
+      const warrantyId = randomUUID();
+      const warrantyInput = [
+        fixture.id,
+        fixture.orderItemId,
+        fixture.serializedUnitId,
+        fixture.guestSessionId,
+        `a6-warranty-${randomUUID()}`,
+        randomBytes(32),
+        new Date(fixture.deliveredAt.getTime() + 365 * 86_400_000),
+      ];
+      await client.query(
+        `INSERT INTO "WarrantyClaim" (
+           "id", "orderId", "orderItemId", "serializedUnitId", "requesterGuestSessionId",
+           "idempotencyKey", "requestHash", "issueDescription", "remedy", "warrantyDueAt"
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Falla cubierta por garantía A6', 'REFUND', $8)`,
+        [warrantyId, ...warrantyInput],
+      );
+      const refundId = await createA6ApprovedRefund(client, fixture, "WARRANTY");
+      await client.query(
+        `UPDATE "WarrantyClaim"
+         SET "status" = 'APPROVED', "refundId" = $1, "reviewedByAdminUserId" = $2,
+             "reviewedAt" = CURRENT_TIMESTAMP, "version" = 1
+         WHERE "id" = $3`,
+        [refundId, fixture.adminUserId, warrantyId],
+      );
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      await expectSqlViolation(
+        client,
+        `UPDATE "WarrantyClaim"
+         SET "status" = 'RESOLVED', "resolvedAt" = CURRENT_TIMESTAMP, "version" = 2
+         WHERE "id" = $1`,
+        [warrantyId],
+        "23514",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "WarrantyClaim" (
+           "orderId", "orderItemId", "serializedUnitId", "requesterGuestSessionId",
+           "idempotencyKey", "requestHash", "issueDescription", "remedy", "warrantyDueAt"
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'Reclamo duplicado de garantía', 'REFUND', $7)`,
+        [
+          ...warrantyInput.slice(0, 4),
+          `a6-warranty-duplicate-${randomUUID()}`,
+          warrantyInput[5],
+          warrantyInput[6],
+        ],
+        "23505",
+        "WarrantyClaim_one_active_serial_key",
+      );
+      await completeA6Refund(client, fixture, refundId);
+      await client.query(`UPDATE "SerializedUnit" SET "status" = 'RETURNED' WHERE "id" = $1`, [
+        fixture.serializedUnitId,
+      ]);
+      await client.query(
+        `UPDATE "WarrantyClaim"
+         SET "status" = 'RESOLVED', "resolvedAt" = CURRENT_TIMESTAMP, "version" = 2
+         WHERE "id" = $1`,
+        [warrantyId],
+      );
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+    });
+  });
+
+  it("keeps current-day fiscal captures, refunds and threshold history monotonic", async () => {
+    await withRollback(async (client) => {
+      const snapshotId = randomUUID();
+      await client.query(
+        `INSERT INTO "FiscalWatchSnapshot" (
+           "id", "fiscalYear", "snapshotDate", "uvtYear", "uvtValueCents", "thresholdUvt",
+           "thresholdCents", "grossCapturedCents", "refundedCents", "netRevenueCents",
+           "refundExcessCents", "remainingCents", "status"
+         ) VALUES (
+           $1, 2026, CURRENT_DATE, 2026, 100000, 2, 200000, 160000, 20000, 140000, 0, 40000,
+           'APPROACHING_LIMIT'
+         )`,
+        [snapshotId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "FiscalWatchSnapshot" SET "grossCapturedCents" = 140000 WHERE "id" = $1`,
+        [snapshotId],
+        "55000",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "FiscalWatchSnapshot" SET "refundedCents" = 10000 WHERE "id" = $1`,
+        [snapshotId],
+        "55000",
+      );
+      await client.query(
+        `UPDATE "FiscalWatchSnapshot"
+         SET "grossCapturedCents" = 200000, "netRevenueCents" = 180000,
+             "remainingCents" = 0, "status" = 'THRESHOLD_REACHED',
+             "thresholdReachedAt" = CURRENT_TIMESTAMP
+         WHERE "id" = $1`,
+        [snapshotId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "FiscalWatchSnapshot" SET "thresholdReachedAt" = NULL WHERE "id" = $1`,
+        [snapshotId],
+        "55000",
+      );
     });
   });
 });

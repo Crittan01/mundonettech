@@ -203,6 +203,7 @@ describe("A2 — NotificationRead y auditoría en la misma transacción", () => 
         findUnique: vi.fn(async () => ({ id: randomUUID(), category: "orders.fulfillment" })),
       },
       adminUser: { findFirst: vi.fn(async () => ({ id: actorId, role: "FULFILLMENT" })) },
+      $queryRaw: vi.fn(async () => [{ id: actorId, role: "FULFILLMENT" }]),
       notificationRead: { upsert: vi.fn(async () => ({ readAt })) },
       adminActionLog: { create: vi.fn(async () => ({})) },
     };

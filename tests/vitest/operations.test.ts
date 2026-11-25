@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   adminNavigation,
@@ -6,8 +6,11 @@ import {
   formatCopCents,
   formatSignedCopCents,
   hasAdminPermission,
+  parseCsv,
+  serializeCsv,
 } from "../../packages/core/dist/index.js";
 import {
+  FinanceService,
   bogotaDayStart,
   canReadNotificationCategory,
   currentYearRange,
@@ -77,6 +80,7 @@ describe("F4A.1 — RBAC for operational and finance surfaces", () => {
         hasAdminPermission(role, "audit:read"),
       );
       expect(canReadNotificationCategory(role, "operations.general")).toBe(true);
+      expect(canReadNotificationCategory(role, "security.unclassified")).toBe(false);
     }
     expect(hasAdminPermission("FULFILLMENT", "orders:read")).toBe(true);
     expect(hasAdminPermission("CUSTOMER_SUPPORT", "orders:read")).toBe(true);
@@ -104,5 +108,42 @@ describe("F4A.1 — exact local dates and signed financial presentation", () => 
     expect(() => formatCopCents(-1n)).toThrow(RangeError);
     expect(() => formatSignedCopCents(-9_223_372_036_854_775_808n)).not.toThrow();
     expect(() => formatSignedCopCents(-9_223_372_036_854_775_809n)).toThrow(RangeError);
+  });
+
+  it("neutralizes spreadsheet formulas in finance CSV cells", () => {
+    const csv = serializeCsv([["=1+1"], ["  @cmd"], ["\t-2"], ["\r=3"], ["safe"]]);
+    expect(parseCsv(csv).map((record) => record.cells[0]?.[0])).toEqual(["'", "'", "'", "'", "s"]);
+  });
+
+  it("reads finance totals and rows from one repeatable-read snapshot", async () => {
+    const queryRaw = vi
+      .fn()
+      .mockResolvedValueOnce([{ orderCount: 0n }])
+      .mockResolvedValueOnce([]);
+    const transaction = vi.fn(
+      async (
+        callback: (tx: { $queryRaw: typeof queryRaw }) => Promise<unknown>,
+        options: { isolationLevel: string },
+      ) => {
+        expect(options).toEqual({
+          isolationLevel: "RepeatableRead",
+          maxWait: 10_000,
+          timeout: 120_000,
+        });
+        return callback({ $queryRaw: queryRaw });
+      },
+    );
+    const service = new FinanceService({ $transaction: transaction } as never, {
+      uvtValueCents: 5_237_400n,
+      uvtYear: 2026,
+      thresholdUvt: 3500,
+    });
+
+    await expect(service.report(currentYearRange(2026))).resolves.toMatchObject({
+      summary: { orderCount: 0 },
+      rows: [],
+    });
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(queryRaw).toHaveBeenCalledTimes(2);
   });
 });

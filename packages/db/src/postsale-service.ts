@@ -307,9 +307,27 @@ export class PostSaleService {
           throw new PostSaleError("VALIDATION", "Duplicate serialized units are not allowed.");
         }
         serials.forEach((id) => assertUuid(id, "serializedUnitId"));
-        return { ...item, replacementVariantId: item.replacementVariantId ?? null, serials };
+        return {
+          shipmentItemId: item.shipmentItemId,
+          quantity: item.quantity,
+          replacementVariantId: item.replacementVariantId ?? null,
+          serializedUnitIds: serials,
+          serials,
+        };
       })
       .sort((left, right) => compareStrings(left.shipmentItemId, right.shipmentItemId));
+    const requestedSerials = new Set<string>();
+    for (const item of items) {
+      for (const serial of item.serials) {
+        if (requestedSerials.has(serial)) {
+          throw new PostSaleError(
+            "VALIDATION",
+            "A serialized unit cannot appear in multiple delivery items.",
+          );
+        }
+        requestedSerials.add(serial);
+      }
+    }
     const expectedHash = digest({
       actor: actorHash(actor),
       input: { ...input, reason, idempotencyKey, items },
@@ -416,7 +434,7 @@ export class PostSaleService {
               productId: delivery.orderItem.variant.productId,
               status: "ACTIVE",
               deletedAt: null,
-              product: { deletedAt: null },
+              product: { status: "ACTIVE", deletedAt: null },
             },
           });
           if (!replacement)
@@ -643,7 +661,7 @@ export class PostSaleService {
         await tx.supportTicketMessage.create({
           data: {
             ticketId: id,
-            idempotencyKey: `${idempotencyKey}:initial`.slice(0, 128),
+            idempotencyKey: `support:${id}:initial`,
             authorType: actor.kind,
             authorCustomerId: ids.customerId,
             authorGuestSessionId: ids.guestSessionId,
@@ -698,7 +716,15 @@ export class PostSaleService {
         if (actor.kind !== "CUSTOMER" || peek.requesterCustomerId !== actor.customerId) {
           throw new PostSaleError("FORBIDDEN", "The customer does not own this ticket.");
         }
-        await acquireOperationLocks(tx, [`support:${peek.id}`]);
+        await acquireOperationLocks(tx, [
+          `customer-account:${actor.customerId}`,
+          `support:${peek.id}`,
+        ]);
+        const customer = await tx.customer.findFirst({
+          where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+          select: { id: true },
+        });
+        if (!customer) throw new PostSaleError("FORBIDDEN", "The customer account is not active.");
       } else {
         await this.lockOrderActor(tx, peek.orderId, actor);
         await acquireOperationLocks(tx, [`support:${peek.id}`]);
@@ -768,6 +794,11 @@ export class PostSaleService {
     if (actor.kind !== "CUSTOMER")
       throw new PostSaleError("VALIDATION", "Guest tickets require an order.");
     assertUuid(actor.customerId, "customerId");
+    const customer = await this.db.customer.findFirst({
+      where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+      select: { id: true },
+    });
+    if (!customer) throw new PostSaleError("FORBIDDEN", "The customer account is not active.");
     return this.db.supportTicket.findMany({
       where: { requesterCustomerId: actor.customerId },
       include: {
@@ -852,9 +883,18 @@ export class PostSaleService {
       select: { id: true },
     });
     if (!product) throw new PostSaleError("NOT_FOUND", "Product not found.");
+    const publishedDeliveredWhere = {
+      productId: product.id,
+      status: "PUBLISHED" as const,
+      orderItem: {
+        shipmentItems: {
+          some: { shipment: { status: "DELIVERED" as const, deliveredAt: { not: null } } },
+        },
+      },
+    };
     const cursor = options.cursor
       ? await this.db.review.findFirst({
-          where: { id: options.cursor, productId: product.id, status: "PUBLISHED" },
+          where: { id: options.cursor, ...publishedDeliveredWhere },
           select: { id: true, createdAt: true },
         })
       : null;
@@ -862,8 +902,7 @@ export class PostSaleService {
     const [items, aggregate] = await Promise.all([
       this.db.review.findMany({
         where: {
-          productId: product.id,
-          status: "PUBLISHED",
+          ...publishedDeliveredWhere,
           ...(cursor
             ? {
                 OR: [
@@ -885,7 +924,7 @@ export class PostSaleService {
         take: limit + 1,
       }),
       this.db.review.aggregate({
-        where: { productId: product.id, status: "PUBLISHED" },
+        where: publishedDeliveredWhere,
         _count: { _all: true },
         _avg: { rating: true },
       }),

@@ -178,7 +178,7 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
           value={Math.min(10_000, progressBps)}
           aria-label="Avance hacia el umbral anual"
         />
-        <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-3">
+        <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <div>
             <dt className="text-muted-foreground">Bruto reconocido</dt>
             <dd className="font-semibold">{formatCopCents(watch.grossCapturedCents)}</dd>
@@ -186,6 +186,10 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
           <div>
             <dt className="text-muted-foreground">Neto tras reembolsos</dt>
             <dd className="font-semibold">{formatCopCents(watch.netRevenueCents)}</dd>
+          </div>
+          <div>
+            <dt className="text-muted-foreground">Exceso de reembolsos</dt>
+            <dd className="font-semibold">{formatCopCents(watch.refundExcessCents)}</dd>
           </div>
           <div>
             <dt className="text-muted-foreground">Restante para el umbral</dt>

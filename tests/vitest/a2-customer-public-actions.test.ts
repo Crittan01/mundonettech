@@ -13,6 +13,7 @@ import * as db from "../../packages/db/dist/index.js";
 import {
   actionError,
   actionSuccess,
+  closedFormObject,
   formSnapshot,
   formString,
   type ActionState,
@@ -65,7 +66,13 @@ const moduleMocks: Record<string, unknown> = {
   "@mundonettech/db": db,
   "next/cache": { revalidatePath: mocks.revalidatePath, updateTag: mocks.updateTag },
   "next/navigation": { redirect: mocks.redirect },
-  "@/lib/action-state": { actionError, actionSuccess, formSnapshot, formString },
+  "@/lib/action-state": {
+    actionError,
+    actionSuccess,
+    closedFormObject,
+    formSnapshot,
+    formString,
+  },
   "@/lib/cart": {
     cartForMutation: mocks.cartForMutation,
     claimAssistedCart: mocks.claimAssistedCart,
@@ -217,6 +224,12 @@ const cancelCustomerAuthRequestAction = requiredAction(
   customerAuthActions,
   "cancelCustomerAuthRequestAction",
 );
+const registerCustomerAction = requiredAction(customerAuthActions, "registerCustomerAction");
+const requestCustomerRecoveryAction = requiredAction(
+  customerAuthActions,
+  "requestCustomerRecoveryAction",
+);
+const signOutCustomerAction = requiredAction(customerAuthActions, "signOutCustomerAction");
 const acceptB2bProposalAction = requiredAction(b2bActions, "acceptB2bProposalAction");
 const captureB2bOpportunityAction = requiredAction(b2bActions, "captureB2bOpportunityAction");
 
@@ -245,6 +258,9 @@ beforeEach(() => {
     affectedReviewProductSlugs: ["producto-a", "producto-b"],
   });
   mocks.signInWithOtp.mockResolvedValue({ error: null });
+  mocks.signUp.mockResolvedValue({ error: null });
+  mocks.resetPasswordForEmail.mockResolvedValue({ error: null });
+  mocks.signOut.mockResolvedValue({ error: null });
   mocks.readCustomerAuthRequest.mockResolvedValue({ purpose: "login", email: "cookie@example.co" });
   mocks.verifyTurnstileToken.mockResolvedValue(undefined);
   mocks.captureOpportunity.mockResolvedValue({ opportunityId, replayed: false });
@@ -314,7 +330,6 @@ describe("A2 — carrito, cuenta y crecimiento", () => {
 
   it("actualiza perfil con timestamp del titular y devuelve conflictos obsoletos seguros", async () => {
     const form = new FormData();
-    form.set("customerId", otherCustomerId);
     form.set("expectedUpdatedAt", "2026-11-24T11:00:00.000Z");
     form.set("givenName", "Nombre");
     form.set("familyName", "Apellido");
@@ -343,6 +358,32 @@ describe("A2 — carrito, cuenta y crecimiento", () => {
     expect(conflict.status).toBe("error");
     expect(conflict.message).toContain("cambió en otra sesión");
     expect(conflict.message).not.toContain("stale internal");
+  });
+
+  it("rechaza campos ajenos y duplicados sin llamar al DAL ni reflejar valores inyectados", async () => {
+    function validForm(): FormData {
+      const form = new FormData();
+      form.set("expectedUpdatedAt", "2026-11-24T11:00:00.000Z");
+      form.set("givenName", "Nombre");
+      form.set("familyName", "Apellido");
+      form.set("phoneE164", "+573001234567");
+      return form;
+    }
+
+    const unknown = validForm();
+    unknown.set("customerId", otherCustomerId);
+    unknown.set("internalSecret", "no-re reflejar");
+    const rejectedUnknown = await updateProfileAction(idle, unknown);
+    expect(rejectedUnknown.status).toBe("error");
+    expect(rejectedUnknown.values?.customerId).toBeUndefined();
+    expect(rejectedUnknown.values?.internalSecret).toBeUndefined();
+    expect(JSON.stringify(rejectedUnknown)).not.toContain("no-re reflejar");
+
+    const duplicate = validForm();
+    duplicate.append("givenName", "Suplantado");
+    const rejectedDuplicate = await updateProfileAction(idle, duplicate);
+    expect(rejectedDuplicate.status).toBe("error");
+    expect(mocks.updateProfile).not.toHaveBeenCalled();
   });
 
   it("invalida reseñas globales y por producto después de anonimizar", async () => {
@@ -392,15 +433,13 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     expect(mocks.establishCustomerAuthRequest).toHaveBeenCalledWith("login", "cliente@example.co");
   });
 
-  it("ignora correo y modo inyectados y registra OTP fallido sin PII ni respuesta Auth", async () => {
+  it("registra OTP fallido sin PII ni respuesta privada de Auth", async () => {
     mocks.verifyOtp.mockResolvedValueOnce({
       data: { user: null, session: null },
       error: { message: "private auth response cliente@example.co" },
     });
     const form = new FormData();
-    form.set("email", "atacante@example.co");
     form.set("code", "123456");
-    form.set("mode", "recovery");
     form.set("turnstileToken", "captcha-token");
 
     const result = await verifyCustomerOtpAction(idle, form);
@@ -423,6 +462,29 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     expect(mocks.synchronizeCustomerProfile).not.toHaveBeenCalled();
     expect(mocks.establishCustomerActivity).not.toHaveBeenCalled();
     expect(mocks.clearCustomerAuthRequest).not.toHaveBeenCalled();
+  });
+
+  it("rechaza modo, correo, next y códigos duplicados antes de Turnstile o Auth", async () => {
+    const form = new FormData();
+    form.set("email", "atacante@example.co");
+    form.set("code", "123456");
+    form.set("mode", "recovery");
+    form.set("next", "https://evil.example/robo");
+    form.set("turnstileToken", "captcha-token");
+    const result = await verifyCustomerOtpAction(idle, form);
+
+    expect(result.status).toBe("error");
+    expect(JSON.stringify(result)).not.toContain("atacante@example.co");
+    expect(mocks.verifyTurnstileToken).not.toHaveBeenCalled();
+    expect(mocks.verifyOtp).not.toHaveBeenCalled();
+    expect(mocks.readCustomerAuthRequest).not.toHaveBeenCalled();
+
+    const duplicate = new FormData();
+    duplicate.append("code", "123456");
+    duplicate.append("code", "654321");
+    duplicate.set("turnstileToken", "captcha-token");
+    expect((await verifyCustomerOtpAction(idle, duplicate)).status).toBe("error");
+    expect(mocks.verifyOtp).not.toHaveBeenCalled();
   });
 
   it("consume el estado solo con OTP válido y activa la sesión del correo protegido", async () => {
@@ -458,7 +520,7 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     expect(mocks.establishCustomerAuthRequest).not.toHaveBeenCalled();
   });
 
-  it("completa el flujo real con cookie cifrada, ignora next inyectado y bloquea replay", async () => {
+  it("completa el flujo real con cookie cifrada, conserva next firmado y bloquea replay", async () => {
     const next = `/pagar/${token}`;
     const request = new FormData();
     request.set("email", "cliente@example.co");
@@ -478,7 +540,6 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     const verification = new FormData();
     verification.set("code", "123456");
     verification.set("turnstileToken", "captcha-token");
-    verification.set("next", "https://evil.example/robo");
 
     await expect(verifyRealCustomerOtpAction(idle, verification)).rejects.toMatchObject({
       digest: expect.stringContaining("NEXT_REDIRECT"),
@@ -529,7 +590,7 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     );
   });
 
-  it("liga el reset al propósito recovery y consume el estado antes de actualizar", async () => {
+  it("liga el reset al propósito recovery y revoca las demás sesiones", async () => {
     mocks.readCustomerAuthRequest.mockResolvedValueOnce({
       purpose: "recovery",
       email: "reset@example.co",
@@ -544,7 +605,6 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     form.set("password", "ClaveSegura123!");
     form.set("confirmation", "ClaveSegura123!");
     form.set("turnstileToken", "captcha-token");
-    form.set("email", "atacante@example.co");
 
     await expect(resetCustomerPasswordAction(idle, form)).rejects.toMatchObject({
       digest: expect.stringContaining("NEXT_REDIRECT"),
@@ -556,6 +616,88 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     });
     expect(mocks.clearCustomerAuthRequest).toHaveBeenCalledOnce();
     expect(mocks.updateUser).toHaveBeenCalledWith({ password: "ClaveSegura123!" });
+    expect(mocks.signOut).toHaveBeenCalledWith({ scope: "others" });
+  });
+
+  it("cierra la sesión actual si no puede revocar las demás tras cambiar la contraseña", async () => {
+    mocks.readCustomerAuthRequest.mockResolvedValueOnce({
+      purpose: "recovery",
+      email: "reset@example.co",
+    });
+    mocks.verifyOtp.mockResolvedValueOnce({
+      data: { user: { id: customerId }, session: { access_token: "session" } },
+      error: null,
+    });
+    mocks.updateUser.mockResolvedValueOnce({ error: null });
+    mocks.signOut.mockResolvedValueOnce({ error: new Error("private revocation failure") });
+    const form = new FormData();
+    form.set("code", "123456");
+    form.set("password", "ClaveSegura123!");
+    form.set("confirmation", "ClaveSegura123!");
+    form.set("turnstileToken", "captcha-token");
+
+    const result = await resetCustomerPasswordAction(idle, form);
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("contraseña se actualizó");
+    expect(JSON.stringify(result)).not.toContain("private revocation failure");
+    expect(mocks.signOut.mock.calls.map(([options]) => options)).toEqual([
+      { scope: "others" },
+      { scope: "local" },
+    ]);
+    expect(mocks.establishCustomerActivity).not.toHaveBeenCalled();
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+
+  it("siempre limpia la actividad local al cerrar sesión, incluso si Auth falla", async () => {
+    await expect(signOutCustomerAction(idle, new FormData())).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    expect(mocks.signOut).toHaveBeenCalledWith({ scope: "local" });
+    expect(mocks.clearActivityCookies).toHaveBeenCalledOnce();
+    expect(mocks.clearCustomerCartCookie).toHaveBeenCalledOnce();
+    expect(mocks.clearCustomerAuthRequest).toHaveBeenCalledOnce();
+    expect(mocks.clearReferralCode).toHaveBeenCalledOnce();
+
+    vi.clearAllMocks();
+    mocks.signOut.mockRejectedValueOnce(new Error("network private"));
+    await expect(signOutCustomerAction(idle, new FormData())).rejects.toThrow(
+      "Unable to revoke the local customer session.",
+    );
+    expect(mocks.clearActivityCookies).toHaveBeenCalledOnce();
+    expect(mocks.clearCustomerCartCookie).toHaveBeenCalledOnce();
+    expect(mocks.clearCustomerAuthRequest).toHaveBeenCalledOnce();
+    expect(mocks.clearReferralCode).toHaveBeenCalledOnce();
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+
+  it("mantiene respuestas uniformes y sin detalles de Auth en solicitudes públicas", async () => {
+    const registration = new FormData();
+    registration.set("email", "persona@example.co");
+    registration.set("password", "ClaveSegura123!");
+    registration.set("confirmation", "ClaveSegura123!");
+    registration.set("turnstileToken", "captcha-token");
+    mocks.signUp.mockResolvedValueOnce({ error: { message: "private signup status" } });
+    const registered = await registerCustomerAction(idle, registration);
+
+    const login = new FormData();
+    login.set("email", "persona@example.co");
+    login.set("turnstileToken", "captcha-token");
+    mocks.signInWithOtp.mockResolvedValueOnce({ error: { message: "private login status" } });
+    const loggedIn = await requestCustomerOtpAction(idle, login);
+
+    const recovery = new FormData();
+    recovery.set("email", "persona@example.co");
+    recovery.set("turnstileToken", "captcha-token");
+    mocks.resetPasswordForEmail.mockResolvedValueOnce({
+      error: { message: "private recovery status" },
+    });
+    const recovered = await requestCustomerRecoveryAction(idle, recovery);
+
+    expect(registered).toEqual(loggedIn);
+    expect(loggedIn).toEqual(recovered);
+    expect(registered.status).toBe("success");
+    expect(JSON.stringify([registered, loggedIn, recovered])).not.toContain("private");
+    expect(mocks.establishCustomerAuthRequest).toHaveBeenCalledTimes(3);
   });
 });
 

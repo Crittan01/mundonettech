@@ -605,12 +605,11 @@ export class GrowthService {
       include: {
         referralCode: true,
         loyaltyTxns: {
-          include: { order: { select: { orderNumber: true } } },
+          include: { order: { select: { orderNumber: true, customerId: true } } },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 100,
         },
         referralsMade: {
-          include: { order: { select: { orderNumber: true } } },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 50,
         },
@@ -634,13 +633,12 @@ export class GrowthService {
         type: entry.type,
         points: entry.points,
         balanceAfter: entry.balanceAfter,
-        orderNumber: entry.order.orderNumber,
+        orderNumber: entry.order.customerId === customerId ? entry.order.orderNumber : null,
         createdAt: entry.createdAt,
       })),
       referralsMade: customer.referralsMade.map((referral) => ({
         id: referral.id,
         status: referral.status,
-        orderNumber: referral.order?.orderNumber ?? null,
         createdAt: referral.createdAt,
         qualifiedAt: referral.qualifiedAt,
       })),

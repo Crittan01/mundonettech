@@ -22,7 +22,7 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 
 export default async function PostSaleAdminPage() {
   const session = await requireAdminPage("postsale:read");
-  const queue = await new PostSaleAdminService(getDatabase()).queue();
+  const queue = await new PostSaleAdminService(getDatabase()).queue(session.profile.id);
   const canWrite = hasAdminPermission(session.profile.role, "postsale:write");
   const canRefund = hasAdminPermission(session.profile.role, "payments:write");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");

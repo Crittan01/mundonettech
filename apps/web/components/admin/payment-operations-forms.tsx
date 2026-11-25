@@ -157,7 +157,7 @@ export function CompensationForm({ transactionId }: { transactionId: string }) {
         />
       </div>
       <Button type="submit" variant="outline" disabled={pending}>
-        Conciliar
+        {pending ? "Conciliando…" : "Conciliar"}
       </Button>
       <div className="w-full">
         <FormMessage state={state} />
@@ -172,7 +172,7 @@ export function VoidPaymentForm({ paymentAttemptId }: { paymentAttemptId: string
     <form action={action} className="mt-3 space-y-2">
       <input type="hidden" name="paymentAttemptId" value={paymentAttemptId} />
       <Button type="submit" variant="destructive" size="sm" disabled={pending}>
-        Solicitar anulación
+        {pending ? "Solicitando…" : "Solicitar anulación"}
       </Button>
       <FormMessage state={state} />
     </form>
@@ -293,7 +293,7 @@ export function BlockIdentityForm() {
         El valor ingresado se normaliza y se reemplaza por HMAC-SHA256 antes de persistirse.
       </p>
       <Button type="submit" variant="destructive" disabled={pending}>
-        Bloquear para COD
+        {pending ? "Bloqueando…" : "Bloquear para COD"}
       </Button>
       <FormMessage state={state} />
     </form>
@@ -306,7 +306,7 @@ export function UnblockIdentityForm({ blockedIdentityId }: { blockedIdentityId: 
     <form action={action} className="mt-3 space-y-2">
       <input type="hidden" name="blockedIdentityId" value={blockedIdentityId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
-        Desactivar bloqueo
+        {pending ? "Desactivando…" : "Desactivar bloqueo"}
       </Button>
       <FormMessage state={state} />
     </form>

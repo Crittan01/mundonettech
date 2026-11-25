@@ -2473,4 +2473,53 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       "REFUNDED",
     );
   });
+
+  it("keeps a provider void with invalid success evidence uncertain and blocks blind retry", async () => {
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-void-invalid-evidence:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved = wompiEvent(attempt, "APPROVED");
+    await webhooks.process({ body: approved.body, environment: "LOCAL" });
+    const gateway = new PaymentRefundService(db, { vault });
+    gateway.providerFor = async () => ({
+      code: PaymentProvider.WOMPI,
+      async start() {
+        return { checkoutUrl: null };
+      },
+      async refund() {
+        throw new Error("Refund is not used by this test.");
+      },
+      async void() {
+        return {
+          status: "SUCCEEDED",
+          externalId: null,
+          providerReference: null,
+          message: null,
+        };
+      },
+    });
+
+    await assert.rejects(
+      gateway.void(attempt.id, audit),
+      (error) => error instanceof PaymentProviderError && error.code === "INVALID_RESPONSE",
+    );
+    const pending = await db.paymentTransaction.findFirstOrThrow({
+      where: { attemptId: attempt.id, kind: "VOID" },
+    });
+    assert.equal(pending.status, "PROCESSING");
+    await assert.rejects(
+      gateway.void(attempt.id, audit),
+      (error) => error instanceof PaymentConflictError && error.code === "PROVIDER_UNCERTAIN",
+    );
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "PAID",
+    );
+  });
 });

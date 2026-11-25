@@ -1,8 +1,18 @@
-import { hasAdminPermission, isAdminRole, maskName, type AdminRoleValue } from "@mundonettech/core";
+import {
+  hasAdminPermission,
+  isAdminRole,
+  maskName,
+  type AdminPermission,
+  type AdminRoleValue,
+} from "@mundonettech/core";
 
 import type { Prisma, PrismaClient } from "./generated/client.js";
 import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
-import { recordAdminAction, type AdminActionAudit } from "./primitives.js";
+import {
+  assertAdminActorInTransaction,
+  recordAdminAction,
+  type AdminActionAudit,
+} from "./primitives.js";
 import type {
   OperationalNotification,
   OperationsPermissions,
@@ -28,77 +38,42 @@ const managedCategories = [
   "outbox.failed",
 ] as const;
 
+const categoryPermissions = [
+  ["orders.", "orders:read"],
+  ["shipping.", "orders:read"],
+  ["postsale.", "postsale:read"],
+  ["reviews.", "reviews:read"],
+  ["crm.", "crm:read"],
+  ["b2b.", "b2b:read"],
+  ["channels.", "integrations:read"],
+  ["meta.", "integrations:read"],
+  ["payments.", "payments:read"],
+  ["refunds.", "payments:read"],
+  ["fiscal.", "finance:read"],
+  ["outbox.", "audit:read"],
+  ["health.", "audit:read"],
+  ["operations.", "dashboard:read"],
+] as const satisfies readonly (readonly [string, AdminPermission])[];
+
 export function canReadNotificationCategory(role: AdminRoleValue, category: string): boolean {
-  if (category.startsWith("orders.") || category.startsWith("shipping.")) {
-    return hasAdminPermission(role, "orders:read");
-  }
-  if (category.startsWith("postsale.")) {
-    return hasAdminPermission(role, "postsale:read");
-  }
-  if (category.startsWith("reviews.")) {
-    return hasAdminPermission(role, "reviews:read");
-  }
-  if (category === "crm.merges") {
-    return hasAdminPermission(role, "crm:merge");
-  }
-  if (category.startsWith("crm.")) {
-    return hasAdminPermission(role, "crm:read");
-  }
-  if (category.startsWith("b2b.")) {
-    return hasAdminPermission(role, "b2b:read");
-  }
-  if (category.startsWith("channels.") || category.startsWith("meta.")) {
-    return hasAdminPermission(role, "integrations:read");
-  }
-  if (category.startsWith("payments.") || category.startsWith("refunds.")) {
-    return hasAdminPermission(role, "payments:read");
-  }
-  if (category.startsWith("fiscal.")) {
-    return hasAdminPermission(role, "finance:read");
-  }
-  if (category.startsWith("outbox.") || category.startsWith("health.")) {
-    return hasAdminPermission(role, "audit:read");
-  }
-  return hasAdminPermission(role, "dashboard:read");
+  if (category === "crm.merges") return hasAdminPermission(role, "crm:merge");
+  const rule = categoryPermissions.find(([prefix]) => category.startsWith(prefix));
+  return rule ? hasAdminPermission(role, rule[1]) : false;
 }
 
 export function notificationWhereForRole(role: AdminRoleValue): Prisma.NotificationWhereInput {
-  const excludedPrefixes: string[] = [];
-  const excludedCategories: string[] = [];
-  if (!hasAdminPermission(role, "orders:read")) {
-    excludedPrefixes.push("orders.", "shipping.");
+  const allowed: Prisma.NotificationWhereInput[] = [];
+  for (const [prefix, permission] of categoryPermissions) {
+    if (!hasAdminPermission(role, permission)) continue;
+    if (prefix === "crm." && !hasAdminPermission(role, "crm:merge")) {
+      allowed.push({
+        AND: [{ category: { startsWith: prefix } }, { NOT: { category: "crm.merges" } }],
+      });
+    } else {
+      allowed.push({ category: { startsWith: prefix } });
+    }
   }
-  if (!hasAdminPermission(role, "postsale:read")) {
-    excludedPrefixes.push("postsale.");
-  }
-  if (!hasAdminPermission(role, "reviews:read")) {
-    excludedPrefixes.push("reviews.");
-  }
-  if (!hasAdminPermission(role, "crm:read")) {
-    excludedPrefixes.push("crm.");
-  } else if (!hasAdminPermission(role, "crm:merge")) {
-    excludedCategories.push("crm.merges");
-  }
-  if (!hasAdminPermission(role, "b2b:read")) {
-    excludedPrefixes.push("b2b.");
-  }
-  if (!hasAdminPermission(role, "integrations:read")) {
-    excludedPrefixes.push("channels.", "meta.");
-  }
-  if (!hasAdminPermission(role, "payments:read")) {
-    excludedPrefixes.push("payments.", "refunds.");
-  }
-  if (!hasAdminPermission(role, "finance:read")) {
-    excludedPrefixes.push("fiscal.");
-  }
-  if (!hasAdminPermission(role, "audit:read")) {
-    excludedPrefixes.push("outbox.", "health.");
-  }
-  const exclusions: Prisma.NotificationWhereInput[] = [
-    ...excludedPrefixes.map((prefix) => ({ category: { startsWith: prefix } })),
-    ...excludedCategories.map((category) => ({ category })),
-  ];
-  return exclusions.length === 0 ? {} : { NOT: exclusions };
+  return { OR: allowed };
 }
 
 function notificationView(record: {
@@ -363,7 +338,7 @@ export class OperationsService {
         UNION ALL
         SELECT 'crm-task-overdue:' || tasks."id", 'crm.tasks',
           CASE WHEN tasks."priority" = 'URGENT' THEN 'CRITICAL' ELSE 'WARNING' END,
-          btrim('Tarea CRM vencida: ' || left(tasks."title", 120)),
+          'Tarea CRM vencida',
           'Una tarea comercial o de seguimiento superó su fecha de vencimiento en CRM 360.',
           '/admin/crm/' || tasks."contactId", 'Task', tasks."id"::text
         FROM "Task" tasks
@@ -437,10 +412,27 @@ export class OperationsService {
         ON CONFLICT ("deduplicationKey") DO NOTHING
       `;
       await tx.$executeRaw`
-        UPDATE "Notification" notification SET "resolvedAt" = NULL
+        UPDATE "Notification" notification SET
+          "category" = current."category",
+          "severity" = current."severity"::"NotificationSeverity",
+          "title" = current."title",
+          "message" = current."message",
+          "href" = current."href",
+          "entityType" = current."entityType",
+          "entityId" = current."entityId",
+          "resolvedAt" = NULL
         FROM "OperationNotificationSync" current
         WHERE notification."deduplicationKey" = current."deduplicationKey"
-          AND notification."resolvedAt" IS NOT NULL
+          AND (
+            notification."resolvedAt" IS NOT NULL
+            OR (
+              notification."category", notification."severity", notification."title",
+              notification."message", notification."href", notification."entityType", notification."entityId"
+            ) IS DISTINCT FROM (
+              current."category", current."severity"::"NotificationSeverity", current."title",
+              current."message", current."href", current."entityType", current."entityId"
+            )
+          )
       `;
       await tx.$executeRaw`
         UPDATE "Notification" notification SET "resolvedAt" = CURRENT_TIMESTAMP
@@ -591,22 +583,16 @@ export class OperationsService {
       throw new TypeError("Notification audit hashes must contain exactly 32 bytes.");
     }
     return this.db.$transaction(async (tx) => {
-      const [notification, actor] = await Promise.all([
-        tx.notification.findUnique({
-          where: { id: notificationId },
-          select: { id: true, category: true },
-        }),
-        tx.adminUser.findFirst({
-          where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-          select: { id: true, role: true },
-        }),
-      ]);
-      if (
-        !notification ||
-        !actor ||
-        !isAdminRole(actor.role) ||
-        !canReadNotificationCategory(actor.role, notification.category)
-      ) {
+      const actor = await assertAdminActorInTransaction(
+        tx,
+        audit.actorAdminUserId,
+        "dashboard:read",
+      );
+      const notification = await tx.notification.findUnique({
+        where: { id: notificationId },
+        select: { id: true, category: true },
+      });
+      if (!notification || !canReadNotificationCategory(actor.role, notification.category)) {
         throw new Error("Notification or authorized active administrator not found.");
       }
       const read = await tx.notificationRead.upsert({

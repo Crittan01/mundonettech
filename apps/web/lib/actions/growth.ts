@@ -9,7 +9,18 @@ import { growthService } from "@/lib/growth";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 import { clearReferralCode } from "@/lib/security/referral";
 
+function isNextRedirect(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "digest" in error &&
+    typeof error.digest === "string" &&
+    error.digest.startsWith("NEXT_REDIRECT")
+  );
+}
+
 function failure(error: unknown, values: Record<string, string>): ActionState {
+  if (isNextRedirect(error)) throw error;
   if (error instanceof GrowthError) {
     const messages = {
       VALIDATION: "El código debe tener 12 caracteres válidos, sin espacios internos.",

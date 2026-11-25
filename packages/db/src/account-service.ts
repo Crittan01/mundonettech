@@ -785,6 +785,7 @@ export class AccountService {
       blockingReturn,
       blockingWarranty,
       blockingMetaCapi,
+      blockingPaymentTransaction,
     ] = await Promise.all([
       tx.order.findFirst({
         where: {
@@ -804,7 +805,10 @@ export class AccountService {
         select: { id: true },
       }),
       tx.paymentAttempt.findFirst({
-        where: { order: { customerId }, status: { in: ["PENDING", "PROCESSING"] } },
+        where: {
+          order: { customerId },
+          status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
+        },
         select: { id: true },
       }),
       tx.orderRefund.findFirst({
@@ -836,6 +840,13 @@ export class AccountService {
         },
         select: { id: true },
       }),
+      tx.paymentTransaction.findFirst({
+        where: {
+          attempt: { order: { customerId } },
+          status: { in: ["PENDING", "PROCESSING"] },
+        },
+        select: { id: true },
+      }),
     ]);
     if (
       blockingOrder ||
@@ -843,7 +854,8 @@ export class AccountService {
       blockingRefund ||
       blockingReturn ||
       blockingWarranty ||
-      blockingMetaCapi
+      blockingMetaCapi ||
+      blockingPaymentTransaction
     ) {
       throw new AccountError(
         "CONFLICT",

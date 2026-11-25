@@ -176,9 +176,9 @@ export class PaymentService {
         where: {
           orderId: order.id,
           ...(codSealed ? { provider: { not: PaymentProvider.COD } } : {}),
-          status: { in: ["REQUIRES_ACTION", "PENDING"] },
+          status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
           expiresAt: { not: null, lte: now },
-          transactions: { none: { kind: "CAPTURE" } },
+          transactions: { none: { kind: "CAPTURE", status: "SUCCEEDED" } },
           OR: [
             { codReconciliation: null },
             { codReconciliation: { status: "PENDING_COLLECTION" } },

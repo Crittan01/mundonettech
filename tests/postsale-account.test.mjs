@@ -69,7 +69,9 @@ async function createDeliveredOrder({
   customerId = catalog.customerId,
   email = `postsale-${randomUUID()}@example.test`,
   quantity = 1,
+  shipmentQuantity = quantity,
   deliveredAt = new Date(),
+  deliver = true,
 } = {}) {
   const orderId = randomUUID();
   const orderItemId = randomUUID();
@@ -84,8 +86,8 @@ async function createDeliveredOrder({
   try {
     await sql.query(
       `INSERT INTO "Order" ("id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod", "taxRegime", "emailSnapshot", "recipientNameSnapshot", "phoneE164Snapshot", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt")
-       VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'FULFILLED', 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', $4, 'Cliente Posventa', '+573001234567', '13', '1020304050', $5, 0, 0, 0, $5, CURRENT_TIMESTAMP)`,
-      [orderId, orderNumber, customerId, email, total],
+       VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', $6, 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', $4, 'Cliente Posventa', '+573001234567', '13', '1020304050', $5, 0, 0, 0, $5, CURRENT_TIMESTAMP)`,
+      [orderId, orderNumber, customerId, email, total, deliver ? "FULFILLED" : "UNFULFILLED"],
     );
     await sql.query(
       `INSERT INTO "OrderItem" ("id", "orderId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot", "unitPriceCents", "unitCostWacCents", "discountCents", "lineTotalCents", "taxCents")
@@ -103,7 +105,7 @@ async function createDeliveredOrder({
     );
     await sql.query(
       `INSERT INTO "ShipmentItem" ("id", "shipmentId", "orderItemId", "quantity", "declaredValueCents") VALUES ($1, $2, $3, $4, $5)`,
-      [shipmentItemId, shipmentId, orderItemId, quantity, total],
+      [shipmentItemId, shipmentId, orderItemId, shipmentQuantity, 100000 * shipmentQuantity],
     );
     for (let index = 0; index < quantity; index += 1) {
       const id = randomUUID();
@@ -115,7 +117,7 @@ async function createDeliveredOrder({
           catalog.variantId,
           inventory.locationId,
           orderId,
-          shipmentId,
+          index < shipmentQuantity ? shipmentId : null,
           `PS-SERIAL-${randomUUID()}`,
           deliveredAt,
         ],
@@ -126,7 +128,7 @@ async function createDeliveredOrder({
     await sql.query("ROLLBACK");
     throw error;
   }
-  await deliverShipment(shipmentId, deliveredAt);
+  if (deliver) await deliverShipment(shipmentId, deliveredAt);
   receiptTokens.set(orderId, token);
   return { orderId, orderItemId, shipmentId, shipmentItemId, serializedUnitIds, token, email };
 }
@@ -737,6 +739,11 @@ describe("F4A.2 — serialized warranty and financial completion", () => {
       audit,
     });
     assert.equal(resolved.status, "RESOLVED");
+    assert.equal(
+      (await db.serializedUnit.findUniqueOrThrow({ where: { id: order.serializedUnitIds[0] } }))
+        .status,
+      "RETURNED",
+    );
   });
 });
 
@@ -1311,5 +1318,310 @@ describe("F4A.2 — account anonymization and concurrency", () => {
       await db.orderRefund.count({ where: { idempotencyKey: `return:${results[0].id}:refund` } }),
       1,
     );
+  });
+});
+
+describe("A6 — post-sale boundary regressions", () => {
+  it("atomically caps concurrent OTP requests from one IP across different orders", async () => {
+    const sharedIp = bytes();
+    const [firstOrder, secondOrder] = await Promise.all([
+      createDeliveredOrder(),
+      createDeliveredOrder(),
+    ]);
+    const windows = await db.$queryRaw`
+      SELECT date_bin(INTERVAL '1 hour', CURRENT_TIMESTAMP, TIMESTAMPTZ '2000-01-01 00:00:00+00') AS "windowStartedAt"
+    `;
+    const windowStartedAt = windows[0].windowStartedAt;
+    await db.operationRateLimit.create({
+      data: {
+        operation: "guest-order-code",
+        subjectType: "IP",
+        subjectHash: sharedIp,
+        ipHash: sharedIp,
+        windowStartedAt,
+        count: 19,
+        expiresAt: new Date(windowStartedAt.getTime() + 3_600_000),
+      },
+    });
+
+    const results = await Promise.allSettled([
+      guestAccess.requestCode({
+        token: firstOrder.token,
+        idempotencyKey: `guest-ip-race-a-${randomUUID()}`,
+        ipHash: sharedIp,
+      }),
+      guestAccess.requestCode({
+        token: secondOrder.token,
+        idempotencyKey: `guest-ip-race-b-${randomUUID()}`,
+        ipHash: sharedIp,
+      }),
+    ]);
+
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    const rejected = results.find((result) => result.status === "rejected");
+    assert.ok(rejected);
+    assert.equal(rejected.reason.code, "RATE_LIMIT");
+    const bucket = await db.operationRateLimit.findUniqueOrThrow({
+      where: {
+        operation_subjectType_subjectHash_ipHash_windowStartedAt: {
+          operation: "guest-order-code",
+          subjectType: "IP",
+          subjectHash: sharedIp,
+          ipHash: sharedIp,
+          windowStartedAt,
+        },
+      },
+    });
+    assert.equal(bucket.count, 20);
+  });
+
+  it("applies manual refunds and previous returns FIFO across multiple delivery batches", async () => {
+    const order = await createDeliveredOrder({ quantity: 3, shipmentQuantity: 2, deliver: false });
+    const secondShipment = await db.shipment.create({
+      data: {
+        orderId: order.orderId,
+        originLocationId: inventory.locationId,
+        kind: "DELIVERY",
+        promisedAt: new Date(Date.now() + 86_400_000),
+        items: {
+          create: {
+            orderItemId: order.orderItemId,
+            quantity: 1,
+            declaredValueCents: 100_000n,
+          },
+        },
+      },
+      include: { items: true },
+    });
+    const secondShipmentItem = secondShipment.items[0];
+    await db.serializedUnit.update({
+      where: { id: order.serializedUnitIds[2] },
+      data: { shipmentId: secondShipment.id },
+    });
+    await deliverShipment(order.shipmentId);
+    await deliverShipment(secondShipment.id);
+    await new OrderRefundService(db).request({
+      orderId: order.orderId,
+      idempotencyKey: `manual-fifo-${randomUUID()}`,
+      reason: "CUSTOMER_SUPPORT",
+      note: "Reembolso manual que debe consumir la entrega más antigua.",
+      includeShipping: false,
+      items: [{ orderItemId: order.orderItemId, quantity: 1 }],
+      audit,
+    });
+    const actor = { kind: "CUSTOMER", customerId: catalog.customerId };
+    const request = (shipmentItemId, serialNumber, suffix) =>
+      postsale.requestReturn(actor, {
+        orderId: order.orderId,
+        kind: "REFUND",
+        reason: "Retracto parcial con cantidades FIFO por cada entrega recibida.",
+        idempotencyKey: `fifo-${suffix}-${randomUUID()}`,
+        items: [
+          {
+            shipmentItemId,
+            quantity: 1,
+            serializedUnitIds: [order.serializedUnitIds[serialNumber]],
+          },
+        ],
+      });
+
+    const newest = await request(secondShipmentItem.id, 2, "newest");
+    assert.equal(newest.status, "REQUESTED");
+    const oldest = await request(order.shipmentItemId, 0, "oldest");
+    assert.equal(oldest.status, "REQUESTED");
+    await assert.rejects(request(order.shipmentItemId, 1, "overflow"), /remaining delivered units/);
+  });
+
+  it("rejects expired warranties and serials outside the owned order", async () => {
+    const expired = await createDeliveredOrder({
+      deliveredAt: new Date("2020-01-06T15:00:00.000Z"),
+    });
+    await assert.rejects(
+      postsale.requestWarranty(
+        { kind: "CUSTOMER", customerId: catalog.customerId },
+        {
+          orderId: expired.orderId,
+          serializedUnitId: expired.serializedUnitIds[0],
+          issueDescription: "La falla se presenta después de la vigencia configurada.",
+          remedy: "REPAIR",
+          idempotencyKey: `expired-warranty-${randomUUID()}`,
+        },
+      ),
+      (error) => error instanceof PostSaleError && error.code === "EXPIRED",
+    );
+    const [owned, foreign] = await Promise.all([createDeliveredOrder(), createDeliveredOrder()]);
+    await assert.rejects(
+      postsale.requestWarranty(
+        { kind: "CUSTOMER", customerId: catalog.customerId },
+        {
+          orderId: owned.orderId,
+          serializedUnitId: foreign.serializedUnitIds[0],
+          issueDescription: "Intento asociar un serial que pertenece a otro pedido.",
+          remedy: "REPLACEMENT",
+          idempotencyKey: `foreign-warranty-${randomUUID()}`,
+        },
+      ),
+      (error) => error instanceof PostSaleError && error.code === "CONFLICT",
+    );
+  });
+
+  it("serializes concurrent warranty submissions without duplicate claims", async () => {
+    const order = await createDeliveredOrder();
+    const input = {
+      orderId: order.orderId,
+      serializedUnitId: order.serializedUnitIds[0],
+      issueDescription: "La unidad presenta una falla intermitente dentro de la garantía.",
+      remedy: "REPAIR",
+      idempotencyKey: `concurrent-warranty-${randomUUID()}`,
+    };
+    const actor = { kind: "CUSTOMER", customerId: catalog.customerId };
+    const results = await Promise.all([
+      postsale.requestWarranty(actor, input),
+      postsale.requestWarranty(actor, input),
+    ]);
+
+    assert.equal(results[0].id, results[1].id);
+    assert.equal(
+      await db.warrantyClaim.count({ where: { idempotencyKey: input.idempotencyKey } }),
+      1,
+    );
+  });
+
+  it("canonicalizes serial order for an idempotent retract replay", async () => {
+    const order = await createDeliveredOrder({ quantity: 2 });
+    const input = {
+      orderId: order.orderId,
+      kind: "REFUND",
+      reason: "Devuelvo las dos unidades seriadas dentro del plazo legal aplicable.",
+      idempotencyKey: `canonical-serials-${randomUUID()}`,
+      items: [
+        {
+          shipmentItemId: order.shipmentItemId,
+          quantity: 2,
+          serializedUnitIds: order.serializedUnitIds,
+        },
+      ],
+    };
+    const actor = { kind: "CUSTOMER", customerId: catalog.customerId };
+    const created = await postsale.requestReturn(actor, input);
+    const replayed = await postsale.requestReturn(actor, {
+      ...input,
+      items: [
+        {
+          ...input.items[0],
+          serializedUnitIds: [...order.serializedUnitIds].reverse(),
+        },
+      ],
+    });
+
+    assert.equal(replayed.id, created.id);
+    assert.equal(replayed.replayed, true);
+    assert.equal(
+      await db.returnRequest.count({ where: { idempotencyKey: input.idempotencyKey } }),
+      1,
+    );
+  });
+
+  it("does not collide initial PQR messages for distinct maximum-length idempotency keys", async () => {
+    const prefix = "p".repeat(127);
+    const first = await postsale.createSupportTicket(
+      { kind: "CUSTOMER", customerId: catalog.customerId },
+      {
+        orderId: checkout.orderId,
+        kind: "QUERY",
+        subject: "Primera clave idempotente extensa",
+        message: "La primera PQR debe conservar su mensaje inicial sin colisiones.",
+        idempotencyKey: `${prefix}a`,
+      },
+    );
+    const second = await postsale.createSupportTicket(
+      { kind: "CUSTOMER", customerId: catalog.customerId },
+      {
+        orderId: checkout.orderId,
+        kind: "QUERY",
+        subject: "Segunda clave idempotente extensa",
+        message: "La segunda PQR comparte prefijo, pero es una operación diferente.",
+        idempotencyKey: `${prefix}b`,
+      },
+    );
+
+    const messages = await db.supportTicketMessage.findMany({
+      where: { ticketId: { in: [first.id, second.id] } },
+    });
+    assert.equal(messages.length, 2);
+    assert.deepEqual(
+      new Set(messages.map((message) => message.idempotencyKey)),
+      new Set([`support:${first.id}:initial`, `support:${second.id}:initial`]),
+    );
+  });
+
+  it("blocks general PQR reads and replies after the customer is no longer active", async () => {
+    const customerId = randomUUID();
+    const customer = await db.customer.create({
+      data: {
+        id: customerId,
+        authUserId: randomUUID(),
+        email: `inactive-pqr-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+        givenName: "Cuenta",
+        familyName: "Inactiva",
+      },
+    });
+    const ticket = await postsale.createSupportTicket(
+      { kind: "CUSTOMER", customerId },
+      {
+        kind: "QUERY",
+        subject: "Consulta antes de desactivar la cuenta",
+        message: "Esta conversación no debe aceptar respuestas de una cuenta inactiva.",
+        idempotencyKey: `inactive-${randomUUID()}`,
+      },
+    );
+    await db.customer.update({ where: { id: customer.id }, data: { deletedAt: new Date() } });
+
+    await assert.rejects(
+      postsale.listSupportTickets({ kind: "CUSTOMER", customerId }),
+      (error) => error instanceof PostSaleError && error.code === "FORBIDDEN",
+    );
+    await assert.rejects(
+      postsale.replySupportTicket(
+        { kind: "CUSTOMER", customerId },
+        {
+          ticketId: ticket.id,
+          body: "Respuesta prohibida para una cuenta inactiva.",
+          idempotencyKey: `inactive-reply-${randomUUID()}`,
+          expectedVersion: 0,
+        },
+      ),
+      (error) => error instanceof PostSaleError && error.code === "FORBIDDEN",
+    );
+  });
+
+  it("rejects a published review whose order line has no delivered ShipmentItem", async () => {
+    const order = await createDeliveredOrder({ deliver: false });
+    const product = await db.product.findUniqueOrThrow({ where: { id: catalog.productId } });
+    const before = await postsale.publicReviews(product.slug);
+    await assert.rejects(
+      db.review.create({
+        data: {
+          orderItemId: order.orderItemId,
+          productId: product.id,
+          requesterCustomerId: catalog.customerId,
+          moderatedByAdminUserId: adminId,
+          moderatedAt: new Date(),
+          idempotencyKey: `undelivered-review-${randomUUID()}`,
+          requestHash: randomBytes(32),
+          rating: 1,
+          title: "No debe publicarse",
+          body: "Registro hostil que intenta eludir la entrega requerida para una reseña pública.",
+          authorDisplayName: "Intruso",
+          status: "PUBLISHED",
+        },
+      }),
+      /Reviews require a delivered order item/,
+    );
+
+    const after = await postsale.publicReviews(product.slug);
+    assert.equal(after.count, before.count);
+    assert.equal(after.averageRating, before.averageRating);
   });
 });

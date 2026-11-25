@@ -10,6 +10,7 @@ import {
   buildProductJsonLd,
   hasAdminPermission,
 } from "../../packages/core/dist/index.js";
+import { PostSaleService } from "../../packages/db/dist/index.js";
 import {
   defaultEmailTemplate,
   renderEmailTemplate,
@@ -147,5 +148,83 @@ describe("F4A.2 — security OTP email transport", () => {
       if (previous === undefined) delete process.env.EMAIL_SEND_DISABLED;
       else process.env.EMAIL_SEND_DISABLED = previous;
     }
+  });
+});
+
+describe("A6 — delivered-only public review queries", () => {
+  it("applies the delivered ShipmentItem predicate to cursors, pages and aggregates", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const createdAt = new Date("2026-11-20T15:00:00.000Z");
+    const review = {
+      id: "00000000-0000-4000-8000-000000000001",
+      rating: 5,
+      title: "Compra entregada",
+      body: "Contenido moderado de una compra efectivamente entregada.",
+      authorDisplayName: "Cliente",
+      createdAt,
+    };
+    const record = async <T>(query: Record<string, unknown>, result: T): Promise<T> => {
+      calls.push(query);
+      return result;
+    };
+    const service = new PostSaleService({
+      product: {
+        findFirst: (query: Record<string, unknown>) => record(query, { id: "product-1" }),
+      },
+      review: {
+        findFirst: (query: Record<string, unknown>) => record(query, review),
+        findMany: (query: Record<string, unknown>) => record(query, [review]),
+        aggregate: (query: Record<string, unknown>) =>
+          record(query, { _count: { _all: 1 }, _avg: { rating: 5 } }),
+      },
+    } as never);
+
+    const result = await service.publicReviews("producto-verificado", {
+      cursor: review.id,
+      limit: 1,
+    });
+
+    expect(result).toMatchObject({ count: 1, averageRating: 5, nextCursor: null });
+    expect(calls).toHaveLength(4);
+    for (const call of calls.slice(1)) {
+      expect(call.where).toMatchObject({
+        status: "PUBLISHED",
+        orderItem: {
+          shipmentItems: {
+            some: { shipment: { status: "DELIVERED", deliveredAt: { not: null } } },
+          },
+        },
+      });
+    }
+  });
+});
+
+describe("A6 — serialized return validation", () => {
+  it("rejects the same SerializedUnit in different delivery items before opening a transaction", async () => {
+    const service = new PostSaleService({} as never);
+    const serializedUnitId = "00000000-0000-4000-8000-000000000010";
+    await expect(
+      service.requestReturn(
+        { kind: "CUSTOMER", customerId: "00000000-0000-4000-8000-000000000001" },
+        {
+          orderId: "00000000-0000-4000-8000-000000000002",
+          kind: "REFUND",
+          reason: "Solicitud con una unidad serial duplicada entre entregas.",
+          idempotencyKey: "duplicate-serial-across-items",
+          items: [
+            {
+              shipmentItemId: "00000000-0000-4000-8000-000000000003",
+              quantity: 1,
+              serializedUnitIds: [serializedUnitId],
+            },
+            {
+              shipmentItemId: "00000000-0000-4000-8000-000000000004",
+              quantity: 1,
+              serializedUnitIds: [serializedUnitId],
+            },
+          ],
+        },
+      ),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
   });
 });

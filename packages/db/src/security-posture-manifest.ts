@@ -11285,7 +11285,21 @@ export const securityPostureManifest = {
       searchPath: ["search_path=pg_catalog,public"],
     },
     {
+      identity: "validate_postsale_financial_links()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
       identity: "validate_return_request_item()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
+      identity: "validate_return_request_serial_coverage()",
       kind: "f",
       securityDefiner: true,
       owner: "postgres",
@@ -18644,6 +18658,19 @@ export const securityPostureManifest = {
         'CREATE INDEX "WarrantyClaim_orderItemId_status_createdAt_idx" ON public."WarrantyClaim" USING btree ("orderItemId", status, "createdAt")',
     },
     {
+      name: "WarrantyClaim_one_active_serial_key",
+      table: "WarrantyClaim",
+      method: "btree",
+      unique: true,
+      valid: true,
+      ready: true,
+      columns: ['"serializedUnitId"'],
+      predicate:
+        "status = ANY (ARRAY['REQUESTED'::\"WarrantyClaimStatus\", 'UNDER_REVIEW'::\"WarrantyClaimStatus\", 'APPROVED'::\"WarrantyClaimStatus\"])",
+      definition:
+        'CREATE UNIQUE INDEX "WarrantyClaim_one_active_serial_key" ON public."WarrantyClaim" USING btree ("serializedUnitId") WHERE (status = ANY (ARRAY[\'REQUESTED\'::"WarrantyClaimStatus", \'UNDER_REVIEW\'::"WarrantyClaimStatus", \'APPROVED\'::"WarrantyClaimStatus"]))',
+    },
+    {
       name: "WarrantyClaim_pkey",
       table: "WarrantyClaim",
       method: "btree",
@@ -19941,12 +19968,12 @@ export const securityPostureManifest = {
       function: "enforce_guest_order_session()",
       timing: "BEFORE",
       level: "ROW",
-      events: ["DELETE", "UPDATE"],
+      events: ["INSERT", "DELETE", "UPDATE"],
       enabled: "O",
       deferrable: false,
       initiallyDeferred: false,
       definition:
-        'CREATE TRIGGER "GuestOrderSession_enforce_state" BEFORE DELETE OR UPDATE ON "GuestOrderSession" FOR EACH ROW EXECUTE FUNCTION enforce_guest_order_session()',
+        'CREATE TRIGGER "GuestOrderSession_enforce_state" BEFORE INSERT OR DELETE OR UPDATE ON "GuestOrderSession" FOR EACH ROW EXECUTE FUNCTION enforce_guest_order_session()',
     },
     {
       table: "IdentityMergeCandidate",
@@ -20652,6 +20679,19 @@ export const securityPostureManifest = {
     },
     {
       table: "OrderRefund",
+      name: "OrderRefund_validate_postsale_link",
+      function: "validate_postsale_financial_links()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "OrderRefund_validate_postsale_link" AFTER INSERT OR UPDATE ON "OrderRefund" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_postsale_financial_links()',
+    },
+    {
+      table: "OrderRefund",
       name: "OrderRefund_validate_provider_totals",
       function: "validate_payment_totals()",
       timing: "AFTER",
@@ -20701,6 +20741,19 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "OrderRefundItem_validate" BEFORE INSERT ON "OrderRefundItem" FOR EACH ROW EXECUTE FUNCTION validate_refund_item()',
+    },
+    {
+      table: "OrderRefundItem",
+      name: "OrderRefundItem_validate_postsale_link",
+      function: "validate_postsale_financial_links()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "OrderRefundItem_validate_postsale_link" AFTER INSERT ON "OrderRefundItem" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_postsale_financial_links()',
     },
     {
       table: "OrderRefundItem",
@@ -20857,6 +20910,19 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "PaymentTransaction_validate" BEFORE INSERT OR UPDATE ON "PaymentTransaction" FOR EACH ROW EXECUTE FUNCTION validate_payment_transaction()',
+    },
+    {
+      table: "PaymentTransaction",
+      name: "PaymentTransaction_validate_postsale_link",
+      function: "validate_postsale_financial_links()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "PaymentTransaction_validate_postsale_link" AFTER INSERT OR UPDATE ON "PaymentTransaction" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_postsale_financial_links()',
     },
     {
       table: "PaymentTransaction",
@@ -21263,6 +21329,19 @@ export const securityPostureManifest = {
     },
     {
       table: "ReturnRequest",
+      name: "ReturnRequest_validate_financial_link",
+      function: "validate_postsale_financial_links()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "ReturnRequest_validate_financial_link" AFTER INSERT OR UPDATE ON "ReturnRequest" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_postsale_financial_links()',
+    },
+    {
+      table: "ReturnRequest",
       name: "ReturnRequest_validate_requester",
       function: "validate_postsale_requester()",
       timing: "BEFORE",
@@ -21301,6 +21380,19 @@ export const securityPostureManifest = {
         'CREATE TRIGGER "ReturnRequestItem_validate" BEFORE INSERT OR UPDATE ON "ReturnRequestItem" FOR EACH ROW EXECUTE FUNCTION validate_return_request_item()',
     },
     {
+      table: "ReturnRequestItem",
+      name: "ReturnRequestItem_validate_serial_coverage",
+      function: "validate_return_request_serial_coverage()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "ReturnRequestItem_validate_serial_coverage" AFTER INSERT ON "ReturnRequestItem" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_return_request_serial_coverage()',
+    },
+    {
       table: "ReturnRequestUnit",
       name: "ReturnRequestUnit_append_only",
       function: "prevent_append_only_mutation()",
@@ -21325,6 +21417,19 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "ReturnRequestUnit_validate" BEFORE INSERT ON "ReturnRequestUnit" FOR EACH ROW EXECUTE FUNCTION validate_return_request_unit()',
+    },
+    {
+      table: "ReturnRequestUnit",
+      name: "ReturnRequestUnit_validate_serial_coverage",
+      function: "validate_return_request_serial_coverage()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "ReturnRequestUnit_validate_serial_coverage" AFTER INSERT ON "ReturnRequestUnit" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_return_request_serial_coverage()',
     },
     {
       table: "Review",
@@ -21991,6 +22096,19 @@ export const securityPostureManifest = {
     },
     {
       table: "WarrantyClaim",
+      name: "WarrantyClaim_validate_financial_link",
+      function: "validate_postsale_financial_links()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "WarrantyClaim_validate_financial_link" AFTER INSERT OR UPDATE ON "WarrantyClaim" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_postsale_financial_links()',
+    },
+    {
+      table: "WarrantyClaim",
       name: "WarrantyClaim_validate_requester",
       function: "validate_postsale_requester()",
       timing: "BEFORE",
@@ -22130,6 +22248,7 @@ export const securityPostureManifest = {
     "20261124170000_a3_url_redirect_integrity",
     "20261125120000_a5_checkout_flex_document",
     "20261125120100_a5_checkout_flex_document_constraints",
+    "20261125130000_a6_postsale_financial_integrity",
   ],
   signedColumns: [
     {

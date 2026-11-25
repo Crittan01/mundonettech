@@ -858,11 +858,12 @@ export class PaymentRefundService {
       };
     }
     if (prepared.attempt.provider !== PaymentProvider.WOMPI) {
+      const failed = prepared.transaction.status === "FAILED";
       return {
         refundId: paymentAttemptId,
-        status: "PROCESSING",
+        status: failed ? "FAILED" : "PROCESSING",
         transactionIds: [prepared.transaction.id],
-        pendingTransactionIds: [prepared.transaction.id],
+        pendingTransactionIds: failed ? [] : [prepared.transaction.id],
       };
     }
     if (prepared.transaction.status === "PROCESSING" && !prepared.captureExternalId) {
@@ -951,6 +952,15 @@ export class PaymentRefundService {
           pending: false,
         };
       }
+      if (result.status === "SUCCEEDED") {
+        const expectedExternalId = prepared.captureExternalId ?? current.externalId;
+        if (!result.externalId || result.externalId !== expectedExternalId) {
+          throw new PaymentProviderError(
+            "Successful provider void omitted or changed its capture ID.",
+            "INVALID_RESPONSE",
+          );
+        }
+      }
       const now = await databaseNow(tx);
       await tx.paymentTransaction.update({
         where: { id: prepared.transaction.id },
@@ -989,7 +999,7 @@ export class PaymentRefundService {
       });
       return {
         status: result.status,
-        pending: result.status !== "SUCCEEDED",
+        pending: result.status === "PENDING",
       };
     });
     return {

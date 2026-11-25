@@ -16,7 +16,7 @@ const baseInput = {
   advertising: false,
 };
 
-function harness() {
+function harness(options: { marketingGranted?: boolean; advertisingGranted?: boolean } = {}) {
   let customer = {
     id: customerId,
     status: "ACTIVE",
@@ -26,8 +26,8 @@ function harness() {
     familyName: baseInput.familyName,
     phoneE164: baseInput.phoneE164,
   };
-  let marketingGranted = false;
-  let advertisingGranted = false;
+  let marketingGranted = options.marketingGranted ?? false;
+  let advertisingGranted = options.advertisingGranted ?? false;
   const customerUpdate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     customer = { ...customer, ...data, updatedAt: now };
     return customer;
@@ -112,4 +112,124 @@ describe("A2 — concurrencia optimista de perfil", () => {
     ).rejects.toBeInstanceOf(AccountError);
     expect(customerUpdate).not.toHaveBeenCalled();
   });
+
+  it("revoca cada consentimiento vigente una sola vez y conserva el enlace append-only", async () => {
+    const { service, consentCreate } = harness({
+      marketingGranted: true,
+      advertisingGranted: true,
+    });
+    await service.updateProfile(customerId, baseInput, initialUpdatedAt, audit);
+
+    expect(consentCreate).toHaveBeenCalledTimes(2);
+    for (const purpose of ["MARKETING_EMAIL", "ADVERTISING"]) {
+      expect(consentCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          purpose,
+          status: "REVOKED",
+          revokesId: expect.any(String),
+          policyVersion: "2026-01",
+        }),
+      });
+    }
+  });
 });
+
+describe("A6 — cursor de pedidos y obligaciones de anonimización", () => {
+  it("pagina por createdAt/id solo dentro del titular y rechaza cursores ajenos", async () => {
+    const cursorDate = new Date("2026-11-23T10:00:00.000Z");
+    const findFirst = vi.fn(async (): Promise<{ id: string; createdAt: Date } | null> => ({
+      id: customerId,
+      createdAt: cursorDate,
+    }));
+    const findMany = vi.fn(async () => []);
+    const service = new AccountService({ order: { findFirst, findMany } } as never, {
+      privacyPolicyVersion: "2026-01",
+    });
+    await service.listOrders(customerId, { cursor: otherCustomerId(), limit: 10 });
+
+    expect(findFirst).toHaveBeenCalledWith({
+      where: { id: expect.any(String), customerId },
+      select: { id: true, createdAt: true },
+    });
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          customerId,
+          OR: [
+            { createdAt: { lt: cursorDate } },
+            { createdAt: cursorDate, id: { lt: expect.any(String) } },
+          ],
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 11,
+      }),
+    );
+
+    findFirst.mockResolvedValueOnce(null);
+    await expect(
+      service.listOrders(customerId, { cursor: otherCustomerId(), limit: 10 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(findMany).toHaveBeenCalledOnce();
+    await expect(service.listOrders(customerId, { limit: 26 })).rejects.toMatchObject({
+      code: "VALIDATION",
+    });
+  });
+
+  it("bloquea intentos por confirmar/autorizados y transacciones aún en proceso", async () => {
+    async function run(paymentTransactionOpen: boolean) {
+      const paymentAttemptFindFirst = vi.fn(async () =>
+        paymentTransactionOpen ? null : { id: randomUUID() },
+      );
+      const paymentTransactionFindFirst = vi.fn(async () =>
+        paymentTransactionOpen ? { id: randomUUID() } : null,
+      );
+      const tx = {
+        $queryRaw: vi.fn(async () => [{ now }]),
+        customer: {
+          findUnique: vi.fn(async () => ({
+            id: customerId,
+            status: "ACTIVE",
+            deletedAt: null,
+            email: "cliente@example.co",
+          })),
+        },
+        storeCreditAccount: {
+          aggregate: vi.fn(async () => ({ _sum: { availableCents: 0n, heldCents: 0n } })),
+        },
+        order: { findFirst: vi.fn(async () => null) },
+        paymentAttempt: { findFirst: paymentAttemptFindFirst },
+        orderRefund: { findFirst: vi.fn(async () => null) },
+        returnRequest: { findFirst: vi.fn(async () => null) },
+        warrantyClaim: { findFirst: vi.fn(async () => null) },
+        metaCapiEvent: { findFirst: vi.fn(async () => null) },
+        paymentTransaction: { findFirst: paymentTransactionFindFirst },
+      };
+      const service = new AccountService({} as never, { privacyPolicyVersion: "2026-01" });
+      await expect(
+        service.anonymizeInTransaction(tx as never, customerId, audit, {
+          skipCrmCascade: true,
+          alreadyLocked: true,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+      return { paymentAttemptFindFirst, paymentTransactionFindFirst };
+    }
+
+    const attempt = await run(false);
+    expect(attempt.paymentAttemptFindFirst).toHaveBeenCalledWith({
+      where: {
+        order: { customerId },
+        status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
+      },
+      select: { id: true },
+    });
+    const transaction = await run(true);
+    expect(transaction.paymentTransactionFindFirst).toHaveBeenCalledWith({
+      where: { attempt: { order: { customerId } }, status: { in: ["PENDING", "PROCESSING"] } },
+      select: { id: true },
+    });
+  });
+});
+
+function otherCustomerId(): string {
+  return "22222222-2222-4222-8222-222222222222";
+}

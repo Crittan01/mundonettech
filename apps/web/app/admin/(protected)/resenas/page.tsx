@@ -17,7 +17,7 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 export default async function ReviewAdminPage() {
   const session = await requireAdminPage("reviews:read");
   const canWrite = hasAdminPermission(session.profile.role, "reviews:write");
-  const reviews = await new PostSaleAdminService(getDatabase()).reviewQueue();
+  const reviews = await new PostSaleAdminService(getDatabase()).reviewQueue(session.profile.id);
   return (
     <div className="space-y-8">
       <div>

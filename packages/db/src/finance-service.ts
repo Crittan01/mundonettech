@@ -285,26 +285,34 @@ export class FinanceService {
       throw new RangeError("rowLimit must be between 1 and 50000.");
     }
     const cte = financeCte(range);
-    const [totals, records] = await Promise.all([
-      this.db.$queryRaw<FinanceSummaryRecord[]>(PrismaSql`
-        ${cte}
-        SELECT count(*) AS "orderCount",
-          COALESCE(sum("capturedCents"), 0)::text AS "capturedCents",
-          COALESCE(sum("voidedCents"), 0)::text AS "voidedCents",
-          COALESCE(sum("grossCapturedCents"), 0)::text AS "grossCapturedCents",
-          COALESCE(sum("refundedCents"), 0)::text AS "refundedCents",
-          COALESCE(sum("netRevenueCents"), 0)::text AS "netRevenueCents",
-          COALESCE(sum("wacCostCents"), 0)::text AS "wacCostCents",
-          COALESCE(sum("marginCents"), 0)::text AS "marginCents"
-        FROM finance_rows
-      `),
-      this.db.$queryRaw<FinanceRowRecord[]>(PrismaSql`
-        ${cte}
-        SELECT * FROM finance_rows
-        ORDER BY "recognizedAt" DESC, "orderId" DESC
-        LIMIT ${rowLimit}::int
-      `),
-    ]);
+    const { totals, records } = await this.db.$transaction(
+      async (tx) => {
+        const totals = await tx.$queryRaw<FinanceSummaryRecord[]>(PrismaSql`
+          ${cte}
+          SELECT count(*) AS "orderCount",
+            COALESCE(sum("capturedCents"), 0)::text AS "capturedCents",
+            COALESCE(sum("voidedCents"), 0)::text AS "voidedCents",
+            COALESCE(sum("grossCapturedCents"), 0)::text AS "grossCapturedCents",
+            COALESCE(sum("refundedCents"), 0)::text AS "refundedCents",
+            COALESCE(sum("netRevenueCents"), 0)::text AS "netRevenueCents",
+            COALESCE(sum("wacCostCents"), 0)::text AS "wacCostCents",
+            COALESCE(sum("marginCents"), 0)::text AS "marginCents"
+          FROM finance_rows
+        `);
+        const records = await tx.$queryRaw<FinanceRowRecord[]>(PrismaSql`
+          ${cte}
+          SELECT * FROM finance_rows
+          ORDER BY "recognizedAt" DESC, "orderId" DESC
+          LIMIT ${rowLimit}::int
+        `);
+        return { totals, records };
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+        maxWait: 10_000,
+        timeout: 120_000,
+      },
+    );
     const report = { summary: summary(totals[0]), rows: records.map(row) };
     if (report.summary.orderCount > rowLimit && rowLimit === 50_000) {
       throw new RangeError("The CSV export exceeds 50000 orders; narrow the date range.");
@@ -452,7 +460,7 @@ export class FinanceService {
             deduplicationKey: `fiscal-watch:${fiscalYear}:threshold`,
             ...thresholdNotificationValues,
           },
-          update: { resolvedAt: null },
+          update: { ...thresholdNotificationValues, resolvedAt: null },
         });
       } else {
         await tx.notification.updateMany({
@@ -467,7 +475,7 @@ export class FinanceService {
             deduplicationKey: `fiscal-watch:${fiscalYear}:approaching`,
             ...approachingNotificationValues,
           },
-          update: { resolvedAt: null },
+          update: { ...approachingNotificationValues, resolvedAt: null },
         });
       } else {
         await tx.notification.updateMany({

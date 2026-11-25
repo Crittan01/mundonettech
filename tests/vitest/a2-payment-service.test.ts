@@ -20,6 +20,7 @@ function harness(
   document: string | null,
   blocked = false,
   distribution: DistributionState = "open",
+  staleAttempts: Array<{ id: string; provider: string }> = [],
 ) {
   const order = {
     id: orderId,
@@ -36,14 +37,17 @@ function harness(
     reference: data.id,
     replayed: false,
   }));
+  const paymentAttemptFindMany = vi.fn(async () => staleAttempts);
+  const paymentAttemptUpdate = vi.fn(async () => ({}));
   const blockedIdentityFindFirst = vi.fn(async () => (blocked ? { kind: "DOCUMENT" } : null));
   const tx = {
     $executeRaw: vi.fn(async () => 0),
     $queryRaw: vi.fn(),
     paymentAttempt: {
       findUnique: vi.fn(async () => null),
-      findMany: vi.fn(async () => []),
+      findMany: paymentAttemptFindMany,
       create: paymentAttemptCreate,
+      update: paymentAttemptUpdate,
     },
     blockedIdentity: { findFirst: blockedIdentityFindFirst },
     codReconciliation: { create: vi.fn(async () => ({})) },
@@ -67,7 +71,13 @@ function harness(
     $transaction: async (callback: (transaction: typeof tx) => Promise<unknown>) => callback(tx),
   };
   const service = new PaymentService(db as never);
-  return { service, paymentAttemptCreate, blockedIdentityFindFirst };
+  return {
+    service,
+    paymentAttemptCreate,
+    paymentAttemptFindMany,
+    paymentAttemptUpdate,
+    blockedIdentityFindFirst,
+  };
 }
 
 function input(identityHashes: Partial<typeof hashes>) {
@@ -142,6 +152,35 @@ describe("A5 — distribución COD sellada al iniciar fulfillments", () => {
     });
     expect(paymentAttemptCreate).not.toHaveBeenCalled();
     expect(blockedIdentityFindFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("A6 — expiración de intentos abiertos sin captura", () => {
+  it("expira también PROCESSING y AUTHORIZED antes de comprometer otro intento", async () => {
+    const staleIds = [randomUUID(), randomUUID()];
+    const { service, paymentAttemptFindMany, paymentAttemptUpdate } = harness(
+      "abc",
+      false,
+      "open",
+      staleIds.map((id) => ({ id, provider: "BANK_TRANSFER" })),
+    );
+
+    await service.start(input(hashes));
+
+    expect(paymentAttemptFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
+          transactions: { none: { kind: "CAPTURE", status: "SUCCEEDED" } },
+        }),
+      }),
+    );
+    for (const id of staleIds) {
+      expect(paymentAttemptUpdate).toHaveBeenCalledWith({
+        where: { id },
+        data: { status: "EXPIRED", completedAt: now },
+      });
+    }
   });
 });
 

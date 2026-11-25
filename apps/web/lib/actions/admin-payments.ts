@@ -248,6 +248,12 @@ export async function executeRefundAction(
     }
     const result = await paymentRefundService().refund(refundId, audit);
     revalidatePaymentViews(existing.orderId);
+    if (result.status === "FAILED") {
+      return actionError(
+        "El proveedor rechazó el reembolso. Revisa el estado; puedes reintentarlo o cancelarlo sin marcarlo como completado.",
+        values,
+      );
+    }
     return actionSuccess(
       result.pendingTransactionIds.length
         ? `Reembolso ${result.status.toLowerCase()}: ${result.pendingTransactionIds.length} transacciones requieren conciliación.`
@@ -296,6 +302,12 @@ export async function voidPaymentAction(
     });
     const result = await paymentRefundService().void(paymentAttemptId, audit);
     revalidatePaymentViews(existing?.orderId);
+    if (result.status === "FAILED") {
+      return actionError(
+        "La anulación fue rechazada y no se confirmó ningún reverso. Revisa el estado antes de reintentar o usar un reembolso.",
+        values,
+      );
+    }
     return actionSuccess(
       result.pendingTransactionIds.length
         ? "Anulación registrada; requiere conciliación con el ID externo."
