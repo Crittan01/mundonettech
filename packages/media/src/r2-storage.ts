@@ -29,9 +29,13 @@ export interface StoredObject {
 
 function endpointUrl(value: string): URL {
   const url = new URL(value);
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("R2 URL cannot include credentials, query parameters, or fragments.");
+  }
+  const normalizedHost = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   const local =
-    ["127.0.0.1", "localhost"].includes(url.hostname) ||
-    (isIP(url.hostname) === 6 && url.hostname === "::1");
+    ["127.0.0.1", "localhost"].includes(normalizedHost) ||
+    (isIP(normalizedHost) === 6 && normalizedHost === "::1");
   if (url.protocol !== "https:" && !(url.protocol === "http:" && local))
     throw new Error("R2 endpoint requires HTTPS outside loopback tests.");
   return url;

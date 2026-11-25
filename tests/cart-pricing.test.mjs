@@ -474,10 +474,23 @@ describe("F3.1 — bundles and assisted sale lifecycle", () => {
     try {
       await service.addBundle({ cartId: cart.id }, fixedPrice.id, 1);
       const initial = await catalogService.getProductBySlug(await productSlug());
+      const initialBundle = initial.bundles.find((bundle) => bundle.id === fixedPrice.id);
+      assert.equal(initialBundle?.effectivePriceCents, "170000");
+      assert.equal(initialBundle?.savingsCents, "30000");
+      assert.ok((initialBundle?.available ?? 0) >= 1);
+
+      // Bundle with components below required sellable stock disappears from PDP
+      await sql.query(`UPDATE "StockLevel" SET "safetyStock" = "onHand" WHERE "variantId" = $1`, [
+        catalog.variantId,
+      ]);
+      const outOfStockPdp = await catalogService.getProductBySlug(await productSlug());
       assert.equal(
-        initial.bundles.find((bundle) => bundle.id === fixedPrice.id)?.effectivePriceCents,
-        "170000",
+        outOfStockPdp.bundles.some((bundle) => bundle.id === fixedPrice.id),
+        false,
       );
+      await sql.query(`UPDATE "StockLevel" SET "safetyStock" = 2 WHERE "variantId" = $1`, [
+        catalog.variantId,
+      ]);
 
       await sql.query(`UPDATE "ProductVariant" SET "priceCents" = 10000 WHERE "id" = $1`, [
         catalog.variantId,

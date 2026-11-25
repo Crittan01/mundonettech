@@ -39,6 +39,8 @@ export function Spin360({
   alt: string;
   className?: string;
 }) {
+  const framesKey = useMemo(() => frames.map((entry) => entry.src).join("\0"), [frames]);
+  const [syncedFramesKey, setSyncedFramesKey] = useState(framesKey);
   const [current, setCurrent] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
@@ -46,6 +48,17 @@ export function Spin360({
   const lastStep = useRef(0);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const prefetchedUrls = useRef<Set<string>>(new Set());
+
+  if (syncedFramesKey !== framesKey) {
+    setSyncedFramesKey(framesKey);
+    setCurrent(0);
+    setLoaded(false);
+    setError(false);
+  }
+
+  useEffect(() => {
+    prefetchedUrls.current.clear();
+  }, [framesKey]);
 
   const validFrames = useMemo(
     () => frames.length >= 2 && frames.length <= 120 && frames.every(isValidFrame),
@@ -62,6 +75,9 @@ export function Spin360({
       if (img.naturalWidth > 0) {
         setLoaded(true);
         setError(false);
+      } else {
+        setError(true);
+        setLoaded(false);
       }
     }
   }, [frame, safeIndex]);
@@ -89,7 +105,10 @@ export function Spin360({
     if (!candidate || prefetchedUrls.current.has(candidate.src)) return;
     prefetchedUrls.current.add(candidate.src);
     const preload = new window.Image();
-    const preferredSrcSet = candidate.sources?.[0]?.srcSet ?? candidate.srcSet;
+    const webpSource = candidate.sources?.find((source) => source.type === "image/webp");
+    const preferredSizes = webpSource?.sizes ?? candidate.sizes;
+    if (preferredSizes) preload.sizes = preferredSizes;
+    const preferredSrcSet = webpSource?.srcSet ?? candidate.srcSet;
     if (preferredSrcSet) preload.srcset = preferredSrcSet;
     preload.src = candidate.src;
   }

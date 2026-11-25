@@ -702,7 +702,7 @@ describe("F2.1 — CMS media with sharp-safe, R2 compensation and reference lock
       );
       assert.equal(objects.has(archivable.media.storageKey), true);
 
-      // 2. Brand-new image upload failing DB FK cleans all newly uploaded R2 derivatives
+      // 2. Unauthorized actor is rejected BEFORE writing any R2 derivatives
       const before = objects.size;
       await assert.rejects(
         mediaService.upload(
@@ -712,17 +712,41 @@ describe("F2.1 — CMS media with sharp-safe, R2 compensation and reference lock
       );
       assert.equal(objects.size, before);
 
-      // 3. Double failure (DB failure + R2 delete failure) throws AggregateError
+      // 3. Mid-flight DB failure + R2 delete failure throws AggregateError
+      const transientActor = await db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `cms-transient-${randomUUID()}@example.test`,
+          displayName: "Transient CMS Actor",
+          role: "CMS_EDITOR",
+          status: "ACTIVE",
+        },
+        select: { id: true },
+      });
+      const originalPut = client.put.bind(client);
+      let revoked = false;
+      client.put = async (input) => {
+        const res = await originalPut(input);
+        if (!revoked) {
+          revoked = true;
+          await db.adminUser.update({
+            where: { id: transientActor.id },
+            data: { status: "SUSPENDED" },
+          });
+        }
+        return res;
+      };
       failDeletes = true;
       try {
         await assert.rejects(
           mediaService.upload(
             { bytes: createPng(44, 28), filename: "double-fail.png", altText: "Doble fallo" },
-            { ...audit, actorAdminUserId: randomUUID() },
+            { ...audit, actorAdminUserId: transientActor.id },
           ),
           (error) => error instanceof AggregateError && error.errors.length >= 2,
         );
       } finally {
+        client.put = originalPut;
         failDeletes = false;
       }
     } finally {
@@ -823,6 +847,29 @@ describe("A2 — CMS media/settings audit, operator masking and rollback", () =>
       await assert.rejects(
         media.archive(uploaded.media.id, { ...audit, actorAdminUserId: financeOnly.id }),
       );
+      // CmsService no-op branches MUST also enforce transactional RBAC
+      const noopPage = await service.createPage(
+        { slug: `noop-rbac-${randomUUID()}`, title: "Página RBAC No-Op" },
+        [{ type: "HERO", content: { heading: "Hola" } }],
+        audit,
+      );
+      const deniedAudit = { ...audit, actorAdminUserId: financeOnly.id };
+      await assert.rejects(
+        service.updatePage(
+          noopPage.id,
+          { slug: noopPage.slug, title: noopPage.title },
+          deniedAudit,
+        ),
+      );
+      const noopBlocks = await db.cmsSectionBlock.findMany({ where: { pageId: noopPage.id } });
+      await assert.rejects(
+        service.reorderBlocks(
+          noopPage.id,
+          noopBlocks.map((b) => b.id),
+          deniedAudit,
+        ),
+      );
+      await assert.rejects(service.setBlockVisibility(noopBlocks[0].id, true, deniedAudit));
       assert.equal(
         (await db.cmsMedia.findUniqueOrThrow({ where: { id: uploaded.media.id } })).altText,
         uploaded.media.altText,

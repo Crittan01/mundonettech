@@ -7,6 +7,17 @@ const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const attributeKeyPattern = /^[a-z][a-z0-9_]{0,79}$/;
 const controlCharPattern = /[\u0000-\u001f\u007f]/;
 
+const scalarKeys = [
+  "q",
+  "page",
+  "orden",
+  "categoria",
+  "marca",
+  "precioMin",
+  "precioMax",
+  "stock",
+] as const;
+
 function single(value: string | string[] | undefined): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -27,14 +38,13 @@ export function parseCatalogParams(
   compareSlugs: string[];
   error?: string;
 } {
-  const params: Record<string, string> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    const normalized = Array.isArray(value) ? value.join(",") : single(value);
-    if (normalized) params[key] = normalized;
-  }
-  Object.assign(params, fixed);
-
   let error: string | undefined;
+
+  for (const key of scalarKeys) {
+    if (Array.isArray(raw[key])) {
+      error = "Uno de los parámetros de búsqueda está repetido y no es válido.";
+    }
+  }
 
   const rawQuery = single(raw.q);
   let q = "";
@@ -73,9 +83,11 @@ export function parseCatalogParams(
 
   let minPriceCents: string | undefined;
   let maxPriceCents: string | undefined;
+  const rawMinPrice = single(raw.precioMin);
+  const rawMaxPrice = single(raw.precioMax);
   try {
-    if (single(raw.precioMin)) minPriceCents = parseWholeCopToCents(single(raw.precioMin));
-    if (single(raw.precioMax)) maxPriceCents = parseWholeCopToCents(single(raw.precioMax));
+    if (rawMinPrice) minPriceCents = parseWholeCopToCents(rawMinPrice);
+    if (rawMaxPrice) maxPriceCents = parseWholeCopToCents(rawMaxPrice);
     if (minPriceCents && maxPriceCents && BigInt(minPriceCents) > BigInt(maxPriceCents)) {
       throw new Error("range");
     }
@@ -107,14 +119,30 @@ export function parseCatalogParams(
     attributeKeysCount += 1;
   }
 
+  const rawCompareValues = Array.isArray(raw.comparar)
+    ? raw.comparar.flatMap((entry) => entry.split(","))
+    : single(raw.comparar).split(",");
   const compareSlugs = [
     ...new Set(
-      single(raw.comparar)
-        .split(",")
+      rawCompareValues
         .map((entry) => validSlug(entry))
         .filter((entry): entry is string => entry !== null),
     ),
   ].slice(0, 4);
+
+  const params: Record<string, string> = {};
+  if (rawQuery) params.q = rawQuery;
+  if (rawPage) params.page = rawPage;
+  if (sortValue) params.orden = sortValue;
+  if (fixed.categoria ?? rawCategory) params.categoria = fixed.categoria ?? rawCategory;
+  if (fixed.marca ?? rawBrand) params.marca = fixed.marca ?? rawBrand;
+  if (rawMinPrice) params.precioMin = rawMinPrice;
+  if (rawMaxPrice) params.precioMax = rawMaxPrice;
+  if (single(raw.stock) === "1") params.stock = "1";
+  for (const [attrKey, values] of Object.entries(attributes)) {
+    params[`attr_${attrKey}`] = values.join(",");
+  }
+  if (compareSlugs.length > 0) params.comparar = compareSlugs.join(",");
 
   return {
     filters: {

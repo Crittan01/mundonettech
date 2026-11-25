@@ -1,12 +1,13 @@
 "use client";
 
 import { formatCopCents } from "@mundonettech/core";
-import type { CatalogVariant } from "@mundonettech/db";
+import type { CatalogMedia, CatalogVariant } from "@mundonettech/db";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { AddToCartForm } from "@/components/cart/add-to-cart-form";
+import { ProductMediaGallery } from "@/components/catalog/product-media-gallery";
 
 function VariantQueryInitializer({
   variants,
@@ -28,21 +29,27 @@ function VariantQueryInitializer({
   return null;
 }
 
-export function ProductVariantPanel({
+function ProductVariantPanel({
   productSlug,
   defaultVariantId,
   variants,
+  selectedVariantId,
+  onSelectVariant,
 }: {
   productSlug: string;
   defaultVariantId: string;
   variants: readonly CatalogVariant[];
+  selectedVariantId?: string;
+  onSelectVariant?: (variantId: string) => void;
 }) {
-  const [selectedId, setSelectedId] = useState(defaultVariantId);
+  const [internalSelectedId, setInternalSelectedId] = useState(defaultVariantId);
   const [syncedDefaultId, setSyncedDefaultId] = useState(defaultVariantId);
   if (syncedDefaultId !== defaultVariantId) {
     setSyncedDefaultId(defaultVariantId);
-    setSelectedId(defaultVariantId);
+    setInternalSelectedId(defaultVariantId);
   }
+  const selectedId = selectedVariantId ?? internalSelectedId;
+  const setSelectedId = onSelectVariant ?? setInternalSelectedId;
 
   const selected = useMemo(
     () => variants.find((variant) => variant.id === selectedId) ?? variants[0]!,
@@ -83,6 +90,22 @@ export function ProductVariantPanel({
     }));
   }, [variants]);
 
+  const showSkuFallback = useMemo(() => {
+    if (variants.length <= 1) return false;
+    if (optionAxes.length === 0) return true;
+    const signatures = new Set<string>();
+    for (const variant of variants) {
+      if (variant.options.length === 0) return true;
+      const signature = [...variant.options]
+        .sort((left, right) => left.key.localeCompare(right.key))
+        .map((option) => `${option.key}=${option.value}`)
+        .join("|");
+      if (signatures.has(signature)) return true;
+      signatures.add(signature);
+    }
+    return false;
+  }, [optionAxes.length, variants]);
+
   function selectOptionValue(axisKey: string, optionValue: string): void {
     const currentChoices = new Map(selected.options.map((opt) => [opt.key, opt.value]));
     currentChoices.set(axisKey, optionValue);
@@ -104,9 +127,11 @@ export function ProductVariantPanel({
 
   return (
     <div className="space-y-5 rounded-xl border border-border bg-card p-5">
-      <Suspense fallback={null}>
-        <VariantQueryInitializer variants={variants} onSelect={setSelectedId} />
-      </Suspense>
+      {!onSelectVariant ? (
+        <Suspense fallback={null}>
+          <VariantQueryInitializer variants={variants} onSelect={setSelectedId} />
+        </Suspense>
+      ) : null}
       {optionAxes.length > 0 ? (
         <div className="space-y-4">
           {optionAxes.map((axis) => {
@@ -154,7 +179,8 @@ export function ProductVariantPanel({
             );
           })}
         </div>
-      ) : variants.length > 1 ? (
+      ) : null}
+      {showSkuFallback ? (
         <div className="space-y-2">
           <p className="text-sm font-medium">Selecciona una variante</p>
           <div className="flex flex-wrap gap-2" role="group" aria-label="Variantes del producto">
@@ -234,7 +260,7 @@ export function ProductVariantPanel({
         </div>
       </dl>
 
-      <AddToCartForm variantId={selected.id} available={selected.available} />
+      <AddToCartForm key={selected.id} variantId={selected.id} available={selected.available} />
 
       <Link
         href={`/comparar?productos=${encodeURIComponent(productSlug)}`}
@@ -243,6 +269,57 @@ export function ProductVariantPanel({
       >
         Comparar este producto
       </Link>
+    </div>
+  );
+}
+
+export function ProductShowcase({
+  productSlug,
+  productName,
+  media,
+  mediaOrigin,
+  defaultVariantId,
+  variants,
+  header,
+  footer,
+}: {
+  productSlug: string;
+  productName: string;
+  media: readonly CatalogMedia[];
+  mediaOrigin: string | null;
+  defaultVariantId: string;
+  variants: readonly CatalogVariant[];
+  header: ReactNode;
+  footer?: ReactNode;
+}) {
+  const [selectedId, setSelectedId] = useState(defaultVariantId);
+  const [syncedDefaultId, setSyncedDefaultId] = useState(defaultVariantId);
+  if (syncedDefaultId !== defaultVariantId) {
+    setSyncedDefaultId(defaultVariantId);
+    setSelectedId(defaultVariantId);
+  }
+  return (
+    <div className="grid gap-10 lg:grid-cols-2">
+      <Suspense fallback={null}>
+        <VariantQueryInitializer variants={variants} onSelect={setSelectedId} />
+      </Suspense>
+      <ProductMediaGallery
+        media={media}
+        origin={mediaOrigin}
+        productName={productName}
+        selectedVariantId={selectedId}
+      />
+      <section className="space-y-6">
+        {header}
+        <ProductVariantPanel
+          productSlug={productSlug}
+          defaultVariantId={defaultVariantId}
+          variants={variants}
+          selectedVariantId={selectedId}
+          onSelectVariant={setSelectedId}
+        />
+        {footer}
+      </section>
     </div>
   );
 }

@@ -250,6 +250,7 @@ async function CompareResults({
             </p>
           </div>
           <form
+            key={`${candidateQuery}|${activeSlugs.join(",")}`}
             action="/comparar"
             className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card p-4"
           >

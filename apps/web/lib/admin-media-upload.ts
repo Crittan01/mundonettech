@@ -80,7 +80,6 @@ export type AdminMultipartResult =
 export interface AdminMultipartLimits {
   readonly maximumBodyBytes: number;
   readonly maximumParts?: number;
-  readonly maximumHeaderBytes?: number;
 }
 
 const boundaryMarkerLimit = 220;

@@ -54,6 +54,7 @@ async function readSitemapEntries(): Promise<SitemapXmlEntry[]> {
       priority: 0.9,
     },
     { url: absolute("/comparar"), changeFrequency: "weekly", priority: 0.5 },
+    { url: absolute("/empresas"), changeFrequency: "monthly", priority: 0.6 },
     { url: absolute("/legal"), changeFrequency: "yearly", priority: 0.4 },
     { url: absolute("/ayuda"), changeFrequency: "monthly", priority: 0.6 },
     ...helpArticles.map((article) => ({

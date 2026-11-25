@@ -1,3 +1,13 @@
+const bogotaDateFormatter = new Intl.DateTimeFormat("es-CO", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "America/Bogota",
+});
+
+export function formatBogotaDate(date: Date): string {
+  return bogotaDateFormatter.format(date);
+}
+
 export function bogotaInputValue(date: Date | null): string {
   if (!date) return "";
   const parts = new Intl.DateTimeFormat("en-CA", {

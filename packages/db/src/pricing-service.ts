@@ -156,13 +156,9 @@ function bundleAuditState(
   };
 }
 
-async function writeAudit(
+async function authorizePricingMutation(
   tx: Prisma.TransactionClient,
   audit: PricingMutationAudit,
-  action: string,
-  targetType: string,
-  targetId: string,
-  metadata: Prisma.JsonObject,
 ): Promise<void> {
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
   if (
@@ -172,6 +168,16 @@ async function writeAudit(
     throw new PricingValidationError("Audit hashes must contain 32 bytes.");
   }
   await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "pricing:write");
+}
+
+async function writeAudit(
+  tx: Prisma.TransactionClient,
+  audit: PricingMutationAudit,
+  action: string,
+  targetType: string,
+  targetId: string,
+  metadata: Prisma.JsonObject,
+): Promise<void> {
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,
@@ -207,26 +213,33 @@ async function resolveWholesaleTarget(
   try {
     if (input.scope === "VARIANT") {
       const sku = normalizeSku(target);
-      const variant = await tx.productVariant.findFirst({
-        where: { sku, deletedAt: null },
-        select: { id: true },
-      });
+      const variants = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT v."id" FROM "ProductVariant" v
+        JOIN "Product" p ON p."id" = v."productId"
+        WHERE v."sku" = ${sku} AND v."deletedAt" IS NULL AND p."deletedAt" IS NULL
+        FOR SHARE OF v, p
+      `;
+      const variant = variants[0];
       if (!variant) throw new PricingNotFoundError("Wholesale variant was not found.");
       return { variantId: variant.id, productId: null, categoryId: null };
     }
     const slug = normalizePromotionSlug(target, "target");
     if (input.scope === "PRODUCT") {
-      const product = await tx.product.findFirst({
-        where: { slug, deletedAt: null },
-        select: { id: true },
-      });
+      const products = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Product"
+        WHERE "slug" = ${slug} AND "deletedAt" IS NULL
+        FOR SHARE
+      `;
+      const product = products[0];
       if (!product) throw new PricingNotFoundError("Wholesale product was not found.");
       return { variantId: null, productId: product.id, categoryId: null };
     }
-    const category = await tx.category.findFirst({
-      where: { slug, deletedAt: null },
-      select: { id: true },
-    });
+    const categories = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Category"
+      WHERE "slug" = ${slug} AND "deletedAt" IS NULL
+      FOR SHARE
+    `;
+    const category = categories[0];
     if (!category) throw new PricingNotFoundError("Wholesale category was not found.");
     return { variantId: null, productId: null, categoryId: category.id };
   } catch (error) {
@@ -321,20 +334,22 @@ async function resolveCouponRestrictions(
   productSlugs: readonly string[],
   categorySlugs: readonly string[],
 ): Promise<{ productIds: string[]; categoryIds: string[] }> {
-  const [products, categories] = await Promise.all([
-    productSlugs.length
-      ? tx.product.findMany({
-          where: { slug: { in: [...productSlugs] }, deletedAt: null },
-          select: { id: true, slug: true },
-        })
-      : [],
-    categorySlugs.length
-      ? tx.category.findMany({
-          where: { slug: { in: [...categorySlugs] }, deletedAt: null },
-          select: { id: true, slug: true },
-        })
-      : [],
-  ]);
+  const products = productSlugs.length
+    ? await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Product"
+        WHERE "slug" = ANY(${[...productSlugs]}::text[]) AND "deletedAt" IS NULL
+        ORDER BY "id" ASC
+        FOR SHARE
+      `
+    : [];
+  const categories = categorySlugs.length
+    ? await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Category"
+        WHERE "slug" = ANY(${[...categorySlugs]}::text[]) AND "deletedAt" IS NULL
+        ORDER BY "id" ASC
+        FOR SHARE
+      `
+    : [];
   if (products.length !== productSlugs.length || categories.length !== categorySlugs.length) {
     throw new PricingNotFoundError("A coupon product or category restriction was not found.");
   }
@@ -425,6 +440,7 @@ export class PricingService {
       throw new PricingValidationError("active must be boolean.");
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        await authorizePricingMutation(tx, audit);
         const target = await resolveWholesaleTarget(tx, input);
         const data = {
           scope: input.scope,
@@ -505,6 +521,7 @@ export class PricingService {
   async archiveWholesaleTier(id: string, audit: PricingMutationAudit) {
     assertUuid(id, "wholesaleTierId");
     return inInventoryTransaction(this.db, async (tx) => {
+      await authorizePricingMutation(tx, audit);
       const peeked = await tx.wholesaleTier.findFirst({
         where: { id, deletedAt: null },
         select: {
@@ -580,6 +597,7 @@ export class PricingService {
     const categorySlugs = normalizeSlugs(input.categorySlugs, "categorySlugs");
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        await authorizePricingMutation(tx, audit);
         const peekedCode = id
           ? ((
               await tx.coupon.findFirst({
@@ -664,6 +682,7 @@ export class PricingService {
   async archiveCoupon(id: string, audit: PricingMutationAudit) {
     assertUuid(id, "couponId");
     return inInventoryTransaction(this.db, async (tx) => {
+      await authorizePricingMutation(tx, audit);
       await acquireOperationLocks(tx, [`coupon-redemption:${id}`, `coupon-write:${id}`]);
       const existing = await tx.coupon.findFirst({
         where: { id, deletedAt: null },
@@ -767,14 +786,39 @@ export class PricingService {
     }
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        await authorizePricingMutation(tx, audit);
         await acquireOperationLocks(tx, [`bundle-slug:${slug}`, ...(id ? [`bundle:${id}`] : [])]);
-        const variants = await tx.productVariant.findMany({
-          where: { sku: { in: skus }, deletedAt: null },
-          include: { product: { include: { brand: true, category: true } } },
-        });
-        if (variants.length !== skus.length)
+        const lockedVariants = await tx.$queryRaw<
+          Array<{
+            id: string;
+            sku: string;
+            status: string;
+            priceCents: bigint;
+            productId: string;
+            productStatus: string;
+            brandId: string;
+            brandDeletedAt: Date | null;
+            categoryId: string;
+            categoryDeletedAt: Date | null;
+          }>
+        >`
+          SELECT v."id", v."sku", v."status", v."priceCents",
+                 p."id" AS "productId", p."status" AS "productStatus",
+                 b."id" AS "brandId", b."deletedAt" AS "brandDeletedAt",
+                 c."id" AS "categoryId", c."deletedAt" AS "categoryDeletedAt"
+          FROM "ProductVariant" v
+          JOIN "Product" p ON p."id" = v."productId"
+          JOIN "Brand" b ON b."id" = p."brandId"
+          JOIN "Category" c ON c."id" = p."categoryId"
+          WHERE v."sku" = ANY(${skus}::text[])
+            AND v."deletedAt" IS NULL
+            AND p."deletedAt" IS NULL
+          ORDER BY v."id" ASC
+          FOR SHARE OF v, p, b, c
+        `;
+        if (lockedVariants.length !== skus.length)
           throw new PricingNotFoundError("A bundle SKU was not found.");
-        const bySku = new Map(variants.map((variant) => [variant.sku, variant]));
+        const bySku = new Map(lockedVariants.map((variant) => [variant.sku, variant]));
         const resolvedItems = input.items.map((item) => {
           const normalizedSku = normalizeSku(item.sku);
           const variant = bySku.get(normalizedSku);
@@ -782,18 +826,17 @@ export class PricingService {
           return { variantId: variant.id, quantity: item.quantity };
         });
         if (input.status === "ACTIVE") {
-          const invalid = variants.some(
+          const invalid = lockedVariants.some(
             (variant) =>
               variant.status !== "ACTIVE" ||
-              variant.product.status !== "ACTIVE" ||
-              variant.product.deletedAt !== null ||
-              variant.product.brand.deletedAt !== null ||
-              variant.product.category.deletedAt !== null,
+              variant.productStatus !== "ACTIVE" ||
+              variant.brandDeletedAt !== null ||
+              variant.categoryDeletedAt !== null,
           );
           if (invalid)
             throw new PricingValidationError("Active bundles require sellable components.");
         }
-        const componentsTotal = variants.reduce((sum, variant) => {
+        const componentsTotal = lockedVariants.reduce((sum, variant) => {
           const inputItem = input.items.find((item) => normalizeSku(item.sku) === variant.sku);
           return sum + variant.priceCents * BigInt(inputItem?.quantity ?? 0);
         }, 0n);
@@ -852,6 +895,7 @@ export class PricingService {
   async archiveBundle(id: string, audit: PricingMutationAudit) {
     assertUuid(id, "bundleId");
     return inInventoryTransaction(this.db, async (tx) => {
+      await authorizePricingMutation(tx, audit);
       await acquireOperationLocks(tx, [`bundle:${id}`]);
       const existing = await tx.bundle.findFirst({
         where: { id, deletedAt: null },

@@ -43,7 +43,11 @@ export function CatalogBrowser({
           <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">{description}</p>
         </div>
       ) : null}
-      <form action={basePath} className="grid gap-4 rounded-2xl border border-border bg-card p-5">
+      <form
+        key={new URLSearchParams(params).toString()}
+        action={basePath}
+        className="grid gap-4 rounded-2xl border border-border bg-card p-5"
+      >
         {fixedFilter ? (
           <input type="hidden" name={fixedFilter.kind} value={fixedFilter.value} />
         ) : null}

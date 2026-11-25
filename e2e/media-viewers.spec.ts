@@ -272,7 +272,7 @@ test("real PDP hydrates lazy viewers, supports keyboard, loading, failure and re
       await route.fulfill({
         status: 200,
         contentType: "model/vnd.usdz+zip",
-        body: createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-e2e-viewer") }]),
+        body: createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-e2e-viewer") }]),
       });
       return;
     }

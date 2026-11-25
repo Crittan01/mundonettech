@@ -1,4 +1,5 @@
 import { formatCopCents } from "@mundonettech/core";
+import { PostSaleError } from "@mundonettech/db";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
@@ -6,9 +7,8 @@ import { z } from "zod";
 
 import { AddBundleToCartForm } from "@/components/cart/add-to-cart-form";
 import { ProductCard } from "@/components/catalog/product-card";
-import { ProductMediaGallery } from "@/components/catalog/product-media-gallery";
 import { ProductReviews } from "@/components/catalog/product-reviews";
-import { ProductVariantPanel } from "@/components/catalog/product-variant-panel";
+import { ProductShowcase } from "@/components/catalog/product-variant-panel";
 import { JsonLd } from "@/components/seo/json-ld";
 import { getCatalogProduct, searchCatalog } from "@/lib/catalog";
 import { authenticityLabels } from "@/lib/catalog-presenters";
@@ -44,6 +44,7 @@ export async function generateMetadata({ params }: PageProps<"/producto/[slug]">
     alternates: { canonical },
     openGraph: {
       type: "website",
+      locale: "es_CO",
       url: canonical,
       title: product.seoTitle ?? product.name,
       description: description ?? undefined,
@@ -82,9 +83,15 @@ async function ProductReviewsSlot({
     .string()
     .uuid()
     .safeParse(typeof rawReviewCursor === "string" ? rawReviewCursor : undefined);
-  const reviews = parsedReviewCursor.success
-    ? await getPublicReviews(slug, parsedReviewCursor.data)
-    : initialReviews;
+  let reviews = initialReviews;
+  if (parsedReviewCursor.success) {
+    try {
+      reviews = await getPublicReviews(slug, parsedReviewCursor.data);
+    } catch (error) {
+      if (error instanceof PostSaleError && error.code === "NOT_FOUND") notFound();
+      throw error;
+    }
+  }
   return <ProductReviews slug={slug} reviews={reviews} variantId={variantId} />;
 }
 
@@ -92,15 +99,22 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
   const { slug } = await params;
   const product = await getCatalogProduct(slug);
   if (!product) notFound();
-  const [related, reviews] = await Promise.all([
-    searchCatalog({
-      categorySlug: product.category.slug,
-      excludeProductId: product.id,
-      pageSize: 3,
-      sort: "newest",
-    }),
-    getPublicReviews(product.slug),
-  ]);
+  let related;
+  let reviews;
+  try {
+    [related, reviews] = await Promise.all([
+      searchCatalog({
+        categorySlug: product.category.slug,
+        excludeProductId: product.id,
+        pageSize: 3,
+        sort: "newest",
+      }),
+      getPublicReviews(product.slug),
+    ]);
+  } catch (error) {
+    if (error instanceof PostSaleError && error.code === "NOT_FOUND") notFound();
+    throw error;
+  }
   const mediaOrigin = getPublicMediaOrigin();
   const reviewSummary =
     reviews.count > 0 && reviews.averageRating !== null
@@ -130,39 +144,38 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
           </li>
         </ol>
       </nav>
-      <div className="grid gap-10 lg:grid-cols-2">
-        <ProductMediaGallery
-          media={product.media}
-          origin={mediaOrigin}
-          productName={product.name}
-        />
-        <section className="space-y-6">
-          <div>
-            <Link
-              href={`/marca/${product.brand.slug}`}
-              className="text-sm font-semibold text-primary"
-            >
-              {product.brand.name}
-            </Link>
-            <h1 className="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">{product.name}</h1>
-            <p className="mt-3 text-muted-foreground">
-              {authenticityLabels[product.authenticity]} · Garantía: {product.warrantyMonths} meses
-              {" · "}
-              {retractLabels[product.retractPolicy]}
-              {product.trackSerial ? " · Control por serial/IMEI" : ""}
-            </p>
-          </div>
-          {product.shortDescription ? (
-            <p className="text-lg leading-8 text-muted-foreground">{product.shortDescription}</p>
-          ) : null}
-          <ProductVariantPanel
-            productSlug={product.slug}
-            defaultVariantId={product.defaultVariantId}
-            variants={product.variants}
-          />
-          {product.description ? <p className="leading-7">{product.description}</p> : null}
-        </section>
-      </div>
+      <ProductShowcase
+        productSlug={product.slug}
+        productName={product.name}
+        media={product.media}
+        mediaOrigin={mediaOrigin}
+        defaultVariantId={product.defaultVariantId}
+        variants={product.variants}
+        header={
+          <>
+            <div>
+              <Link
+                href={`/marca/${product.brand.slug}`}
+                className="text-sm font-semibold text-primary"
+              >
+                {product.brand.name}
+              </Link>
+              <h1 className="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">{product.name}</h1>
+              <p className="mt-3 text-muted-foreground">
+                {authenticityLabels[product.authenticity]} · Garantía: {product.warrantyMonths}{" "}
+                meses
+                {" · "}
+                {retractLabels[product.retractPolicy]}
+                {product.trackSerial ? " · Control por serial/IMEI" : ""}
+              </p>
+            </div>
+            {product.shortDescription ? (
+              <p className="text-lg leading-8 text-muted-foreground">{product.shortDescription}</p>
+            ) : null}
+          </>
+        }
+        footer={product.description ? <p className="leading-7">{product.description}</p> : null}
+      />
 
       <section aria-labelledby="variants-title">
         <h2 id="variants-title" className="text-2xl font-bold">
@@ -307,11 +320,15 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
                 <p className="mt-3 text-lg font-bold">
                   {formatCopCents(bundle.effectivePriceCents)}
                 </p>
-                {BigInt(bundle.discountCents) > 0n ? (
+                {BigInt(bundle.savingsCents) > 0n ? (
                   <p className="text-xs font-medium text-success">
-                    Ahorras {formatCopCents(bundle.discountCents)}
+                    Ahorras {formatCopCents(bundle.savingsCents)}
                   </p>
                 ) : null}
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {bundle.available}{" "}
+                  {bundle.available === 1 ? "paquete disponible" : "paquetes disponibles"}
+                </p>
                 <AddBundleToCartForm bundleId={bundle.id} />
               </article>
             ))}

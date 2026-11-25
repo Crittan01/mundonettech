@@ -50,11 +50,21 @@ export function Model3d({
   alt: string;
   className?: string;
 }) {
+  const sourceKey = `${glbSrc}\0${usdzSrc ?? ""}`;
+  const [syncedSourceKey, setSyncedSourceKey] = useState(sourceKey);
   const [status, setStatus] = useState<ViewerStatus>("idle");
   const [elementReady, setElementReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [failedAttempts, setFailedAttempts] = useState(0);
   const viewer = useRef<HTMLElement>(null);
+
+  if (syncedSourceKey !== sourceKey) {
+    setSyncedSourceKey(sourceKey);
+    setStatus("idle");
+    setElementReady(false);
+    setAttempt(0);
+    setFailedAttempts(0);
+  }
 
   const safeSources =
     isSafeMediaUrl(glbSrc) &&
@@ -79,8 +89,12 @@ export function Model3d({
   }, [status, attempt, safeSources]);
 
   useEffect(() => {
-    const element = viewer.current;
+    const element = viewer.current as (HTMLElement & { loaded?: boolean }) | null;
     if (!element || !elementReady || status !== "loading") return;
+    if (element.loaded === true) {
+      setStatus("ready");
+      return;
+    }
     const loaded = () => setStatus("ready");
     const failed = () => setStatus("error");
     element.addEventListener("load", loaded);
@@ -93,7 +107,7 @@ export function Model3d({
       element.removeEventListener("load", loaded);
       element.removeEventListener("error", failed);
     };
-  }, [elementReady, status, attempt]);
+  }, [elementReady, status, attempt, modelSrc]);
 
   if (!safeSources) {
     return (

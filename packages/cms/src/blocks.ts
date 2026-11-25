@@ -159,6 +159,9 @@ export function interpolateCmsText(input: string, tokens: CmsTokens): string {
   if (resolved.includes("{{") || resolved.includes("}}")) {
     throw new Error("Malformed CMS token expression.");
   }
+  if (htmlTagOrCommentPattern.test(resolved)) {
+    throw new Error("Arbitrary HTML is not allowed in CMS text.");
+  }
   return resolved;
 }
 

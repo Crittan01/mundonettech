@@ -12,7 +12,10 @@ import {
   buildSitemapIndex,
   buildSitemapUrlSet,
   centsToDecimalString,
+  isReservedRedirectSource,
+  isReservedRedirectTarget,
   isValidCommercialGtin,
+  normalizeRedirectPath,
   normalizeXmlText,
   partitionSitemapEntries,
   resolveCommercialGtin,
@@ -295,5 +298,49 @@ describe("A4 — public catalog GET validation", () => {
     const parsed = parseCatalogParams({ q: "x".repeat(101) });
     expect(parsed.filters.q).toBeUndefined();
     expect(parsed.error).toMatch(/100 caracteres/);
+
+    const repeated = parseCatalogParams({ precioMin: ["1000", "2000"] });
+    expect(repeated.error).toMatch(/repetido/);
+    expect(repeated.params.precioMin).toBeUndefined();
+  });
+
+  it("blocks percent-encoded redirect bypasses and handles whitespace-only optional Merchant fields", () => {
+    for (const encoded of [
+      "/%61dmin",
+      "/%61pi/health/live",
+      "/%65mail/baja/tok",
+      "/%5c%5cevil.com",
+      "/foo%3fbar=1",
+      "/foo%23frag",
+      "/%61",
+    ]) {
+      expect(() => normalizeRedirectPath(encoded)).toThrow();
+    }
+    expect(isReservedRedirectSource("/admin.rsc")).toBe(true);
+    expect(isReservedRedirectSource("/_not-found")).toBe(true);
+    expect(isReservedRedirectTarget("/admin.rsc")).toBe(true);
+    expect(isReservedRedirectTarget("/_not-found")).toBe(true);
+    expect(isReservedRedirectTarget("/referido/CODE")).toBe(true);
+
+    const xml = buildGoogleMerchantXml(
+      { title: "Tienda", link: "https://tienda.example.co", description: "Feed" },
+      [
+        {
+          id: "var-whitespace",
+          itemGroupId: "prod-whitespace",
+          title: "Cable USB-C",
+          description: "Cable certificado",
+          link: "https://tienda.example.co/producto/cable",
+          brand: "Anker",
+          priceCents: "3990000",
+          available: true,
+          mpn: "   ",
+          color: "   ",
+          size: "  ",
+        },
+      ],
+    );
+    expect(xml).toContain("<g:identifier_exists>no</g:identifier_exists>");
+    expect(xml).not.toContain("<g:mpn>");
   });
 });

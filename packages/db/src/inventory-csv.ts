@@ -5,6 +5,7 @@ import {
   type InventoryStockCsvRow,
 } from "@mundonettech/core";
 
+import { Prisma } from "./generated/client.js";
 import type { DatabaseExecutor } from "./primitives.js";
 import {
   InventoryConflictError,
@@ -278,8 +279,8 @@ function levelKey(locationId: string, variantId: string): string {
   return `${locationId}:${variantId}`;
 }
 
-export async function exportInventoryStockCsv(db: DatabaseExecutor): Promise<string> {
-  const levels = await db.stockLevel.findMany({
+async function readInventorySnapshot(executor: DatabaseExecutor) {
+  const levels = await executor.stockLevel.findMany({
     where: {
       location: { deletedAt: null },
       variant: { deletedAt: null, product: { deletedAt: null } },
@@ -291,7 +292,7 @@ export async function exportInventoryStockCsv(db: DatabaseExecutor): Promise<str
     orderBy: [{ location: { code: "asc" } }, { variant: { sku: "asc" } }],
   });
   const units = levels.length
-    ? await db.serializedUnit.findMany({
+    ? await executor.serializedUnit.findMany({
         where: {
           status: { in: ["IN_STOCK", "RESERVED", "QUARANTINED"] },
           location: { deletedAt: null },
@@ -300,6 +301,16 @@ export async function exportInventoryStockCsv(db: DatabaseExecutor): Promise<str
         orderBy: [{ locationId: "asc" }, { variantId: "asc" }, { serial: "asc" }, { id: "asc" }],
       })
     : [];
+  return { levels, units };
+}
+
+export async function exportInventoryStockCsv(db: DatabaseExecutor): Promise<string> {
+  const { levels, units } =
+    "$transaction" in db && typeof db.$transaction === "function"
+      ? await db.$transaction((tx) => readInventorySnapshot(tx), {
+          isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+        })
+      : await readInventorySnapshot(db);
   const unitsByLevel = new Map<string, typeof units>();
   for (const unit of units) {
     const key = levelKey(unit.locationId, unit.variantId);

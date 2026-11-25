@@ -61,10 +61,11 @@ function bundleItems(value: string): BundleInput["items"] | null {
   if (lines.length === 0) return null;
   const items: Array<{ sku: string; quantity: number }> = [];
   for (const line of lines) {
-    const match = /^([^|]+)\|([0-9]+)$/.exec(line);
+    const match = /^([^|]+)\|\s*([0-9]+)$/.exec(line);
+    const sku = match?.[1]?.trim();
     const quantity = match?.[2] ? integer(match[2]) : null;
-    if (!match?.[1] || quantity === null || quantity < 1) return null;
-    items.push({ sku: match[1].trim(), quantity });
+    if (!sku || quantity === null || quantity < 1) return null;
+    items.push({ sku, quantity });
   }
   return items;
 }
@@ -156,6 +157,12 @@ function message(error: unknown, values: Record<string, string>): ActionState {
     error instanceof RangeError ||
     error instanceof TypeError
   ) {
+    if (error instanceof PricingValidationError && error.message.includes("Bundle discount")) {
+      return actionError(
+        "Para aplicar un descuento al bundle debes definir un precio base mayor o igual al descuento; si dejas el precio base vacío, el descuento debe ser 0.",
+        values,
+      );
+    }
     return actionError(
       "Revisa montos enteros no negativos, referencias, cantidades, fechas y límites. Ningún cambio fue aplicado.",
       values,

@@ -544,5 +544,19 @@ describe("A2 — URL redirect audit before/after and error branches", () => {
     );
     assert.equal(await db.urlRedirect.count({ where: { fromPath: source } }), 0);
     assert.equal(await db.adminActionLog.count({ where: { actorAdminUserId: suspended.id } }), 0);
+
+    // No-op setActive branch MUST still enforce transactional RBAC and reject suspended actors
+    const activeRedirect = await service.create(
+      { fromPath: `/noop-rbac-${randomUUID()}`, toPath: "/productos", statusCode: 308 },
+      { ...audit, requestId: randomUUID() },
+    );
+    await assert.rejects(
+      service.setActive(activeRedirect.id, true, {
+        actorAdminUserId: suspended.id,
+        ipHash: randomBytes(32),
+        userAgentHash: randomBytes(32),
+      }),
+      AdminActorAuthorizationError,
+    );
   });
 });

@@ -278,7 +278,7 @@ describe("ProductMedia SPIN_360 and MODEL_3D end-to-end domain contracts", () =>
     assert.equal(publicSpin.frames[0].derivatives.length, 2);
 
     const glb = createGlb();
-    const usdz = createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-model") }]);
+    const usdz = createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-model") }]);
     const [model, duplicate] = await Promise.all([
       service.uploadModel3d(
         { productId: fixture.productId, glb, usdz, altText: "Modelo interactivo" },
@@ -474,7 +474,7 @@ describe("ProductMedia compensation and immutable history", () => {
         {
           productId: fixture.productId,
           glb: createGlb({ bufferLength: 12, binaryLength: 12, viewLength: 12 }),
-          usdz: createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-rollback") }]),
+          usdz: createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-rollback") }]),
           altText: "Model rollback",
         },
         { ...audit, actorAdminUserId: randomUUID() },
@@ -482,6 +482,58 @@ describe("ProductMedia compensation and immutable history", () => {
     );
     assert.equal(objects.size, modelBefore);
 
+    // Partial R2 failure on re-uploading an existing IMAGE must NEVER delete its responsive derivatives
+    const protectedPng = createPng(800, 600);
+    const savedProtected = await service.uploadImage(
+      { productId: fixture.productId, bytes: protectedPng, altText: "Imagen protegida A4" },
+      audit,
+    );
+    const protectedPrefix = savedProtected.media.storageKey.replace(/\/[^/]+$/, "/");
+    const protectedKeys = [...objects.keys()].filter((key) => key.startsWith(protectedPrefix));
+    assert.ok(protectedKeys.length >= 4);
+    const originalPut = storageClient.put.bind(storageClient);
+    let partialPutCalls = 0;
+    storageClient.put = async (input) => {
+      partialPutCalls += 1;
+      if (partialPutCalls === 2) throw new Error("Simulated R2 mid-upload failure");
+      return originalPut(input);
+    };
+    try {
+      await assert.rejects(
+        service.uploadImage(
+          { productId: fixture.productId, bytes: protectedPng, altText: "Re-upload parcial" },
+          audit,
+        ),
+        /Simulated R2 mid-upload failure/,
+      );
+      for (const key of protectedKeys) assert.equal(objects.has(key), true);
+    } finally {
+      storageClient.put = originalPut;
+    }
+
+    // Mid-flight actor revocation between R2 upload and DB persist + delete failure surfaces AggregateError
+    const transientActor = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `media-transient-${randomUUID()}@example.test`,
+        displayName: "Transient Media Actor",
+        role: "STORE_MANAGER",
+        status: "ACTIVE",
+      },
+      select: { id: true },
+    });
+    let revokedDuringPut = false;
+    storageClient.put = async (input) => {
+      const res = await originalPut(input);
+      if (!revokedDuringPut) {
+        revokedDuringPut = true;
+        await db.adminUser.update({
+          where: { id: transientActor.id },
+          data: { status: "SUSPENDED" },
+        });
+      }
+      return res;
+    };
     failDeletes = true;
     try {
       await assert.rejects(
@@ -491,11 +543,12 @@ describe("ProductMedia compensation and immutable history", () => {
             bytes: createPng(36, 24),
             altText: "Double failure",
           },
-          { ...audit, actorAdminUserId: randomUUID() },
+          { ...audit, actorAdminUserId: transientActor.id },
         ),
         (error) => error instanceof AggregateError,
       );
     } finally {
+      storageClient.put = originalPut;
       failDeletes = false;
     }
   });

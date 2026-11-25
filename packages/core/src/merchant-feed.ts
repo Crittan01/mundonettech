@@ -32,7 +32,8 @@ function optionalElement(
   value: string | null | undefined,
   maxLength: number,
 ): string | null {
-  return value ? element(name, normalizeXmlText(value, maxLength, name)) : null;
+  const trimmed = value?.trim();
+  return trimmed ? element(name, normalizeXmlText(trimmed, maxLength, name)) : null;
 }
 
 export function buildGoogleMerchantXml(
@@ -61,6 +62,7 @@ export function buildGoogleMerchantXml(
       ) {
         throw new TypeError(`Invalid shipping weight for merchant item ${item.id}.`);
       }
+      const normalizedMpn = item.mpn?.trim() || null;
       const lines = [
         "    <item>",
         element("g:id", normalizeXmlText(item.id, 100, "g:id")),
@@ -76,8 +78,8 @@ export function buildGoogleMerchantXml(
         element("g:price", `${centsToDecimalString(item.priceCents)} COP`),
         element("g:brand", normalizeXmlText(item.brand, 70, "g:brand")),
         gtin ? element("g:gtin", gtin) : null,
-        optionalElement("g:mpn", item.mpn, 70),
-        !gtin && !item.mpn ? element("g:identifier_exists", "no") : null,
+        optionalElement("g:mpn", normalizedMpn, 70),
+        !gtin && !normalizedMpn ? element("g:identifier_exists", "no") : null,
         item.weightGrams ? element("g:shipping_weight", `${item.weightGrams} g`) : null,
         optionalElement("g:color", item.color, 100),
         optionalElement("g:size", item.size, 100),

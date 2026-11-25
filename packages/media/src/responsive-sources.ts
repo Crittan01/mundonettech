@@ -35,12 +35,12 @@ export function isSafeMediaUrl(value: string): boolean {
     typeof value !== "string" ||
     !value ||
     value.trim() !== value ||
-    /[\u0000-\u0020\u007f]/.test(value)
+    /[\u0000-\u0020\u007f,\\]/.test(value)
   ) {
     return false;
   }
   if (value.startsWith("/")) {
-    return !value.startsWith("//") && !value.includes("\\");
+    return !value.startsWith("//");
   }
   try {
     const parsed = new URL(value);
@@ -70,6 +70,21 @@ export function isSafeSrcSet(srcSet: string): boolean {
   });
 }
 
+function normalizeMediaBaseUrl(baseUrl: string): string {
+  if (!isSafeMediaUrl(baseUrl) || baseUrl.startsWith("/")) {
+    if (baseUrl.startsWith("/") && isSafeMediaUrl(baseUrl) && !/[?#]/.test(baseUrl)) {
+      return baseUrl.replace(/\/+$/, "");
+    }
+    throw new TypeError("Unsafe media base URL.");
+  }
+  const parsed = new URL(baseUrl);
+  if (parsed.search || parsed.hash) {
+    throw new TypeError("Media base URL cannot include query parameters or fragments.");
+  }
+  const pathname = parsed.pathname.replace(/\/+$/, "");
+  return `${parsed.origin}${pathname}`;
+}
+
 function resolveDerivativeUrl(
   derivative: ResponsiveDerivativeDescriptor,
   baseUrl?: string,
@@ -92,7 +107,7 @@ function resolveDerivativeUrl(
     ) {
       throw new TypeError("Unsafe derivative storage key.");
     }
-    const cleanBase = baseUrl.replace(/\/$/, "");
+    const cleanBase = normalizeMediaBaseUrl(baseUrl);
     const encodedKey = derivative.key.split("/").map(encodeURIComponent).join("/");
     const candidate = `${cleanBase}/${encodedKey}`;
     if (!isSafeMediaUrl(candidate)) {
@@ -111,8 +126,12 @@ export function buildPictureSources(
     throw new RangeError("At least one image derivative is required.");
   }
 
+  const seen = new Set<string>();
   const resolved = derivatives
     .map((item) => {
+      if (item.format !== "avif" && item.format !== "webp") {
+        throw new TypeError("Derivative format must be avif or webp.");
+      }
       if (
         !Number.isSafeInteger(item.width) ||
         !Number.isSafeInteger(item.height) ||
@@ -121,6 +140,11 @@ export function buildPictureSources(
       ) {
         throw new RangeError("Derivative dimensions must be positive integers.");
       }
+      const pairKey = `${item.format}:${item.width}`;
+      if (seen.has(pairKey)) {
+        throw new RangeError("Duplicate derivative format and width are not allowed.");
+      }
+      seen.add(pairKey);
       return { ...item, url: resolveDerivativeUrl(item, options.baseUrl) };
     })
     .sort((a, b) => a.width - b.width);

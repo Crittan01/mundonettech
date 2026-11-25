@@ -624,5 +624,78 @@ describe("A2 — regresiones de acciones administrativas con persistencia real",
         where: { targetType: "UrlRedirect", targetId: redirect.id, action: "URL_REDIRECT_CREATED" },
       }),
     ).toBe(1);
+    const redirectLog = await database.adminActionLog.findFirstOrThrow({
+      where: { targetType: "UrlRedirect", targetId: redirect.id, action: "URL_REDIRECT_CREATED" },
+    });
+    expect(redirectLog.requestId).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
+  it("A4 crea un producto DRAFT con variante inicial ACTIVE sin colisión de status", async () => {
+    const base = await database.product.findUniqueOrThrow({ where: { id: catalog.productId } });
+    const suffix = randomUUID().slice(0, 8);
+    const slug = `a4-draft-${suffix}`;
+    const sku = `A4DRAFT-${suffix.toUpperCase()}`;
+    const form = new FormData();
+    form.set("slug", slug);
+    form.set("name", "Producto Borrador A4");
+    form.set("shortDescription", "Creado en estado borrador.");
+    form.set("description", "Descripción completa.");
+    form.set("brandId", base.brandId);
+    form.set("categoryId", base.categoryId);
+    form.set("taxGroupId", base.taxGroupId);
+    form.set("status", "DRAFT");
+    form.set("authenticity", "ORIGINAL");
+    form.set("retractPolicy", "STANDARD");
+    form.set("warrantyMonths", "12");
+    form.set("trackSerial", "false");
+    form.set("seoTitle", "");
+    form.set("seoDescription", "");
+    form.set("sku", sku);
+    form.set("priceCents", "150000");
+    form.set("costCents", "100000");
+    form.set("compareAtPriceCents", "");
+    form.set("gtin", "");
+    form.set("ean", "");
+    form.set("mpn", "");
+    form.set("weightGrams", "300");
+    form.set("lengthMillimeters", "120");
+    form.set("widthMillimeters", "100");
+    form.set("heightMillimeters", "60");
+    form.set("variantStatus", "ACTIVE");
+    form.set("isDefault", "true");
+
+    await required(adminCatalog, "createCatalogProductAction")(idle, form);
+    const saved = await database.product.findFirstOrThrow({
+      where: { slug, deletedAt: null },
+      include: { variants: true },
+    });
+    expect(saved.status).toBe("DRAFT");
+    expect(saved.variants[0]?.sku).toBe(sku);
+    expect(saved.variants[0]?.status).toBe("ACTIVE");
+  });
+
+  it("A4 guarda un bundle con formato espaciado 'SKU | cantidad' igual que el formulario precargado", async () => {
+    const variant = await database.productVariant.findUniqueOrThrow({
+      where: { id: catalog.variantId },
+      select: { sku: true },
+    });
+    const slug = `a4-spaced-bundle-${randomUUID().slice(0, 8)}`;
+    const form = new FormData();
+    form.set("id", "");
+    form.set("slug", slug);
+    form.set("name", "Bundle formato espaciado A4");
+    form.set("description", "Prueba de edición con espacios alrededor de |");
+    form.set("status", "DRAFT");
+    form.set("priceCents", "180000");
+    form.set("discountCents", "10000");
+    form.set("items", `${variant.sku} | 2`);
+
+    await required(adminPricing, "saveBundleAction")(idle, form);
+    const saved = await database.bundle.findFirstOrThrow({
+      where: { slug, deletedAt: null },
+      include: { items: true },
+    });
+    expect(saved.items).toHaveLength(1);
+    expect(saved.items[0]?.quantity).toBe(2);
   });
 });

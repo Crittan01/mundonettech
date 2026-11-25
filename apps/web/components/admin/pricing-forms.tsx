@@ -369,14 +369,14 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
         <Field
           id="bundle-price"
           name="priceCents"
-          label="Precio base; vacío usa componentes (centavos COP)"
+          label="Precio base (centavos COP; vacío usa suma de componentes y descuento 0)"
           value={get("priceCents")}
           maxLength={19}
         />
         <Field
           id="bundle-discount"
           name="discountCents"
-          label="Descuento sobre la base (centavos COP)"
+          label="Descuento sobre el precio base (requiere definir precio base)"
           value={get("discountCents")}
           maxLength={19}
         />

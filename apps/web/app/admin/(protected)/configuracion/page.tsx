@@ -1,6 +1,6 @@
 import { StoreSettingsService } from "@mundonettech/cms";
 import { storeConfig } from "@mundonettech/config/store";
-import { formatCopCents, hasAdminPermission, maskEmail } from "@mundonettech/core";
+import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
 
 import { StoreSettingsForm } from "@/components/admin/cms-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -80,7 +80,7 @@ export default async function StoreSettingsPage() {
       {stored?.updatedBy ? (
         <p className="text-sm text-muted-foreground">
           Última actualización (hora de Colombia): {bogotaFormatter.format(stored.updatedAt)} ·{" "}
-          {stored.updatedBy.displayName} ({maskEmail(stored.updatedBy.email)})
+          {stored.updatedBy.displayName} ({stored.updatedBy.email})
         </p>
       ) : (
         <p className="text-sm text-muted-foreground">

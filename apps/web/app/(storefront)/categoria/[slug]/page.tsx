@@ -82,12 +82,16 @@ export default async function CategoryPage({
               Catálogo
             </Link>
           </li>
-          {category.breadcrumbs.map((crumb) => (
+          {category.breadcrumbs.map((crumb, index) => (
             <li key={crumb.slug} className="flex gap-2">
               <span aria-hidden="true">/</span>
-              <Link href={`/categoria/${crumb.slug}`} className="hover:text-foreground">
-                {crumb.name}
-              </Link>
+              {index === category.breadcrumbs.length - 1 ? (
+                <span aria-current="page">{crumb.name}</span>
+              ) : (
+                <Link href={`/categoria/${crumb.slug}`} className="hover:text-foreground">
+                  {crumb.name}
+                </Link>
+              )}
             </li>
           ))}
         </ol>

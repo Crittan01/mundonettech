@@ -121,12 +121,13 @@ describe("F1.2 — client viewer subpath isolation and responsive URL contracts"
     ).toThrow(RangeError);
   });
 
-  it("renders persisted image keys as a responsive AVIF/WebP public gallery", () => {
+  it("renders persisted image keys as a responsive AVIF/WebP public gallery and filters by selected variant", () => {
+    const sha = "a".repeat(64);
     const image: CatalogMedia = {
       id: "image-1",
       variantId: null,
       mediaType: "IMAGE",
-      storageKey: "catalog/product/image/hash/1280.webp",
+      storageKey: `catalog/product/product/image/${sha}/1280.webp`,
       altText: "Vista frontal",
       width: 1280,
       height: 960,
@@ -136,11 +137,19 @@ describe("F1.2 — client viewer subpath isolation and responsive URL contracts"
       posterKey: null,
       usdzKey: null,
     };
+    const variantImage: CatalogMedia = {
+      ...image,
+      id: "image-var-b",
+      variantId: "variant-b",
+      storageKey: `catalog/product/variant-b/image/${sha}/1280.webp`,
+      altText: "Vista variante B",
+    };
     const html = renderToStaticMarkup(
       React.createElement(ProductMediaGallery, {
-        media: [image],
+        media: [image, variantImage],
         origin: "https://media.example.test",
         productName: "Producto real",
+        selectedVariantId: "variant-a",
       }),
     );
     expect((html.match(/<source/g) ?? []).length).toBe(2);
@@ -152,5 +161,57 @@ describe("F1.2 — client viewer subpath isolation and responsive URL contracts"
     expect(html).not.toContain("1920.avif");
     expect(html).toContain('loading="eager"');
     expect(html).toContain('alt="Vista frontal"');
+    expect(html).not.toContain("Vista variante B");
+
+    const manualImage: CatalogMedia = {
+      ...image,
+      id: "image-manual",
+      storageKey: "catalog/manual/1280.webp",
+      altText: "Manual sin sha",
+    };
+    const manualHtml = renderToStaticMarkup(
+      React.createElement(ProductMediaGallery, {
+        media: [manualImage],
+        origin: "https://media.example.test",
+        productName: "Producto manual",
+        priorityFirstImage: false,
+      }),
+    );
+    expect((manualHtml.match(/<source/g) ?? []).length).toBe(0);
+    expect(manualHtml).toContain('loading="lazy"');
+  });
+
+  it("rejects query/hash baseUrl, commas/backslashes, invalid formats, and duplicate derivative widths", () => {
+    expect(() =>
+      buildPictureSources([{ format: "webp", width: 480, height: 320, key: "a/480.webp" }], {
+        baseUrl: "https://cdn.example.co?x=1",
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      buildPictureSources([
+        {
+          format: "webp",
+          width: 480,
+          height: 320,
+          publicUrl: "https://cdn.example.co/a,b.webp",
+        },
+      ]),
+    ).toThrow(TypeError);
+    expect(() =>
+      buildPictureSources([
+        {
+          format: "png" as "webp",
+          width: 480,
+          height: 320,
+          publicUrl: "https://cdn.example.co/a.webp",
+        },
+      ]),
+    ).toThrow(TypeError);
+    expect(() =>
+      buildPictureSources([
+        { format: "webp", width: 480, height: 320, publicUrl: "https://cdn.example.co/a.webp" },
+        { format: "webp", width: 480, height: 320, publicUrl: "https://cdn.example.co/b.webp" },
+      ]),
+    ).toThrow(RangeError);
   });
 });

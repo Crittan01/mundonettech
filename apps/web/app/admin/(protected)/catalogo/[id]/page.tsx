@@ -11,10 +11,9 @@ import {
   CatalogProductForm,
   CatalogVariantForm,
 } from "@/components/admin/catalog-forms";
+import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { ProductMediaAdmin } from "@/components/admin/product-media-admin";
 import { getPublicMediaOrigin } from "@/lib/env";
-import { StepUpPrompt } from "@/components/admin/security-manager";
-import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -37,16 +36,6 @@ export default async function AdminCatalogProductPage({
   const product = await service.getAdminProduct(id, { includeCosts: canWrite });
   if (!product) notFound();
   const references = canWrite ? await service.getReferences() : null;
-  let stepUp: React.ReactNode = null;
-  if (canWrite) {
-    const [now, factors] = await Promise.all([
-      getDatabaseClock(getDatabase()),
-      session.supabase.auth.mfa.listFactors(),
-    ]);
-    const verifiedFactor = factors.data?.totp.find((factor) => factor.status === "verified");
-    const recentMfa = session.lastMfaAt && now.getTime() - session.lastMfaAt.getTime() <= 600_000;
-    if (!recentMfa && verifiedFactor) stepUp = <StepUpPrompt factorId={verifiedFactor.id} />;
-  }
   const justCreated = query.created === "1";
 
   return (
@@ -84,7 +73,7 @@ export default async function AdminCatalogProductPage({
           Medio archivado. Se retiró de la ficha pública sin borrar su objeto ni su historial.
         </p>
       ) : null}
-      {stepUp}
+      {canWrite ? <CmsStepUp session={session} /> : null}
       {canWrite && references ? (
         <CatalogProductForm
           references={references}

@@ -275,7 +275,7 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
     await uploadForm.getByLabel("Modelo USDZ para AR en iOS (opcional)").setInputFiles({
       name: "model.usdz",
       mimeType: "model/vnd.usdz+zip",
-      buffer: createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-e2e-model") }]),
+      buffer: createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-e2e-model") }]),
     });
     await uploadForm.getByRole("button", { name: "Procesar y publicar medio" }).click();
     await expect(page.getByText(/Medio validado, almacenado en R2/)).toBeVisible();

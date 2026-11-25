@@ -40,9 +40,10 @@ export function AddToCartForm({ variantId, available }: { variantId: string; ava
             name="quantity"
             type="number"
             min="1"
-            max="1000000"
+            max={String(Math.max(1, Math.min(available, 1_000_000)))}
             step="1"
             defaultValue="1"
+            disabled={available < 1}
             required
             inputMode="numeric"
           />

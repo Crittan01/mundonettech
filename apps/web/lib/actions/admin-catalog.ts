@@ -1,5 +1,7 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
   AdminActorAuthorizationError,
   CatalogConflictError,
@@ -121,7 +123,14 @@ function baseInput(formData: FormData): CatalogProductBaseInput | null {
   };
 }
 
-function variantInput(formData: FormData): CatalogVariantInput | null {
+function variantInput(
+  formData: FormData,
+  statusField: "status" | "variantStatus" = "status",
+): CatalogVariantInput | null {
+  const rawStatus =
+    statusField === "variantStatus" && formData.has("variantStatus")
+      ? formString(formData, "variantStatus")
+      : formString(formData, "status");
   const parsed = variantSchema.safeParse({
     sku: formString(formData, "sku"),
     priceCents: formString(formData, "priceCents"),
@@ -134,7 +143,7 @@ function variantInput(formData: FormData): CatalogVariantInput | null {
     lengthMillimeters: formString(formData, "lengthMillimeters"),
     widthMillimeters: formString(formData, "widthMillimeters"),
     heightMillimeters: formString(formData, "heightMillimeters"),
-    status: formString(formData, "status"),
+    status: rawStatus,
   });
   const variantId = formString(formData, "variantId");
   const isDefault = formBoolean(formData, "isDefault");
@@ -167,6 +176,7 @@ const catalogSnapshotFields = new Set([
   "categoryId",
   "taxGroupId",
   "status",
+  "variantStatus",
   "authenticity",
   "retractPolicy",
   "warrantyMonths",
@@ -262,7 +272,12 @@ function mutationMessage(error: unknown, values: Record<string, string>): Action
           values,
         );
       case "INACTIVE_DEFAULT":
-        return actionError("Una variante inactiva no puede marcarse como principal.", values);
+        return actionError(
+          error.message.includes("initial variant")
+            ? "La variante inicial debe marcarse como principal."
+            : "Una variante inactiva no puede marcarse como principal.",
+          values,
+        );
       case "NO_ACTIVE_VARIANT":
         return actionError(
           "Un producto activo debe conservar al menos una variante activa.",
@@ -315,7 +330,7 @@ export async function createCatalogProductAction(
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
     const product = baseInput(formData);
-    const variant = variantInput(formData);
+    const variant = variantInput(formData, "variantStatus");
     if (!product || !variant) {
       return actionError(
         "Completa correctamente los campos obligatorios del producto y su variante inicial.",
@@ -327,6 +342,7 @@ export async function createCatalogProductAction(
       { ...product, variant },
       {
         actorAdminUserId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
       },

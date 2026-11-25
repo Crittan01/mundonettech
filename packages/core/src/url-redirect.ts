@@ -33,7 +33,10 @@ export function normalizeRedirectPath(value: string): string {
     throw new TypeError("Invalid URL encoding in redirect path.");
   }
   if (
-    /%2f|%2e/i.test(value) ||
+    /%2f|%2e|%5c|%3f|%23|%25/i.test(value) ||
+    /%(?:2d|5f|7e|3[0-9]|4[1-9a-f]|5[0-9a]|6[1-9a-f]|7[0-9a])/i.test(value) ||
+    /[?#\\]/.test(decoded) ||
+    decoded.includes("//") ||
     /[\u0000-\u001f\u007f]/.test(decoded) ||
     value.split("/").some((part) => part === "." || part === "..") ||
     decoded.split("/").some((part) => part === "." || part === "..")
@@ -96,6 +99,7 @@ export function assertRedirectAllowed(
 const reservedRedirectSourcePrefixes = [
   "/api",
   "/_next",
+  "/_not-found",
   "/admin",
   "/email",
   "/mi-cuenta",
@@ -118,22 +122,45 @@ const reservedRedirectSourcePrefixes = [
   "/empresas",
 ] as const;
 
-const reservedRedirectTargetPrefixes = ["/api", "/_next", "/admin", "/email"] as const;
+const reservedRedirectTargetPrefixes = [
+  "/api",
+  "/_next",
+  "/_not-found",
+  "/admin",
+  "/email",
+  "/referido",
+] as const;
 
 function hasRedirectPathPrefix(path: string, prefix: string): boolean {
-  return path === prefix || path.startsWith(`${prefix}/`);
+  return path === prefix || path.startsWith(`${prefix}/`) || path.startsWith(`${prefix}.`);
+}
+
+function redirectPathVariants(normalizedPath: string): string[] {
+  const lowered = normalizedPath.toLowerCase();
+  const variants = new Set<string>([normalizedPath, lowered]);
+  try {
+    const decoded = decodeURIComponent(normalizedPath);
+    variants.add(decoded);
+    variants.add(decoded.toLowerCase());
+  } catch {
+    // Malformed encoding is rejected by normalizeRedirectPath; keep raw variants.
+  }
+  return [...variants];
 }
 
 export function isReservedRedirectSource(normalizedPath: string): boolean {
-  return (
-    normalizedPath === "/" ||
-    reservedRedirectSourcePrefixes.some((prefix) => hasRedirectPathPrefix(normalizedPath, prefix))
+  const variants = redirectPathVariants(normalizedPath);
+  return variants.some(
+    (candidate) =>
+      candidate === "/" ||
+      reservedRedirectSourcePrefixes.some((prefix) => hasRedirectPathPrefix(candidate, prefix)),
   );
 }
 
 export function isReservedRedirectTarget(normalizedPath: string): boolean {
-  return reservedRedirectTargetPrefixes.some((prefix) =>
-    hasRedirectPathPrefix(normalizedPath, prefix),
+  const variants = redirectPathVariants(normalizedPath);
+  return variants.some((candidate) =>
+    reservedRedirectTargetPrefixes.some((prefix) => hasRedirectPathPrefix(candidate, prefix)),
   );
 }
 

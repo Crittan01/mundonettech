@@ -79,7 +79,7 @@ async function lockSerializedUnits(
       AND "status" = ${status}::"SerializedUnitStatus"
       AND (${reservationKey}::text IS NULL OR "reservationKey" = ${reservationKey})
       AND (${serials}::text[] IS NULL OR "serial" = ANY(${serials}::text[]))
-      AND (NOT ${requireUnordered}::boolean OR "orderId" IS NULL)
+      AND (NOT ${requireUnordered}::boolean OR ("orderId" IS NULL AND "channelOrderId" IS NULL AND "soldAt" IS NULL))
     ORDER BY "id" ASC
     FOR UPDATE
     LIMIT ${movement.quantity}::int

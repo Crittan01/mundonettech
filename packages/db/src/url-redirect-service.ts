@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   assertRedirectAllowed,
   isRedirectStatus,
@@ -128,14 +130,12 @@ function redirectAuditState(record: UrlRedirect): Prisma.JsonObject {
   };
 }
 
-async function audit(
+async function authorizeRedirectMutation(
   tx: Prisma.TransactionClient,
   context: CatalogMutationAudit,
-  action: string,
-  targetId: string,
-  metadata: Prisma.JsonObject,
-): Promise<void> {
+): Promise<string> {
   assertUuid(context.actorAdminUserId, "actorAdminUserId");
+  if (context.requestId !== undefined) assertUuid(context.requestId, "requestId");
   if (
     context.ipHash.length !== 32 ||
     (context.userAgentHash && context.userAgentHash.length !== 32)
@@ -143,12 +143,24 @@ async function audit(
     throw new UrlRedirectValidationError("Audit hashes must contain 32 bytes.");
   }
   await assertAdminActorInTransaction(tx, context.actorAdminUserId, "content:write");
+  return context.requestId ?? randomUUID();
+}
+
+async function audit(
+  tx: Prisma.TransactionClient,
+  context: CatalogMutationAudit,
+  requestId: string,
+  action: string,
+  targetId: string,
+  metadata: Prisma.JsonObject,
+): Promise<void> {
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: context.actorAdminUserId,
       action,
       targetType: "UrlRedirect",
       targetId,
+      requestId,
       ipHash: Uint8Array.from(context.ipHash),
       userAgentHash: context.userAgentHash ? Uint8Array.from(context.userAgentHash) : null,
       metadata: sanitizeAuditValue(metadata) as Prisma.JsonObject,
@@ -230,12 +242,13 @@ export class UrlRedirectService {
     const normalized = normalizeInput(input);
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        const requestId = await authorizeRedirectMutation(tx, context);
         await lockGraph(tx);
         if (normalized.active) {
           assertGraph(normalized.fromPath, normalized.toPath, await activeEdges(tx));
         }
         const created = await tx.urlRedirect.create({ data: normalized });
-        await audit(tx, context, "URL_REDIRECT_CREATED", created.id, {
+        await audit(tx, context, requestId, "URL_REDIRECT_CREATED", created.id, {
           before: null,
           after: redirectAuditState(created),
         });
@@ -251,6 +264,7 @@ export class UrlRedirectService {
     const normalized = normalizeInput(input);
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        const requestId = await authorizeRedirectMutation(tx, context);
         await lockGraph(tx);
         const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
         if (!existing) throw new UrlRedirectNotFoundError();
@@ -260,7 +274,7 @@ export class UrlRedirectService {
           });
         }
         const updated = await tx.urlRedirect.update({ where: { id }, data: normalized });
-        await audit(tx, context, "URL_REDIRECT_UPDATED", id, {
+        await audit(tx, context, requestId, "URL_REDIRECT_UPDATED", id, {
           before: redirectAuditState(existing),
           after: redirectAuditState(updated),
         });
@@ -278,6 +292,7 @@ export class UrlRedirectService {
     }
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        const requestId = await authorizeRedirectMutation(tx, context);
         await lockGraph(tx);
         const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
         if (!existing) throw new UrlRedirectNotFoundError();
@@ -288,7 +303,7 @@ export class UrlRedirectService {
           });
         }
         const updated = await tx.urlRedirect.update({ where: { id }, data: { active } });
-        await audit(tx, context, "URL_REDIRECT_ACTIVITY_UPDATED", id, {
+        await audit(tx, context, requestId, "URL_REDIRECT_ACTIVITY_UPDATED", id, {
           before: redirectAuditState(existing),
           after: redirectAuditState(updated),
         });
@@ -302,6 +317,7 @@ export class UrlRedirectService {
   async archive(id: string, context: CatalogMutationAudit) {
     assertUuid(id, "redirectId");
     return inInventoryTransaction(this.db, async (tx) => {
+      const requestId = await authorizeRedirectMutation(tx, context);
       await lockGraph(tx);
       const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
       if (!existing) throw new UrlRedirectNotFoundError();
@@ -310,7 +326,7 @@ export class UrlRedirectService {
         where: { id },
         data: { active: false, deletedAt: rows[0]!.now },
       });
-      await audit(tx, context, "URL_REDIRECT_ARCHIVED", id, {
+      await audit(tx, context, requestId, "URL_REDIRECT_ARCHIVED", id, {
         before: redirectAuditState(existing),
         after: redirectAuditState(updated),
       });

@@ -1,3 +1,5 @@
+"use client";
+
 import type { CatalogMedia } from "@mundonettech/db";
 import {
   buildPictureSources,
@@ -46,7 +48,7 @@ const galleryImageSizes = "(min-width: 1024px) 45vw, 100vw";
 
 function resolveImageSources(media: CatalogMedia, origin: string) {
   if (media.width === null || media.height === null) return null;
-  const match = /^(.+\/)([1-9][0-9]*)\.webp$/.exec(media.storageKey);
+  const match = /^(.+\/[0-9a-f]{64}\/)([1-9][0-9]*)\.webp$/.exec(media.storageKey);
   const prefix = match?.[1];
   if (!prefix || Number(match[2]) !== media.width) return null;
   const primaryWidth = media.width;
@@ -159,15 +161,22 @@ export function ProductMediaGallery({
   media,
   origin,
   productName,
+  selectedVariantId = null,
+  priorityFirstImage = true,
 }: {
   media: readonly CatalogMedia[];
   origin: string | null;
   productName: string;
+  selectedVariantId?: string | null;
+  priorityFirstImage?: boolean;
 }) {
-  const firstImageId = media.find((item) => item.mediaType === "IMAGE")?.id;
+  const visibleMedia = selectedVariantId
+    ? media.filter((item) => item.variantId === null || item.variantId === selectedVariantId)
+    : media;
+  const firstImageId = visibleMedia.find((item) => item.mediaType === "IMAGE")?.id;
   return (
     <section aria-label={`Galería de ${productName}`} className="space-y-4">
-      {media.length === 0 ? (
+      {visibleMedia.length === 0 ? (
         <div className="flex aspect-[4/3] items-center justify-center rounded-2xl border border-border bg-secondary p-8 text-center text-muted-foreground">
           Aún no hay imágenes publicadas para este producto.
         </div>
@@ -176,20 +185,28 @@ export function ProductMediaGallery({
           La galería no está disponible porque el origen multimedia no está configurado.
         </p>
       ) : (
-        media.map((item) =>
+        visibleMedia.map((item) =>
           item.mediaType === "SPIN_360" ? (
             <div
-              key={item.id}
+              key={`${selectedVariantId ?? "all"}-${item.id}`}
               className="overflow-hidden rounded-2xl border border-border bg-card p-3"
             >
-              <MediaItem media={item} origin={origin} priority={item.id === firstImageId} />
+              <MediaItem
+                media={item}
+                origin={origin}
+                priority={priorityFirstImage && item.id === firstImageId}
+              />
             </div>
           ) : (
             <figure
-              key={item.id}
+              key={`${selectedVariantId ?? "all"}-${item.id}`}
               className="overflow-hidden rounded-2xl border border-border bg-card p-3"
             >
-              <MediaItem media={item} origin={origin} priority={item.id === firstImageId} />
+              <MediaItem
+                media={item}
+                origin={origin}
+                priority={priorityFirstImage && item.id === firstImageId}
+              />
               <figcaption className="sr-only">{item.altText}</figcaption>
             </figure>
           ),

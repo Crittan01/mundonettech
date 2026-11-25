@@ -27,6 +27,11 @@ export const metadata: Metadata = {
     title: "Centro de ayuda",
     description: "Encuentra respuestas y canales reales de atención.",
   },
+  twitter: {
+    card: "summary",
+    title: "Centro de ayuda",
+    description: "Encuentra respuestas y canales reales de atención.",
+  },
 };
 
 function first(value: string | string[] | undefined): string | undefined {
