@@ -170,12 +170,12 @@ export class PaymentRefundService {
     audit: PaymentAuditContext,
   ): Promise<RefundExecutionResult> {
     return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       const peek = await tx.orderRefund.findUnique({
         where: { id: refundId },
         select: { orderId: true },
       });
       if (!peek) throw new PaymentNotFoundError("Order refund not found.");
-      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
       const order = await lockPaymentOrder(tx, peek.orderId);
       return this.finalizeRefundInTransaction(tx, order, refundId, audit, actor);
@@ -413,12 +413,12 @@ export class PaymentRefundService {
   async refund(refundId: string, audit: PaymentAuditContext): Promise<RefundExecutionResult> {
     assertPaymentUuid(refundId, "refundId");
     const transactions = await inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       const peek = await tx.orderRefund.findUnique({
         where: { id: refundId },
         select: { orderId: true },
       });
       if (!peek) throw new PaymentNotFoundError("Order refund not found.");
-      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
       const order = await lockPaymentOrder(tx, peek.orderId);
       const refund = await this.lockRefund(tx, refundId);
@@ -550,6 +550,7 @@ export class PaymentRefundService {
     }
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        const actor = await assertFinancialActor(tx, options.audit.actorAdminUserId);
         const peek = await tx.paymentTransaction.findUnique({
           where: { id: options.transactionId },
           select: { kind: true, attempt: { select: { orderId: true, provider: true } } },
@@ -562,7 +563,6 @@ export class PaymentRefundService {
             "Store credit compensations cannot be reconciled manually.",
           );
         }
-        const actor = await assertFinancialActor(tx, options.audit.actorAdminUserId);
         await acquireOperationLocks(tx, [`order-payment:${peek.attempt.orderId}`]);
         const order = await lockPaymentOrder(tx, peek.attempt.orderId);
         const lockedRows = await tx.$queryRaw<
@@ -675,9 +675,12 @@ export class PaymentRefundService {
 
   async void(paymentAttemptId: string, audit: PaymentAuditContext): Promise<RefundExecutionResult> {
     assertPaymentUuid(paymentAttemptId, "paymentAttemptId");
-    const preflight = await this.db.paymentAttempt.findUnique({
-      where: { id: paymentAttemptId },
-      include: { transactions: true },
+    const preflight = await inInventoryTransaction(this.db, async (tx) => {
+      await assertFinancialActor(tx, audit.actorAdminUserId);
+      return tx.paymentAttempt.findUnique({
+        where: { id: paymentAttemptId },
+        include: { transactions: true },
+      });
     });
     if (!preflight) throw new PaymentNotFoundError("Payment attempt not found.");
     const preflightCapture = preflight.transactions.find(
@@ -696,12 +699,12 @@ export class PaymentRefundService {
       preResolvedProvider = await this.providerFor(preflight);
     }
     const prepared = await inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       const peek = await tx.paymentAttempt.findUnique({
         where: { id: paymentAttemptId },
         select: { orderId: true },
       });
       if (!peek) throw new PaymentNotFoundError("Payment attempt not found.");
-      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
       const order = await lockPaymentOrder(tx, peek.orderId);
       const attempt = await lockPaymentAttempt(tx, paymentAttemptId);
@@ -749,6 +752,18 @@ export class PaymentRefundService {
           const retried = await tx.paymentTransaction.update({
             where: { id: existing.id },
             data: { status: "PROCESSING", completedAt: null },
+          });
+          await writePaymentAudit(tx, {
+            action: "PAYMENT_VOID_REQUESTED",
+            targetType: "PaymentAttempt",
+            targetId: attempt.id,
+            audit,
+            selfDealing,
+            metadata: {
+              orderId: attempt.orderId,
+              amountCents: attempt.amountCents.toString(),
+              retried: true,
+            },
           });
           return { attempt, transaction: retried, captureExternalId: capture.externalId };
         }
@@ -962,6 +977,10 @@ export class PaymentRefundService {
         }
       }
       const now = await databaseNow(tx);
+      const nextExternalId =
+        result.status === "SUCCEEDED"
+          ? result.externalId
+          : (current.externalId ?? result.externalId);
       await tx.paymentTransaction.update({
         where: { id: prepared.transaction.id },
         data: {
@@ -971,7 +990,7 @@ export class PaymentRefundService {
               : result.status === "PENDING"
                 ? "PROCESSING"
                 : "FAILED",
-          externalId: result.externalId,
+          externalId: nextExternalId,
           providerReference: result.providerReference,
           statusMessage: result.message,
           completedAt: result.status === "PENDING" ? null : now,
@@ -995,6 +1014,7 @@ export class PaymentRefundService {
         metadata: {
           orderId: prepared.attempt.orderId,
           amountCents: prepared.attempt.amountCents.toString(),
+          status: result.status,
         },
       });
       return {

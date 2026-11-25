@@ -48,7 +48,9 @@ export function ReturnModerationForm({
           <Label htmlFor={`return-transition-${id}`}>Transición con MFA</Label>
           <Select
             id={`return-transition-${id}`}
+            key={`return-transition-${state.values?.transition ?? ""}`}
             name="transition"
+            defaultValue={state.values?.transition ?? available[0]}
             className="disabled:opacity-50"
             disabled={pending}
           >
@@ -109,7 +111,9 @@ export function WarrantyModerationForm({
           <Label htmlFor={`warranty-transition-${id}`}>Transición con MFA</Label>
           <Select
             id={`warranty-transition-${id}`}
+            key={`warranty-transition-${state.values?.transition ?? ""}`}
             name="transition"
+            defaultValue={state.values?.transition ?? available[0]}
             className="disabled:opacity-50"
             disabled={pending}
           >
@@ -181,7 +185,9 @@ export function SupportAdminForm({
             <Label htmlFor={`admin-ticket-status-${id}`}>Nuevo estado</Label>
             <Select
               id={`admin-ticket-status-${id}`}
+              key={`admin-ticket-status-${state.values?.status ?? ""}`}
               name="status"
+              defaultValue={state.values?.status ?? "IN_PROGRESS"}
               className="disabled:opacity-50"
               disabled={pending}
             >
@@ -227,7 +233,9 @@ export function ReviewModerationForm({
           <Label htmlFor={`review-status-${id}`}>Decisión con MFA</Label>
           <Select
             id={`review-status-${id}`}
+            key={`review-status-${state.values?.status ?? ""}`}
             name="status"
+            defaultValue={state.values?.status ?? "PUBLISHED"}
             className="disabled:opacity-50"
             disabled={pending}
           >

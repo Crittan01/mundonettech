@@ -176,9 +176,14 @@ export class PaymentService {
         where: {
           orderId: order.id,
           ...(codSealed ? { provider: { not: PaymentProvider.COD } } : {}),
-          status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
+          status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING"] },
           expiresAt: { not: null, lte: now },
-          transactions: { none: { kind: "CAPTURE", status: "SUCCEEDED" } },
+          transactions: {
+            none: {
+              kind: "CAPTURE",
+              status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+            },
+          },
           OR: [
             { codReconciliation: null },
             { codReconciliation: { status: "PENDING_COLLECTION" } },
@@ -499,6 +504,7 @@ export class PaymentService {
     }
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        const actor = await assertFinancialActor(tx, options.audit.actorAdminUserId);
         const peek = await tx.paymentAttempt.findUnique({
           where: { id: options.paymentAttemptId },
           select: { orderId: true, provider: true },
@@ -507,7 +513,6 @@ export class PaymentService {
         if (peek.provider !== PaymentProvider.BANK_TRANSFER) {
           throw new PaymentConflictError("Only bank transfer attempts can be confirmed manually.");
         }
-        const actor = await assertFinancialActor(tx, options.audit.actorAdminUserId);
         await acquireOperationLocks(tx, [
           `order-payment:${peek.orderId}`,
           `bank-reference:${externalReference}`,

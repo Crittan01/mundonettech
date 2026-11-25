@@ -101,6 +101,7 @@ function revalidateAdmin(): void {
   revalidatePath("/admin/posventa");
   revalidatePath("/admin/resenas");
   revalidatePath("/admin/pedidos");
+  revalidatePath("/admin/pagos");
   revalidatePath("/admin/finanzas");
   revalidatePath("/admin/hoy");
 }
@@ -123,7 +124,7 @@ export async function transitionReturnAction(
         .enum(["APPROVE", "REJECT", "RECEIVE", "COMPLETE", "CANCEL"])
         .parse(formString(formData, "transition")),
       expectedVersion: expectedVersion(formData),
-      note: z.string().max(500).parse(formString(formData, "note")),
+      note: z.string().trim().max(500).parse(formString(formData, "note")),
       audit: auditContext,
     });
     revalidateAdmin();
@@ -155,7 +156,7 @@ export async function transitionWarrantyAction(
         .enum(["UNDER_REVIEW", "APPROVE", "REJECT", "RESOLVE", "CANCEL"])
         .parse(formString(formData, "transition")),
       expectedVersion: expectedVersion(formData),
-      note: z.string().max(500).parse(formString(formData, "note")),
+      note: z.string().trim().max(500).parse(formString(formData, "note")),
       audit: auditContext,
     });
     revalidateAdmin();
@@ -184,7 +185,7 @@ export async function replySupportAdminAction(
     ]);
     const result = await new PostSaleAdminService(getDatabase()).replySupport({
       ticketId: z.string().uuid().parse(formString(formData, "ticketId")),
-      body: z.string().min(2).max(5000).parse(formString(formData, "body")),
+      body: z.string().trim().min(2).max(5000).parse(formString(formData, "body")),
       status: z
         .enum(["IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED"])
         .parse(formString(formData, "status")),
@@ -243,7 +244,7 @@ export async function moderateReviewAction(
     const result = await new PostSaleAdminService(getDatabase()).moderateReview({
       reviewId,
       status: z.enum(["PUBLISHED", "REJECTED"]).parse(formString(formData, "status")),
-      note: z.string().max(500).parse(formString(formData, "note")),
+      note: z.string().trim().max(500).parse(formString(formData, "note")),
       expectedUpdatedAt: new Date(
         z.string().datetime().parse(formString(formData, "expectedUpdatedAt")),
       ),

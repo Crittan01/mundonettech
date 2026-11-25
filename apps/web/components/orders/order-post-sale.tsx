@@ -82,7 +82,7 @@ export function OrderPostSaleView({
   );
   const activeWarrantySerialIds = new Set(
     order.warrantyClaims
-      .filter((claim) => !["REJECTED", "CANCELLED"].includes(claim.status))
+      .filter((claim) => ["REQUESTED", "UNDER_REVIEW", "APPROVED"].includes(claim.status))
       .map((claim) => claim.serializedUnitId),
   );
   const deliveries: ReturnDeliveryOption[] = order.items.flatMap((item) => {
@@ -142,9 +142,26 @@ export function OrderPostSaleView({
           sku: item.skuSnapshot,
           maximum: effectiveMaximum,
           trackSerial: item.variant.product.trackSerial,
-          replacements: item.variant.product.variants
-            .filter((variant) => variant.id !== item.variantId)
-            .map((variant) => ({ id: variant.id, sku: variant.sku })),
+          replacements:
+            item.variant.product.brand.deletedAt === null &&
+            item.variant.product.category.deletedAt === null
+              ? item.variant.product.variants
+                  .filter((variant) => {
+                    if (
+                      variant.id === item.variantId ||
+                      variant.priceCents !== item.variant.priceCents
+                    ) {
+                      return false;
+                    }
+                    const available = variant.stockLevels.reduce(
+                      (sum, level) =>
+                        sum + Math.max(0, level.onHand - level.committed - level.safetyStock),
+                      0,
+                    );
+                    return available > 0;
+                  })
+                  .map((variant) => ({ id: variant.id, sku: variant.sku }))
+              : [],
           serials,
         },
       ];
@@ -354,6 +371,13 @@ export function OrderPostSaleView({
         <h2 id="reviews-title" className="text-2xl font-semibold">
           Reseñas verificadas
         </h2>
+        {!order.items.some((item) =>
+          item.shipmentItems.some((entry) => entry.shipment.status === "DELIVERED"),
+        ) ? (
+          <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
+            Podrás escribir reseñas verificadas cuando recibas los productos de este pedido.
+          </p>
+        ) : null}
         {order.items.map((item) => {
           const delivered = item.shipmentItems.some(
             (entry) => entry.shipment.status === "DELIVERED",

@@ -125,19 +125,15 @@ export class GuestOrderAccessService {
     } | null;
     try {
       prepared = await inInventoryTransaction(this.db, async (tx) => {
+        const existing = await tx.guestOrderChallenge.findUnique({ where: { idempotencyKey } });
         const receipt = await tx.orderReceipt.findFirst({
           where: { accessTokenHash: receiptHash },
-          include: { order: true },
+          select: { orderId: true },
         });
-        if (!receipt?.order.emailSnapshot || receipt.order.anonymizedAt) {
-          return null;
-        }
-        const order = receipt.order;
-        await acquireOperationLocks(tx, [`guest-order:${order.id}`]);
-        const existing = await tx.guestOrderChallenge.findUnique({ where: { idempotencyKey } });
         if (existing) {
           if (
-            existing.orderId !== order.id ||
+            !receipt ||
+            existing.orderId !== receipt.orderId ||
             !timingSafeEqual(Uint8Array.from(existing.requestIpHash), ipHash)
           ) {
             throw new GuestOrderAccessError(
@@ -145,11 +141,23 @@ export class GuestOrderAccessService {
               "The guest access idempotency key belongs to another request.",
             );
           }
+          const lockedOrders = await tx.$queryRaw<
+            Array<{
+              id: string;
+              orderNumber: string;
+              emailSnapshot: string | null;
+              anonymizedAt: Date | null;
+            }>
+          >`SELECT "id", "orderNumber", "emailSnapshot", "anonymizedAt" FROM "Order" WHERE "id" = ${receipt.orderId}::uuid FOR SHARE`;
+          const lockedOrder = lockedOrders[0];
+          if (!lockedOrder?.emailSnapshot || lockedOrder.anonymizedAt) {
+            return null;
+          }
           return {
             challengeId: existing.id,
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            email: order.emailSnapshot!,
+            orderId: lockedOrder.id,
+            orderNumber: lockedOrder.orderNumber,
+            email: lockedOrder.emailSnapshot,
             code: null,
             status: existing.status,
           };
@@ -167,6 +175,42 @@ export class GuestOrderAccessService {
             "RATE_LIMIT",
             "Too many guest access codes were requested.",
           );
+        }
+        if (!receipt) {
+          return null;
+        }
+        const lockedOrders = await tx.$queryRaw<
+          Array<{
+            id: string;
+            orderNumber: string;
+            emailSnapshot: string | null;
+            anonymizedAt: Date | null;
+          }>
+        >`SELECT "id", "orderNumber", "emailSnapshot", "anonymizedAt" FROM "Order" WHERE "id" = ${receipt.orderId}::uuid FOR SHARE`;
+        const order = lockedOrders[0];
+        if (!order?.emailSnapshot || order.anonymizedAt) {
+          return null;
+        }
+        await acquireOperationLocks(tx, [`guest-order:${order.id}`]);
+        const rechecked = await tx.guestOrderChallenge.findUnique({ where: { idempotencyKey } });
+        if (rechecked) {
+          if (
+            rechecked.orderId !== order.id ||
+            !timingSafeEqual(Uint8Array.from(rechecked.requestIpHash), ipHash)
+          ) {
+            throw new GuestOrderAccessError(
+              "CONFLICT",
+              "The guest access idempotency key belongs to another request.",
+            );
+          }
+          return {
+            challengeId: rechecked.id,
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            email: order.emailSnapshot,
+            code: null,
+            status: rechecked.status,
+          };
         }
         const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
         const now = nowRows[0]!.now;
@@ -312,25 +356,51 @@ export class GuestOrderAccessService {
   }) {
     assertIntegrationUuid(input.challengeId, "challengeId");
     const receiptHash = tokenHash(input.token);
-    hash32(input.ipHash);
+    const ipHash = hash32(input.ipHash);
     if (!/^[0-9]{6}$/.test(input.code))
       throw new GuestOrderAccessError("INVALID", "The access code is invalid.");
     const outcome = await inInventoryTransaction(this.db, async (tx) => {
+      const ipRate = await consumeOperationRateLimit(tx, {
+        operation: "guest-order-verify",
+        subject: { type: "IP" },
+        ipHash,
+        limit: 60,
+        windowSeconds: 3_600,
+        throwOnLimit: false,
+      });
+      if (!ipRate.allowed) {
+        throw new GuestOrderAccessError("RATE_LIMIT", "Too many verification attempts.");
+      }
+      const peekChallenge = await tx.guestOrderChallenge.findUnique({
+        where: { id: input.challengeId },
+        select: { orderId: true },
+      });
+      if (!peekChallenge) {
+        throw new GuestOrderAccessError("INVALID", "The access code is invalid or expired.");
+      }
+      const lockedOrders = await tx.$queryRaw<
+        Array<{ id: string; anonymizedAt: Date | null }>
+      >`SELECT "id", "anonymizedAt" FROM "Order" WHERE "id" = ${peekChallenge.orderId}::uuid FOR SHARE`;
+      const lockedOrder = lockedOrders[0];
+      const receipt = lockedOrder
+        ? await tx.orderReceipt.findUnique({
+            where: { orderId: lockedOrder.id },
+            select: { accessTokenHash: true },
+          })
+        : null;
+      if (
+        !lockedOrder ||
+        !receipt ||
+        !timingSafeEqual(Uint8Array.from(receipt.accessTokenHash), receiptHash) ||
+        lockedOrder.anonymizedAt
+      ) {
+        throw new GuestOrderAccessError("INVALID", "The access code is invalid or expired.");
+      }
       const challenges = await tx.$queryRaw<
         import("@mundonettech/db").GuestOrderChallenge[]
       >`SELECT * FROM "GuestOrderChallenge" WHERE "id" = ${input.challengeId}::uuid FOR UPDATE`;
       const challenge = challenges[0];
-      if (!challenge)
-        throw new GuestOrderAccessError("INVALID", "The access code is invalid or expired.");
-      const order = await tx.order.findUnique({
-        where: { id: challenge.orderId },
-        include: { receipt: true },
-      });
-      if (
-        !order?.receipt ||
-        !timingSafeEqual(Uint8Array.from(order.receipt.accessTokenHash), receiptHash) ||
-        order.anonymizedAt
-      ) {
+      if (!challenge || challenge.orderId !== lockedOrder.id) {
         throw new GuestOrderAccessError("INVALID", "The access code is invalid or expired.");
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
@@ -338,7 +408,7 @@ export class GuestOrderAccessService {
       if (challenge.status !== "SENT" || challenge.expiresAt <= now || challenge.attempts >= 5) {
         throw new GuestOrderAccessError("EXPIRED", "The access code is invalid or expired.");
       }
-      const expected = this.codeHash(challenge.id, order.id, input.code);
+      const expected = this.codeHash(challenge.id, lockedOrder.id, input.code);
       if (!timingSafeEqual(Uint8Array.from(challenge.codeHash), expected)) {
         const attempts = challenge.attempts + 1;
         await tx.guestOrderChallenge.update({
@@ -352,13 +422,13 @@ export class GuestOrderAccessService {
         data: { status: "CONSUMED", consumedAt: now },
       });
       await tx.guestOrderSession.updateMany({
-        where: { orderId: order.id, revokedAt: null },
+        where: { orderId: lockedOrder.id, revokedAt: null },
         data: { revokedAt: now },
       });
       const sessionToken = randomBytes(32).toString("base64url");
       const session = await tx.guestOrderSession.create({
         data: {
-          orderId: order.id,
+          orderId: lockedOrder.id,
           challengeId: challenge.id,
           tokenHash: createHash("sha256").update(sessionToken).digest(),
           expiresAt: new Date(now.getTime() + 30 * 60_000),
@@ -366,7 +436,7 @@ export class GuestOrderAccessService {
       });
       return {
         sessionId: session.id,
-        orderId: order.id,
+        orderId: lockedOrder.id,
         sessionToken,
         expiresAt: session.expiresAt,
       };

@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
   assertCartQuantity,
@@ -141,7 +141,7 @@ function validatedAudit(audit: RefundAudit) {
     actorAdminUserId: audit.actorAdminUserId,
     ipHash,
     userAgentHash,
-    requestId: audit.requestId ?? null,
+    requestId: audit.requestId ?? randomUUID(),
   };
 }
 

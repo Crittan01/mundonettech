@@ -52,6 +52,7 @@ function revalidateOperations(orderId?: string): void {
   revalidatePath("/admin/pedidos");
   revalidatePath("/admin/finanzas");
   revalidatePath("/admin/pagos");
+  revalidatePath("/admin/posventa");
   if (orderId) revalidatePath(`/admin/pedidos/${orderId}`);
 }
 

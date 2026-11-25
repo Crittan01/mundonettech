@@ -94,7 +94,12 @@ export async function POST(request: Request) {
           userAgentHash: security.userAgentHash,
         },
       );
-      if (crmRetention.suppressed.length > 0) revalidateTag("reviews", { expire: 0 });
+      if (crmRetention.suppressed.length > 0) {
+        revalidateTag("reviews", { expire: 0 });
+        for (const slug of crmRetention.affectedReviewProductSlugs ?? []) {
+          revalidateTag(`reviews:${slug}`, { expire: 0 });
+        }
+      }
     } catch (error) {
       revalidateTag("reviews", { expire: 0 });
       throw error;

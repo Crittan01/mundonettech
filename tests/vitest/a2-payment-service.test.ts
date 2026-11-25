@@ -156,7 +156,7 @@ describe("A5 — distribución COD sellada al iniciar fulfillments", () => {
 });
 
 describe("A6 — expiración de intentos abiertos sin captura", () => {
-  it("expira también PROCESSING y AUTHORIZED antes de comprometer otro intento", async () => {
+  it("expira intentos vencidos sin capturas activas ni autorizaciones vigentes", async () => {
     const staleIds = [randomUUID(), randomUUID()];
     const { service, paymentAttemptFindMany, paymentAttemptUpdate } = harness(
       "abc",
@@ -170,8 +170,10 @@ describe("A6 — expiración de intentos abiertos sin captura", () => {
     expect(paymentAttemptFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"] },
-          transactions: { none: { kind: "CAPTURE", status: "SUCCEEDED" } },
+          status: { in: ["REQUIRES_ACTION", "PENDING", "PROCESSING"] },
+          transactions: {
+            none: { kind: "CAPTURE", status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] } },
+          },
         }),
       }),
     );

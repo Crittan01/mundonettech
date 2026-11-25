@@ -155,6 +155,7 @@ function cents(value: string): bigint {
 
 function revalidatePaymentViews(orderId?: string): void {
   revalidatePath("/admin/pagos");
+  revalidatePath("/admin/posventa");
   revalidatePath("/admin/finanzas");
   revalidatePath("/admin/pedidos");
   revalidatePath("/admin/hoy");

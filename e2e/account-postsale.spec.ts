@@ -676,7 +676,7 @@ test("exchange form discards stale quantities from lines without replacement var
                     sku: `A6-${kind}-ALTERNATE-${suffix}`.toUpperCase(),
                     isDefault: false,
                     status: "ACTIVE" as const,
-                    priceCents: 42_000_000n,
+                    priceCents: 40_000_000n,
                     costCents: 21_000_000n,
                     weightGrams: 210,
                     lengthMillimeters: 100,

@@ -140,7 +140,9 @@ export class OperationsService {
       if (
         evidence?.attemptId !== attempt.id ||
         evidence.status !== "IGNORED" ||
-        !["LATE_APPROVAL_REVIEW", "ORDER_CANCELLED_REVIEW"].includes(evidence.errorCode ?? "")
+        !["LATE_APPROVAL_REVIEW", "ORDER_CANCELLED_REVIEW", "VOID_STATE_REVIEW"].includes(
+          evidence.errorCode ?? "",
+        )
       ) {
         throw new Error("Late payment review requires persisted Wompi evidence.");
       }
@@ -235,7 +237,7 @@ export class OperationsService {
   }
 
   async synchronizeNotifications(): Promise<void> {
-    await this.db.$transaction(async (tx) => {
+    await inInventoryTransaction(this.db, async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"operations-notifications"}, 0))`;
       await tx.$executeRaw`
         CREATE LOCAL TEMP TABLE "OperationNotificationSync" (
@@ -287,6 +289,17 @@ export class OperationsService {
         JOIN "Order" orders ON orders."id" = attempts."orderId"
         WHERE attempts."provider" = 'BANK_TRANSFER' AND attempts."status" IN ('PENDING', 'PROCESSING')
         UNION ALL
+        SELECT 'payment-cod-discrepancy:' || attempts."id", 'payments.review', 'WARNING',
+          'Discrepancia COD por conciliar ' || orders."orderNumber",
+          'Una remesa contraentrega registró una discrepancia pendiente de conciliación.',
+          '/admin/pedidos/' || orders."id", 'PaymentAttempt', attempts."id"::text
+        FROM "PaymentAttempt" attempts
+        JOIN "Order" orders ON orders."id" = attempts."orderId"
+        JOIN "CodReconciliation" cod ON cod."paymentAttemptId" = attempts."id"
+        WHERE attempts."provider" = 'COD'
+          AND attempts."status" IN ('PENDING', 'PROCESSING')
+          AND cod."status" = 'DISCREPANCY'
+        UNION ALL
         SELECT 'payment-late-review:' || attempts."id", 'payments.review', 'CRITICAL',
           'Pago tardío por revisar ' || orders."orderNumber",
           'Wompi reportó un resultado sobre un intento no disponible o un pedido cancelado. Concilia antes de capturar o ajustar inventario.',
@@ -298,7 +311,7 @@ export class OperationsService {
             SELECT 1 FROM "PaymentWebhookEvent" late_events
             WHERE late_events."attemptId" = attempts."id"
               AND late_events."status" = 'IGNORED'
-              AND late_events."errorCode" IN ('LATE_APPROVAL_REVIEW', 'ORDER_CANCELLED_REVIEW')
+              AND late_events."errorCode" IN ('LATE_APPROVAL_REVIEW', 'ORDER_CANCELLED_REVIEW', 'VOID_STATE_REVIEW')
           )
         UNION ALL
         SELECT 'return-pending:' || returns."id", 'postsale.returns', 'WARNING',
@@ -478,6 +491,15 @@ export class OperationsService {
               orderStatus: "CONFIRMED",
               paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED"] },
               fulfillmentStatus: { in: ["UNFULFILLED", "PARTIALLY_FULFILLED"] },
+            },
+            select: {
+              id: true,
+              orderNumber: true,
+              createdAt: true,
+              totalCents: true,
+              paymentStatus: true,
+              fulfillmentStatus: true,
+              recipientNameSnapshot: true,
             },
             orderBy: [{ createdAt: "asc" }, { id: "asc" }],
             take: 50,

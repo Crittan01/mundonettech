@@ -86,21 +86,32 @@ export class CrmRetentionService {
         select: { id: true },
       });
       if (!peekRequested) throw new CrmError("NOT_FOUND", "Contact not found.");
-      const peekLineageIds = await findContactLineageIds(tx, input.contactId);
-      const peekContacts =
-        peekLineageIds.length > 0
+      const initialLineageIds = await findContactLineageIds(tx, input.contactId);
+      const initialContacts =
+        initialLineageIds.length > 0
           ? await tx.contact.findMany({
-              where: { id: { in: peekLineageIds } },
+              where: { id: { in: initialLineageIds } },
               select: { id: true, customerId: true },
             })
           : [];
-      const peekCustomerIds = [
+      const initialCustomerIds = [
         ...new Set(
-          peekContacts
+          initialContacts
             .map((contact) => contact.customerId)
             .filter((value): value is string => value !== null),
         ),
       ].sort(compareStrings);
+      const customerLinkedContacts =
+        initialCustomerIds.length > 0
+          ? await tx.contact.findMany({
+              where: { customerId: { in: initialCustomerIds } },
+              select: { id: true },
+            })
+          : [];
+      const peekLineageIds = [
+        ...new Set([...initialLineageIds, ...customerLinkedContacts.map((item) => item.id)]),
+      ].sort(compareStrings);
+      const peekCustomerIds = initialCustomerIds;
       const peekScope = await peekCustomerAnonymizationScope(tx, peekCustomerIds);
       const locked = await acquireCustomerContactLockHierarchy(tx, {
         customerIds: peekCustomerIds,
@@ -115,6 +126,7 @@ export class CrmRetentionService {
           contactId: requested.id,
           lineage: [] as string[],
           customers: [] as string[],
+          affectedReviewProductSlugs: [] as string[],
           replayed: true,
         };
       }
@@ -124,10 +136,7 @@ export class CrmRetentionService {
       if (requested.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The contact changed in another session.");
       }
-      const lineageIds = await findContactLineageIds(tx, requested.id);
-      if (contacts.length !== lineageIds.length || !sameSortedIds(peekLineageIds, lineageIds)) {
-        throw retryableLockDivergenceError("The contact lineage changed during suppression.");
-      }
+      const directLineageIds = await findContactLineageIds(tx, requested.id);
       const customerIds = [
         ...new Set(
           contacts
@@ -135,6 +144,19 @@ export class CrmRetentionService {
             .filter((value): value is string => value !== null),
         ),
       ].sort(compareStrings);
+      const verifiedLinkedContacts =
+        customerIds.length > 0
+          ? await tx.contact.findMany({
+              where: { customerId: { in: customerIds } },
+              select: { id: true },
+            })
+          : [];
+      const lineageIds = [
+        ...new Set([...directLineageIds, ...verifiedLinkedContacts.map((item) => item.id)]),
+      ].sort(compareStrings);
+      if (contacts.length !== lineageIds.length || !sameSortedIds(peekLineageIds, lineageIds)) {
+        throw retryableLockDivergenceError("The contact lineage changed during suppression.");
+      }
       const verifiedScope = await peekCustomerAnonymizationScope(tx, customerIds);
       if (
         hasNewIds(peekCustomerIds, customerIds) ||
@@ -184,7 +206,10 @@ export class CrmRetentionService {
       if (input.reason === "RETENTION_EXPIRED" && customerIds.length > 0) {
         const openSupport = await tx.supportTicket.findFirst({
           where: {
-            requesterCustomerId: { in: customerIds },
+            OR: [
+              { requesterCustomerId: { in: customerIds } },
+              { order: { customerId: { in: customerIds } } },
+            ],
             status: { in: ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER"] },
           },
           select: { id: true },
@@ -200,13 +225,17 @@ export class CrmRetentionService {
         locked.customers.map((customer) => [customer.id, customer]),
       );
       const anonymizedCustomers: string[] = [];
+      const affectedReviewSlugSet = new Set<string>();
       for (const customerId of customerIds) {
         const customer = lockedCustomerMap.get(customerId);
         if (!customer || customer.status === "ANONYMIZED" || customer.deletedAt) continue;
-        await accounts.anonymizeInTransaction(tx, customerId, audit, {
+        const anonymized = await accounts.anonymizeInTransaction(tx, customerId, audit, {
           skipCrmCascade: true,
           alreadyLocked: true,
         });
+        for (const slug of anonymized.affectedReviewProductSlugs) {
+          affectedReviewSlugSet.add(slug);
+        }
         anonymizedCustomers.push(customerId);
       }
       const now = await crmNow(tx);
@@ -264,6 +293,7 @@ export class CrmRetentionService {
         contactId: requested.id,
         lineage: lineageIds,
         customers: anonymizedCustomers,
+        affectedReviewProductSlugs: [...affectedReviewSlugSet],
         replayed: false,
       };
     });
@@ -298,6 +328,7 @@ export class CrmRetentionService {
     `;
     const suppressed: string[] = [];
     const deferred: string[] = [];
+    const affectedReviewSlugSet = new Set<string>();
     const attempted = new Set<string>();
     for (const contact of due) {
       if (attempted.has(contact.id)) continue;
@@ -314,6 +345,9 @@ export class CrmRetentionService {
         );
         if (!outcome.replayed) {
           suppressed.push(contact.id);
+          for (const slug of outcome.affectedReviewProductSlugs) {
+            affectedReviewSlugSet.add(slug);
+          }
         }
       } catch (error) {
         if (error instanceof CrmError && error.code === "FORBIDDEN") {
@@ -359,6 +393,11 @@ export class CrmRetentionService {
         }
       }
     }
-    return { suppressed, deferred, scanned: due.length };
+    return {
+      suppressed,
+      deferred,
+      scanned: due.length,
+      affectedReviewProductSlugs: [...affectedReviewSlugSet],
+    };
   }
 }

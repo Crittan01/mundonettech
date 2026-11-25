@@ -9,7 +9,7 @@ import {
   retryableLockDivergenceError,
   suppressCustomerCrmLineageInTransaction,
 } from "./crm-shared.js";
-import { GrowthService, marketingEmailConsentGranted } from "./growth-service.js";
+import { GrowthError, GrowthService, marketingEmailConsentGranted } from "./growth-service.js";
 import {
   acquireOperationLocks,
   assertUuid,
@@ -635,6 +635,11 @@ export class AccountService {
     if (!Number.isInteger(limit) || limit < 1 || limit > 25) {
       throw new AccountError("VALIDATION", "Order page size must be between 1 and 25.");
     }
+    const active = await this.db.customer.findFirst({
+      where: { id: customerId, status: "ACTIVE", deletedAt: null },
+      select: { id: true },
+    });
+    if (!active) throw new AccountError("NOT_FOUND", "Active customer account not found.");
     let cursor: { createdAt: Date; id: string } | null = null;
     if (options.cursor) {
       assertUuid(options.cursor, "cursor");
@@ -670,6 +675,11 @@ export class AccountService {
   async getOrder(customerId: string, orderId: string) {
     assertUuid(customerId, "customerId");
     assertUuid(orderId, "orderId");
+    const active = await this.db.customer.findFirst({
+      where: { id: customerId, status: "ACTIVE", deletedAt: null },
+      select: { id: true },
+    });
+    if (!active) throw new AccountError("NOT_FOUND", "Active customer account not found.");
     const order = await this.db.order.findFirst({
       where: { id: orderId, customerId },
       omit: {
@@ -685,9 +695,17 @@ export class AccountService {
               include: {
                 product: {
                   include: {
+                    brand: { select: { deletedAt: true } },
+                    category: { select: { deletedAt: true } },
                     variants: {
                       where: { deletedAt: null, status: "ACTIVE" },
                       omit: { costCents: true },
+                      include: {
+                        stockLevels: {
+                          where: { location: { deletedAt: null, type: { not: "QUARANTINE" } } },
+                          select: { onHand: true, committed: true, safetyStock: true },
+                        },
+                      },
                     },
                   },
                 },
@@ -786,6 +804,10 @@ export class AccountService {
       blockingWarranty,
       blockingMetaCapi,
       blockingPaymentTransaction,
+      blockingTaxInvoice,
+      blockingCreditNote,
+      blockingUninvoicedOrder,
+      blockingUncreditedRefund,
     ] = await Promise.all([
       tx.order.findFirst({
         where: {
@@ -836,7 +858,6 @@ export class AccountService {
         where: {
           customerId,
           status: "DISPATCHING",
-          claimExpiresAt: { gt: now },
         },
         select: { id: true },
       }),
@@ -844,6 +865,41 @@ export class AccountService {
         where: {
           attempt: { order: { customerId } },
           status: { in: ["PENDING", "PROCESSING"] },
+        },
+        select: { id: true },
+      }),
+      tx.taxInvoice.findFirst({
+        where: {
+          order: { customerId },
+          status: { not: "ACCEPTED" },
+        },
+        select: { id: true },
+      }),
+      tx.creditNote.findFirst({
+        where: {
+          invoice: { order: { customerId } },
+          status: { not: "ACCEPTED" },
+        },
+        select: { id: true },
+      }),
+      tx.order.findFirst({
+        where: {
+          customerId,
+          taxRegime: "RESPONSABLE_IVA",
+          paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED", "REFUNDED"] },
+          OR: [{ taxInvoice: null }, { taxInvoice: { is: { status: { not: "ACCEPTED" } } } }],
+        },
+        select: { id: true },
+      }),
+      tx.orderRefund.findFirst({
+        where: {
+          order: {
+            customerId,
+            taxRegime: "RESPONSABLE_IVA",
+            taxInvoice: { is: { status: "ACCEPTED" } },
+          },
+          status: "COMPLETED",
+          OR: [{ creditNote: null }, { creditNote: { is: { status: { not: "ACCEPTED" } } } }],
         },
         select: { id: true },
       }),
@@ -855,14 +911,25 @@ export class AccountService {
       blockingReturn ||
       blockingWarranty ||
       blockingMetaCapi ||
-      blockingPaymentTransaction
+      blockingPaymentTransaction ||
+      blockingTaxInvoice ||
+      blockingCreditNote ||
+      blockingUninvoicedOrder ||
+      blockingUncreditedRefund
     ) {
       throw new AccountError(
         "CONFLICT",
-        "Complete or resolve active orders, payments, refunds and post-sale requests before deleting the account.",
+        "Complete or resolve active orders, payments, refunds, fiscal documents and post-sale requests before deleting the account.",
       );
     }
-    await new GrowthService(tx).forfeitCustomerPointsInTransaction(tx, customerId);
+    try {
+      await new GrowthService(tx).forfeitCustomerPointsInTransaction(tx, customerId);
+    } catch (error) {
+      if (error instanceof GrowthError && error.code === "CONFLICT") {
+        throw new AccountError("CONFLICT", error.message);
+      }
+      throw error;
+    }
     if (!options.skipCrmCascade) {
       try {
         await suppressCustomerCrmLineageInTransaction(tx, customerId, now);

@@ -11,7 +11,10 @@ BEGIN
     NEW."expiresAt" IS DISTINCT FROM OLD."expiresAt" OR
     NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR
     NEW."lastUsedAt" < OLD."lastUsedAt" OR
-    (OLD."revokedAt" IS NOT NULL AND NEW."revokedAt" IS DISTINCT FROM OLD."revokedAt")
+    (OLD."revokedAt" IS NOT NULL AND (
+      NEW."revokedAt" IS DISTINCT FROM OLD."revokedAt" OR
+      NEW."lastUsedAt" IS DISTINCT FROM OLD."lastUsedAt"
+    ))
   ) THEN
     RAISE EXCEPTION 'Guest session identity and revocation history are immutable' USING ERRCODE = '55000';
   END IF;
@@ -77,12 +80,44 @@ BEGIN
     RAISE EXCEPTION 'Return item does not belong to the order or its delivery snapshot is invalid' USING ERRCODE = '23514';
   END IF;
 
-  PERFORM 1
-  FROM "ProductVariant" variant
-  JOIN "Product" product ON product."id" = variant."productId"
-  WHERE variant."id" = item_variant
-  FOR SHARE OF product;
-  PERFORM 1 FROM "ProductVariant" variant WHERE variant."id" = item_variant FOR SHARE;
+  IF parent_kind = 'EXCHANGE' THEN
+    IF NEW."replacementVariantId" IS NULL OR NEW."replacementVariantId" = item_variant THEN
+      RAISE EXCEPTION 'Exchange replacement must be another active variant of the same product' USING ERRCODE = '23514';
+    END IF;
+    PERFORM 1
+    FROM "ProductVariant" replacement
+    JOIN "ProductVariant" original ON original."productId" = replacement."productId"
+    JOIN "Product" product ON product."id" = replacement."productId"
+    JOIN "Brand" brand ON brand."id" = product."brandId"
+    JOIN "Category" category ON category."id" = product."categoryId"
+    WHERE replacement."id" = NEW."replacementVariantId"
+      AND original."id" = item_variant
+      AND replacement."status" = 'ACTIVE'
+      AND replacement."deletedAt" IS NULL
+      AND replacement."priceCents" = original."priceCents"
+      AND product."status" = 'ACTIVE'
+      AND product."deletedAt" IS NULL
+      AND brand."deletedAt" IS NULL
+      AND category."deletedAt" IS NULL
+    FOR SHARE OF product;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Exchange replacement must be another active sellable variant of the same product and price' USING ERRCODE = '23514';
+    END IF;
+    PERFORM 1
+    FROM "ProductVariant" variant
+    WHERE variant."id" IN (item_variant, NEW."replacementVariantId")
+    ORDER BY variant."id"
+    FOR SHARE;
+  ELSIF NEW."replacementVariantId" IS NOT NULL THEN
+    RAISE EXCEPTION 'Refunds cannot select a replacement variant' USING ERRCODE = '23514';
+  ELSE
+    PERFORM 1
+    FROM "ProductVariant" variant
+    JOIN "Product" product ON product."id" = variant."productId"
+    WHERE variant."id" = item_variant
+    FOR SHARE OF product;
+    PERFORM 1 FROM "ProductVariant" variant WHERE variant."id" = item_variant FOR SHARE;
+  END IF;
 
   SELECT COALESCE(sum(item."quantity"), 0)
   INTO already_requested
@@ -93,32 +128,6 @@ BEGIN
     AND request."status" NOT IN ('REJECTED', 'CANCELLED');
   IF NEW."quantity" > shipment_quantity OR already_requested + NEW."quantity" > shipment_quantity THEN
     RAISE EXCEPTION 'Return quantities exceed the delivered shipment item' USING ERRCODE = '23514';
-  END IF;
-
-  IF parent_kind = 'EXCHANGE' THEN
-    IF NEW."replacementVariantId" IS NULL OR NEW."replacementVariantId" = item_variant THEN
-      RAISE EXCEPTION 'Exchange replacement must be another active variant of the same product' USING ERRCODE = '23514';
-    END IF;
-    PERFORM 1
-    FROM "ProductVariant" replacement
-    JOIN "ProductVariant" original ON original."productId" = replacement."productId"
-    JOIN "Product" product ON product."id" = replacement."productId"
-    WHERE replacement."id" = NEW."replacementVariantId"
-      AND original."id" = item_variant
-      AND replacement."status" = 'ACTIVE'
-      AND replacement."deletedAt" IS NULL
-      AND product."status" = 'ACTIVE'
-      AND product."deletedAt" IS NULL
-    FOR SHARE OF product;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'Exchange replacement must be another active variant of the same product' USING ERRCODE = '23514';
-    END IF;
-    PERFORM 1
-    FROM "ProductVariant" replacement
-    WHERE replacement."id" = NEW."replacementVariantId"
-    FOR SHARE;
-  ELSIF NEW."replacementVariantId" IS NOT NULL THEN
-    RAISE EXCEPTION 'Refunds cannot select a replacement variant' USING ERRCODE = '23514';
   END IF;
   RETURN NEW;
 END;
@@ -140,6 +149,13 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'Serialized unit already has an active return request' USING ERRCODE = '23514';
   END IF;
+  IF EXISTS (
+    SELECT 1 FROM "WarrantyClaim" claim
+    WHERE claim."serializedUnitId" = NEW."serializedUnitId"
+      AND claim."status" IN ('REQUESTED', 'UNDER_REVIEW', 'APPROVED')
+  ) THEN
+    RAISE EXCEPTION 'Serialized unit already has an active warranty claim' USING ERRCODE = '23514';
+  END IF;
   IF NOT EXISTS (
     SELECT 1 FROM "ReturnRequestItem" return_item
     JOIN "ReturnRequest" request ON request."id" = return_item."returnRequestId"
@@ -151,7 +167,10 @@ BEGIN
       AND unit."shipmentId" = shipment_item."shipmentId"
     WHERE return_item."id" = NEW."returnRequestItemId"
       AND request."status" = 'REQUESTED'
-      AND unit."status" IN ('SOLD', 'RETURNED')
+      AND (
+        (TG_OP = 'INSERT' AND unit."status" = 'SOLD') OR
+        (TG_OP = 'UPDATE' AND unit."status" IN ('SOLD', 'RETURNED'))
+      )
   ) THEN
     RAISE EXCEPTION 'Returned serial does not match the order item or request state' USING ERRCODE = '23514';
   END IF;
@@ -176,7 +195,16 @@ BEGIN
   WHERE variant."id" = item_variant
   FOR SHARE OF product;
   PERFORM 1 FROM "ProductVariant" variant WHERE variant."id" = item_variant FOR SHARE;
-  PERFORM 1 FROM "SerializedUnit" unit WHERE unit."id" = NEW."serializedUnitId" FOR SHARE;
+  PERFORM 1 FROM "SerializedUnit" unit WHERE unit."id" = NEW."serializedUnitId" FOR UPDATE;
+  IF TG_OP = 'INSERT' AND EXISTS (
+    SELECT 1 FROM "ReturnRequestUnit" existing
+    JOIN "ReturnRequestItem" return_item ON return_item."id" = existing."returnRequestItemId"
+    JOIN "ReturnRequest" request ON request."id" = return_item."returnRequestId"
+    WHERE existing."serializedUnitId" = NEW."serializedUnitId"
+      AND request."status" IN ('REQUESTED', 'AWAITING_RETURN', 'RECEIVED', 'COMPLETED')
+  ) THEN
+    RAISE EXCEPTION 'Warranty serial already has an active or completed return request' USING ERRCODE = '23514';
+  END IF;
   IF NOT EXISTS (
     SELECT 1 FROM "OrderItem" item
     JOIN "SerializedUnit" unit ON unit."orderId" = item."orderId" AND unit."variantId" = item."variantId"
@@ -184,7 +212,10 @@ BEGIN
     WHERE item."id" = NEW."orderItemId"
       AND item."orderId" = NEW."orderId"
       AND unit."id" = NEW."serializedUnitId"
-      AND unit."status" IN ('SOLD', 'RETURNED')
+      AND (
+        (TG_OP = 'INSERT' AND unit."status" = 'SOLD') OR
+        (TG_OP = 'UPDATE' AND unit."status" IN ('SOLD', 'RETURNED'))
+      )
   ) THEN
     RAISE EXCEPTION 'Warranty serial must belong to a delivered order item' USING ERRCODE = '23514';
   END IF;
@@ -255,12 +286,23 @@ BEGIN
   target_return_id := CASE WHEN TG_TABLE_NAME = 'ReturnRequest' THEN NEW."id" ELSE NULL END;
   target_warranty_id := CASE WHEN TG_TABLE_NAME = 'WarrantyClaim' THEN NEW."id" ELSE NULL END;
 
+  IF target_return_id IS NOT NULL THEN
+    PERFORM 1 FROM "ReturnRequest" request WHERE request."id" = target_return_id FOR SHARE;
+    PERFORM 1 FROM "OrderRefund" refund
+    JOIN "ReturnRequest" request ON request."refundId" = refund."id"
+    WHERE request."id" = target_return_id
+    FOR SHARE OF refund;
+  END IF;
   IF target_return_id IS NOT NULL AND EXISTS (
     SELECT 1
     FROM "ReturnRequest" request
     LEFT JOIN "OrderRefund" refund ON refund."id" = request."refundId"
     WHERE request."id" = target_return_id
       AND (
+        (request."status" IN ('AWAITING_RETURN', 'RECEIVED', 'COMPLETED') AND NOT EXISTS (
+          SELECT 1 FROM "ReturnRequestItem" return_item
+          WHERE return_item."returnRequestId" = request."id"
+        )) OR
         (request."kind" = 'EXCHANGE' AND request."refundId" IS NOT NULL) OR
         (request."status" IN ('REQUESTED', 'REJECTED') AND request."refundId" IS NOT NULL) OR
         (request."kind" = 'REFUND' AND request."status" IN ('AWAITING_RETURN', 'RECEIVED', 'COMPLETED') AND request."refundId" IS NULL) OR
@@ -269,7 +311,7 @@ BEGIN
         )) OR
         (request."status" IN ('AWAITING_RETURN', 'RECEIVED') AND refund."status" IN ('REJECTED', 'CANCELLED')) OR
         (request."kind" = 'REFUND' AND request."status" = 'COMPLETED' AND refund."status" IS DISTINCT FROM 'COMPLETED') OR
-        (request."status" = 'CANCELLED' AND request."refundId" IS NOT NULL AND refund."status" IS DISTINCT FROM 'CANCELLED')
+        (request."status" = 'CANCELLED' AND request."refundId" IS NOT NULL AND refund."status" NOT IN ('CANCELLED', 'REJECTED'))
       )
   ) THEN
     RAISE EXCEPTION 'Return request and refund financial states are inconsistent' USING ERRCODE = '23514';
@@ -309,6 +351,13 @@ BEGIN
     RAISE EXCEPTION 'Return refund does not cover the returned items exactly' USING ERRCODE = '23514';
   END IF;
 
+  IF target_warranty_id IS NOT NULL THEN
+    PERFORM 1 FROM "WarrantyClaim" claim WHERE claim."id" = target_warranty_id FOR SHARE;
+    PERFORM 1 FROM "OrderRefund" refund
+    JOIN "WarrantyClaim" claim ON claim."refundId" = refund."id"
+    WHERE claim."id" = target_warranty_id
+    FOR SHARE OF refund;
+  END IF;
   IF target_warranty_id IS NOT NULL AND EXISTS (
     SELECT 1
     FROM "WarrantyClaim" claim
@@ -323,7 +372,7 @@ BEGIN
         )) OR
         (claim."status" = 'APPROVED' AND refund."status" IN ('REJECTED', 'CANCELLED')) OR
         (claim."status" = 'RESOLVED' AND claim."remedy" = 'REFUND' AND refund."status" IS DISTINCT FROM 'COMPLETED') OR
-        (claim."status" = 'CANCELLED' AND claim."refundId" IS NOT NULL AND refund."status" IS DISTINCT FROM 'CANCELLED') OR
+        (claim."status" = 'CANCELLED' AND claim."refundId" IS NOT NULL AND refund."status" NOT IN ('CANCELLED', 'REJECTED')) OR
         (claim."refundId" IS NOT NULL AND (
           SELECT count(*) FROM "OrderRefundItem" refund_item
           WHERE refund_item."refundId" = claim."refundId"
@@ -340,6 +389,11 @@ BEGIN
     RAISE EXCEPTION 'Warranty claim and refund financial states are inconsistent' USING ERRCODE = '23514';
   END IF;
 
+  IF target_refund_id IS NOT NULL THEN
+    SELECT * INTO refund_record FROM "OrderRefund" WHERE "id" = target_refund_id FOR UPDATE;
+    PERFORM 1 FROM "ReturnRequest" request WHERE request."refundId" = target_refund_id FOR SHARE;
+    PERFORM 1 FROM "WarrantyClaim" claim WHERE claim."refundId" = target_refund_id FOR SHARE;
+  END IF;
   IF target_refund_id IS NOT NULL AND EXISTS (
     SELECT 1
     FROM "ReturnRequest" request
@@ -349,7 +403,7 @@ BEGIN
         refund."orderId" <> request."orderId" OR refund."reason" <> 'RETRACT' OR
         (request."status" IN ('AWAITING_RETURN', 'RECEIVED') AND refund."status" IN ('REJECTED', 'CANCELLED')) OR
         (request."status" = 'COMPLETED' AND refund."status" <> 'COMPLETED') OR
-        (request."status" = 'CANCELLED' AND refund."status" <> 'CANCELLED')
+        (request."status" = 'CANCELLED' AND refund."status" NOT IN ('CANCELLED', 'REJECTED'))
       )
   ) THEN
     RAISE EXCEPTION 'Refund cannot change independently of its return request' USING ERRCODE = '23514';
@@ -363,14 +417,13 @@ BEGIN
         refund."orderId" <> claim."orderId" OR refund."reason" <> 'WARRANTY' OR
         (claim."status" = 'APPROVED' AND refund."status" IN ('REJECTED', 'CANCELLED')) OR
         (claim."status" = 'RESOLVED' AND claim."remedy" = 'REFUND' AND refund."status" <> 'COMPLETED') OR
-        (claim."status" = 'CANCELLED' AND refund."status" <> 'CANCELLED')
+        (claim."status" = 'CANCELLED' AND refund."status" NOT IN ('CANCELLED', 'REJECTED'))
       )
   ) THEN
     RAISE EXCEPTION 'Refund cannot change independently of its warranty claim' USING ERRCODE = '23514';
   END IF;
 
   IF target_refund_id IS NOT NULL THEN
-    SELECT * INTO refund_record FROM "OrderRefund" WHERE "id" = target_refund_id;
     SELECT COALESCE(sum(transaction."amountCents"), 0)
     INTO successful_refunds
     FROM "PaymentTransaction" transaction
@@ -413,7 +466,12 @@ BEGIN
   IF TG_OP = 'DELETE' OR NEW."orderId" IS DISTINCT FROM OLD."orderId" OR NEW."requesterCustomerId" IS DISTINCT FROM OLD."requesterCustomerId" OR
      NEW."requesterGuestSessionId" IS DISTINCT FROM OLD."requesterGuestSessionId" OR NEW."idempotencyKey" IS DISTINCT FROM OLD."idempotencyKey" OR
      NEW."requestHash" IS DISTINCT FROM OLD."requestHash" OR NEW."kind" IS DISTINCT FROM OLD."kind" OR NEW."reason" IS DISTINCT FROM OLD."reason" OR
-     NEW."retractRefundDueAt" IS DISTINCT FROM OLD."retractRefundDueAt" OR NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR NEW."version" <> OLD."version" + 1 THEN
+     NEW."retractRefundDueAt" IS DISTINCT FROM OLD."retractRefundDueAt" OR NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR
+     (OLD."refundId" IS NOT NULL AND NEW."refundId" IS DISTINCT FROM OLD."refundId") OR
+     (OLD."reviewedByAdminUserId" IS NOT NULL AND NEW."reviewedByAdminUserId" IS DISTINCT FROM OLD."reviewedByAdminUserId") OR
+     (OLD."reviewedAt" IS NOT NULL AND NEW."reviewedAt" IS DISTINCT FROM OLD."reviewedAt") OR
+     (OLD."receivedAt" IS NOT NULL AND NEW."receivedAt" IS DISTINCT FROM OLD."receivedAt") OR
+     NEW."version" <> OLD."version" + 1 THEN
     RAISE EXCEPTION 'Return identity is immutable and versions must be monotonic' USING ERRCODE = '55000';
   END IF;
   IF NEW."status" IS DISTINCT FROM OLD."status" AND NOT (
@@ -422,8 +480,8 @@ BEGIN
     (OLD."status" = 'RECEIVED' AND NEW."status" = 'COMPLETED')
   ) THEN RAISE EXCEPTION 'Invalid return request transition' USING ERRCODE = '55000'; END IF;
   IF OLD."status" IN ('COMPLETED', 'REJECTED', 'CANCELLED') THEN RAISE EXCEPTION 'Terminal return requests are immutable' USING ERRCODE = '55000'; END IF;
-  IF (NEW."status" = 'AWAITING_RETURN' AND (NEW."reviewedByAdminUserId" IS NULL OR NEW."reviewedAt" IS NULL OR (NEW."kind" = 'REFUND') <> (NEW."refundId" IS NOT NULL))) OR
-     (NEW."status" = 'RECEIVED' AND NEW."receivedAt" IS NULL) OR (NEW."status" = 'COMPLETED' AND NEW."completedAt" IS NULL) THEN
+  IF (NEW."status" IN ('AWAITING_RETURN', 'RECEIVED', 'COMPLETED') AND (NEW."reviewedByAdminUserId" IS NULL OR NEW."reviewedAt" IS NULL OR (NEW."kind" = 'REFUND') <> (NEW."refundId" IS NOT NULL))) OR
+     (NEW."status" IN ('RECEIVED', 'COMPLETED') AND NEW."receivedAt" IS NULL) OR (NEW."status" = 'COMPLETED' AND NEW."completedAt" IS NULL) THEN
     RAISE EXCEPTION 'Return review, refund and timestamp snapshots are inconsistent' USING ERRCODE = '23514';
   END IF;
   IF NEW."kind" = 'REFUND' AND NEW."status" = 'COMPLETED' AND NOT EXISTS (
@@ -445,7 +503,11 @@ BEGIN
      NEW."requesterGuestSessionId" IS DISTINCT FROM OLD."requesterGuestSessionId" OR NEW."idempotencyKey" IS DISTINCT FROM OLD."idempotencyKey" OR
      NEW."requestHash" IS DISTINCT FROM OLD."requestHash" OR NEW."issueDescription" IS DISTINCT FROM OLD."issueDescription" OR
      NEW."remedy" IS DISTINCT FROM OLD."remedy" OR NEW."warrantyDueAt" IS DISTINCT FROM OLD."warrantyDueAt" OR
-     NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR NEW."version" <> OLD."version" + 1 THEN
+     NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR
+     (OLD."refundId" IS NOT NULL AND NEW."refundId" IS DISTINCT FROM OLD."refundId") OR
+     (OLD."reviewedByAdminUserId" IS NOT NULL AND NEW."reviewedByAdminUserId" IS DISTINCT FROM OLD."reviewedByAdminUserId") OR
+     (OLD."reviewedAt" IS NOT NULL AND NEW."reviewedAt" IS DISTINCT FROM OLD."reviewedAt") OR
+     NEW."version" <> OLD."version" + 1 THEN
     RAISE EXCEPTION 'Warranty identity is immutable and versions must be monotonic' USING ERRCODE = '55000';
   END IF;
   IF NEW."status" IS DISTINCT FROM OLD."status" AND NOT (
@@ -454,7 +516,7 @@ BEGIN
     (OLD."status" = 'APPROVED' AND NEW."status" IN ('RESOLVED', 'CANCELLED'))
   ) THEN RAISE EXCEPTION 'Invalid warranty claim transition' USING ERRCODE = '55000'; END IF;
   IF OLD."status" IN ('RESOLVED', 'REJECTED', 'CANCELLED') THEN RAISE EXCEPTION 'Terminal warranty claims are immutable' USING ERRCODE = '55000'; END IF;
-  IF (NEW."status" = 'APPROVED' AND (NEW."reviewedByAdminUserId" IS NULL OR NEW."reviewedAt" IS NULL OR (NEW."remedy" = 'REFUND') <> (NEW."refundId" IS NOT NULL))) OR
+  IF (NEW."status" IN ('APPROVED', 'RESOLVED') AND (NEW."reviewedByAdminUserId" IS NULL OR NEW."reviewedAt" IS NULL OR (NEW."remedy" = 'REFUND') <> (NEW."refundId" IS NOT NULL))) OR
      (NEW."status" = 'RESOLVED' AND NEW."resolvedAt" IS NULL) THEN
     RAISE EXCEPTION 'Warranty review, refund and resolution snapshots are inconsistent' USING ERRCODE = '23514';
   END IF;
@@ -545,10 +607,11 @@ END;
 $$;
 
 CREATE OR REPLACE FUNCTION "validate_shipment_serial_assignments"() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE
   invalid_item UUID;
 BEGIN
+  PERFORM 1 FROM "SerializedUnit" unit WHERE unit."shipmentId" = NEW."id" ORDER BY unit."id" FOR SHARE;
   IF NEW."status" = 'CANCELLED' AND OLD."status" IS DISTINCT FROM NEW."status" THEN
     IF EXISTS (SELECT 1 FROM "SerializedUnit" unit WHERE unit."shipmentId" = NEW."id") THEN
       RAISE EXCEPTION 'Cannot cancel a shipment with assigned serialized units' USING ERRCODE = '23514';
@@ -566,7 +629,10 @@ BEGIN
     ) required
     WHERE (SELECT count(*) FROM "SerializedUnit" unit
            WHERE unit."shipmentId" = NEW."id" AND unit."variantId" = required."variantId"
-             AND unit."status" IN ('SOLD', 'RETURNED')) <> required."quantity"
+             AND (
+               (NEW."status" = 'SHIPPED' AND unit."status" = 'SOLD') OR
+               (NEW."status" = 'DELIVERED' AND unit."status" IN ('SOLD', 'RETURNED'))
+             )) <> required."quantity"
     LIMIT 1;
     IF invalid_item IS NOT NULL THEN
       RAISE EXCEPTION 'Every tracked shipment item requires its exact serialized units before dispatch' USING ERRCODE = '23514';
@@ -585,7 +651,6 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-ALTER FUNCTION "validate_shipment_serial_assignments"() SECURITY DEFINER SET search_path = pg_catalog, public;
 
 CREATE OR REPLACE FUNCTION "enforce_fiscal_watch_snapshot"() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
@@ -596,10 +661,9 @@ BEGIN
   IF NEW."fiscalYear" IS DISTINCT FROM OLD."fiscalYear" OR
      NEW."snapshotDate" IS DISTINCT FROM OLD."snapshotDate" OR
      NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR
-     NEW."grossCapturedCents" < OLD."grossCapturedCents" OR
      NEW."refundedCents" < OLD."refundedCents" OR
      (OLD."thresholdReachedAt" IS NOT NULL AND NEW."status" = 'THRESHOLD_REACHED' AND NEW."thresholdReachedAt" IS DISTINCT FROM OLD."thresholdReachedAt") THEN
-    RAISE EXCEPTION 'Fiscal snapshot identity, captures, refunds and threshold history are monotonic' USING ERRCODE = '55000';
+    RAISE EXCEPTION 'Fiscal snapshot identity, refunds and threshold history are monotonic' USING ERRCODE = '55000';
   END IF;
   RETURN NEW;
 END;
@@ -607,31 +671,58 @@ $$;
 
 CREATE OR REPLACE FUNCTION "validate_support_message"() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
-DECLARE ticket_record "SupportTicket";
+DECLARE
+  ticket_record "SupportTicket";
+  order_record "Order";
 BEGIN
-  SELECT * INTO ticket_record FROM "SupportTicket" WHERE "id" = NEW."ticketId";
-  IF ticket_record."id" IS NULL OR ticket_record."status" IN ('RESOLVED', 'CLOSED') THEN RAISE EXCEPTION 'Support ticket is not accepting messages' USING ERRCODE = '23514'; END IF;
-  IF (NEW."authorType" = 'CUSTOMER' AND NEW."authorCustomerId" IS DISTINCT FROM ticket_record."requesterCustomerId") OR
-     (NEW."authorType" = 'GUEST' AND NEW."authorGuestSessionId" IS DISTINCT FROM ticket_record."requesterGuestSessionId") THEN
-    RAISE EXCEPTION 'Support message author does not own the ticket' USING ERRCODE = '23514';
+  SELECT * INTO ticket_record FROM "SupportTicket" WHERE "id" = NEW."ticketId" FOR SHARE;
+  IF ticket_record."id" IS NULL OR ticket_record."status" IN ('RESOLVED', 'CLOSED') THEN
+    RAISE EXCEPTION 'Support ticket is not accepting messages' USING ERRCODE = '23514';
   END IF;
-  IF NEW."authorType" = 'CUSTOMER' AND NOT EXISTS (
-    SELECT 1 FROM "Customer" customer
+  IF ticket_record."orderId" IS NOT NULL THEN
+    SELECT * INTO order_record FROM "Order" WHERE "id" = ticket_record."orderId" FOR SHARE;
+    IF order_record."id" IS NULL OR order_record."anonymizedAt" IS NOT NULL THEN
+      IF NEW."authorType" IN ('CUSTOMER', 'GUEST') THEN
+        RAISE EXCEPTION 'Support order is no longer active for requester replies' USING ERRCODE = '23514';
+      END IF;
+    END IF;
+    IF NEW."authorType" = 'CUSTOMER' AND NEW."authorCustomerId" IS DISTINCT FROM order_record."customerId" THEN
+      RAISE EXCEPTION 'Support message author does not own the ticket' USING ERRCODE = '23514';
+    END IF;
+  ELSE
+    IF NEW."authorType" = 'CUSTOMER' AND NEW."authorCustomerId" IS DISTINCT FROM ticket_record."requesterCustomerId" THEN
+      RAISE EXCEPTION 'Support message author does not own the ticket' USING ERRCODE = '23514';
+    END IF;
+    IF NEW."authorType" = 'GUEST' THEN
+      RAISE EXCEPTION 'Guest support replies require an order-linked ticket' USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  IF NEW."authorType" = 'CUSTOMER' THEN
+    PERFORM 1 FROM "Customer" customer
     WHERE customer."id" = NEW."authorCustomerId" AND customer."status" = 'ACTIVE' AND customer."deletedAt" IS NULL
-  ) THEN
-    RAISE EXCEPTION 'Support customer is not active' USING ERRCODE = '23514';
+    FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Support customer is not active' USING ERRCODE = '23514';
+    END IF;
   END IF;
-  IF NEW."authorType" = 'GUEST' AND NOT EXISTS (
-    SELECT 1 FROM "GuestOrderSession" session
+  IF NEW."authorType" = 'GUEST' THEN
+    PERFORM 1 FROM "GuestOrderSession" session
     WHERE session."id" = NEW."authorGuestSessionId"
       AND session."orderId" = ticket_record."orderId"
       AND session."revokedAt" IS NULL
       AND session."expiresAt" > CURRENT_TIMESTAMP
-  ) THEN
-    RAISE EXCEPTION 'Support guest session is revoked, expired or belongs to another order' USING ERRCODE = '23514';
+    FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Support guest session is revoked, expired or belongs to another order' USING ERRCODE = '23514';
+    END IF;
   END IF;
-  IF NEW."authorType" = 'ADMIN' AND NOT EXISTS (SELECT 1 FROM "AdminUser" WHERE "id" = NEW."authorAdminUserId" AND "status" = 'ACTIVE' AND "deletedAt" IS NULL) THEN
-    RAISE EXCEPTION 'Support administrator is not active' USING ERRCODE = '23514';
+  IF NEW."authorType" = 'ADMIN' THEN
+    PERFORM 1 FROM "AdminUser" admin_user
+    WHERE admin_user."id" = NEW."authorAdminUserId" AND admin_user."status" = 'ACTIVE' AND admin_user."deletedAt" IS NULL
+    FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Support administrator is not active' USING ERRCODE = '23514';
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -664,3 +755,4 @@ REVOKE ALL ON FUNCTION "validate_serialized_unit"() FROM PUBLIC, anon, authentic
 REVOKE ALL ON FUNCTION "validate_shipment_serial_assignments"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "enforce_fiscal_watch_snapshot"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "validate_support_message"() FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION "enforce_notification_state"() FROM PUBLIC, anon, authenticated, service_role;

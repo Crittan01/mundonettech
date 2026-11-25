@@ -2165,7 +2165,7 @@ describe("A6 — post-sale, serial and financial structural integrity", () => {
     });
   });
 
-  it("keeps current-day fiscal captures, refunds and threshold history monotonic", async () => {
+  it("keeps fiscal refunds, historical days and threshold history immutable while permitting same-day void updates", async () => {
     await withRollback(async (client) => {
       const snapshotId = randomUUID();
       await client.query(
@@ -2174,16 +2174,16 @@ describe("A6 — post-sale, serial and financial structural integrity", () => {
            "thresholdCents", "grossCapturedCents", "refundedCents", "netRevenueCents",
            "refundExcessCents", "remainingCents", "status"
          ) VALUES (
-           $1, 2026, CURRENT_DATE, 2026, 100000, 2, 200000, 160000, 20000, 140000, 0, 40000,
+           $1, 2026, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date, 2026, 100000, 2, 200000, 160000, 20000, 140000, 0, 40000,
            'APPROACHING_LIMIT'
          )`,
         [snapshotId],
       );
-      await expectSqlViolation(
-        client,
-        `UPDATE "FiscalWatchSnapshot" SET "grossCapturedCents" = 140000 WHERE "id" = $1`,
+      await client.query(
+        `UPDATE "FiscalWatchSnapshot"
+         SET "grossCapturedCents" = 140000, "netRevenueCents" = 120000, "remainingCents" = 60000, "status" = 'WITHIN_LIMIT'
+         WHERE "id" = $1`,
         [snapshotId],
-        "55000",
       );
       await expectSqlViolation(
         client,
@@ -2204,6 +2204,138 @@ describe("A6 — post-sale, serial and financial structural integrity", () => {
         `UPDATE "FiscalWatchSnapshot" SET "thresholdReachedAt" = NULL WHERE "id" = $1`,
         [snapshotId],
         "55000",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "FiscalWatchSnapshot"
+         SET "thresholdReachedAt" = CURRENT_TIMESTAMP + INTERVAL '5 minutes'
+         WHERE "id" = $1`,
+        [snapshotId],
+        "55000",
+      );
+      const historicalId = randomUUID();
+      await client.query(
+        `INSERT INTO "FiscalWatchSnapshot" (
+           "id", "fiscalYear", "snapshotDate", "uvtYear", "uvtValueCents", "thresholdUvt",
+           "thresholdCents", "grossCapturedCents", "refundedCents", "netRevenueCents",
+           "refundExcessCents", "remainingCents", "status"
+         ) VALUES (
+           $1, 2026, (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date - 1, 2026, 100000, 2, 200000, 160000, 20000, 140000, 0, 40000,
+           'APPROACHING_LIMIT'
+         )`,
+        [historicalId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "FiscalWatchSnapshot" SET "grossCapturedCents" = 170000 WHERE "id" = $1`,
+        [historicalId],
+        "55000",
+      );
+    });
+  });
+
+  it("blocks clearing refundId on return/warranty, rejects higher-priced exchange, and allows rotated guest PQR replies", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA6PostSaleFixture(client);
+      const priceyVariantId = randomUUID();
+      await client.query(
+        `INSERT INTO "ProductVariant" (
+           "id", "productId", "sku", "priceCents", "costCents", "weightGrams",
+           "lengthMillimeters", "widthMillimeters", "heightMillimeters", "status"
+         ) VALUES ($1, $2, $3, 150000, 60000, 100, 100, 100, 100, 'ACTIVE')`,
+        [priceyVariantId, fixture.productId, `A6-PRICEY-${randomUUID()}`],
+      );
+      const priceyReturnId = randomUUID();
+      await client.query(
+        `INSERT INTO "ReturnRequest" (
+           "id", "orderId", "requesterGuestSessionId", "idempotencyKey", "requestHash",
+           "kind", "reason"
+         ) VALUES ($1, $2, $3, $4, $5, 'EXCHANGE', 'Cambio por variante más costosa')`,
+        [
+          priceyReturnId,
+          fixture.id,
+          fixture.guestSessionId,
+          `a6-ex-${randomUUID()}`,
+          randomBytes(32),
+        ],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "ReturnRequestItem" (
+           "returnRequestId", "orderItemId", "shipmentItemId", "quantity", "replacementVariantId",
+           "deliveredAt", "retractDueAt"
+         ) VALUES ($1, $2, $3, 1, $4, $5, $6)`,
+        [
+          priceyReturnId,
+          fixture.orderItemId,
+          fixture.shipmentItemId,
+          priceyVariantId,
+          fixture.deliveredAt,
+          new Date(fixture.deliveredAt.getTime() + 5 * 86_400_000),
+        ],
+        "23514",
+      );
+
+      const returned = await createA6Return(client, fixture);
+      const refundId = await createA6ApprovedRefund(client, fixture, "RETRACT");
+      await client.query(
+        `UPDATE "ReturnRequest"
+         SET "status" = 'AWAITING_RETURN', "refundId" = $1, "reviewedByAdminUserId" = $2,
+             "reviewedAt" = CURRENT_TIMESTAMP, "version" = 1
+         WHERE "id" = $3`,
+        [refundId, fixture.adminUserId, returned.returnRequestId],
+      );
+      await client.query(`SET CONSTRAINTS ALL IMMEDIATE`);
+      await expectSqlViolation(
+        client,
+        `UPDATE "ReturnRequest"
+         SET "status" = 'CANCELLED', "refundId" = NULL, "version" = 2
+         WHERE "id" = $1`,
+        [returned.returnRequestId],
+        "55000",
+      );
+
+      const ticketId = randomUUID();
+      await client.query(
+        `INSERT INTO "SupportTicket" (
+           "id", "ticketNumber", "orderId", "requesterGuestSessionId", "idempotencyKey",
+           "requestHash", "kind", "subject", "contactEmailSnapshot", "slaDueAt"
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'QUERY', 'Consulta invitado A6', 'guest@example.test', CURRENT_TIMESTAMP + INTERVAL '10 days')`,
+        [
+          ticketId,
+          `PQR-2026-${ticketId}`,
+          fixture.id,
+          fixture.guestSessionId,
+          `a6-tkt-${randomUUID()}`,
+          randomBytes(32),
+        ],
+      );
+      const secondChallengeId = randomUUID();
+      await client.query(
+        `INSERT INTO "GuestOrderChallenge" (
+           "id", "orderId", "idempotencyKey", "codeHash", "requestIpHash",
+           "status", "lastSentAt", "providerMessageId", "consumedAt", "expiresAt"
+         ) VALUES ($1, $2, $3, $4, $5, 'CONSUMED', CURRENT_TIMESTAMP, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '10 minutes')`,
+        [
+          secondChallengeId,
+          fixture.id,
+          `a6-ch2-${randomUUID()}`,
+          randomBytes(32),
+          randomBytes(32),
+          `msg-${randomUUID()}`,
+        ],
+      );
+      const secondSessionId = randomUUID();
+      await client.query(
+        `INSERT INTO "GuestOrderSession" ("id", "orderId", "challengeId", "tokenHash", "expiresAt")
+         VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP + INTERVAL '30 minutes')`,
+        [secondSessionId, fixture.id, secondChallengeId, randomBytes(32)],
+      );
+      await client.query(
+        `INSERT INTO "SupportTicketMessage" (
+           "ticketId", "idempotencyKey", "authorType", "authorGuestSessionId", "body"
+         ) VALUES ($1, $2, 'GUEST', $3, 'Respuesta tras rotar sesión de invitado')`,
+        [ticketId, `a6-msg-${randomUUID()}`, secondSessionId],
       );
     });
   });

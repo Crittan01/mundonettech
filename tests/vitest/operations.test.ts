@@ -116,13 +116,17 @@ describe("F4A.1 — exact local dates and signed financial presentation", () => 
   });
 
   it("reads finance totals and rows from one repeatable-read snapshot", async () => {
+    const executeRaw = vi.fn(async () => 0);
     const queryRaw = vi
       .fn()
       .mockResolvedValueOnce([{ orderCount: 0n }])
       .mockResolvedValueOnce([]);
     const transaction = vi.fn(
       async (
-        callback: (tx: { $queryRaw: typeof queryRaw }) => Promise<unknown>,
+        callback: (tx: {
+          $executeRaw: typeof executeRaw;
+          $queryRaw: typeof queryRaw;
+        }) => Promise<unknown>,
         options: { isolationLevel: string },
       ) => {
         expect(options).toEqual({
@@ -130,7 +134,7 @@ describe("F4A.1 — exact local dates and signed financial presentation", () => 
           maxWait: 10_000,
           timeout: 120_000,
         });
-        return callback({ $queryRaw: queryRaw });
+        return callback({ $executeRaw: executeRaw, $queryRaw: queryRaw });
       },
     );
     const service = new FinanceService({ $transaction: transaction } as never, {

@@ -72,7 +72,18 @@ function orderRecord() {
 }
 
 function orderHarness(role: string | null) {
-  const adminUser = { findFirst: vi.fn(async () => (role ? { role } : null)) };
+  const queryRaw = vi.fn(async () =>
+    role
+      ? [
+          {
+            id: actorId,
+            authUserId: randomUUID(),
+            email: "admin@example.test",
+            role,
+          },
+        ]
+      : [],
+  );
   const order = { findUnique: vi.fn(async () => orderRecord()), findMany: vi.fn() };
   const paymentAttempt = {
     findMany: vi.fn(async () => [
@@ -100,17 +111,24 @@ function orderHarness(role: string | null) {
         totalCents: 119_000n,
         createdAt: new Date(),
         processedAt: null,
+        returnRequest: null,
+        warrantyClaim: null,
         items: [],
         paymentTransactions: [],
       },
     ]),
   };
+  const tx = { $queryRaw: queryRaw, order, paymentAttempt, orderRefund };
   return {
-    adminUser,
+    queryRaw,
     order,
     paymentAttempt,
     orderRefund,
-    db: { adminUser, order, paymentAttempt, orderRefund } as never,
+    db: {
+      $transaction: vi.fn(async (callback: (client: typeof tx) => Promise<unknown>) =>
+        callback(tx),
+      ),
+    } as never,
   };
 }
 

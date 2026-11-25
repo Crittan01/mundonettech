@@ -20,6 +20,7 @@ import {
 import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
 import { isPasswordCompromised } from "@/lib/security/hibp";
 import { isServerOutboundEmailDisabled } from "@/lib/security/outbound-email";
+import { clearGuestOrderSession } from "@/lib/security/guest-order-access";
 import { getRequestSecurityContext, recordSecurityEvent } from "@/lib/security/request-context";
 import { clearReferralCode, consumeReferralPath } from "@/lib/security/referral";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
@@ -102,7 +103,10 @@ export async function registerCustomerAction(
       turnstileToken: z.string().max(2048),
     })
     .safeParse(closedFormObject(formData, fields));
-  if (!parsed.success) return emailFieldError();
+  if (!parsed.success) {
+    const emailFailed = parsed.error.issues.some((issue) => issue.path[0] === "email");
+    return emailFailed ? emailFieldError() : actionError("Revisa los datos ingresados.");
+  }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_register");
   if (captchaError) return captchaError;
   const invalidPassword = await passwordError(parsed.data.password, parsed.data.confirmation);
@@ -134,7 +138,10 @@ export async function requestCustomerOtpAction(
       next: z.string().max(512).optional(),
     })
     .safeParse(closedFormObject(formData, fields));
-  if (!parsed.success) return emailFieldError();
+  if (!parsed.success) {
+    const emailFailed = parsed.error.issues.some((issue) => issue.path[0] === "email");
+    return emailFailed ? emailFieldError() : actionError("Revisa los datos ingresados.");
+  }
   const next = normalizeInternalNextPath(parsed.data.next);
   if (parsed.data.next && next === null) {
     return actionError("El destino de regreso no es válido.");
@@ -159,7 +166,10 @@ export async function requestCustomerRecoveryAction(
   const parsed = z
     .object({ email: emailSchema, turnstileToken: z.string().max(2048) })
     .safeParse(closedFormObject(formData, fields));
-  if (!parsed.success) return emailFieldError();
+  if (!parsed.success) {
+    const emailFailed = parsed.error.issues.some((issue) => issue.path[0] === "email");
+    return emailFailed ? emailFieldError() : actionError("Revisa los datos ingresados.");
+  }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_recovery");
   if (captchaError) return captchaError;
   const email = normalizeEmail(parsed.data.email);
@@ -204,11 +214,16 @@ export async function verifyCustomerOtpAction(
     await synchronizeCustomerProfile(data.user.id, request.email);
     await establishCustomerActivity(data.user.id);
   } catch {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
     return actionError("No pudimos activar tu cuenta. Inténtalo de nuevo o contacta soporte.");
   }
   const referralPath = await consumeReferralPath();
-  redirect(request.next ?? referralPath ?? "/mi-cuenta");
+  const destination =
+    referralPath && (!request.next || request.next === "/mi-cuenta/beneficios")
+      ? referralPath
+      : (request.next ?? "/mi-cuenta");
+  redirect(destination);
 }
 
 export async function resetCustomerPasswordAction(
@@ -247,7 +262,8 @@ export async function resetCustomerPasswordAction(
   await clearCustomerAuthRequest();
   const updated = await supabase.auth.updateUser({ password: parsed.data.password });
   if (updated.error) {
-    await supabase.auth.signOut({ scope: "local" });
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
     return actionError("No pudimos actualizar la contraseña. Solicita un código nuevo.");
   }
   try {
@@ -255,6 +271,7 @@ export async function resetCustomerPasswordAction(
     if (revoked.error) throw new Error("Other session revocation failed.");
   } catch {
     await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
     return actionError(
       "La contraseña se actualizó, pero no pudimos confirmar el cierre de otras sesiones. Vuelve a ingresar.",
     );
@@ -264,6 +281,7 @@ export async function resetCustomerPasswordAction(
     await establishCustomerActivity(data.user.id);
   } catch {
     await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
     return actionError("No pudimos activar tu cuenta. Contacta soporte.");
   }
   redirect((await consumeReferralPath()) ?? "/mi-cuenta");
@@ -294,6 +312,7 @@ export async function signOutCustomerAction(): Promise<void> {
   } finally {
     await clearActivityCookies();
     await clearCustomerCartCookie();
+    await clearGuestOrderSession();
     await clearCustomerAuthRequest();
     await clearReferralCode();
   }

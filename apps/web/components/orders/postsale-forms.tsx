@@ -150,6 +150,11 @@ export function ReturnRequestForm({
                           )
                         : 0;
                       setQuantities((current) => ({ ...current, [delivery.shipmentItemId]: next }));
+                      setSerials((current) => {
+                        const existing = current[delivery.shipmentItemId] ?? [];
+                        if (existing.length <= next) return current;
+                        return { ...current, [delivery.shipmentItemId]: existing.slice(0, next) };
+                      });
                     }}
                     disabled={pending || (kind === "EXCHANGE" && !canExchange)}
                   />
@@ -257,7 +262,9 @@ export function WarrantyClaimForm({
           <Label htmlFor={`warranty-unit-${units[0]?.id ?? "none"}`}>Serial o IMEI</Label>
           <Select
             id={`warranty-unit-${units[0]?.id ?? "none"}`}
+            key={`warranty-unit-${state.values?.serializedUnitId ?? ""}`}
             name="serializedUnitId"
+            defaultValue={state.values?.serializedUnitId ?? units[0]?.id ?? ""}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -273,7 +280,9 @@ export function WarrantyClaimForm({
           <Label htmlFor={`warranty-remedy-${channel.orderId}`}>Remedio solicitado</Label>
           <Select
             id={`warranty-remedy-${channel.orderId}`}
+            key={`warranty-remedy-${state.values?.remedy ?? ""}`}
             name="remedy"
+            defaultValue={state.values?.remedy ?? "REPAIR"}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -326,8 +335,9 @@ export function ReviewForm({
           <Label htmlFor={`rating-${orderItemId}`}>Calificación</Label>
           <Select
             id={`rating-${orderItemId}`}
+            key={`rating-${state.values?.rating ?? "5"}`}
             name="rating"
-            defaultValue="5"
+            defaultValue={state.values?.rating ?? "5"}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -401,7 +411,9 @@ export function SupportTicketForm({
           <Label htmlFor={`support-kind-${channel.orderId}`}>Tipo de PQR</Label>
           <Select
             id={`support-kind-${channel.orderId}`}
+            key={`support-kind-${state.values?.kind ?? "QUERY"}`}
             name="kind"
+            defaultValue={state.values?.kind ?? "QUERY"}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -498,13 +510,7 @@ export function GuestOrderAccessForms({
     initialActionState,
   );
   const [requestKey, setRequestKey] = useState(idempotencyKey);
-  const challengeId = requestState.values?.challengeId
-    ? requestState.status === "success"
-      ? requestState.values.challengeId
-      : ""
-    : requestState.status === "success"
-      ? ""
-      : (verifyState.values?.challengeId ?? "");
+  const challengeId = requestState.values?.challengeId ?? verifyState.values?.challengeId ?? "";
   return (
     <div className="mx-auto grid w-full max-w-4xl gap-6 lg:grid-cols-2">
       <form

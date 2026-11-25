@@ -126,6 +126,15 @@ const moduleMocks: Record<string, unknown> = {
   "@/lib/security/hibp": { isPasswordCompromised: async () => false },
   "@/lib/security/outbound-email": { isServerOutboundEmailDisabled: () => false },
   "@/lib/security/turnstile": { verifyTurnstileToken: mocks.verifyTurnstileToken },
+  "@/lib/supabase/admin": {
+    createSupabaseAdminClient: () => ({
+      auth: {
+        admin: {
+          deleteUser: vi.fn(async () => ({ error: null })),
+        },
+      },
+    }),
+  },
   "@/lib/supabase/server": {
     createSupabaseServerClient: async () => ({
       auth: {
@@ -315,9 +324,15 @@ describe("A2 — carrito, cuenta y crecimiento", () => {
     expect(JSON.stringify(rejected)).not.toContain("x".repeat(100));
     expect(mocks.attributeReferral).not.toHaveBeenCalled();
 
+    const injected = new FormData();
+    injected.set("code", "23456789abcd");
+    injected.set("customerId", otherCustomerId);
+    const rejectedInjected = await attributeReferralAction(idle, injected);
+    expect(rejectedInjected.status).toBe("error");
+    expect(mocks.attributeReferral).not.toHaveBeenCalled();
+
     const valid = new FormData();
     valid.set("code", "23456789abcd");
-    valid.set("customerId", otherCustomerId);
     const attributed = await attributeReferralAction(idle, valid);
     expect(attributed.status).toBe("success");
     expect(mocks.attributeReferral).toHaveBeenCalledWith(customerId, "23456789abcd");

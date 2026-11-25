@@ -16,8 +16,10 @@ import {
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { clearActivityCookies, clearCustomerCartCookie } from "@/lib/security/activity-cookies";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
+import { clearCustomerAuthRequest } from "@/lib/security/customer-auth-request";
 import { clearGuestOrderSession } from "@/lib/security/guest-order-access";
 import { clearReferralCode } from "@/lib/security/referral";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const profileFields = [
@@ -229,25 +231,42 @@ export async function anonymizeAccountAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = formSnapshot(formData, ["confirmation"]);
+  let authUserId: string | null = null;
+  let affectedReviewProductSlugs: string[];
   try {
-    const { profile } = await requireCustomerPage();
+    const { user, profile } = await requireCustomerPage();
+    authUserId = user?.id ?? null;
     const raw = closedFormObject(formData, ["confirmation"]);
     const confirmation = z.literal("ELIMINAR MI CUENTA").parse(raw?.confirmation);
     const context = await getRequestSecurityContext();
     const result = await accountService().anonymize(profile.id, confirmation, context);
-    updateTag("reviews");
-    for (const slug of result.affectedReviewProductSlugs) {
-      updateTag(`reviews:${slug}`);
-      revalidatePath(`/producto/${slug}`);
-    }
+    affectedReviewProductSlugs = result.affectedReviewProductSlugs;
+  } catch (error) {
+    return failure(error, values);
+  }
+  updateTag("reviews");
+  for (const slug of affectedReviewProductSlugs) {
+    updateTag(`reviews:${slug}`);
+    revalidatePath(`/producto/${slug}`);
+  }
+  try {
     const supabase = await createSupabaseServerClient();
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "global" });
+  } catch {
+    // DB anonymization already committed; DomainOutbox guarantees Supabase Auth erasure.
+  } finally {
+    if (authUserId) {
+      try {
+        await createSupabaseAdminClient().auth.admin.deleteUser(authUserId);
+      } catch {
+        // DomainOutbox customer.auth-erasure.requested.v1 retries deletion asynchronously.
+      }
+    }
     await clearActivityCookies();
     await clearCustomerCartCookie();
     await clearGuestOrderSession();
     await clearReferralCode();
-  } catch (error) {
-    return failure(error, values);
+    await clearCustomerAuthRequest();
   }
   redirect("/ingresar?reason=anonymized");
 }

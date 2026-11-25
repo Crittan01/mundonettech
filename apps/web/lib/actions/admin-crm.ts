@@ -480,7 +480,13 @@ export async function suppressCrmContactAction(_previous: ActionState, formData:
         },
         auditContext,
       );
-      if (!result.replayed && result.customers.length > 0) updateTag("reviews");
+      if (!result.replayed && result.customers.length > 0) {
+        updateTag("reviews");
+        for (const slug of result.affectedReviewProductSlugs) {
+          updateTag(`reviews:${slug}`);
+          revalidatePath(`/producto/${slug}`);
+        }
+      }
       return {
         message: result.replayed
           ? "La supresión ya estaba aplicada."

@@ -3,6 +3,7 @@ import { currentYearRange, type FinanceReport } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
+import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,12 +22,26 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
 
+const paymentStatusLabels: Record<string, string> = {
+  UNPAID: "Sin pago",
+  PARTIALLY_PAID: "Pago parcial",
+  PAID: "Pagado",
+  PARTIALLY_REFUNDED: "Reembolsado parcialmente",
+  REFUNDED: "Reembolsado",
+  VOIDED: "Anulado",
+};
+const fiscalStatusLabels: Record<string, string> = {
+  WITHIN_LIMIT: "Dentro del umbral",
+  APPROACHING_LIMIT: "Próximo al umbral",
+  THRESHOLD_REACHED: "Umbral alcanzado",
+};
+
 function percentage(bps: number | null): string {
   return bps === null ? "Sin base" : `${numberFormatter.format(bps / 100)} %`;
 }
 
 export default async function FinancePage({ searchParams }: PageProps<"/admin/finanzas">) {
-  await requireAdminPage("finance:read");
+  const session = await requireAdminPage("finance:read");
   const db = getDatabase();
   const service = financeService();
   const now = await getDatabaseClock(db);
@@ -56,10 +71,8 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
       throw error;
     }
   }
-  const [watch, history] = await Promise.all([
-    service.refreshFiscalWatch(),
-    service.fiscalHistory(),
-  ]);
+  const watch = await service.refreshFiscalWatch();
+  const history = await service.fiscalHistory();
   let report: FinanceReport;
   try {
     report = await service.report(range);
@@ -104,13 +117,15 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
             WAC y margen usan aritmética entera, sin PII en el reporte.
           </p>
         </div>
-        <Link
+        <a
           href={`/admin/finanzas/exportar?${exportParams.toString()}`}
+          download
           className="rounded-md border border-border px-4 py-2 text-sm font-semibold"
         >
           Descargar CSV seguro
-        </Link>
+        </a>
       </div>
+      <CmsStepUp session={session} />
       <form className="flex flex-wrap items-end gap-4 rounded-xl border border-border bg-card p-5">
         <div className="space-y-2">
           <Label htmlFor="finance-from">Desde</Label>
@@ -238,7 +253,7 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
                         {record.orderNumber}
                       </Link>
                       <span className="block text-xs font-normal text-muted-foreground">
-                        {record.paymentStatus}
+                        {paymentStatusLabels[record.paymentStatus] ?? record.paymentStatus}
                       </span>
                     </th>
                     <td className="p-3">{dateFormatter.format(new Date(record.recognizedAt))}</td>
@@ -285,7 +300,7 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
                     <td className="p-3">{formatCopCents(record.grossCapturedCents)}</td>
                     <td className="p-3">{formatCopCents(record.refundedCents)}</td>
                     <td className="p-3">{formatCopCents(record.netRevenueCents)}</td>
-                    <td className="p-3">{record.status}</td>
+                    <td className="p-3">{fiscalStatusLabels[record.status] ?? record.status}</td>
                   </tr>
                 ))}
               </tbody>

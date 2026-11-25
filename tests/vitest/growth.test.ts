@@ -12,6 +12,7 @@ import { GrowthError } from "../../packages/db/dist/index.js";
 import {
   actionError,
   actionSuccess,
+  closedFormObject,
   formString,
   type ActionState,
 } from "../../apps/web/lib/action-state";
@@ -28,7 +29,7 @@ type GrowthAction = (previous: ActionState, formData: FormData) => Promise<Actio
 const growthActions = loadActionModule<Record<string, GrowthAction>>("growth", {
   "@mundonettech/db": { GrowthError },
   "next/cache": { revalidatePath: actionMocks.revalidatePath },
-  "@/lib/action-state": { actionError, actionSuccess, formString },
+  "@/lib/action-state": { actionError, actionSuccess, closedFormObject, formString },
   "@/lib/growth": {
     growthService: () => ({
       createReferralCode: actionMocks.createReferralCode,
@@ -185,9 +186,15 @@ describe("A6 growth customer actions", () => {
     expect(created.status).toBe("success");
     expect(actionMocks.createReferralCode).toHaveBeenCalledWith(customerId);
 
+    const injected = new FormData();
+    injected.set("code", "23456789abcd");
+    injected.set("customerId", "22222222-2222-4222-8222-222222222222");
+    const rejected = await growthActions.attributeReferralAction!(idle, injected);
+    expect(rejected.status).toBe("error");
+    expect(actionMocks.attributeReferral).not.toHaveBeenCalled();
+
     const form = new FormData();
-    form.set("code", "23456789abcd");
-    form.set("customerId", "22222222-2222-4222-8222-222222222222");
+    form.set("code", " 23456789abcd ");
     const attributed = await growthActions.attributeReferralAction!(idle, form);
     expect(attributed.status).toBe("success");
     expect(actionMocks.attributeReferral).toHaveBeenCalledWith(customerId, "23456789abcd");

@@ -25,8 +25,18 @@ const statusLabels: Record<string, string> = {
   PROCESSING: "En ejecución",
   FAILED: "Fallido",
   PENDING: "Pendiente",
+  PICKING: "En alistamiento",
+  PACKED: "Empacado",
+  LABELLED: "Con guía",
+  RECONCILING: "En conciliación",
   READY: "Listo",
   SHIPPED: "Despachado",
+};
+
+const severityLabels: Record<string, string> = {
+  INFO: "Informativa",
+  WARNING: "Atención",
+  CRITICAL: "Crítica",
 };
 
 const providerLabels: Record<string, string> = {
@@ -231,7 +241,7 @@ export default async function TodayPage() {
                 <div className="flex flex-wrap items-start justify-between gap-4">
                   <div className="max-w-3xl">
                     <p className="text-xs font-medium text-muted-foreground">
-                      {notification.severity} ·{" "}
+                      {severityLabels[notification.severity] ?? notification.severity} ·{" "}
                       {dateFormatter.format(new Date(notification.createdAt))}
                       {notification.readAt ? " · Leída" : " · Sin leer"}
                     </p>

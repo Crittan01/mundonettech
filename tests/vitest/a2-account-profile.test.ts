@@ -142,9 +142,15 @@ describe("A6 — cursor de pedidos y obligaciones de anonimización", () => {
       createdAt: cursorDate,
     }));
     const findMany = vi.fn(async () => []);
-    const service = new AccountService({ order: { findFirst, findMany } } as never, {
-      privacyPolicyVersion: "2026-01",
-    });
+    const service = new AccountService(
+      {
+        customer: { findFirst: vi.fn(async () => ({ id: customerId })) },
+        order: { findFirst, findMany },
+      } as never,
+      {
+        privacyPolicyVersion: "2026-01",
+      },
+    );
     await service.listOrders(customerId, { cursor: otherCustomerId(), limit: 10 });
 
     expect(findFirst).toHaveBeenCalledWith({
@@ -203,6 +209,8 @@ describe("A6 — cursor de pedidos y obligaciones de anonimización", () => {
         warrantyClaim: { findFirst: vi.fn(async () => null) },
         metaCapiEvent: { findFirst: vi.fn(async () => null) },
         paymentTransaction: { findFirst: paymentTransactionFindFirst },
+        taxInvoice: { findFirst: vi.fn(async () => null) },
+        creditNote: { findFirst: vi.fn(async () => null) },
       };
       const service = new AccountService({} as never, { privacyPolicyVersion: "2026-01" });
       await expect(

@@ -262,6 +262,7 @@ export interface AdminOrderDetail {
     readonly totalCents: string;
     readonly createdAt: string;
     readonly processedAt: string | null;
+    readonly hasPostSaleLink: boolean;
     readonly items: readonly { readonly orderItemId: string; readonly quantity: number }[];
     readonly transactions: readonly {
       readonly id: string;

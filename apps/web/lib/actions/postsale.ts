@@ -7,7 +7,13 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 
 import { postSaleService } from "@/lib/account";
-import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
+import {
+  actionError,
+  actionSuccess,
+  closedFormObject,
+  formSnapshot,
+  type ActionState,
+} from "@/lib/action-state";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 import {
@@ -20,16 +26,12 @@ import { guestOrderAccessService } from "@/lib/integrations";
 const tokenSchema = z.string().regex(/^[A-Za-z0-9_-]{32,128}$/);
 const keySchema = z.string().min(3).max(128);
 const guestSessionMessage = "La sesión de posventa expiró. Verifica un código nuevo.";
+const channelFields = ["channel", "orderId", "token"] as const;
 
-function actionValues(formData: FormData): Record<string, string> {
-  const values: Record<string, string> = {};
-  formData.forEach((value, key) => {
-    const maximum = key === "items" ? 4_000_000 : 5_000;
-    if (key !== "token" && typeof value === "string" && value.length <= maximum) {
-      values[key] = value;
-    }
-  });
-  return values;
+function parseClosed(formData: FormData, allowedFields: readonly string[]): Record<string, string> {
+  const parsed = closedFormObject(formData, allowedFields);
+  if (!parsed) throw new z.ZodError([]);
+  return parsed;
 }
 
 function isNextRedirect(error: unknown): boolean {
@@ -87,34 +89,37 @@ function revalidate(orderId: string, token?: string): void {
 }
 
 async function orderActor(
-  formData: FormData,
+  raw: Record<string, string>,
   allowGeneralAccountTicket = false,
 ): Promise<{ actor: PostSaleActor; orderId: string; token?: string }> {
-  const rawOrderId = formString(formData, "orderId");
-  const channel = z.enum(["account", "guest"]).parse(formString(formData, "channel"));
+  const rawOrderId = raw.orderId ?? "";
+  const channel = z.enum(["account", "guest"]).parse(raw.channel ?? "");
   if (channel === "account") {
     const { profile } = await requireCustomerPage();
     const orderId =
       allowGeneralAccountTicket && rawOrderId === "" ? "" : z.string().uuid().parse(rawOrderId);
     return { actor: { kind: "CUSTOMER", customerId: profile.id }, orderId };
   }
-  const token = tokenSchema.parse(formString(formData, "token"));
+  const token = tokenSchema.parse(raw.token ?? "");
   const access = await getGuestOrderAccess(token);
   if (!access) throw new Error(guestSessionMessage);
   return { actor: access.actor, orderId: access.orderId, token };
 }
 
 export async function requestGuestCodeAction(
-  _previous: ActionState,
+  previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values: Record<string, string> = {};
+  const values: Record<string, string> = previous.values?.challengeId
+    ? { challengeId: previous.values.challengeId }
+    : {};
   try {
-    const token = tokenSchema.parse(formString(formData, "token"));
+    const raw = parseClosed(formData, ["token", "idempotencyKey"]);
+    const token = tokenSchema.parse(raw.token);
     const context = await getRequestSecurityContext();
     const result = await guestOrderAccessService().requestCode({
       token,
-      idempotencyKey: keySchema.parse(formString(formData, "idempotencyKey")),
+      idempotencyKey: keySchema.parse(raw.idempotencyKey),
       ipHash: context.ipHash,
     });
     if (result.challengeId) values.challengeId = result.challengeId;
@@ -144,18 +149,19 @@ export async function verifyGuestCodeAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = { challengeId: formString(formData, "challengeId") };
+  const values = formSnapshot(formData, ["challengeId"]);
   let destination: string;
   try {
-    const token = tokenSchema.parse(formString(formData, "token"));
+    const raw = parseClosed(formData, ["token", "challengeId", "code"]);
+    const token = tokenSchema.parse(raw.token);
     const context = await getRequestSecurityContext();
     const result = await guestOrderAccessService().verifyCode({
       token,
-      challengeId: z.string().uuid().parse(formString(formData, "challengeId")),
+      challengeId: z.string().uuid().parse(raw.challengeId),
       code: z
         .string()
         .regex(/^[0-9]{6}$/)
-        .parse(formString(formData, "code")),
+        .parse((raw.code ?? "").trim()),
       ipHash: context.ipHash,
     });
     await establishGuestOrderSession(result.sessionToken, result.expiresAt);
@@ -167,12 +173,20 @@ export async function verifyGuestCodeAction(
 }
 
 export async function signOutGuestOrderAction(formData: FormData): Promise<void> {
-  const token = tokenSchema.parse(formString(formData, "token"));
+  const raw = parseClosed(formData, ["token"]);
+  const token = tokenSchema.parse(raw.token);
   const store = await import("next/headers").then(({ cookies }) => cookies());
   const { guestOrderCookie } = await import("@/lib/security/session-policy");
   const sessionToken = store.get(guestOrderCookie)?.value;
-  if (sessionToken) await guestOrderAccessService().revokeSession(sessionToken);
-  await clearGuestOrderSession();
+  try {
+    if (sessionToken) await guestOrderAccessService().revokeSession(sessionToken);
+  } catch (error) {
+    if (!(error instanceof GuestOrderAccessError && error.code === "INVALID")) {
+      throw error;
+    }
+  } finally {
+    await clearGuestOrderSession();
+  }
   redirect(`/pedido/${token}`);
 }
 
@@ -194,16 +208,23 @@ export async function requestReturnAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = actionValues(formData);
+  const values = formSnapshot(formData, ["kind", "reason"]);
   try {
-    const { actor, orderId, token } = await orderActor(formData);
+    const raw = parseClosed(formData, [
+      ...channelFields,
+      "kind",
+      "reason",
+      "idempotencyKey",
+      "items",
+    ]);
+    const { actor, orderId, token } = await orderActor(raw);
     const result = await postSaleService().requestReturn(actor, {
       orderId,
-      kind: z.enum(["REFUND", "EXCHANGE"]).parse(formString(formData, "kind")),
-      reason: z.string().min(10).max(2000).parse(formString(formData, "reason")),
-      idempotencyKey: keySchema.parse(formString(formData, "idempotencyKey")),
+      kind: z.enum(["REFUND", "EXCHANGE"]).parse(raw.kind),
+      reason: z.string().trim().min(10).max(2000).parse(raw.reason),
+      idempotencyKey: keySchema.parse(raw.idempotencyKey),
       items: returnItemsSchema
-        .parse(JSON.parse(z.string().max(4_000_000).parse(formString(formData, "items"))))
+        .parse(JSON.parse(z.string().max(4_000_000).parse(raw.items)))
         .map((item) => ({ ...item, replacementVariantId: item.replacementVariantId ?? null })),
     });
     revalidate(orderId, token);
@@ -221,19 +242,22 @@ export async function requestWarrantyAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = actionValues(formData);
+  const values = formSnapshot(formData, ["serializedUnitId", "remedy", "issueDescription"]);
   try {
-    const { actor, orderId, token } = await orderActor(formData);
+    const raw = parseClosed(formData, [
+      ...channelFields,
+      "serializedUnitId",
+      "issueDescription",
+      "remedy",
+      "idempotencyKey",
+    ]);
+    const { actor, orderId, token } = await orderActor(raw);
     const result = await postSaleService().requestWarranty(actor, {
       orderId,
-      serializedUnitId: z.string().uuid().parse(formString(formData, "serializedUnitId")),
-      issueDescription: z
-        .string()
-        .min(10)
-        .max(2000)
-        .parse(formString(formData, "issueDescription")),
-      remedy: z.enum(["REFUND", "REPAIR", "REPLACEMENT"]).parse(formString(formData, "remedy")),
-      idempotencyKey: keySchema.parse(formString(formData, "idempotencyKey")),
+      serializedUnitId: z.string().uuid().parse(raw.serializedUnitId),
+      issueDescription: z.string().trim().min(10).max(2000).parse(raw.issueDescription),
+      remedy: z.enum(["REFUND", "REPAIR", "REPLACEMENT"]).parse(raw.remedy),
+      idempotencyKey: keySchema.parse(raw.idempotencyKey),
     });
     revalidate(orderId, token);
     return actionSuccess(
@@ -250,21 +274,30 @@ export async function createReviewAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = actionValues(formData);
+  const values = formSnapshot(formData, ["rating", "title", "body", "authorDisplayName"]);
   try {
-    const { actor, orderId, token } = await orderActor(formData);
+    const raw = parseClosed(formData, [
+      ...channelFields,
+      "orderItemId",
+      "rating",
+      "title",
+      "body",
+      "authorDisplayName",
+      "idempotencyKey",
+    ]);
+    const { actor, orderId, token } = await orderActor(raw);
     const result = await postSaleService().createReview(actor, {
       orderId,
-      orderItemId: z.string().uuid().parse(formString(formData, "orderItemId")),
+      orderItemId: z.string().uuid().parse(raw.orderItemId),
       rating: z
         .string()
         .regex(/^[1-5]$/)
         .transform(Number)
-        .parse(formString(formData, "rating")),
-      title: z.string().min(3).max(120).parse(formString(formData, "title")),
-      body: z.string().min(20).max(2000).parse(formString(formData, "body")),
-      authorDisplayName: z.string().min(2).max(80).parse(formString(formData, "authorDisplayName")),
-      idempotencyKey: keySchema.parse(formString(formData, "idempotencyKey")),
+        .parse(raw.rating),
+      title: z.string().trim().min(3).max(120).parse(raw.title),
+      body: z.string().trim().min(20).max(2000).parse(raw.body),
+      authorDisplayName: z.string().trim().min(2).max(80).parse(raw.authorDisplayName),
+      idempotencyKey: keySchema.parse(raw.idempotencyKey),
     });
     revalidate(orderId, token);
     return actionSuccess(
@@ -281,18 +314,23 @@ export async function createSupportTicketAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = actionValues(formData);
+  const values = formSnapshot(formData, ["kind", "subject", "message"]);
   try {
-    const { actor, orderId: resolvedOrderId, token } = await orderActor(formData, true);
+    const raw = parseClosed(formData, [
+      ...channelFields,
+      "kind",
+      "subject",
+      "message",
+      "idempotencyKey",
+    ]);
+    const { actor, orderId: resolvedOrderId, token } = await orderActor(raw, true);
     const orderId = resolvedOrderId || null;
     const result = await postSaleService().createSupportTicket(actor, {
       orderId,
-      kind: z
-        .enum(["QUERY", "COMPLAINT", "CLAIM", "APPEAL", "SUGGESTION"])
-        .parse(formString(formData, "kind")),
-      subject: z.string().min(5).max(200).parse(formString(formData, "subject")),
-      message: z.string().min(2).max(5000).parse(formString(formData, "message")),
-      idempotencyKey: keySchema.parse(formString(formData, "idempotencyKey")),
+      kind: z.enum(["QUERY", "COMPLAINT", "CLAIM", "APPEAL", "SUGGESTION"]).parse(raw.kind),
+      subject: z.string().trim().min(5).max(200).parse(raw.subject),
+      message: z.string().trim().min(2).max(5000).parse(raw.message),
+      idempotencyKey: keySchema.parse(raw.idempotencyKey),
     });
     if (orderId) revalidate(orderId, token);
     revalidatePath("/mi-cuenta/soporte");
@@ -310,19 +348,26 @@ export async function replySupportTicketAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = actionValues(formData);
+  const values = formSnapshot(formData, ["body"]);
   try {
-    const { actor, orderId, token } = await orderActor(formData, true);
+    const raw = parseClosed(formData, [
+      ...channelFields,
+      "ticketId",
+      "body",
+      "idempotencyKey",
+      "expectedVersion",
+    ]);
+    const { actor, orderId, token } = await orderActor(raw, true);
     const result = await postSaleService().replySupportTicket(actor, {
-      ticketId: z.string().uuid().parse(formString(formData, "ticketId")),
-      body: z.string().min(2).max(5000).parse(formString(formData, "body")),
-      idempotencyKey: keySchema.parse(formString(formData, "idempotencyKey")),
+      ticketId: z.string().uuid().parse(raw.ticketId),
+      body: z.string().trim().min(2).max(5000).parse(raw.body),
+      idempotencyKey: keySchema.parse(raw.idempotencyKey),
       expectedVersion: z
         .string()
         .regex(/^[0-9]{1,10}$/)
         .transform(Number)
         .pipe(z.number().int().nonnegative().max(2_147_483_647))
-        .parse(formString(formData, "expectedVersion")),
+        .parse(raw.expectedVersion),
     });
     revalidate(orderId, token);
     return actionSuccess(
