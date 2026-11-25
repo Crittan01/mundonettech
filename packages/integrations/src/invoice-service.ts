@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
 import { IntegrationEnvironment, Prisma, type PrismaClient } from "@mundonettech/db";
 
@@ -92,6 +94,12 @@ function buyer(order: {
   };
 }
 
+const claimLeaseMs = 300_000;
+
+function buildClaimToken(workerId: string): string {
+  return `${workerId.slice(0, 83)}:${randomUUID()}`;
+}
+
 function taxRate(item: { taxLines: readonly { appliedRateBps: number }[] }): number {
   const rates = new Set(item.taxLines.map((line) => line.appliedRateBps));
   if (rates.size !== 1)
@@ -130,7 +138,7 @@ export class InvoiceService {
       const rows = await db.$queryRaw<Array<{ role: string }>>`
         SELECT "role"::text AS "role" FROM "AdminUser"
         WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
-        FOR UPDATE
+        FOR SHARE
       `;
       role = rows[0]?.role;
     } else {
@@ -237,7 +245,7 @@ export class InvoiceService {
           fullNumber: duplicate.fullNumber,
           replayed: true,
         };
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"dian-invoice:" + selectedCredential + ":" + credentials.invoicePrefix}))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"dian-invoice:" + selectedCredential + ":" + credentials.invoicePrefix}, 0))`;
       const latest = await tx.taxInvoice.aggregate({
         where: { credentialId: selectedCredential, prefix: credentials.invoicePrefix },
         _max: { number: true },
@@ -369,7 +377,7 @@ export class InvoiceService {
     const credentials = await this.credentials(refund.order.taxInvoice.credentialId);
     return this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${"dian-credit-note:" + refund.order.taxInvoice!.credentialId + ":" + credentials.creditNotePrefix}))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"dian-credit-note:" + refund.order.taxInvoice!.credentialId + ":" + credentials.creditNotePrefix}, 0))`;
       const lockedRefund = await tx.orderRefund.findUniqueOrThrow({
         where: { id: refundId },
         include: { items: { include: { orderItem: { include: { taxLines: true } } } } },
@@ -559,7 +567,7 @@ export class InvoiceService {
 
   private async failInvoice(
     invoiceId: string,
-    workerId: string,
+    claimToken: string,
     uncertain: boolean,
     code: string,
     audit?: InvoiceAuditContext,
@@ -585,7 +593,7 @@ export class InvoiceService {
           replayed: true,
         };
       }
-      if (current.claimedBy !== workerId) {
+      if (current.status !== "TRANSMITTING" || current.claimedBy !== claimToken) {
         throw new InvoiceConflictError(
           "Invoice claim ownership changed before failure could be recorded.",
         );
@@ -632,6 +640,66 @@ export class InvoiceService {
     });
   }
 
+  private async releaseUncertainInvoiceClaim(
+    invoiceId: string,
+    claimToken: string,
+    code: string,
+    audit?: InvoiceAuditContext,
+  ): Promise<FiscalOperationResult> {
+    return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
+      const locked = await tx.$queryRaw<
+        Array<{
+          id: string;
+          orderId: string;
+          fullNumber: string;
+          status: string;
+          claimedBy: string | null;
+        }>
+      >`SELECT "id", "orderId", "fullNumber", "status", "claimedBy" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
+      const current = locked[0];
+      if (!current) throw new InvoiceNotFoundError();
+      if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
+        return {
+          id: current.id,
+          status: current.status as FiscalOperationResult["status"],
+          fullNumber: current.fullNumber,
+          replayed: true,
+        };
+      }
+      if (current.status !== "UNCERTAIN" || current.claimedBy !== claimToken) {
+        throw new InvoiceConflictError(
+          "Invoice claim ownership changed before uncertain release could be recorded.",
+        );
+      }
+      const invoice = await tx.taxInvoice.update({
+        where: { id: invoiceId },
+        data: {
+          failureCode: code.slice(0, 200),
+          claimedBy: null,
+          claimExpiresAt: null,
+        },
+      });
+      await this.writeAudit(tx, {
+        action: "TAX_INVOICE_MARKED_UNCERTAIN",
+        targetType: "TaxInvoice",
+        targetId: invoiceId,
+        audit,
+        metadata: {
+          orderId: invoice.orderId,
+          fullNumber: invoice.fullNumber,
+          code: code.slice(0, 200),
+        },
+      });
+      return {
+        id: invoice.id,
+        status: invoice.status,
+        fullNumber: invoice.fullNumber,
+        replayed: false,
+      };
+    });
+  }
+
   async transmitInvoice(
     invoiceId: string,
     workerIdInput: string,
@@ -640,6 +708,7 @@ export class InvoiceService {
     await this.assertHumanActor(audit);
     assertIntegrationUuid(invoiceId, "invoiceId");
     const workerId = assertIntegrationKey(workerIdInput, "workerId");
+    const claimToken = buildClaimToken(workerId);
     const claimed = await this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
@@ -652,13 +721,13 @@ export class InvoiceService {
       const now = nowRows[0]!.now;
       if (current.claimExpiresAt && current.claimExpiresAt > now)
         throw new InvoiceConflictError("Another worker owns this fiscal document claim.");
-      const claimExpiresAt = new Date(now.getTime() + 300_000);
+      const claimExpiresAt = new Date(now.getTime() + claimLeaseMs);
       if (current.status === "DRAFT") {
         return tx.taxInvoice.update({
           where: { id: invoiceId },
           data: {
             status: "TRANSMITTING",
-            claimedBy: workerId,
+            claimedBy: claimToken,
             claimExpiresAt,
             transmittedAt: null,
             failureCode: null,
@@ -668,13 +737,13 @@ export class InvoiceService {
       if (current.status === "UNCERTAIN") {
         return tx.taxInvoice.update({
           where: { id: invoiceId },
-          data: { claimedBy: workerId, claimExpiresAt },
+          data: { claimedBy: claimToken, claimExpiresAt },
         });
       }
       if (current.status === "TRANSMITTING") {
         return tx.taxInvoice.update({
           where: { id: invoiceId },
-          data: { status: "UNCERTAIN", claimedBy: workerId, claimExpiresAt },
+          data: { status: "UNCERTAIN", claimedBy: claimToken, claimExpiresAt },
         });
       }
       throw new InvoiceConflictError("Invoice cannot be transmitted in its current state.");
@@ -686,32 +755,59 @@ export class InvoiceService {
         fullNumber: claimed.fullNumber,
         replayed: true,
       };
-    const credentials = await this.credentials(claimed.credentialId);
-    const provider = this.provider(credentials);
     let current = claimed;
-    if (current.status === "UNCERTAIN") {
-      const found = await provider.find(current.cufe);
-      if (found) return this.acceptInvoice(invoiceId, found, audit);
-      const moved = await this.db.taxInvoice.updateMany({
-        where: { id: invoiceId, status: "UNCERTAIN", claimedBy: workerId },
-        data: { status: "TRANSMITTING", transmittedAt: null },
-      });
-      if (moved.count !== 1) {
-        throw new InvoiceConflictError("Invoice claim ownership changed during reconciliation.");
-      }
-      current = await this.db.taxInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
-    }
-    if (!current.transmittedAt) {
-      const stamped = await this.db.taxInvoice.updateMany({
-        where: { id: invoiceId, status: "TRANSMITTING", claimedBy: workerId },
-        data: { transmittedAt: new Date() },
-      });
-      if (stamped.count !== 1) {
-        throw new InvoiceConflictError("Invoice claim ownership changed before transmission.");
-      }
-      current = await this.db.taxInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
-    }
     try {
+      const credentials = await this.credentials(claimed.credentialId);
+      const provider = this.provider(credentials);
+      if (current.status === "UNCERTAIN") {
+        const found = await provider.find(current.cufe);
+        if (found) return this.acceptInvoice(invoiceId, found, audit);
+        current = await this.db.$transaction(async (tx) => {
+          const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+          const now = nowRows[0]!.now;
+          const moved = await tx.taxInvoice.updateMany({
+            where: {
+              id: invoiceId,
+              status: "UNCERTAIN",
+              claimedBy: claimToken,
+              claimExpiresAt: { gt: now },
+            },
+            data: {
+              status: "TRANSMITTING",
+              transmittedAt: null,
+              claimExpiresAt: new Date(now.getTime() + claimLeaseMs),
+            },
+          });
+          if (moved.count !== 1) {
+            throw new InvoiceConflictError(
+              "Invoice claim ownership changed during reconciliation.",
+            );
+          }
+          return tx.taxInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
+        });
+      }
+      if (!current.transmittedAt) {
+        current = await this.db.$transaction(async (tx) => {
+          const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+          const now = nowRows[0]!.now;
+          const stamped = await tx.taxInvoice.updateMany({
+            where: {
+              id: invoiceId,
+              status: "TRANSMITTING",
+              claimedBy: claimToken,
+              claimExpiresAt: { gt: now },
+            },
+            data: {
+              transmittedAt: now,
+              claimExpiresAt: new Date(now.getTime() + claimLeaseMs),
+            },
+          });
+          if (stamped.count !== 1) {
+            throw new InvoiceConflictError("Invoice claim ownership changed before transmission.");
+          }
+          return tx.taxInvoice.findUniqueOrThrow({ where: { id: invoiceId } });
+        });
+      }
       const result = await provider.transmit({
         documentId: current.id,
         idempotencyKey: `fiscal:${current.id}`,
@@ -722,9 +818,27 @@ export class InvoiceService {
       });
       return await this.acceptInvoice(invoiceId, result, audit);
     } catch (error) {
-      if (!(error instanceof InvoiceProviderError)) throw error;
-      const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
-      return this.failInvoice(invoiceId, workerId, uncertain, error.code, audit);
+      if (error instanceof InvoiceConflictError) throw error;
+      if (error instanceof InvoiceProviderError) {
+        if (current.status === "UNCERTAIN") {
+          return this.releaseUncertainInvoiceClaim(invoiceId, claimToken, error.code, audit);
+        }
+        const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
+        return this.failInvoice(invoiceId, claimToken, uncertain, error.code, audit);
+      }
+      if (current.status === "UNCERTAIN") {
+        await this.releaseUncertainInvoiceClaim(
+          invoiceId,
+          claimToken,
+          "PRE_TRANSMIT_ERROR",
+          audit,
+        ).catch(() => undefined);
+      } else {
+        await this.failInvoice(invoiceId, claimToken, true, "PRE_TRANSMIT_ERROR", audit).catch(
+          () => undefined,
+        );
+      }
+      throw error;
     }
   }
 
@@ -794,7 +908,7 @@ export class InvoiceService {
 
   private async failCreditNote(
     creditNoteId: string,
-    workerId: string,
+    claimToken: string,
     uncertain: boolean,
     code: string,
     audit?: InvoiceAuditContext,
@@ -821,7 +935,7 @@ export class InvoiceService {
           replayed: true,
         };
       }
-      if (current.claimedBy !== workerId) {
+      if (current.status !== "TRANSMITTING" || current.claimedBy !== claimToken) {
         throw new InvoiceConflictError(
           "Credit note claim ownership changed before failure could be recorded.",
         );
@@ -865,6 +979,64 @@ export class InvoiceService {
     });
   }
 
+  private async releaseUncertainCreditNoteClaim(
+    creditNoteId: string,
+    claimToken: string,
+    code: string,
+    audit?: InvoiceAuditContext,
+  ): Promise<FiscalOperationResult> {
+    return this.db.$transaction(async (tx) => {
+      if (audit) await this.assertActor(tx, audit, true);
+      const locked = await tx.$queryRaw<
+        Array<{
+          id: string;
+          invoiceId: string;
+          refundId: string;
+          fullNumber: string;
+          status: string;
+          claimedBy: string | null;
+        }>
+      >`SELECT "id", "invoiceId", "refundId", "fullNumber", "status", "claimedBy" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
+      const current = locked[0];
+      if (!current) throw new InvoiceNotFoundError();
+      if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
+        return {
+          id: current.id,
+          status: current.status as FiscalOperationResult["status"],
+          fullNumber: current.fullNumber,
+          replayed: true,
+        };
+      }
+      if (current.status !== "UNCERTAIN" || current.claimedBy !== claimToken) {
+        throw new InvoiceConflictError(
+          "Credit note claim ownership changed before uncertain release could be recorded.",
+        );
+      }
+      const note = await tx.creditNote.update({
+        where: { id: creditNoteId },
+        data: {
+          failureCode: code.slice(0, 200),
+          claimedBy: null,
+          claimExpiresAt: null,
+        },
+      });
+      const invoice = await tx.taxInvoice.findUniqueOrThrow({ where: { id: note.invoiceId } });
+      await this.writeAudit(tx, {
+        action: "CREDIT_NOTE_MARKED_UNCERTAIN",
+        targetType: "CreditNote",
+        targetId: creditNoteId,
+        audit,
+        metadata: {
+          orderId: invoice.orderId,
+          refundId: note.refundId,
+          fullNumber: note.fullNumber,
+          code: code.slice(0, 200),
+        },
+      });
+      return { id: note.id, status: note.status, fullNumber: note.fullNumber, replayed: false };
+    });
+  }
+
   async transmitCreditNote(
     creditNoteId: string,
     workerIdInput: string,
@@ -873,6 +1045,7 @@ export class InvoiceService {
     await this.assertHumanActor(audit);
     assertIntegrationUuid(creditNoteId, "creditNoteId");
     const workerId = assertIntegrationKey(workerIdInput, "workerId");
+    const claimToken = buildClaimToken(workerId);
     const claimed = await this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
@@ -885,13 +1058,13 @@ export class InvoiceService {
       const now = nowRows[0]!.now;
       if (current.claimExpiresAt && current.claimExpiresAt > now)
         throw new InvoiceConflictError("Another worker owns this fiscal document claim.");
-      const claimExpiresAt = new Date(now.getTime() + 300_000);
+      const claimExpiresAt = new Date(now.getTime() + claimLeaseMs);
       if (current.status === "DRAFT") {
         return tx.creditNote.update({
           where: { id: creditNoteId },
           data: {
             status: "TRANSMITTING",
-            claimedBy: workerId,
+            claimedBy: claimToken,
             claimExpiresAt,
             transmittedAt: null,
             failureCode: null,
@@ -901,13 +1074,13 @@ export class InvoiceService {
       if (current.status === "UNCERTAIN") {
         return tx.creditNote.update({
           where: { id: creditNoteId },
-          data: { claimedBy: workerId, claimExpiresAt },
+          data: { claimedBy: claimToken, claimExpiresAt },
         });
       }
       if (current.status === "TRANSMITTING") {
         return tx.creditNote.update({
           where: { id: creditNoteId },
-          data: { status: "UNCERTAIN", claimedBy: workerId, claimExpiresAt },
+          data: { status: "UNCERTAIN", claimedBy: claimToken, claimExpiresAt },
         });
       }
       throw new InvoiceConflictError("Credit note cannot be transmitted in its current state.");
@@ -919,34 +1092,61 @@ export class InvoiceService {
         fullNumber: claimed.fullNumber,
         replayed: true,
       };
-    const credentials = await this.credentials(claimed.credentialId);
-    const provider = this.provider(credentials);
     let current = claimed;
-    if (current.status === "UNCERTAIN") {
-      const found = await provider.find(current.cude);
-      if (found) return this.acceptCreditNote(creditNoteId, found, audit);
-      const moved = await this.db.creditNote.updateMany({
-        where: { id: creditNoteId, status: "UNCERTAIN", claimedBy: workerId },
-        data: { status: "TRANSMITTING", transmittedAt: null },
-      });
-      if (moved.count !== 1) {
-        throw new InvoiceConflictError(
-          "Credit note claim ownership changed during reconciliation.",
-        );
-      }
-      current = await this.db.creditNote.findUniqueOrThrow({ where: { id: creditNoteId } });
-    }
-    if (!current.transmittedAt) {
-      const stamped = await this.db.creditNote.updateMany({
-        where: { id: creditNoteId, status: "TRANSMITTING", claimedBy: workerId },
-        data: { transmittedAt: new Date() },
-      });
-      if (stamped.count !== 1) {
-        throw new InvoiceConflictError("Credit note claim ownership changed before transmission.");
-      }
-      current = await this.db.creditNote.findUniqueOrThrow({ where: { id: creditNoteId } });
-    }
     try {
+      const credentials = await this.credentials(claimed.credentialId);
+      const provider = this.provider(credentials);
+      if (current.status === "UNCERTAIN") {
+        const found = await provider.find(current.cude);
+        if (found) return this.acceptCreditNote(creditNoteId, found, audit);
+        current = await this.db.$transaction(async (tx) => {
+          const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+          const now = nowRows[0]!.now;
+          const moved = await tx.creditNote.updateMany({
+            where: {
+              id: creditNoteId,
+              status: "UNCERTAIN",
+              claimedBy: claimToken,
+              claimExpiresAt: { gt: now },
+            },
+            data: {
+              status: "TRANSMITTING",
+              transmittedAt: null,
+              claimExpiresAt: new Date(now.getTime() + claimLeaseMs),
+            },
+          });
+          if (moved.count !== 1) {
+            throw new InvoiceConflictError(
+              "Credit note claim ownership changed during reconciliation.",
+            );
+          }
+          return tx.creditNote.findUniqueOrThrow({ where: { id: creditNoteId } });
+        });
+      }
+      if (!current.transmittedAt) {
+        current = await this.db.$transaction(async (tx) => {
+          const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+          const now = nowRows[0]!.now;
+          const stamped = await tx.creditNote.updateMany({
+            where: {
+              id: creditNoteId,
+              status: "TRANSMITTING",
+              claimedBy: claimToken,
+              claimExpiresAt: { gt: now },
+            },
+            data: {
+              transmittedAt: now,
+              claimExpiresAt: new Date(now.getTime() + claimLeaseMs),
+            },
+          });
+          if (stamped.count !== 1) {
+            throw new InvoiceConflictError(
+              "Credit note claim ownership changed before transmission.",
+            );
+          }
+          return tx.creditNote.findUniqueOrThrow({ where: { id: creditNoteId } });
+        });
+      }
       const result = await provider.transmit({
         documentId: current.id,
         idempotencyKey: `fiscal:${current.id}`,
@@ -957,9 +1157,31 @@ export class InvoiceService {
       });
       return await this.acceptCreditNote(creditNoteId, result, audit);
     } catch (error) {
-      if (!(error instanceof InvoiceProviderError)) throw error;
-      const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
-      return this.failCreditNote(creditNoteId, workerId, uncertain, error.code, audit);
+      if (error instanceof InvoiceConflictError) throw error;
+      if (error instanceof InvoiceProviderError) {
+        if (current.status === "UNCERTAIN") {
+          return this.releaseUncertainCreditNoteClaim(creditNoteId, claimToken, error.code, audit);
+        }
+        const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
+        return this.failCreditNote(creditNoteId, claimToken, uncertain, error.code, audit);
+      }
+      if (current.status === "UNCERTAIN") {
+        await this.releaseUncertainCreditNoteClaim(
+          creditNoteId,
+          claimToken,
+          "PRE_TRANSMIT_ERROR",
+          audit,
+        ).catch(() => undefined);
+      } else {
+        await this.failCreditNote(
+          creditNoteId,
+          claimToken,
+          true,
+          "PRE_TRANSMIT_ERROR",
+          audit,
+        ).catch(() => undefined);
+      }
+      throw error;
     }
   }
 }

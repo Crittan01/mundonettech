@@ -91,12 +91,15 @@ async function runPostureMutation(statements, assertion) {
   }
 }
 
-async function expectPostureMutation(statements, expectedMessage) {
+async function expectPostureMutation(statements, expectedMessages) {
+  const expectedList = Array.isArray(expectedMessages) ? expectedMessages : [expectedMessages];
   await runPostureMutation(statements, (errors) => {
-    assert.ok(
-      errors.some((message) => message.includes(expectedMessage)),
-      `expected posture failure containing ${expectedMessage}; found ${JSON.stringify(errors)}`,
-    );
+    for (const expectedMessage of expectedList) {
+      assert.ok(
+        errors.some((message) => message.includes(expectedMessage)),
+        `expected posture failure containing ${expectedMessage}; found ${JSON.stringify(errors)}`,
+      );
+    }
   });
 }
 
@@ -438,7 +441,10 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
           'ALTER TABLE "Customer" DROP CONSTRAINT "Customer_loyaltyPoints_nonnegative"',
           'ALTER TABLE "Customer" ADD CONSTRAINT "Customer_loyaltyPoints_nonnegative" CHECK (true)',
         ],
-        expected: "constraint Customer.Customer_loyaltyPoints_nonnegative differs",
+        expected: [
+          "constraint Customer.Customer_loyaltyPoints_nonnegative differs",
+          "Monetary/stock column Customer.loyaltyPoints has no semantic non-negative CHECK coverage",
+        ],
       },
       {
         statements: [
@@ -464,6 +470,101 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
            FOR EACH ROW EXECUTE FUNCTION prevent_append_only_mutation()`,
         ],
         expected: "Unexpected row trigger AdminUser.AdminActionLog_append_only",
+      },
+      {
+        statements: ['ALTER TABLE "AdminActionLog" DISABLE TRIGGER "AdminActionLog_append_only"'],
+        expected: [
+          "Trigger AdminActionLog.AdminActionLog_append_only is not enabled in origin mode",
+          "row trigger AdminActionLog.AdminActionLog_append_only differs",
+        ],
+      },
+      {
+        statements: ["ALTER EVENT TRIGGER enforce_rls_on_new_table DISABLE"],
+        expected: [
+          "Event trigger enforce_rls_on_new_table is not enabled in origin mode",
+          "event trigger enforce_rls_on_new_table differs",
+        ],
+      },
+      {
+        statements: ['ALTER TABLE "Customer" DISABLE ROW LEVEL SECURITY'],
+        expected: "Public table Customer is not deny-by-default.",
+      },
+      {
+        statements: ['ALTER TABLE "Customer" NO FORCE ROW LEVEL SECURITY'],
+        expected: "Public table Customer is not deny-by-default.",
+      },
+      {
+        statements: ["GRANT USAGE ON SCHEMA public TO anon"],
+        expected: "PostgREST role anon retains public schema privileges.",
+      },
+      {
+        statements: [
+          'CREATE SEQUENCE "PostureSeqProbe"',
+          'GRANT USAGE ON SEQUENCE "PostureSeqProbe" TO anon',
+        ],
+        expected: "PostgREST role anon retains USAGE on sequence PostureSeqProbe.",
+      },
+      {
+        statements: [
+          'GRANT EXECUTE ON FUNCTION "consume_admin_recovery_code"(uuid, bytea, timestamp with time zone) TO anon',
+        ],
+        expected: "PostgREST role anon can execute consume_admin_recovery_code.",
+      },
+      {
+        statements: ['GRANT SELECT ("ciphertext") ON "IntegrationCredential" TO service_role'],
+        expected: [
+          "PostgREST role service_role retains column-level SELECT on IntegrationCredential.",
+          "Role service_role retains column privilege SELECT on IntegrationCredential.ciphertext.",
+        ],
+      },
+      {
+        statements: ["GRANT USAGE ON SCHEMA public TO PUBLIC"],
+        expected: "PUBLIC retains schema privileges on public.",
+      },
+      {
+        statements: ["GRANT service_role TO anon"],
+        expected: "Role anon must not hold membership in role service_role.",
+      },
+      {
+        statements: ["CREATE SCHEMA bad_ext", "ALTER EXTENSION pgcrypto SET SCHEMA bad_ext"],
+        expected: "Extension pgcrypto must be installed in public or extensions; found bad_ext.",
+      },
+      {
+        statements: ['ALTER FUNCTION "enforce_blocked_identity_state"() SECURITY INVOKER'],
+        expected: "public function enforce_blocked_identity_state() differs",
+      },
+      {
+        statements: ['ALTER FUNCTION "set_updated_at"() RESET search_path'],
+        expected: [
+          "Public function set_updated_at() must have a fixed search_path of pg_catalog,public.",
+          "public function set_updated_at() differs",
+        ],
+      },
+      {
+        statements: [
+          'ALTER TABLE "Customer" ADD CONSTRAINT "Customer_not_valid_probe" CHECK ("loyaltyPoints" >= 0) NOT VALID',
+        ],
+        expected: [
+          "Constraint Customer.Customer_not_valid_probe is not validated.",
+          "Unexpected constraint Customer.Customer_not_valid_probe.",
+        ],
+      },
+      {
+        statements: [
+          `UPDATE "_prisma_migrations" SET "rolled_back_at" = CURRENT_TIMESTAMP
+           WHERE "migration_name" = '20261124160000_a3_db_constraints_locks'`,
+        ],
+        expected: [
+          "The Prisma migration chain contains an applied migration marked rolled back.",
+          "Prisma migration sequence differs",
+        ],
+      },
+      {
+        statements: [
+          'CREATE POLICY "probe_non_api_policy" ON "Customer" FOR SELECT TO CURRENT_USER USING (true)',
+        ],
+        expected:
+          "Policy probe_non_api_policy on Customer violates deny-by-default zero-policy posture on schema public.",
       },
       {
         statements: ['CREATE TABLE "UnexpectedProtectedProbe" ("id" integer PRIMARY KEY)'],

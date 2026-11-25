@@ -12,10 +12,16 @@ import type {
   ContactIdentity,
   ContactVerificationLevel,
   Customer,
+  Organization,
   Prisma,
   PrismaClient,
 } from "./generated/client.js";
-import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
+import {
+  acquireOperationLocks,
+  assertUuid,
+  compareStrings,
+  inInventoryTransaction,
+} from "./inventory-shared.js";
 import { databaseNow } from "./primitives.js";
 import { maskCrmContact, maskCrmIdentity, maskCrmOrganization } from "./crm-presenters.js";
 import {
@@ -33,6 +39,7 @@ import {
   crmVersion,
   normalizeCrmContactInput,
   normalizeCrmOrganizationInput,
+  retryableLockDivergenceError,
   type CrmAudit,
   type CrmContactInput,
   type CrmContactUpdateInput,
@@ -73,11 +80,12 @@ export class CrmService {
 
   private async assertOrganization(tx: Prisma.TransactionClient, organizationId: string | null) {
     if (!organizationId) return;
-    const organization = await tx.organization.findFirst({
-      where: { id: organizationId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!organization) throw new CrmError("NOT_FOUND", "Active organization not found.");
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Organization"
+      WHERE "id" = ${organizationId}::uuid AND "deletedAt" IS NULL
+      FOR SHARE
+    `;
+    if (!rows[0]) throw new CrmError("NOT_FOUND", "Active organization not found.");
   }
 
   private async upsertIdentity(
@@ -229,9 +237,12 @@ export class CrmService {
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:write");
       await acquireOperationLocks(tx, [`crm-organization:${input.organizationId}`]);
-      const current = await tx.organization.findFirst({
-        where: { id: input.organizationId, deletedAt: null },
-      });
+      const orgRows = await tx.$queryRaw<Organization[]>`
+        SELECT * FROM "Organization"
+        WHERE "id" = ${input.organizationId}::uuid AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      const current = orgRows[0];
       if (!current) throw new CrmError("NOT_FOUND", "Organization not found.");
       if (current.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The organization changed in another session.");
@@ -339,10 +350,10 @@ export class CrmService {
     ]);
     const normalizedEmail = normalizeEmail(customer.email);
     const emailVerifiedAt = customer.authUserId && customer.status === "ACTIVE" ? now : null;
-    let existing = await tx.contact.findFirst({
-      where: { customerId, deletedAt: null },
-      include: { identities: true },
+    let existing: Contact | null = await tx.contact.findFirst({
+      where: { customerId, status: "ACTIVE", deletedAt: null },
     });
+    let fromPreferred = false;
     if (!existing && options.preferredContactId) {
       assertUuid(options.preferredContactId, "preferredContactId");
       const preferred = await tx.contact.findFirst({
@@ -352,17 +363,53 @@ export class CrmService {
           deletedAt: null,
           email: normalizedEmail,
         },
-        include: { identities: true },
       });
       if (!preferred || (preferred.customerId !== null && preferred.customerId !== customerId)) {
         throw new CrmError("CONFLICT", "The B2B contact cannot be linked to this customer.");
       }
       existing = preferred;
+      fromPreferred = true;
+    }
+    let activeTarget: Contact | null = null;
+    if (existing) {
+      await acquireOperationLocks(tx, [`crm-contact:${existing.id}`]);
+      const lockedRows = await tx.$queryRaw<
+        Contact[]
+      >`SELECT * FROM "Contact" WHERE "id" = ${existing.id}::uuid FOR UPDATE`;
+      let locked = lockedRows[0] ?? null;
+      const visited = new Set<string>([existing.id]);
+      while (locked && locked.status === "MERGED" && locked.mergedIntoContactId) {
+        const nextId = locked.mergedIntoContactId;
+        if (visited.has(nextId) || visited.size >= 20) {
+          locked = null;
+          break;
+        }
+        if (compareStrings(locked.id, nextId) >= 0) {
+          throw retryableLockDivergenceError("The contact was merged concurrently.");
+        }
+        visited.add(nextId);
+        await acquireOperationLocks(tx, [`crm-contact:${nextId}`]);
+        const targetRows = await tx.$queryRaw<
+          Contact[]
+        >`SELECT * FROM "Contact" WHERE "id" = ${nextId}::uuid FOR UPDATE`;
+        locked = targetRows[0] ?? null;
+      }
+      if (locked && locked.status === "ACTIVE" && locked.deletedAt === null) {
+        if (
+          (locked.customerId !== null && locked.customerId !== customerId) ||
+          (fromPreferred && locked.email !== normalizedEmail)
+        ) {
+          throw new CrmError("CONFLICT", "The B2B contact cannot be linked to this customer.");
+        }
+        activeTarget = locked;
+      } else if (fromPreferred) {
+        throw new CrmError("CONFLICT", "The B2B contact cannot be linked to this customer.");
+      }
     }
     const effectivePhone = customer.phoneE164
       ? normalizeContactPhone(customer.phoneE164)
-      : (existing?.phoneE164 ?? null);
-    if (!existing) {
+      : (activeTarget?.phoneE164 ?? null);
+    if (!activeTarget) {
       const initialLevel: ContactVerificationLevel = emailVerifiedAt
         ? "SINGLE_CHANNEL_VERIFIED"
         : "UNVERIFIED";
@@ -385,20 +432,33 @@ export class CrmService {
       }
       return created;
     }
-    await acquireOperationLocks(tx, [`crm-contact:${existing.id}`]);
-    await this.upsertIdentity(tx, existing.id, "EMAIL", normalizedEmail, emailVerifiedAt);
-    if (existing.email && existing.email !== normalizedEmail) {
-      await this.retireIdentity(tx, existing.id, "EMAIL", existing.email, normalizedEmail, now);
+    await this.upsertIdentity(tx, activeTarget.id, "EMAIL", normalizedEmail, emailVerifiedAt);
+    if (activeTarget.email && activeTarget.email !== normalizedEmail) {
+      await this.retireIdentity(
+        tx,
+        activeTarget.id,
+        "EMAIL",
+        activeTarget.email,
+        normalizedEmail,
+        now,
+      );
     }
     if (effectivePhone) {
-      await this.upsertIdentity(tx, existing.id, "PHONE", effectivePhone, null);
+      await this.upsertIdentity(tx, activeTarget.id, "PHONE", effectivePhone, null);
     }
-    if (existing.phoneE164 && existing.phoneE164 !== effectivePhone) {
-      await this.retireIdentity(tx, existing.id, "PHONE", existing.phoneE164, effectivePhone, now);
+    if (activeTarget.phoneE164 && activeTarget.phoneE164 !== effectivePhone) {
+      await this.retireIdentity(
+        tx,
+        activeTarget.id,
+        "PHONE",
+        activeTarget.phoneE164,
+        effectivePhone,
+        now,
+      );
     }
-    const verificationLevel = await this.verificationLevel(tx, existing.id);
+    const verificationLevel = await this.verificationLevel(tx, activeTarget.id);
     return tx.contact.update({
-      where: { id: existing.id },
+      where: { id: activeTarget.id },
       data: {
         customerId,
         givenName: customer.givenName,
@@ -889,6 +949,9 @@ export class CrmService {
       >`SELECT * FROM "Task" WHERE "id" = ${input.taskId}::uuid FOR UPDATE`;
       const current = rows[0];
       if (!current) throw new CrmError("NOT_FOUND", "Task not found.");
+      if (current.contactId !== peek.contactId) {
+        throw retryableLockDivergenceError("The task contact changed concurrently.");
+      }
       if (current.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The task changed in another session.");
       }
@@ -1050,10 +1113,31 @@ export class CrmService {
           }
         }
       }
+      const sortedPairs = [...pairs.entries()].sort(([a], [b]) => a.localeCompare(b));
+      const allPairContactIds = [
+        ...new Set(sortedPairs.flatMap(([, entry]) => [entry.leftId, entry.rightId])),
+      ].sort(compareStrings);
+      if (sortedPairs.length > 0) {
+        await acquireOperationLocks(tx, [
+          ...allPairContactIds.map((id) => `crm-contact:${id}`),
+          ...sortedPairs.map(([pairKey]) => `crm-merge:${pairKey}`),
+        ]);
+      }
+      const lockedContacts =
+        allPairContactIds.length > 0
+          ? await tx.$queryRaw<Contact[]>`
+              SELECT * FROM "Contact"
+              WHERE "id" = ANY(${allPairContactIds}::uuid[])
+                AND "status" = 'ACTIVE'
+                AND "deletedAt" IS NULL
+              ORDER BY "id"
+              FOR SHARE
+            `
+          : [];
+      const activeContactsById = new Map(lockedContacts.map((contact) => [contact.id, contact]));
       const resolved: Array<{ id: string; pairKey: string; created: boolean }> = [];
-      for (const [pairKey, entry] of [...pairs.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      for (const [pairKey, entry] of sortedPairs) {
         if (resolved.length >= limit) break;
-        await acquireOperationLocks(tx, [`crm-merge:${pairKey}`]);
         const existing = await tx.identityMergeCandidate.findFirst({
           where: { pairKey, status: { in: ["PENDING", "MERGED", "REJECTED"] } },
           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -1064,14 +1148,10 @@ export class CrmService {
           }
           continue;
         }
-        const contacts = await tx.contact.findMany({
-          where: {
-            id: { in: [entry.leftId, entry.rightId] },
-            status: "ACTIVE",
-            deletedAt: null,
-          },
-        });
-        if (contacts.length !== 2) continue;
+        const leftContact = activeContactsById.get(entry.leftId);
+        const rightContact = activeContactsById.get(entry.rightId);
+        if (!leftContact || !rightContact) continue;
+        const contacts = [leftContact, rightContact];
         contacts.sort(
           (left, right) =>
             verificationRank[right.verificationLevel] - verificationRank[left.verificationLevel] ||

@@ -18,7 +18,7 @@ const notImplementedThrowPattern =
   /\bthrow\s+new\s+\w*Error\(\s*["'`][^"'`]*(?:not\s+implemented|pendiente|todo|stub)\b/giu;
 const prismaModelBlockPattern = /\bmodel\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([\s\S]*?)\n\}/g;
 const monetaryFieldNamePattern =
-  /(?:Cents$|^(?:price|unitPrice|compareAtPrice|cost|unitCost|subtotal|total|discount|tax|shippingFee|amount|refundAmount|balance|creditAmount)$)/;
+  /(?:Cents$|^(?:price|cost|subtotal|total|discount|tax|fee|amount|balance|credit|revenue|proceeds|charge)$|(?:^|[a-z0-9])(?:Price|Cost|Subtotal|Total|Discount|Tax|Fee|Amount|Balance|Credit|Revenue|Proceeds|Charge)$)/;
 const floatMoneyNamePattern =
   /(?:price|cost|amount|subtotal|total|tax|discount|fee|refund|credit|balance|revenue|cents)/i;
 const softDeleteTotalUniqueExceptions = new Set([

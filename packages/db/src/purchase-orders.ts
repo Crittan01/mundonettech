@@ -137,20 +137,15 @@ export async function createPurchaseOrder(
         throw new RangeError("expectedAt cannot be earlier than the purchase order creation time.");
       }
     }
-    const supplier = await tx.supplier.findFirst({
-      where: { id: supplierId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!supplier) throw new InventoryNotFoundError("Active supplier not found.");
-    const location = await tx.stockLocation.findFirst({
-      where: { id: destinationLocationId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!location) throw new InventoryNotFoundError("Active destination location not found.");
     await activeVariants(
       tx,
       items.map((item) => item.variantId),
     );
+    await activeLocations(tx, [destinationLocationId]);
+    const supplierRows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Supplier" WHERE "id" = ${supplierId}::uuid AND "deletedAt" IS NULL FOR SHARE
+    `;
+    if (!supplierRows[0]) throw new InventoryNotFoundError("Active supplier not found.");
     try {
       const purchase = await tx.purchaseOrder.create({
         data: {
@@ -187,12 +182,6 @@ export async function markPurchaseOrderOrdered(
     if (purchase.status !== "DRAFT") {
       throw new PurchaseOrderStateError("Only a draft purchase order can be marked as ordered.");
     }
-    const supplier = await tx.supplier.findFirst({
-      where: { id: purchase.supplierId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!supplier) throw new InventoryNotFoundError("Active supplier not found.");
-    await activeLocations(tx, [purchase.destinationLocationId]);
     const items = await tx.purchaseOrderItem.findMany({
       where: { purchaseOrderId },
       select: { variantId: true },
@@ -204,6 +193,11 @@ export async function markPurchaseOrderOrdered(
       tx,
       items.map((item) => item.variantId),
     );
+    await activeLocations(tx, [purchase.destinationLocationId]);
+    const supplierRows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Supplier" WHERE "id" = ${purchase.supplierId}::uuid AND "deletedAt" IS NULL FOR SHARE
+    `;
+    if (!supplierRows[0]) throw new InventoryNotFoundError("Active supplier not found.");
     await tx.$executeRaw`
       UPDATE "PurchaseOrder"
       SET "status" = 'ORDERED', "orderedAt" = CURRENT_TIMESTAMP
@@ -325,13 +319,11 @@ export async function receivePurchaseOrder(
           "A receipt variant does not belong to the purchase order.",
         );
       }
-      const [locations, variants] = await Promise.all([
-        activeLocations(tx, [purchase.destinationLocationId]),
-        activeVariants(
-          tx,
-          items.map((item) => item.variantId),
-        ),
-      ]);
+      const variants = await activeVariants(
+        tx,
+        items.map((item) => item.variantId),
+      );
+      const locations = await activeLocations(tx, [purchase.destinationLocationId]);
       const destinationLocation = locations.get(purchase.destinationLocationId);
       if (!destinationLocation) {
         throw new InventoryNotFoundError("Active destination location not found.");

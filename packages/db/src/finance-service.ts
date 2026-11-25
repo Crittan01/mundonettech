@@ -345,56 +345,70 @@ export class FinanceService {
   }
 
   async refreshFiscalWatch(year?: number): Promise<FiscalWatchView> {
-    const nowRows = await this.db.$queryRaw<Array<{ localYear: number; localDate: Date }>>`
-      SELECT (EXTRACT(YEAR FROM CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota'))::int AS "localYear",
-        (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date AS "localDate"
-    `;
-    const clock = nowRows[0]!;
-    const fiscalYear = year ?? clock.localYear;
-    if (!Number.isInteger(fiscalYear) || fiscalYear < 2000 || fiscalYear > 9999) {
+    if (year !== undefined && (!Number.isInteger(year) || year < 2000 || year > 9999)) {
       throw new RangeError("fiscalYear is outside the supported range.");
     }
-    const settings = await this.db.storeSettings.findUnique({ where: { key: "default" } });
-    const uvtValueCents = settings?.uvtValueCents ?? this.defaults.uvtValueCents;
-    const uvtYear = settings?.uvtYear ?? this.defaults.uvtYear;
-    const thresholdUvt = settings?.annualRevenueAlertUvt ?? this.defaults.thresholdUvt;
-    if (uvtValueCents <= 0n || thresholdUvt < 1) throw new Error("Invalid stored fiscal settings.");
-    const thresholdCents = uvtValueCents * BigInt(thresholdUvt);
-    if (thresholdCents > 9_223_372_036_854_775_807n) {
-      throw new RangeError("Fiscal threshold exceeds BIGINT.");
-    }
-    const report = await this.report(
-      {
-        from: bogotaDayStart(`${fiscalYear}-01-01`),
-        to: bogotaDayStart(`${fiscalYear + 1}-01-01`),
-      },
-      1,
-    );
-    const grossCapturedCents = BigInt(report.summary.grossCapturedCents);
-    const refundedCents = BigInt(report.summary.refundedCents);
-    const net = grossCapturedCents - refundedCents;
-    const netRevenueCents = net >= 0n ? net : 0n;
-    const refundExcessCents = net < 0n ? -net : 0n;
-    const remainingCents =
-      grossCapturedCents >= thresholdCents ? 0n : thresholdCents - grossCapturedCents;
-    const status =
-      grossCapturedCents >= thresholdCents
-        ? "THRESHOLD_REACHED"
-        : grossCapturedCents * 5n >= thresholdCents * 4n
-          ? "APPROACHING_LIMIT"
-          : "WITHIN_LIMIT";
     return inInventoryTransaction(this.db, async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"fiscal-watch"}, 0))`;
+      const nowRows = await tx.$queryRaw<Array<{ localYear: number; localDate: Date; now: Date }>>`
+        SELECT (EXTRACT(YEAR FROM CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota'))::int AS "localYear",
+          (CURRENT_TIMESTAMP AT TIME ZONE 'America/Bogota')::date AS "localDate",
+          CURRENT_TIMESTAMP AS now
+      `;
+      const clock = nowRows[0]!;
+      const fiscalYear = year ?? clock.localYear;
+      if (!Number.isInteger(fiscalYear) || fiscalYear < 2000 || fiscalYear > 9999) {
+        throw new RangeError("fiscalYear is outside the supported range.");
+      }
+      const settings = await tx.storeSettings.findUnique({ where: { key: "default" } });
+      const uvtValueCents = settings?.uvtValueCents ?? this.defaults.uvtValueCents;
+      const uvtYear = settings?.uvtYear ?? this.defaults.uvtYear;
+      const thresholdUvt = settings?.annualRevenueAlertUvt ?? this.defaults.thresholdUvt;
+      if (uvtValueCents <= 0n || thresholdUvt < 1)
+        throw new Error("Invalid stored fiscal settings.");
+      const thresholdCents = uvtValueCents * BigInt(thresholdUvt);
+      if (thresholdCents > 9_223_372_036_854_775_807n) {
+        throw new RangeError("Fiscal threshold exceeds BIGINT.");
+      }
+      const cte = financeCte(
+        assertRange({
+          from: bogotaDayStart(`${fiscalYear}-01-01`),
+          to: bogotaDayStart(`${fiscalYear + 1}-01-01`),
+        }),
+      );
+      const totals = await tx.$queryRaw<FinanceSummaryRecord[]>(PrismaSql`
+        ${cte}
+        SELECT count(*) AS "orderCount",
+          COALESCE(sum("capturedCents"), 0)::text AS "capturedCents",
+          COALESCE(sum("voidedCents"), 0)::text AS "voidedCents",
+          COALESCE(sum("grossCapturedCents"), 0)::text AS "grossCapturedCents",
+          COALESCE(sum("refundedCents"), 0)::text AS "refundedCents",
+          COALESCE(sum("netRevenueCents"), 0)::text AS "netRevenueCents",
+          COALESCE(sum("wacCostCents"), 0)::text AS "wacCostCents",
+          COALESCE(sum("marginCents"), 0)::text AS "marginCents"
+        FROM finance_rows
+      `);
+      const reportSummary = summary(totals[0]);
+      const grossCapturedCents = BigInt(reportSummary.grossCapturedCents);
+      const refundedCents = BigInt(reportSummary.refundedCents);
+      const net = grossCapturedCents - refundedCents;
+      const netRevenueCents = net >= 0n ? net : 0n;
+      const refundExcessCents = net < 0n ? -net : 0n;
+      const remainingCents =
+        grossCapturedCents >= thresholdCents ? 0n : thresholdCents - grossCapturedCents;
+      const status =
+        grossCapturedCents >= thresholdCents
+          ? "THRESHOLD_REACHED"
+          : grossCapturedCents * 5n >= thresholdCents * 4n
+            ? "APPROACHING_LIMIT"
+            : "WITHIN_LIMIT";
       const firstReached = await tx.fiscalWatchSnapshot.findFirst({
         where: { fiscalYear, status: "THRESHOLD_REACHED" },
         orderBy: [{ snapshotDate: "asc" }, { createdAt: "asc" }],
         select: { thresholdReachedAt: true },
       });
-      const currentRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const thresholdReachedAt =
-        status === "THRESHOLD_REACHED"
-          ? (firstReached?.thresholdReachedAt ?? currentRows[0]!.now)
-          : null;
+        status === "THRESHOLD_REACHED" ? (firstReached?.thresholdReachedAt ?? clock.now) : null;
       const values = {
         uvtYear,
         uvtValueCents,
@@ -443,7 +457,7 @@ export class FinanceService {
       } else {
         await tx.notification.updateMany({
           where: { deduplicationKey: `fiscal-watch:${fiscalYear}:threshold`, resolvedAt: null },
-          data: { resolvedAt: currentRows[0]!.now },
+          data: { resolvedAt: clock.now },
         });
       }
       if (status === "APPROACHING_LIMIT") {
@@ -458,7 +472,7 @@ export class FinanceService {
       } else {
         await tx.notification.updateMany({
           where: { deduplicationKey: `fiscal-watch:${fiscalYear}:approaching`, resolvedAt: null },
-          data: { resolvedAt: currentRows[0]!.now },
+          data: { resolvedAt: clock.now },
         });
       }
       return fiscalView(snapshot);

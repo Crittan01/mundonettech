@@ -152,6 +152,8 @@ model Order {
   @@index([orderStatus, paymentStatus, fulfillmentStatus, createdAt])
   @@index([paymentStatus, reservationExpiresAt])
   @@index([municipalityCode])
+  @@index([clickCollectLocationId])
+  @@index([couponId])
   @@map("Order")
 }
 
@@ -188,6 +190,7 @@ model OrderItem {
 
   @@index([orderId, id])
   @@index([variantId, orderId])
+  @@index([bundleId])
   @@map("OrderItem")
 }
 
@@ -434,6 +437,7 @@ model Cart {
   @@index([customerId, status, updatedAt])
   @@index([kind, status, updatedAt])
   @@index([status, expiresAt])
+  @@index([couponId])
   @@map("Cart")
 }
 

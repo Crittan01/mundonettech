@@ -405,6 +405,7 @@ model OpportunityProposal {
   @@index([status, expiresAt])
   @@index([createdByAdminUserId, createdAt])
   @@index([anonymizedAt])
+  @@index([priceListId])
   @@map("OpportunityProposal")
 }
 
@@ -458,5 +459,6 @@ model OpportunityCopilotRun {
 
   @@index([opportunityId, createdAt])
   @@index([status, createdAt])
+  @@index([credentialId])
   @@map("OpportunityCopilotRun")
 }

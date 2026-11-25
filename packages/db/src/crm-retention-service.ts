@@ -1,6 +1,18 @@
-import type { Contact, PrismaClient } from "./generated/client.js";
-import { AccountService, AccountError } from "./account-service.js";
-import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
+import type { Contact, Prisma, PrismaClient } from "./generated/client.js";
+import {
+  AccountError,
+  AccountService,
+  acquireCustomerContactLockHierarchy,
+  hasNewIds,
+  peekCustomerAnonymizationScope,
+  sameSortedIds,
+} from "./account-service.js";
+import {
+  acquireOperationLocks,
+  assertUuid,
+  compareStrings,
+  inInventoryTransaction,
+} from "./inventory-shared.js";
 import {
   CrmError,
   crmActor,
@@ -11,8 +23,25 @@ import {
   redactCrmActivitiesInTransaction,
   redactCrmMergeHistoryInTransaction,
   redactCrmOpportunitiesInTransaction,
+  retryableLockDivergenceError,
   type CrmAudit,
 } from "./crm-shared.js";
+
+async function findContactLineageIds(
+  tx: Prisma.TransactionClient,
+  contactId: string,
+): Promise<string[]> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    WITH RECURSIVE lineage AS (
+      SELECT "id" FROM "Contact" WHERE "id" = ${contactId}::uuid
+      UNION
+      SELECT contact."id" FROM "Contact" contact
+      JOIN lineage parent ON contact."mergedIntoContactId" = parent."id"
+    )
+    SELECT "id" FROM lineage ORDER BY "id"
+  `;
+  return rows.map((item) => item.id);
+}
 
 export type CrmSuppressionReason =
   "DATA_SUBJECT_REQUEST" | "RETENTION_EXPIRED" | "OPERATIONAL_REVIEW";
@@ -52,11 +81,34 @@ export class CrmRetentionService {
     }
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:suppress");
-      await acquireOperationLocks(tx, [`crm-contact:${input.contactId}`]);
-      const requestedRows = await tx.$queryRaw<
-        Contact[]
-      >`SELECT * FROM "Contact" WHERE "id" = ${input.contactId}::uuid FOR UPDATE`;
-      const requested = requestedRows[0];
+      const peekRequested = await tx.contact.findUnique({
+        where: { id: input.contactId },
+        select: { id: true },
+      });
+      if (!peekRequested) throw new CrmError("NOT_FOUND", "Contact not found.");
+      const peekLineageIds = await findContactLineageIds(tx, input.contactId);
+      const peekContacts =
+        peekLineageIds.length > 0
+          ? await tx.contact.findMany({
+              where: { id: { in: peekLineageIds } },
+              select: { id: true, customerId: true },
+            })
+          : [];
+      const peekCustomerIds = [
+        ...new Set(
+          peekContacts
+            .map((contact) => contact.customerId)
+            .filter((value): value is string => value !== null),
+        ),
+      ].sort(compareStrings);
+      const peekScope = await peekCustomerAnonymizationScope(tx, peekCustomerIds);
+      const locked = await acquireCustomerContactLockHierarchy(tx, {
+        customerIds: peekCustomerIds,
+        contactIds: peekLineageIds,
+        scope: peekScope,
+      });
+      const contacts = locked.contacts;
+      const requested = contacts.find((contact) => contact.id === input.contactId);
       if (!requested) throw new CrmError("NOT_FOUND", "Contact not found.");
       if (requested.status === "ANONYMIZED") {
         return {
@@ -72,25 +124,29 @@ export class CrmRetentionService {
       if (requested.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The contact changed in another session.");
       }
-      const lineageRows = await tx.$queryRaw<Array<{ id: string }>>`
-        WITH RECURSIVE lineage AS (
-          SELECT "id" FROM "Contact" WHERE "id" = ${requested.id}::uuid
-          UNION ALL
-          SELECT contact."id" FROM "Contact" contact
-          JOIN lineage parent ON contact."mergedIntoContactId" = parent."id"
-        )
-        SELECT "id" FROM lineage ORDER BY "id"
-      `;
-      const lineageIds = lineageRows.map((item) => item.id);
-      await acquireOperationLocks(
-        tx,
-        lineageIds.map((id) => `crm-contact:${id}`),
-      );
-      const contacts = await tx.$queryRaw<
-        Contact[]
-      >`SELECT * FROM "Contact" WHERE "id" IN (SELECT * FROM unnest(${lineageIds}::uuid[])) ORDER BY "id" FOR UPDATE`;
-      if (contacts.length !== lineageIds.length) {
-        throw new CrmError("CONFLICT", "The contact lineage changed during suppression.");
+      const lineageIds = await findContactLineageIds(tx, requested.id);
+      if (contacts.length !== lineageIds.length || !sameSortedIds(peekLineageIds, lineageIds)) {
+        throw retryableLockDivergenceError("The contact lineage changed during suppression.");
+      }
+      const customerIds = [
+        ...new Set(
+          contacts
+            .map((contact) => contact.customerId)
+            .filter((value): value is string => value !== null),
+        ),
+      ].sort(compareStrings);
+      const verifiedScope = await peekCustomerAnonymizationScope(tx, customerIds);
+      if (
+        hasNewIds(peekCustomerIds, customerIds) ||
+        hasNewIds(peekScope.cartIds, verifiedScope.cartIds) ||
+        hasNewIds(peekScope.couponIds, verifiedScope.couponIds) ||
+        hasNewIds(peekScope.orderIds, verifiedScope.orderIds) ||
+        hasNewIds(peekScope.ticketIds, verifiedScope.ticketIds) ||
+        hasNewIds(peekScope.reviewIds, verifiedScope.reviewIds)
+      ) {
+        throw retryableLockDivergenceError(
+          "The contact suppression dependencies changed concurrently.",
+        );
       }
       const openTask = await tx.task.findFirst({
         where: { contactId: { in: lineageIds }, status: { in: ["PENDING", "IN_PROGRESS"] } },
@@ -122,13 +178,6 @@ export class CrmRetentionService {
           "Close active B2B opportunities and proposals before suppressing this lineage.",
         );
       }
-      const customerIds = [
-        ...new Set(
-          contacts
-            .map((contact) => contact.customerId)
-            .filter((value): value is string => value !== null),
-        ),
-      ].sort();
       const accounts = new AccountService(this.db, {
         privacyPolicyVersion: input.privacyPolicyVersion,
       });
@@ -147,14 +196,17 @@ export class CrmRetentionService {
           );
         }
       }
+      const lockedCustomerMap = new Map(
+        locked.customers.map((customer) => [customer.id, customer]),
+      );
       const anonymizedCustomers: string[] = [];
       for (const customerId of customerIds) {
-        const customer = await tx.customer.findUnique({
-          where: { id: customerId },
-          select: { status: true, deletedAt: true },
-        });
+        const customer = lockedCustomerMap.get(customerId);
         if (!customer || customer.status === "ANONYMIZED" || customer.deletedAt) continue;
-        await accounts.anonymizeInTransaction(tx, customerId, audit, { skipCrmCascade: true });
+        await accounts.anonymizeInTransaction(tx, customerId, audit, {
+          skipCrmCascade: true,
+          alreadyLocked: true,
+        });
         anonymizedCustomers.push(customerId);
       }
       const now = await crmNow(tx);
@@ -246,9 +298,12 @@ export class CrmRetentionService {
     `;
     const suppressed: string[] = [];
     const deferred: string[] = [];
+    const attempted = new Set<string>();
     for (const contact of due) {
+      if (attempted.has(contact.id)) continue;
+      attempted.add(contact.id);
       try {
-        await this.suppress(
+        const outcome = await this.suppress(
           {
             contactId: contact.id,
             expectedVersion: contact.version,
@@ -257,39 +312,51 @@ export class CrmRetentionService {
           },
           audit,
         );
-        suppressed.push(contact.id);
+        if (!outcome.replayed) {
+          suppressed.push(contact.id);
+        }
       } catch (error) {
+        if (error instanceof CrmError && error.code === "FORBIDDEN") {
+          throw error;
+        }
         if (
           !(error instanceof CrmError && error.code === "CONFLICT") &&
           !(error instanceof AccountError && error.code === "CONFLICT")
         ) {
-          throw error;
+          continue;
         }
-        await inInventoryTransaction(this.db, async (tx) => {
-          await crmActor(tx, audit, "crm:suppress");
-          await acquireOperationLocks(tx, [`crm-contact:${contact.id}`]);
-          const rows = await tx.$queryRaw<
-            Contact[]
-          >`SELECT * FROM "Contact" WHERE "id" = ${contact.id}::uuid FOR UPDATE`;
-          const current = rows[0];
-          if (!current || current.status !== "ACTIVE" || current.version !== contact.version)
-            return;
-          const reviewRows = await tx.$queryRaw<Array<{ retentionReviewAt: Date }>>`
-            SELECT CURRENT_TIMESTAMP + INTERVAL '30 days' AS "retentionReviewAt"
-          `;
-          await tx.contact.update({
-            where: { id: current.id },
-            data: {
-              retentionReviewAt: reviewRows[0]!.retentionReviewAt,
-              version: { increment: 1 },
-            },
+        try {
+          await inInventoryTransaction(this.db, async (tx) => {
+            await crmActor(tx, audit, "crm:suppress");
+            await acquireOperationLocks(tx, [`crm-contact:${contact.id}`]);
+            const rows = await tx.$queryRaw<
+              Contact[]
+            >`SELECT * FROM "Contact" WHERE "id" = ${contact.id}::uuid FOR UPDATE SKIP LOCKED`;
+            const current = rows[0];
+            if (!current || current.status !== "ACTIVE" || current.version !== contact.version)
+              return;
+            const reviewRows = await tx.$queryRaw<Array<{ retentionReviewAt: Date }>>`
+              SELECT CURRENT_TIMESTAMP + INTERVAL '30 days' AS "retentionReviewAt"
+            `;
+            await tx.contact.update({
+              where: { id: current.id },
+              data: {
+                retentionReviewAt: reviewRows[0]!.retentionReviewAt,
+                version: { increment: 1 },
+              },
+            });
+            await crmLog(tx, audit, "CRM_RETENTION_DEFERRED", "Contact", current.id, {
+              reason: "ACTIVE_OBLIGATIONS",
+              retentionMonths: this.retentionMonths,
+            });
+            deferred.push(current.id);
           });
-          await crmLog(tx, audit, "CRM_RETENTION_DEFERRED", "Contact", current.id, {
-            reason: "ACTIVE_OBLIGATIONS",
-            retentionMonths: this.retentionMonths,
-          });
-          deferred.push(current.id);
-        });
+        } catch (deferError) {
+          if (deferError instanceof CrmError && deferError.code === "FORBIDDEN") {
+            throw deferError;
+          }
+          continue;
+        }
       }
     }
     return { suppressed, deferred, scanned: due.length };

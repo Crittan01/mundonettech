@@ -5,9 +5,11 @@ import pg from "pg";
 import { securityPostureManifest } from "./security-posture-manifest.js";
 
 const dataApiRoles = ["anon", "authenticated", "service_role"] as const;
+const postgrestRoles = [...dataApiRoles, "authenticator"] as const;
 const requiredSearchPath = ["search_path=pg_catalog,public"] as const;
-const guardedNumericColumnPattern =
-  /(?:Cents$|quantity|stock|onhand|committed|points|balanceafter|^(?:price|unitPrice|compareAtPrice|cost|unitCost|subtotal|total|discount|tax|shippingFee|amount|refundAmount|balance|creditAmount)$)/i;
+const monetaryColumnPattern =
+  /(?:Cents$|^(?:price|cost|subtotal|total|discount|tax|fee|amount|balance|credit|revenue|proceeds|charge)$|(?:^|[a-z0-9])(?:Price|Cost|Subtotal|Total|Discount|Tax|Fee|Amount|Balance|Credit|Revenue|Proceeds|Charge)$)/;
+const guardedNumericColumnPattern = /^.+$/u;
 
 type ConstraintRow = {
   table: string;
@@ -171,6 +173,24 @@ function nonNegativeAtom(expression: string, column: string): NonNegativeProof {
   const nullMatch = new RegExp(`^(${sqlIdentifier})\\s+IS\\s+NULL$`, "iu").exec(atom);
   if (nullMatch?.[1] && identifierName(nullMatch[1]) === column) return "null";
 
+  const anyArray = new RegExp(
+    `^(${sqlIdentifier})\\s*=\\s*ANY\\s*\\(\\s*ARRAY\\s*\\[([\\s\\S]+)\\](?:::[A-Za-z_][A-Za-z0-9_ \\[\\]]*)?\\s*\\)$`,
+    "iu",
+  ).exec(atom);
+  if (anyArray?.[1] && identifierName(anyArray[1]) === column) {
+    const items = (anyArray[2] ?? "").split(",");
+    if (
+      items.length > 0 &&
+      items.every((item) => {
+        const literal = numericLiteral(item);
+        return literal !== null && literal >= 0;
+      })
+    ) {
+      return "bound";
+    }
+    return "none";
+  }
+
   const direct = new RegExp(`^(${sqlIdentifier})\\s*(>=|>|<=|<|=)\\s*([\\s\\S]+)$`, "iu").exec(
     atom,
   );
@@ -333,10 +353,11 @@ export async function verifySecurityPosture(
       role_name: string;
       rolsuper: boolean;
       rolbypassrls: boolean;
+      rolinherit: boolean;
     }>(
-      `SELECT rolname AS role_name, rolsuper, rolbypassrls
+      `SELECT rolname AS role_name, rolsuper, rolbypassrls, rolinherit
        FROM pg_roles WHERE rolname = ANY($1::text[])`,
-      [dataApiRoles],
+      [postgrestRoles],
     );
     const platformRoles = await client.query<{ reserved_roles: string | null }>(
       "SELECT current_setting('supautils.reserved_roles', true) AS reserved_roles",
@@ -354,6 +375,42 @@ export async function verifySecurityPosture(
         errors.push(
           `Role ${role} must exist without SUPERUSER or BYPASSRLS${role === "service_role" ? " unless BYPASSRLS is explicitly reserved by supautils for service_role" : ""}.`,
         );
+      }
+    }
+    const authenticatorRole = roleFlags.rows.find((item) => item.role_name === "authenticator");
+    if (
+      authenticatorRole &&
+      (authenticatorRole.rolsuper || authenticatorRole.rolbypassrls || authenticatorRole.rolinherit)
+    ) {
+      errors.push("Role authenticator must not have SUPERUSER, BYPASSRLS, or INHERIT.");
+    }
+
+    const dataApiMemberships = await client.query<{ member_name: string; role_name: string }>(
+      `SELECT member_role.rolname AS member_name, granted_role.rolname AS role_name
+       FROM pg_auth_members membership
+       JOIN pg_roles member_role ON member_role.oid = membership.member
+       JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+       WHERE member_role.rolname = ANY($1::text[])
+       ORDER BY member_role.rolname, granted_role.rolname`,
+      [dataApiRoles],
+    );
+    for (const row of dataApiMemberships.rows) {
+      errors.push(`Role ${row.member_name} must not hold membership in role ${row.role_name}.`);
+    }
+
+    if (authenticatorRole) {
+      const authenticatorMemberships = await client.query<{ role_name: string }>(
+        `SELECT granted_role.rolname AS role_name
+         FROM pg_auth_members membership
+         JOIN pg_roles member_role ON member_role.oid = membership.member
+         JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+         WHERE member_role.rolname = 'authenticator'
+           AND NOT (granted_role.rolname = ANY($1::text[]))
+         ORDER BY granted_role.rolname`,
+        [dataApiRoles],
+      );
+      for (const row of authenticatorMemberships.rows) {
+        errors.push(`Role authenticator holds unexpected membership in role ${row.role_name}.`);
       }
     }
 
@@ -391,19 +448,11 @@ export async function verifySecurityPosture(
        JOIN pg_class cls ON cls.oid = pol.polrelid
        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
        WHERE ns.nspname = 'public'
-         AND (
-           pol.polroles = '{0}'::oid[] OR
-           EXISTS (
-             SELECT 1 FROM pg_roles r
-             WHERE r.oid = ANY(pol.polroles)
-               AND r.rolname = ANY($1::text[])
-           )
-         )`,
-      [dataApiRoles],
+       ORDER BY cls.relname, pol.polname`,
     );
     for (const row of exposedPolicies.rows) {
       errors.push(
-        `Policy ${row.policy_name} on ${row.table_name} exposes public schema data to PUBLIC or Data API roles.`,
+        `Policy ${row.policy_name} on ${row.table_name} violates deny-by-default zero-policy posture on schema public.`,
       );
     }
 
@@ -416,12 +465,18 @@ export async function verifySecurityPosture(
               has_schema_privilege(role.oid, 'public', 'USAGE') AS has_usage,
               has_schema_privilege(role.oid, 'public', 'CREATE') AS has_create
        FROM pg_roles role WHERE role.rolname = ANY($1::text[])`,
-      [dataApiRoles],
+      [postgrestRoles],
     );
     for (const role of dataApiRoles) {
       const row = schemaPrivileges.rows.find((item) => item.role_name === role);
       if (!row || row.has_usage || row.has_create) {
         errors.push(`PostgREST role ${role} retains public schema privileges.`);
+      }
+    }
+    if (authenticatorRole) {
+      const authSchema = schemaPrivileges.rows.find((item) => item.role_name === "authenticator");
+      if (authSchema && (authSchema.has_usage || authSchema.has_create)) {
+        errors.push("PostgREST role authenticator retains public schema privileges.");
       }
     }
 
@@ -439,12 +494,62 @@ export async function verifySecurityPosture(
        ]) AS privilege
        WHERE role.rolname = ANY($1::text[])
          AND ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f')
-         AND has_table_privilege(role.oid, cls.oid, privilege)`,
-      [dataApiRoles],
+         AND has_table_privilege(role.oid, cls.oid, privilege)
+       ORDER BY role.rolname, cls.relname, privilege`,
+      [postgrestRoles],
     );
     for (const row of relationPrivileges.rows) {
       errors.push(
         `PostgREST role ${row.role_name} retains ${row.privilege} on ${row.relation_name}.`,
+      );
+    }
+
+    const anyColumnPrivileges = await client.query<{
+      role_name: string;
+      relation_name: string;
+      privilege: string;
+    }>(
+      `SELECT role.rolname AS role_name, cls.relname AS relation_name, privilege
+       FROM pg_roles role
+       CROSS JOIN pg_class cls
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       CROSS JOIN LATERAL unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'REFERENCES']) AS privilege
+       WHERE role.rolname = ANY($1::text[])
+         AND ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND has_any_column_privilege(role.oid, cls.oid, privilege)
+       ORDER BY role.rolname, cls.relname, privilege`,
+      [postgrestRoles],
+    );
+    for (const row of anyColumnPrivileges.rows) {
+      errors.push(
+        `PostgREST role ${row.role_name} retains column-level ${row.privilege} on ${row.relation_name}.`,
+      );
+    }
+
+    const explicitColumnPrivileges = await client.query<{
+      relation_name: string;
+      column_name: string;
+      grantee_name: string;
+      privilege: string;
+    }>(
+      `SELECT cls.relname AS relation_name, att.attname AS column_name,
+              COALESCE(grantee.rolname, 'PUBLIC') AS grantee_name, acl.privilege_type AS privilege
+       FROM pg_attribute att
+       JOIN pg_class cls ON cls.oid = att.attrelid
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       CROSS JOIN LATERAL aclexplode(att.attacl) AS acl
+       LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+       WHERE ns.nspname = 'public'
+         AND cls.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND att.attnum > 0 AND NOT att.attisdropped
+         AND att.attacl IS NOT NULL
+         AND (acl.grantee = 0 OR grantee.rolname = ANY($1::text[]))
+       ORDER BY cls.relname, att.attname, grantee_name, acl.privilege_type`,
+      [postgrestRoles],
+    );
+    for (const row of explicitColumnPrivileges.rows) {
+      errors.push(
+        `Role ${row.grantee_name} retains column privilege ${row.privilege} on ${row.relation_name}.${row.column_name}.`,
       );
     }
 
@@ -460,8 +565,9 @@ export async function verifySecurityPosture(
        CROSS JOIN LATERAL unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) AS privilege
        WHERE role.rolname = ANY($1::text[])
          AND ns.nspname = 'public' AND cls.relkind = 'S'
-         AND has_sequence_privilege(role.oid, cls.oid, privilege)`,
-      [dataApiRoles],
+         AND has_sequence_privilege(role.oid, cls.oid, privilege)
+       ORDER BY role.rolname, cls.relname, privilege`,
+      [postgrestRoles],
     );
     for (const row of sequencePrivileges.rows) {
       errors.push(
@@ -469,12 +575,40 @@ export async function verifySecurityPosture(
       );
     }
 
+    const defaultAclExposure = await client.query<{
+      grantor_name: string;
+      object_type: string;
+      grantee_name: string;
+      privilege: string;
+    }>(
+      `SELECT grantor.rolname AS grantor_name, default_acl.defaclobjtype AS object_type,
+              COALESCE(grantee.rolname, 'PUBLIC') AS grantee_name, acl.privilege_type AS privilege
+       FROM pg_default_acl default_acl
+       JOIN pg_namespace ns ON ns.oid = default_acl.defaclnamespace
+       JOIN pg_roles grantor ON grantor.oid = default_acl.defaclrole
+       CROSS JOIN LATERAL aclexplode(default_acl.defaclacl) AS acl
+       LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+       WHERE ns.nspname = 'public'
+         AND grantor.rolname <> 'supabase_admin'
+         AND (acl.grantee = 0 OR grantee.rolname = ANY($1::text[]))
+       ORDER BY grantor.rolname, default_acl.defaclobjtype, grantee_name, acl.privilege_type`,
+      [postgrestRoles],
+    );
+    for (const row of defaultAclExposure.rows) {
+      errors.push(
+        `Default privilege in public from ${row.grantor_name} exposes ${row.object_type} (${row.privilege}) to ${row.grantee_name}.`,
+      );
+    }
+
+    const allowedExtensionNames = securityPostureManifest.requiredExtensions.map(
+      (extension) => extension.name,
+    );
     const installedExtensions = await client.query<{ name: string; schema: string }>(
       `SELECT extension.extname AS name, ns.nspname AS schema
        FROM pg_extension extension
        JOIN pg_namespace ns ON ns.oid = extension.extnamespace
        WHERE extension.extname = ANY($1::text[])`,
-      [securityPostureManifest.requiredExtensions.map((extension) => extension.name)],
+      [allowedExtensionNames],
     );
     for (const required of securityPostureManifest.requiredExtensions) {
       const installed = installedExtensions.rows.find(
@@ -487,6 +621,19 @@ export async function verifySecurityPosture(
           `Extension ${required.name} must be installed in public or extensions; found ${installed.schema}.`,
         );
       }
+    }
+
+    const unexpectedPublicExtensions = await client.query<{ name: string }>(
+      `SELECT extension.extname AS name
+       FROM pg_extension extension
+       JOIN pg_namespace ns ON ns.oid = extension.extnamespace
+       WHERE ns.nspname = 'public'
+         AND NOT (extension.extname = ANY($1::text[]))
+       ORDER BY extension.extname`,
+      [allowedExtensionNames],
+    );
+    for (const row of unexpectedPublicExtensions.rows) {
+      errors.push(`Unexpected PostgreSQL extension ${row.name} is installed in schema public.`);
     }
 
     const functions = await client.query<FunctionRow>(
@@ -502,11 +649,17 @@ export async function verifySecurityPosture(
        JOIN pg_roles role ON role.oid = proc.proowner
        WHERE ns.nspname = 'public'
          AND NOT EXISTS (
-           SELECT 1 FROM pg_depend dependency
+           SELECT 1
+           FROM pg_depend dependency
+           JOIN pg_extension extension ON extension.oid = dependency.refobjid
            WHERE dependency.classid = 'pg_proc'::regclass
-             AND dependency.objid = proc.oid AND dependency.deptype = 'e'
+             AND dependency.objid = proc.oid
+             AND dependency.deptype = 'e'
+             AND dependency.refclassid = 'pg_extension'::regclass
+             AND extension.extname = ANY($1::text[])
          )
        ORDER BY identity`,
+      [allowedExtensionNames],
     );
     compareExact(
       errors,
@@ -517,12 +670,11 @@ export async function verifySecurityPosture(
     );
     for (const row of functions.rows) {
       if (
-        row.securityDefiner &&
-        (row.searchPath.length !== requiredSearchPath.length ||
-          row.searchPath.some((value, index) => value !== requiredSearchPath[index]))
+        row.searchPath.length !== requiredSearchPath.length ||
+        row.searchPath.some((value, index) => value !== requiredSearchPath[index])
       ) {
         errors.push(
-          `SECURITY DEFINER function ${row.identity} must have a fixed search_path of pg_catalog,public.`,
+          `Public function ${row.identity} must have a fixed search_path of pg_catalog,public.`,
         );
       }
     }
@@ -534,49 +686,57 @@ export async function verifySecurityPosture(
        JOIN pg_namespace ns ON ns.oid = proc.pronamespace
        WHERE role.rolname = ANY($1::text[])
          AND ns.nspname = 'public'
-         AND has_function_privilege(role.oid, proc.oid, 'EXECUTE')`,
-      [dataApiRoles],
+         AND has_function_privilege(role.oid, proc.oid, 'EXECUTE')
+       ORDER BY role.rolname, proc.proname`,
+      [postgrestRoles],
     );
     for (const row of functionPrivileges.rows) {
       errors.push(`PostgREST role ${row.role_name} can execute ${row.function_name}.`);
     }
 
-    const publicPrivileges = await client.query<{
-      schema_usage: boolean;
-      relation_name: string | null;
-      function_name: string | null;
+    const publicSchemaPrivileges = await client.query<{
+      has_usage: boolean;
+      has_create: boolean;
     }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM pg_namespace ns
-         CROSS JOIN LATERAL aclexplode(ns.nspacl) AS acl
-         WHERE ns.nspname = 'public' AND acl.grantee = 0
-           AND acl.privilege_type IN ('USAGE', 'CREATE')
-       ) AS schema_usage,
-       (SELECT cls.relname FROM pg_class cls
-        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
-        WHERE ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
-          AND EXISTS (
-            SELECT 1 FROM aclexplode(cls.relacl) AS acl
-            WHERE acl.grantee = 0
-          ) LIMIT 1) AS relation_name,
-       (SELECT proc.proname FROM pg_proc proc
-        JOIN pg_namespace ns ON ns.oid = proc.pronamespace
-        WHERE ns.nspname = 'public' AND (
-          proc.proacl IS NULL OR EXISTS (
-            SELECT 1 FROM aclexplode(proc.proacl) AS acl
-            WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
-          )
-        ) LIMIT 1) AS function_name`,
+      `SELECT has_schema_privilege('public', 'public', 'USAGE') AS has_usage,
+              has_schema_privilege('public', 'public', 'CREATE') AS has_create`,
     );
-    const publicRow = publicPrivileges.rows[0];
-    if (
-      publicRow &&
-      (publicRow.schema_usage || publicRow.relation_name || publicRow.function_name)
-    ) {
-      const target = publicRow.relation_name ?? publicRow.function_name;
-      errors.push(
-        `PUBLIC retains schema, relation, or function privileges${target ? ` (${target})` : ""}.`,
-      );
+    const publicSchemaRow = publicSchemaPrivileges.rows[0];
+    if (publicSchemaRow && (publicSchemaRow.has_usage || publicSchemaRow.has_create)) {
+      errors.push("PUBLIC retains schema privileges on public.");
+    }
+
+    const publicRelationPrivileges = await client.query<{
+      relation_name: string;
+      privilege: string;
+    }>(
+      `SELECT cls.relname AS relation_name, acl.privilege_type AS privilege
+       FROM pg_class cls
+       JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       CROSS JOIN LATERAL aclexplode(cls.relacl) AS acl
+       WHERE ns.nspname = 'public' AND cls.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+         AND acl.grantee = 0
+       ORDER BY cls.relname, acl.privilege_type`,
+    );
+    for (const row of publicRelationPrivileges.rows) {
+      errors.push(`PUBLIC retains ${row.privilege} on relation ${row.relation_name}.`);
+    }
+
+    const publicFunctionPrivileges = await client.query<{ function_name: string }>(
+      `SELECT proc.oid::regprocedure::text AS function_name
+       FROM pg_proc proc
+       JOIN pg_namespace ns ON ns.oid = proc.pronamespace
+       WHERE ns.nspname = 'public'
+         AND (
+           proc.proacl IS NULL OR EXISTS (
+             SELECT 1 FROM aclexplode(proc.proacl) AS acl
+             WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+           )
+         )
+       ORDER BY function_name`,
+    );
+    for (const row of publicFunctionPrivileges.rows) {
+      errors.push(`PUBLIC retains EXECUTE on routine ${row.function_name}.`);
     }
 
     const eventTriggers = await client.query<EventTriggerRow>(
@@ -592,7 +752,7 @@ export async function verifySecurityPosture(
        ORDER BY evt.evtname`,
     );
     const supabasePlatform = await client.query<{ present: boolean }>(
-      "SELECT to_regrole('supabase_admin') IS NOT NULL AS present",
+      "SELECT to_regrole('supabase_admin') IS NOT NULL AND to_regprocedure('extensions.pgrst_ddl_watch()') IS NOT NULL AS present",
     );
     const expectedEventTriggers = securityPostureManifest.eventTriggers.filter(
       (trigger) => supabasePlatform.rows[0]?.present === true || !trigger.platform,
@@ -604,6 +764,13 @@ export async function verifySecurityPosture(
       eventTriggers.rows,
       (row) => row.name,
     );
+    for (const eventTrigger of eventTriggers.rows) {
+      if (eventTrigger.enabled !== "O") {
+        errors.push(
+          `Event trigger ${eventTrigger.name} is not enabled in origin mode (found ${eventTrigger.enabled}).`,
+        );
+      }
+    }
 
     const triggers = await client.query<TriggerRow>(
       `SELECT cls.relname AS table, tg.tgname AS name,
@@ -634,6 +801,13 @@ export async function verifySecurityPosture(
       (row) => `${row.table}.${row.name}`,
       canonicalTrigger,
     );
+    for (const trigger of triggers.rows) {
+      if (trigger.enabled !== "O") {
+        errors.push(
+          `Trigger ${trigger.table}.${trigger.name} is not enabled in origin mode (found ${trigger.enabled}).`,
+        );
+      }
+    }
 
     const constraints = await client.query<ConstraintRow>(
       `SELECT cls.relname AS table, con.conname AS name, con.contype AS kind,
@@ -669,15 +843,22 @@ export async function verifySecurityPosture(
       (row) => `${row.table}.${row.name}`,
       canonicalConstraint,
     );
+    for (const constraint of constraints.rows) {
+      if (!constraint.validated) {
+        errors.push(`Constraint ${constraint.table}.${constraint.name} is not validated.`);
+      }
+    }
 
-    const numericColumns = await client.query<{ table: string; column: string }>(
-      `SELECT cls.relname AS table, att.attname AS column
+    const numericColumns = await client.query<{ table: string; column: string; type: string }>(
+      `SELECT cls.relname AS table, att.attname AS column, typ.typname AS type
        FROM pg_attribute att
        JOIN pg_class cls ON cls.oid = att.attrelid
        JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+       JOIN pg_type typ ON typ.oid = att.atttypid
        WHERE ns.nspname = 'public' AND cls.relkind IN ('r', 'p')
+         AND cls.relname <> '_prisma_migrations'
          AND att.attnum > 0 AND NOT att.attisdropped
-         AND att.atttypid IN ('int8'::regtype, 'int4'::regtype)
+         AND typ.typname IN ('int2', 'int4', 'int8', 'numeric', 'float4', 'float8')
        ORDER BY cls.relname, att.attname`,
     );
     const signedColumns = new Set(
@@ -685,22 +866,30 @@ export async function verifySecurityPosture(
     );
     const guardedColumns = new Set<string>();
     for (const row of numericColumns.rows) {
-      if (!guardedNumericColumnPattern.test(row.column)) continue;
       const key = `${row.table}.${row.column}`;
+      if (monetaryColumnPattern.test(row.column) && row.type !== "int8") {
+        errors.push(
+          `Monetary column ${key} must use int8 (BIGINT) COP cents instead of ${row.type}.`,
+        );
+      }
+      if (!guardedNumericColumnPattern.test(row.column)) continue;
       guardedColumns.add(key);
       if (signedColumns.has(key)) continue;
       const hasNonNegativeCheck = constraints.rows.some(
         (constraint) =>
           constraint.kind === "c" &&
+          constraint.validated === true &&
           constraint.table === row.table &&
           constraintGuaranteesNonNegative(constraint.definition, row.column),
       );
-      if (!hasNonNegativeCheck)
+      if (!hasNonNegativeCheck) {
         errors.push(`Monetary/stock column ${key} has no semantic non-negative CHECK coverage.`);
+      }
     }
     for (const key of signedColumns) {
-      if (!guardedColumns.has(key))
+      if (!guardedColumns.has(key)) {
         errors.push(`Signed numeric exception ${key} no longer exists.`);
+      }
     }
 
     const indexes = await client.query<IndexRow>(

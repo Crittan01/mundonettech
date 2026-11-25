@@ -12,11 +12,12 @@ import {
   habeasDataQueryBusinessDays,
 } from "@mundonettech/legal-co";
 
-import type { Prisma, PrismaClient } from "./generated/client.js";
+import type { Prisma, PrismaClient, SupportTicket } from "./generated/client.js";
 import {
   acquireOperationLocks,
   assertUuid,
   compareStrings,
+  hasUniqueViolation,
   inInventoryTransaction,
 } from "./inventory-shared.js";
 
@@ -163,46 +164,76 @@ export class PostSaleService {
     return { order, now };
   }
 
-  async getOrder(actor: PostSaleActor, orderId: string) {
-    return inInventoryTransaction(this.db, async (tx) => {
-      await this.lockOrderActor(tx, orderId, actor);
-      return tx.order.findUniqueOrThrow({
-        where: { id: orderId },
-        omit: {
-          acceptanceIpHash: true,
-          acceptanceUserAgentHash: true,
+  private async assertOrderActor(orderId: string, actor: PostSaleActor): Promise<void> {
+    assertUuid(orderId, "orderId");
+    actorIds(actor);
+    const order = await this.db.order.findUnique({
+      where: { id: orderId },
+      select: { id: true, customerId: true },
+    });
+    if (!order) throw new PostSaleError("NOT_FOUND", "Order not found.");
+    const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+    const now = nowRows[0]!.now;
+    if (actor.kind === "CUSTOMER") {
+      const customer = await this.db.customer.findFirst({
+        where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+        select: { id: true },
+      });
+      if (!customer || order.customerId !== actor.customerId) {
+        throw new PostSaleError("FORBIDDEN", "The customer does not own this order.");
+      }
+    } else {
+      const session = await this.db.guestOrderSession.findFirst({
+        where: {
+          id: actor.guestSessionId,
+          orderId,
+          revokedAt: null,
+          expiresAt: { gt: now },
         },
-        include: {
-          items: {
-            omit: { unitCostWacCents: true },
-            include: {
-              variant: {
-                omit: { costCents: true },
-                include: {
-                  product: {
-                    include: {
-                      variants: {
-                        where: { status: "ACTIVE", deletedAt: null },
-                        omit: { costCents: true },
-                      },
+        select: { id: true },
+      });
+      if (!session) throw new PostSaleError("FORBIDDEN", "The guest order session is not valid.");
+    }
+  }
+
+  async getOrder(actor: PostSaleActor, orderId: string) {
+    await this.assertOrderActor(orderId, actor);
+    return this.db.order.findUniqueOrThrow({
+      where: { id: orderId },
+      omit: {
+        acceptanceIpHash: true,
+        acceptanceUserAgentHash: true,
+      },
+      include: {
+        items: {
+          omit: { unitCostWacCents: true },
+          include: {
+            variant: {
+              omit: { costCents: true },
+              include: {
+                product: {
+                  include: {
+                    variants: {
+                      where: { status: "ACTIVE", deletedAt: null },
+                      omit: { costCents: true },
                     },
                   },
                 },
               },
-              shipmentItems: { include: { shipment: true } },
-              returnRequestItems: { include: { returnRequest: true, units: true } },
-              warrantyClaims: true,
-              reviews: true,
             },
+            shipmentItems: { include: { shipment: true } },
+            returnRequestItems: { include: { returnRequest: true, units: true } },
+            warrantyClaims: true,
+            reviews: true,
           },
-          shipments: { include: { items: true } },
-          serializedUnits: true,
-          returnRequests: { include: { items: { include: { units: true } } } },
-          warrantyClaims: true,
-          supportTickets: { include: { messages: { orderBy: { createdAt: "asc" } } } },
-          refunds: { include: { items: true, returnRequest: true, warrantyClaim: true } },
         },
-      });
+        shipments: { include: { items: true } },
+        serializedUnits: true,
+        returnRequests: { include: { items: { include: { units: true } } } },
+        warrantyClaims: true,
+        supportTickets: { include: { messages: { orderBy: { createdAt: "asc" } } } },
+        refunds: { include: { items: true, returnRequest: true, warrantyClaim: true } },
+      },
     });
   }
 
@@ -556,76 +587,95 @@ export class PostSaleService {
       actor: actorHash(actor),
       input: { ...input, subject, message, idempotencyKey },
     });
-    return inInventoryTransaction(this.db, async (tx) => {
-      const existing = await tx.supportTicket.findUnique({ where: { idempotencyKey } });
-      if (existing && sameHash(existing.requestHash, expectedHash)) {
-        return { id: existing.id, ticketNumber: existing.ticketNumber, replayed: true };
-      }
-      if (existing)
-        throw new PostSaleError(
-          "CONFLICT",
-          "The support idempotency key belongs to another request.",
-        );
-      const ids = actorIds(actor);
-      let email: string;
-      if (input.orderId) {
-        const { order } = await this.lockOrderActor(tx, input.orderId, actor);
-        if (!order.emailSnapshot)
+    try {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        const ids = actorIds(actor);
+        let email: string | null = null;
+        if (input.orderId) {
+          const { order } = await this.lockOrderActor(tx, input.orderId, actor);
+          email = order.emailSnapshot;
+        } else {
+          if (actor.kind !== "CUSTOMER")
+            throw new PostSaleError("VALIDATION", "Guest tickets require an order.");
+          await acquireOperationLocks(tx, [`customer-account:${actor.customerId}`]);
+          const customer = await tx.customer.findFirst({
+            where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+          });
+          if (!customer)
+            throw new PostSaleError("FORBIDDEN", "The customer account is not active.");
+          email = customer.email;
+        }
+        const existing = await tx.supportTicket.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          if (sameHash(existing.requestHash, expectedHash)) {
+            return { id: existing.id, ticketNumber: existing.ticketNumber, replayed: true };
+          }
+          throw new PostSaleError(
+            "CONFLICT",
+            "The support idempotency key belongs to another request.",
+          );
+        }
+        if (!email) {
           throw new PostSaleError("CONFLICT", "The order has no contact email.");
-        email = order.emailSnapshot;
-      } else {
-        if (actor.kind !== "CUSTOMER")
-          throw new PostSaleError("VALIDATION", "Guest tickets require an order.");
-        await acquireOperationLocks(tx, [`customer-account:${actor.customerId}`]);
-        const customer = await tx.customer.findFirst({
-          where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+        }
+        const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+        const now = nowRows[0]!.now;
+        const id = randomUUID();
+        const ticketNumber = `PQR-${bogotaDateOnly(now).slice(0, 4)}-${id}`;
+        const days = ["QUERY", "SUGGESTION"].includes(input.kind)
+          ? habeasDataQueryBusinessDays
+          : consumerPqrBusinessDays;
+        await tx.supportTicket.create({
+          data: {
+            id,
+            ticketNumber,
+            orderId: input.orderId ?? null,
+            requesterCustomerId: ids.customerId,
+            requesterGuestSessionId: ids.guestSessionId,
+            idempotencyKey,
+            requestHash: expectedHash,
+            kind: input.kind,
+            subject,
+            contactEmailSnapshot: normalizeEmail(email),
+            slaDueAt: calculateBusinessDayDeadlineAt(now, days),
+          },
         });
-        if (!customer) throw new PostSaleError("FORBIDDEN", "The customer account is not active.");
-        email = customer.email;
+        await tx.supportTicketMessage.create({
+          data: {
+            ticketId: id,
+            idempotencyKey: `${idempotencyKey}:initial`.slice(0, 128),
+            authorType: actor.kind,
+            authorCustomerId: ids.customerId,
+            authorGuestSessionId: ids.guestSessionId,
+            body: message,
+          },
+        });
+        await tx.domainOutbox.create({
+          data: {
+            eventType: "support.ticket.created.v1",
+            aggregateType: "SupportTicket",
+            aggregateId: id,
+            deduplicationKey: `support:${id}:created:v1`,
+            payload: { supportTicketId: id, ticketNumber },
+          },
+        });
+        return { id, ticketNumber, replayed: false };
+      });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        const existing = await this.db.supportTicket.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          if (sameHash(existing.requestHash, expectedHash)) {
+            return { id: existing.id, ticketNumber: existing.ticketNumber, replayed: true };
+          }
+          throw new PostSaleError(
+            "CONFLICT",
+            "The support idempotency key belongs to another request.",
+          );
+        }
       }
-      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-      const now = nowRows[0]!.now;
-      const id = randomUUID();
-      const ticketNumber = `PQR-${bogotaDateOnly(now).slice(0, 4)}-${id}`;
-      const days = ["QUERY", "SUGGESTION"].includes(input.kind)
-        ? habeasDataQueryBusinessDays
-        : consumerPqrBusinessDays;
-      await tx.supportTicket.create({
-        data: {
-          id,
-          ticketNumber,
-          orderId: input.orderId ?? null,
-          requesterCustomerId: ids.customerId,
-          requesterGuestSessionId: ids.guestSessionId,
-          idempotencyKey,
-          requestHash: expectedHash,
-          kind: input.kind,
-          subject,
-          contactEmailSnapshot: normalizeEmail(email),
-          slaDueAt: calculateBusinessDayDeadlineAt(now, days),
-        },
-      });
-      await tx.supportTicketMessage.create({
-        data: {
-          ticketId: id,
-          idempotencyKey: `${idempotencyKey}:initial`.slice(0, 128),
-          authorType: actor.kind,
-          authorCustomerId: ids.customerId,
-          authorGuestSessionId: ids.guestSessionId,
-          body: message,
-        },
-      });
-      await tx.domainOutbox.create({
-        data: {
-          eventType: "support.ticket.created.v1",
-          aggregateType: "SupportTicket",
-          aggregateId: id,
-          deduplicationKey: `support:${id}:created:v1`,
-          payload: { supportTicketId: id, ticketNumber },
-        },
-      });
-      return { id, ticketNumber, replayed: false };
-    });
+      throw error;
+    }
   }
 
   async replySupportTicket(
@@ -639,18 +689,25 @@ export class PostSaleService {
       throw new PostSaleError("VALIDATION", "expectedVersion must be nonnegative.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
-      const ticket = await tx.supportTicket.findUnique({ where: { id: input.ticketId } });
-      if (!ticket) throw new PostSaleError("NOT_FOUND", "Support ticket not found.");
-      const orderId = ticket.orderId;
-      if (!orderId) {
-        if (actor.kind !== "CUSTOMER" || ticket.requesterCustomerId !== actor.customerId) {
+      const peek = await tx.supportTicket.findUnique({
+        where: { id: input.ticketId },
+        select: { id: true, orderId: true, requesterCustomerId: true },
+      });
+      if (!peek) throw new PostSaleError("NOT_FOUND", "Support ticket not found.");
+      if (!peek.orderId) {
+        if (actor.kind !== "CUSTOMER" || peek.requesterCustomerId !== actor.customerId) {
           throw new PostSaleError("FORBIDDEN", "The customer does not own this ticket.");
         }
-        await acquireOperationLocks(tx, [`support:${ticket.id}`]);
+        await acquireOperationLocks(tx, [`support:${peek.id}`]);
       } else {
-        await this.lockOrderActor(tx, orderId, actor);
-        await acquireOperationLocks(tx, [`support:${ticket.id}`]);
+        await this.lockOrderActor(tx, peek.orderId, actor);
+        await acquireOperationLocks(tx, [`support:${peek.id}`]);
       }
+      const lockedTickets = await tx.$queryRaw<SupportTicket[]>`
+        SELECT * FROM "SupportTicket" WHERE "id" = ${input.ticketId}::uuid FOR UPDATE
+      `;
+      const ticket = lockedTickets[0];
+      if (!ticket) throw new PostSaleError("NOT_FOUND", "Support ticket not found.");
       const existing = await tx.supportTicketMessage.findUnique({ where: { idempotencyKey } });
       if (existing) {
         const ids = actorIds(actor);
@@ -685,26 +742,27 @@ export class PostSaleService {
           body,
         },
       });
-      await tx.supportTicket.update({
-        where: { id: ticket.id },
+      const updated = await tx.supportTicket.updateMany({
+        where: { id: ticket.id, version: input.expectedVersion },
         data: { status: "OPEN", version: { increment: 1 }, resolvedAt: null },
       });
+      if (updated.count !== 1) {
+        throw new PostSaleError("CONFLICT", "The support ticket changed in another session.");
+      }
       return { id: message.id, ticketId: ticket.id, replayed: false };
     });
   }
 
   async listSupportTickets(actor: PostSaleActor, orderId?: string) {
     if (orderId) {
-      return inInventoryTransaction(this.db, async (tx) => {
-        await this.lockOrderActor(tx, orderId, actor);
-        return tx.supportTicket.findMany({
-          where: { orderId },
-          include: {
-            messages: { orderBy: { createdAt: "asc" } },
-            order: { select: { orderNumber: true } },
-          },
-          orderBy: { createdAt: "desc" },
-        });
+      await this.assertOrderActor(orderId, actor);
+      return this.db.supportTicket.findMany({
+        where: { orderId },
+        include: {
+          messages: { orderBy: { createdAt: "asc" } },
+          order: { select: { orderNumber: true } },
+        },
+        orderBy: { createdAt: "desc" },
       });
     }
     if (actor.kind !== "CUSTOMER")

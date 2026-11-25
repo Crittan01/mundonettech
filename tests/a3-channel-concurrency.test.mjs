@@ -69,15 +69,61 @@ function delay(milliseconds) {
 }
 
 async function waitForDatabaseLockWait() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     const result = await admin.query(
       `SELECT 1 FROM pg_stat_activity
-       WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid() LIMIT 1`,
+       WHERE datname = current_database()
+         AND wait_event_type = 'Lock'
+         AND pid <> pg_backend_pid()
+       LIMIT 1`,
     );
     if (result.rows.length === 1) return;
     await delay(20);
   }
   throw new Error("The competing PostgreSQL transaction did not wait for a row lock.");
+}
+
+async function openAdvisoryBarrier(keys) {
+  const client = new pg.Client({ connectionString: harness.databaseUrl });
+  await client.connect();
+  await client.query("BEGIN");
+  for (const key of [...new Set(keys)].sort()) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
+  }
+  return client;
+}
+
+async function waitForAdvisoryWaiters(minimum = 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    const result = await admin.query(
+      `SELECT count(*)::int AS count FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND pid <> pg_backend_pid()
+         AND wait_event_type = 'Lock'
+         AND wait_event = 'advisory'`,
+    );
+    if (result.rows[0].count >= minimum) return;
+    await delay(20);
+  }
+  throw new Error(`Expected at least ${minimum} advisory-lock waiter(s).`);
+}
+
+function sqlErrorCode(error) {
+  if (!error || typeof error !== "object") return null;
+  if (typeof error.code === "string") return error.code;
+  for (const property of ["cause", "meta", "driverAdapterError"]) {
+    const nested = sqlErrorCode(error[property]);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function assertNoDeadlock(outcomes) {
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") {
+      assert.notEqual(sqlErrorCode(outcome.reason), "40P01", String(outcome.reason));
+    }
+  }
 }
 
 function instrumentDatabase(hooks) {
@@ -204,6 +250,13 @@ async function reconnect() {
     where: { id: account.id },
     include: { credential: true },
   });
+}
+
+async function ensureActiveAccount() {
+  const current = await db.channelAccount.findUnique({ where: { id: account.id } });
+  if (current && current.status !== "ACTIVE") {
+    await reconnect();
+  }
 }
 
 function remoteOrder(listing, quantity = 2) {
@@ -635,47 +688,55 @@ describe("A3 — channel lock ordering, credential fencing and claim recovery", 
     "fences delayed order 401s by account version and credential while revoking current credentials",
     { timeout: 20_000 },
     async () => {
-      const listing = await publish(await makeCatalog());
-      const staleRemote = remoteOrder(listing);
-      const entered = deferred();
-      const release = deferred();
-      orderBehavior = async () => {
-        entered.resolve();
-        await release.promise;
-        return { status: 401, body: { error: "unauthorized" } };
-      };
-      const processing = synchronize(staleRemote.orderId);
-      await entered.promise;
-      const reconnected = await reconnect();
-      release.resolve();
-      await assert.rejects(processing, (error) => error.code === "UNAUTHORIZED");
-      const afterStale = await db.channelAccount.findUniqueOrThrow({
-        where: { id: account.id },
-        include: { credential: true },
-      });
-      assert.equal(afterStale.status, "ACTIVE");
-      assert.equal(afterStale.credentialId, reconnected.credentialId);
-      assert.equal(afterStale.credential.revokedAt, null);
-      assert.equal(
-        await db.channelOrder.count({ where: { externalOrderId: staleRemote.orderId } }),
-        0,
-      );
+      try {
+        const listing = await publish(await makeCatalog());
+        const staleRemote = remoteOrder(listing);
+        const entered = deferred();
+        const release = deferred();
+        orderBehavior = async () => {
+          entered.resolve();
+          await release.promise;
+          return { status: 401, body: { error: "unauthorized" } };
+        };
+        const processing = synchronize(staleRemote.orderId);
+        try {
+          await entered.promise;
+          const reconnected = await reconnect();
+          release.resolve();
+          await assert.rejects(processing, (error) => error.code === "UNAUTHORIZED");
+          const afterStale = await db.channelAccount.findUniqueOrThrow({
+            where: { id: account.id },
+            include: { credential: true },
+          });
+          assert.equal(afterStale.status, "ACTIVE");
+          assert.equal(afterStale.credentialId, reconnected.credentialId);
+          assert.equal(afterStale.credential.revokedAt, null);
+          assert.equal(
+            await db.channelOrder.count({ where: { externalOrderId: staleRemote.orderId } }),
+            0,
+          );
 
-      const currentRemote = remoteOrder(listing);
-      orderBehavior = () => ({ status: 401, body: { error: "unauthorized" } });
-      await assert.rejects(synchronize(currentRemote.orderId), (error) => {
-        assert.equal(error.code, "UNAUTHORIZED");
-        return true;
-      });
-      const afterCurrent = await db.channelAccount.findUniqueOrThrow({
-        where: { id: account.id },
-        include: { credential: true },
-      });
-      assert.equal(afterCurrent.status, "REAUTH_REQUIRED");
-      assert.equal(afterCurrent.lastRefreshError, "CHANNEL_API_UNAUTHORIZED");
-      assert.equal(afterCurrent.credentialId, reconnected.credentialId);
-      assert.ok(afterCurrent.credential.revokedAt);
-      await reconnect();
+          const currentRemote = remoteOrder(listing);
+          orderBehavior = () => ({ status: 401, body: { error: "unauthorized" } });
+          await assert.rejects(synchronize(currentRemote.orderId), (error) => {
+            assert.equal(error.code, "UNAUTHORIZED");
+            return true;
+          });
+          const afterCurrent = await db.channelAccount.findUniqueOrThrow({
+            where: { id: account.id },
+            include: { credential: true },
+          });
+          assert.equal(afterCurrent.status, "REAUTH_REQUIRED");
+          assert.equal(afterCurrent.lastRefreshError, "CHANNEL_API_UNAUTHORIZED");
+          assert.equal(afterCurrent.credentialId, reconnected.credentialId);
+          assert.ok(afterCurrent.credential.revokedAt);
+        } finally {
+          release.resolve();
+        }
+      } finally {
+        orderBehavior = undefined;
+        await ensureActiveAccount();
+      }
     },
   );
 
@@ -683,45 +744,65 @@ describe("A3 — channel lock ordering, credential fencing and claim recovery", 
     "does not persist an order or reserve stock when disconnect wins during getOrder",
     { timeout: 20_000 },
     async () => {
-      const catalog = await makeCatalog();
-      const listing = await publish(catalog);
-      const remote = remoteOrder(listing);
-      const entered = deferred();
-      const release = deferred();
-      orderBehavior = async ({ current }) => {
-        entered.resolve();
-        await release.promise;
-        return { status: 200, body: current };
-      };
-      const processing = synchronize(remote.orderId);
-      await entered.promise;
-      const disconnected = await accounts.disconnectAccount(account.id, audit());
-      assert.equal(disconnected.alreadyDisconnected, false);
-      release.resolve();
-      await assert.rejects(processing, (error) => {
-        assert.equal(error.code, "CONFLICT");
-        return true;
-      });
-      assert.equal(await db.channelOrder.count({ where: { externalOrderId: remote.orderId } }), 0);
-      assert.equal(await db.channelPack.count({ where: { accountId: account.id } }), 0);
-      assert.equal(await db.channelShipment.count({ where: { accountId: account.id } }), 0);
-      const level = await db.stockLevel.findUniqueOrThrow({
-        where: {
-          locationId_variantId: {
-            locationId: catalog.inventory.locationId,
-            variantId: catalog.variantId,
-          },
-        },
-      });
-      assert.equal(level.onHand, 10);
-      assert.equal(level.committed, 0);
-      assert.equal(
-        await db.inventoryLedger.count({
+      try {
+        const catalog = await makeCatalog();
+        const listing = await publish(catalog);
+        const packsBefore = await db.channelPack.count({ where: { accountId: account.id } });
+        const shipmentsBefore = await db.channelShipment.count({
+          where: { accountId: account.id },
+        });
+        const channelLedgerBefore = await db.inventoryLedger.count({
           where: { operationKey: { startsWith: "channel-order:" } },
-        }),
-        0,
-      );
-      await reconnect();
+        });
+        const remote = remoteOrder(listing);
+        const entered = deferred();
+        const release = deferred();
+        orderBehavior = async ({ current }) => {
+          entered.resolve();
+          await release.promise;
+          return { status: 200, body: current };
+        };
+        const processing = synchronize(remote.orderId);
+        try {
+          await entered.promise;
+          const disconnected = await accounts.disconnectAccount(account.id, audit());
+          assert.equal(disconnected.alreadyDisconnected, false);
+        } finally {
+          release.resolve();
+        }
+        await assert.rejects(processing, (error) => {
+          assert.equal(error.code, "CONFLICT");
+          return true;
+        });
+        assert.equal(
+          await db.channelOrder.count({ where: { externalOrderId: remote.orderId } }),
+          0,
+        );
+        assert.equal(await db.channelPack.count({ where: { accountId: account.id } }), packsBefore);
+        assert.equal(
+          await db.channelShipment.count({ where: { accountId: account.id } }),
+          shipmentsBefore,
+        );
+        const level = await db.stockLevel.findUniqueOrThrow({
+          where: {
+            locationId_variantId: {
+              locationId: catalog.inventory.locationId,
+              variantId: catalog.variantId,
+            },
+          },
+        });
+        assert.equal(level.onHand, 10);
+        assert.equal(level.committed, 0);
+        assert.equal(
+          await db.inventoryLedger.count({
+            where: { operationKey: { startsWith: "channel-order:" } },
+          }),
+          channelLedgerBefore,
+        );
+      } finally {
+        orderBehavior = undefined;
+        await ensureActiveAccount();
+      }
     },
   );
 
@@ -911,6 +992,263 @@ describe("A3 — channel lock ordering, credential fencing and claim recovery", 
         }),
         0,
       );
+    },
+  );
+
+  it(
+    "serializes disconnectAccount with enqueueSync and processSyncJobs without deadlocks",
+    { timeout: 25_000 },
+    async () => {
+      try {
+        const listing = await createListing(await makeCatalog());
+        const finalizeLocked = deferred();
+        const releaseFinalize = deferred();
+        let accountUpdateLocks = 0;
+        const racingDb = instrumentDatabase({
+          afterRaw: async (text) => {
+            if (text.includes('FROM "ChannelAccount"') && text.includes("FOR UPDATE")) {
+              accountUpdateLocks += 1;
+              if (accountUpdateLocks === 2) {
+                finalizeLocked.resolve();
+                await releaseFinalize.promise;
+              }
+            }
+          },
+        });
+        const racingAccounts = new ChannelAccountService(racingDb, {
+          ring,
+          tokenUrl: `${fixture.origin}/oauth/token`,
+          revokeUrlBase: fixture.origin,
+          allowLoopback: true,
+          timeoutMs: 2_000,
+        });
+        const disconnecting = racingAccounts.disconnectAccount(account.id, audit());
+        let outcomes;
+        try {
+          await finalizeLocked.promise;
+          const enqueuing = catalogService.enqueueSync({
+            listingId: listing.id,
+            kind: "PUBLISH",
+            force: true,
+            audit: audit(),
+          });
+          await waitForDatabaseLockWait();
+          releaseFinalize.resolve();
+          outcomes = await Promise.allSettled([disconnecting, enqueuing]);
+        } finally {
+          releaseFinalize.resolve();
+        }
+        assertNoDeadlock(outcomes);
+        assert.equal(outcomes[0].status, "fulfilled");
+        assert.equal(outcomes[0].value.alreadyDisconnected, false);
+        assert.equal(outcomes[1].status, "rejected");
+        assert.equal(outcomes[1].reason.code, "REAUTH_REQUIRED");
+        await ensureActiveAccount();
+
+        const listingInFlight = await createListing(await makeCatalog());
+        const entered = deferred();
+        const release = deferred();
+        createBehavior = async () => {
+          entered.resolve();
+          await release.promise;
+          return undefined;
+        };
+        const processing = catalogService.processSyncJobs(audit(), {
+          listingId: listingInFlight.id,
+          limit: 1,
+          queueDrift: false,
+        });
+        try {
+          await entered.promise;
+          await assert.rejects(
+            accounts.disconnectAccount(account.id, audit()),
+            (error) => error.code === "CONFLICT",
+          );
+        } finally {
+          release.resolve();
+          createBehavior = undefined;
+        }
+        const inFlightResult = await processing;
+        assert.equal(inFlightResult.succeeded, 1, JSON.stringify(inFlightResult));
+
+        const listingRace = await createListing(await makeCatalog());
+        const raceOutcomes = await Promise.allSettled([
+          accounts.disconnectAccount(account.id, audit()),
+          catalogService.processSyncJobs(audit(), {
+            listingId: listingRace.id,
+            limit: 1,
+            queueDrift: false,
+          }),
+        ]);
+        assertNoDeadlock(raceOutcomes);
+        assert.equal(raceOutcomes[1].status, "fulfilled");
+        if (raceOutcomes[0].status === "rejected") {
+          assert.equal(raceOutcomes[0].reason.code, "CONFLICT");
+          assert.equal(raceOutcomes[1].value.succeeded, 1);
+        } else {
+          assert.equal(raceOutcomes[0].value.alreadyDisconnected, false);
+          assert.equal(
+            (await db.channelAccount.findUniqueOrThrow({ where: { id: account.id } })).status,
+            "DISCONNECTED",
+          );
+        }
+      } finally {
+        createBehavior = undefined;
+        await ensureActiveAccount();
+      }
+    },
+  );
+
+  it(
+    "claims a ready sync job immediately without starving behind more than 25 delayed jobs",
+    { timeout: 20_000 },
+    async () => {
+      const delayedListing = await createListing(await makeCatalog());
+      const initialDelayedJob = await db.channelSyncJob.findFirstOrThrow({
+        where: { listingId: delayedListing.id },
+      });
+      await admin.query(
+        `UPDATE "ChannelSyncJob"
+         SET "availableAt" = CURRENT_TIMESTAMP + INTERVAL '1 hour'
+         WHERE "id" = $1`,
+        [initialDelayedJob.id],
+      );
+      const insertedIds = [initialDelayedJob.id];
+      try {
+        for (let index = 0; index < 26; index += 1) {
+          const dedupHex = createHash("sha256")
+            .update(`delayed-starvation:${delayedListing.id}:${index}:${randomUUID()}`)
+            .digest("hex");
+          const created = await admin.query(
+            `INSERT INTO "ChannelSyncJob" (
+              "listingId", "kind", "status", "deduplicationKey", "requestHash",
+              "payload", "attempts", "availableAt", "createdByAdminUserId", "createdAt"
+            ) VALUES (
+              $1, 'PUBLISH', 'PENDING', $2, $3, $4::jsonb, 0,
+              CURRENT_TIMESTAMP + INTERVAL '1 hour', $5,
+              CURRENT_TIMESTAMP - INTERVAL '10 minutes'
+            ) RETURNING "id"`,
+            [
+              delayedListing.id,
+              `PUBLISH:${dedupHex}`,
+              randomBytes(32),
+              JSON.stringify({ listingVersion: 1, offerVersion: null }),
+              actor.id,
+            ],
+          );
+          insertedIds.push(created.rows[0].id);
+        }
+
+        const readyListing = await createListing(await makeCatalog());
+        const readyJob = await db.channelSyncJob.findFirstOrThrow({
+          where: { listingId: readyListing.id },
+        });
+        const batch = await catalogService.processSyncJobs(audit(), {
+          limit: 1,
+          queueDrift: false,
+        });
+        assert.equal(batch.claimed, 1, JSON.stringify(batch));
+        assert.equal(batch.succeeded, 1, JSON.stringify(batch));
+        assert.equal(
+          (await db.channelSyncJob.findUniqueOrThrow({ where: { id: readyJob.id } })).status,
+          "SUCCEEDED",
+        );
+        assert.equal(
+          await db.channelSyncJob.count({
+            where: { id: { in: insertedIds }, status: "PENDING", attempts: 0 },
+          }),
+          insertedIds.length,
+        );
+      } finally {
+        await admin
+          .query(
+            `UPDATE "ChannelSyncJob"
+             SET "status" = 'SUPERSEDED', "completedAt" = CURRENT_TIMESTAMP, "failureCode" = 'SUPERSEDED'
+             WHERE "id" = ANY($1::uuid[]) AND "status" IN ('PENDING', 'RETRY_SCHEDULED')`,
+            [insertedIds],
+          )
+          .catch(() => undefined);
+      }
+    },
+  );
+
+  it(
+    "serializes ChannelOrderService.persistOrder with markReconciled without reverting RECONCILED to REVIEW_REQUIRED",
+    { timeout: 20_000 },
+    async () => {
+      const listing = await publish(await makeCatalog());
+      const firstRemote = remoteOrder(listing, 1);
+      firstRemote.order.payments[0].marketplace_fee = 999;
+      const firstSync = await synchronize(firstRemote.orderId);
+      assert.equal(firstSync.orderIds.length, 1);
+      const firstOrder = await db.channelOrder.findUniqueOrThrow({
+        where: { id: firstSync.orderIds[0] },
+      });
+      assert.equal(firstOrder.reconciliationStatus, "REVIEW_REQUIRED");
+
+      const entered = deferred();
+      const release = deferred();
+      orderBehavior = async ({ current }) => {
+        entered.resolve();
+        await release.promise;
+        return { status: 200, body: current };
+      };
+      const inFlightSync = synchronize(firstRemote.orderId);
+      try {
+        await entered.promise;
+        await orderService.markReconciled({
+          orderId: firstOrder.id,
+          expectedVersion: firstOrder.version,
+          evidenceReference: "LIQ-A3-2026-001",
+          reasonCode: "FEE_VERIFIED_MANUALLY",
+          audit: audit(),
+        });
+      } finally {
+        release.resolve();
+        orderBehavior = undefined;
+      }
+      await inFlightSync;
+      const afterInFlight = await db.channelOrder.findUniqueOrThrow({
+        where: { id: firstOrder.id },
+      });
+      assert.equal(afterInFlight.reconciliationStatus, "RECONCILED");
+      assert.equal(afterInFlight.reconciliationReason, "FEE_VERIFIED_MANUALLY");
+      assert.ok(afterInFlight.reconciledAt);
+
+      const secondRemote = remoteOrder(listing, 1);
+      secondRemote.order.payments[0].marketplace_fee = 999;
+      const secondSync = await synchronize(secondRemote.orderId);
+      const secondOrder = await db.channelOrder.findUniqueOrThrow({
+        where: { id: secondSync.orderIds[0] },
+      });
+      assert.equal(secondOrder.reconciliationStatus, "REVIEW_REQUIRED");
+
+      const blocker = await openAdvisoryBarrier([`channel-order-id:${secondOrder.id}`]);
+      try {
+        const resync = synchronize(secondRemote.orderId);
+        const reconcile = orderService.markReconciled({
+          orderId: secondOrder.id,
+          expectedVersion: secondOrder.version,
+          evidenceReference: "LIQ-A3-2026-002",
+          reasonCode: "FEE_VERIFIED_MANUALLY",
+          audit: audit(),
+        });
+        await waitForAdvisoryWaiters(2);
+        await blocker.query("COMMIT");
+        const outcomes = await Promise.allSettled([resync, reconcile]);
+        assertNoDeadlock(outcomes);
+        assert.equal(outcomes[0].status, "fulfilled");
+        assert.equal(outcomes[1].status, "fulfilled");
+        const finalSecond = await db.channelOrder.findUniqueOrThrow({
+          where: { id: secondOrder.id },
+        });
+        assert.equal(finalSecond.reconciliationStatus, "RECONCILED");
+        assert.equal(finalSecond.reconciliationReason, "FEE_VERIFIED_MANUALLY");
+        assert.ok(finalSecond.reconciledAt);
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => undefined);
+        await blocker.end();
+      }
     },
   );
 });

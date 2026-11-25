@@ -37,6 +37,7 @@ import {
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const refreshWindowMs = 15 * 60 * 1000;
 const refreshLeaseMs = 30_000;
+const disconnectLeaseMs = 5 * 60 * 1000;
 const oauthLifetimeMs = 10 * 60 * 1000;
 const providerName = "mercado-libre";
 
@@ -530,6 +531,7 @@ export class ChannelAccountService {
       throw new ChannelAccountError("OAUTH_REPLAY", "OAuth state is invalid or was already used.");
     }
     const claimed = await this.db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOAuthAttempt" WHERE "id" = ${options.attemptId}::uuid FOR UPDATE`;
       const now = await this.now(tx);
       const attempt = await tx.channelOAuthAttempt.findUnique({
         where: { id: options.attemptId },
@@ -542,8 +544,8 @@ export class ChannelAccountService {
         await this.actor(tx, attempt.createdByAdminUserId, "integrations:write");
       } catch (error) {
         if (error instanceof ChannelAccountError && error.code === "FORBIDDEN") {
-          await tx.channelOAuthAttempt.update({
-            where: { id: attempt.id },
+          const failed = await tx.channelOAuthAttempt.updateMany({
+            where: { id: attempt.id, status: "PENDING" },
             data: {
               status: "FAILED",
               completedAt: now,
@@ -551,6 +553,7 @@ export class ChannelAccountService {
               updatedAt: now,
             },
           });
+          if (failed.count !== 1) return { kind: "REPLAY" as const };
           await tx.integrationCredential.updateMany({
             where: { id: attempt.credentialId, revokedAt: null },
             data: { revokedAt: now, updatedAt: now },
@@ -570,8 +573,8 @@ export class ChannelAccountService {
         throw error;
       }
       if (attempt.expiresAt <= now) {
-        await tx.channelOAuthAttempt.update({
-          where: { id: attempt.id },
+        const expired = await tx.channelOAuthAttempt.updateMany({
+          where: { id: attempt.id, status: "PENDING" },
           data: {
             status: "FAILED",
             completedAt: now,
@@ -579,8 +582,9 @@ export class ChannelAccountService {
             updatedAt: now,
           },
         });
-        await tx.integrationCredential.update({
-          where: { id: attempt.credentialId },
+        if (expired.count !== 1) return { kind: "REPLAY" as const };
+        await tx.integrationCredential.updateMany({
+          where: { id: attempt.credentialId, revokedAt: null },
           data: { revokedAt: now, updatedAt: now },
         });
         await this.audit(tx, {
@@ -1076,9 +1080,20 @@ export class ChannelAccountService {
       where: {
         environment: this.options.ring.environment,
         status: "ACTIVE",
-        OR: [
-          { tokenExpiresAt: { lte: new Date(now.getTime() + refreshWindowMs) } },
-          { refreshClaimExpiresAt: { lte: now } },
+        AND: [
+          {
+            OR: [
+              { tokenExpiresAt: { lte: new Date(now.getTime() + refreshWindowMs) } },
+              { refreshClaimExpiresAt: { lte: now } },
+            ],
+          },
+          {
+            OR: [
+              { refreshClaimId: null },
+              { refreshClaimExpiresAt: null },
+              { refreshClaimExpiresAt: { lte: now } },
+            ],
+          },
         ],
       },
       orderBy: [{ tokenExpiresAt: "asc" }, { id: "asc" }],
@@ -1149,6 +1164,7 @@ export class ChannelAccountService {
     assertUuid(accountId, "accountId");
     const normalizedAudit = validateAudit(audit);
     await this.actor(this.db, audit.actorAdminUserId, "integrations:write");
+    const disconnectClaimId = randomUUID();
     const preflight = await this.db.$transaction(async (tx) => {
       await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await this.lockAccount(tx, accountId);
@@ -1205,6 +1221,15 @@ export class ChannelAccountService {
           "Wait for the in-flight channel order ingestion before disconnecting.",
         );
       }
+      await tx.channelAccount.update({
+        where: { id: accountId },
+        data: {
+          refreshClaimId: disconnectClaimId,
+          refreshClaimedAt: now,
+          refreshClaimExpiresAt: new Date(now.getTime() + disconnectLeaseMs),
+          updatedAt: now,
+        },
+      });
       return { kind: "READY" as const, account };
     });
     if (preflight.kind === "ALREADY_DISCONNECTED") {
@@ -1224,161 +1249,188 @@ export class ChannelAccountService {
     } finally {
       plaintext?.fill(0);
     }
-    await this.db.$transaction(async (tx) => {
-      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
-      await this.lockAccount(tx, accountId);
-      const now = await this.now(tx);
-      const current = await tx.channelAccount.findUnique({ where: { id: accountId } });
-      if (
-        !current ||
-        current.version !== account.version ||
-        current.status === "DISCONNECTED" ||
-        (current.refreshClaimExpiresAt && current.refreshClaimExpiresAt > now)
-      ) {
-        throw new ChannelAccountError(
-          "CONFLICT",
-          "The channel changed during disconnection; review it before retrying.",
-        );
-      }
-      await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "accountId" = ${accountId}::uuid ORDER BY "id" FOR UPDATE`;
-      await tx.$executeRaw`
-        SELECT job."id" FROM "ChannelSyncJob" job
-        JOIN "ChannelListing" listing ON listing."id" = job."listingId"
-        WHERE listing."accountId" = ${accountId}::uuid
-        ORDER BY job."id"
-        FOR UPDATE OF job`;
-      const processingAttempt = await tx.channelOAuthAttempt.findFirst({
-        where: { accountId, status: "PROCESSING" },
-        select: { id: true },
-      });
-      if (processingAttempt) {
-        throw new ChannelAccountError(
-          "CONFLICT",
-          "The channel changed during disconnection; review it before retrying.",
-        );
-      }
-      const processingSync = await tx.channelSyncJob.findFirst({
-        where: { listing: { accountId }, status: "PROCESSING" },
-        select: { id: true },
-      });
-      if (processingSync) {
-        throw new ChannelAccountError(
-          "CONFLICT",
-          "The channel changed during disconnection; review it before retrying.",
-        );
-      }
-      const processingIngestion = await tx.domainOutbox.findFirst({
-        where: {
-          eventType: "channel.resource.sync.requested.v1",
-          aggregateType: "ChannelAccount",
-          aggregateId: accountId,
-          processedAt: null,
-          failedAt: null,
-          claimExpiresAt: { gt: now },
-        },
-        select: { id: true },
-      });
-      if (processingIngestion) {
-        throw new ChannelAccountError(
-          "CONFLICT",
-          "The channel changed during disconnection; review it before retrying.",
-        );
-      }
-      const pendingAttempts = await tx.channelOAuthAttempt.findMany({
-        where: { accountId, status: "PENDING" },
-        select: { id: true, credentialId: true },
-      });
-      for (const pending of pendingAttempts) {
-        await tx.channelOAuthAttempt.update({
-          where: { id: pending.id },
+    let alreadyDisconnected = false;
+    try {
+      alreadyDisconnected = await this.db.$transaction(async (tx) => {
+        await this.actor(tx, audit.actorAdminUserId, "integrations:write");
+        await this.lockAccount(tx, accountId);
+        const now = await this.now(tx);
+        const current = await tx.channelAccount.findUnique({ where: { id: accountId } });
+        if (current?.status === "DISCONNECTED") {
+          return true;
+        }
+        if (
+          !current ||
+          current.version !== account.version ||
+          current.refreshClaimId !== disconnectClaimId
+        ) {
+          throw new ChannelAccountError(
+            "CONFLICT",
+            "The channel changed during disconnection; review it before retrying.",
+          );
+        }
+        await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "accountId" = ${accountId}::uuid ORDER BY "id" FOR UPDATE`;
+        await tx.$executeRaw`
+          SELECT job."id" FROM "ChannelSyncJob" job
+          JOIN "ChannelListing" listing ON listing."id" = job."listingId"
+          WHERE listing."accountId" = ${accountId}::uuid
+          ORDER BY job."id"
+          FOR UPDATE OF job`;
+        const processingAttempt = await tx.channelOAuthAttempt.findFirst({
+          where: { accountId, status: "PROCESSING" },
+          select: { id: true },
+        });
+        if (processingAttempt) {
+          throw new ChannelAccountError(
+            "CONFLICT",
+            "The channel changed during disconnection; review it before retrying.",
+          );
+        }
+        const processingSync = await tx.channelSyncJob.findFirst({
+          where: { listing: { accountId }, status: "PROCESSING" },
+          select: { id: true },
+        });
+        if (processingSync) {
+          throw new ChannelAccountError(
+            "CONFLICT",
+            "The channel changed during disconnection; review it before retrying.",
+          );
+        }
+        const processingIngestion = await tx.domainOutbox.findFirst({
+          where: {
+            eventType: "channel.resource.sync.requested.v1",
+            aggregateType: "ChannelAccount",
+            aggregateId: accountId,
+            processedAt: null,
+            failedAt: null,
+            claimExpiresAt: { gt: now },
+          },
+          select: { id: true },
+        });
+        if (processingIngestion) {
+          throw new ChannelAccountError(
+            "CONFLICT",
+            "The channel changed during disconnection; review it before retrying.",
+          );
+        }
+        const pendingAttempts = await tx.channelOAuthAttempt.findMany({
+          where: { accountId, status: "PENDING" },
+          select: { id: true, credentialId: true },
+        });
+        for (const pending of pendingAttempts) {
+          await tx.channelOAuthAttempt.update({
+            where: { id: pending.id },
+            data: {
+              status: "FAILED",
+              completedAt: now,
+              failureCode: "OAUTH_CANCELLED",
+              updatedAt: now,
+            },
+          });
+          await tx.integrationCredential.updateMany({
+            where: { id: pending.credentialId, revokedAt: null },
+            data: { revokedAt: now, updatedAt: now },
+          });
+          await this.audit(tx, {
+            actorAdminUserId: audit.actorAdminUserId,
+            action: "CHANNEL_OAUTH_FAILED",
+            targetType: "ChannelOAuthAttempt",
+            targetId: pending.id,
+            ...normalizedAudit,
+            accountId,
+            attemptId: pending.id,
+            outcome: "OAUTH_CANCELLED",
+          });
+        }
+        await tx.channelSyncJob.updateMany({
+          where: {
+            listing: { accountId },
+            status: { in: ["PENDING", "RETRY_SCHEDULED"] },
+          },
           data: {
             status: "FAILED",
             completedAt: now,
-            failureCode: "OAUTH_CANCELLED",
+            failureCode: "ACCOUNT_DISCONNECTED",
+            claimId: null,
+            claimedBy: null,
+            claimedAt: null,
+            claimExpiresAt: null,
             updatedAt: now,
           },
         });
+        await tx.channelListing.updateMany({
+          where: { accountId, externalUserProductId: { not: null }, status: { not: "CLOSED" } },
+          data: { status: "PAUSED", lastProviderError: "ACCOUNT_DISCONNECTED", updatedAt: now },
+        });
+        await tx.channelListing.updateMany({
+          where: { accountId, externalUserProductId: null },
+          data: { lastProviderError: "ACCOUNT_DISCONNECTED", updatedAt: now },
+        });
+        await tx.channelOffer.updateMany({
+          where: {
+            listing: { accountId },
+            externalItemId: { not: null },
+            status: { not: "CLOSED" },
+          },
+          data: { status: "PAUSED", updatedAt: now },
+        });
         await tx.integrationCredential.updateMany({
-          where: { id: pending.credentialId, revokedAt: null },
+          where: { id: account.credentialId, revokedAt: null },
           data: { revokedAt: now, updatedAt: now },
         });
+        const disconnected = await tx.channelAccount.updateMany({
+          where: {
+            id: accountId,
+            version: account.version,
+            refreshClaimId: disconnectClaimId,
+            status: { not: "DISCONNECTED" },
+          },
+          data: {
+            status: "DISCONNECTED",
+            tokenExpiresAt: null,
+            lastRefreshError: remoteRevoked ? null : "REMOTE_REVOCATION_UNCERTAIN",
+            refreshClaimId: null,
+            refreshClaimedAt: null,
+            refreshClaimExpiresAt: null,
+            disconnectedAt: now,
+            version: { increment: 1 },
+            updatedAt: now,
+          },
+        });
+        if (disconnected.count !== 1) {
+          throw new ChannelAccountError(
+            "CONFLICT",
+            "The channel changed during disconnection; review it before retrying.",
+          );
+        }
         await this.audit(tx, {
           actorAdminUserId: audit.actorAdminUserId,
-          action: "CHANNEL_OAUTH_FAILED",
-          targetType: "ChannelOAuthAttempt",
-          targetId: pending.id,
+          action: "CHANNEL_ACCOUNT_DISCONNECTED",
+          targetType: "ChannelAccount",
+          targetId: accountId,
           ...normalizedAudit,
           accountId,
-          attemptId: pending.id,
-          outcome: "OAUTH_CANCELLED",
+          outcome: remoteRevoked ? "REMOTE_REVOKED" : "REMOTE_REVOCATION_UNCERTAIN",
         });
-      }
-      await tx.channelSyncJob.updateMany({
-        where: {
-          listing: { accountId },
-          status: { in: ["PENDING", "RETRY_SCHEDULED"] },
-        },
-        data: {
-          status: "FAILED",
-          completedAt: now,
-          failureCode: "ACCOUNT_DISCONNECTED",
-          claimId: null,
-          claimedBy: null,
-          claimedAt: null,
-          claimExpiresAt: null,
-          updatedAt: now,
-        },
+        return false;
       });
-      await tx.channelListing.updateMany({
-        where: { accountId, externalUserProductId: { not: null }, status: { not: "CLOSED" } },
-        data: { status: "PAUSED", lastProviderError: "ACCOUNT_DISCONNECTED", updatedAt: now },
-      });
-      await tx.channelListing.updateMany({
-        where: { accountId, externalUserProductId: null },
-        data: { lastProviderError: "ACCOUNT_DISCONNECTED", updatedAt: now },
-      });
-      await tx.channelOffer.updateMany({
-        where: {
-          listing: { accountId },
-          externalItemId: { not: null },
-          status: { not: "CLOSED" },
-        },
-        data: { status: "PAUSED", updatedAt: now },
-      });
-      await tx.integrationCredential.updateMany({
-        where: { id: account.credentialId, revokedAt: null },
-        data: { revokedAt: now, updatedAt: now },
-      });
-      const disconnected = await tx.channelAccount.updateMany({
-        where: { id: accountId, version: account.version, status: { not: "DISCONNECTED" } },
-        data: {
-          status: "DISCONNECTED",
-          tokenExpiresAt: null,
-          lastRefreshError: remoteRevoked ? null : "REMOTE_REVOCATION_UNCERTAIN",
-          refreshClaimId: null,
-          refreshClaimedAt: null,
-          refreshClaimExpiresAt: null,
-          disconnectedAt: now,
-          version: { increment: 1 },
-          updatedAt: now,
-        },
-      });
-      if (disconnected.count !== 1) {
-        throw new ChannelAccountError(
-          "CONFLICT",
-          "The channel changed during disconnection; review it before retrying.",
-        );
-      }
-      await this.audit(tx, {
-        actorAdminUserId: audit.actorAdminUserId,
-        action: "CHANNEL_ACCOUNT_DISCONNECTED",
-        targetType: "ChannelAccount",
-        targetId: accountId,
-        ...normalizedAudit,
-        accountId,
-        outcome: remoteRevoked ? "REMOTE_REVOKED" : "REMOTE_REVOCATION_UNCERTAIN",
-      });
-    });
-    return { accountId, alreadyDisconnected: false, remoteRevoked };
+    } catch (error) {
+      await this.db.channelAccount
+        .updateMany({
+          where: { id: accountId, refreshClaimId: disconnectClaimId },
+          data: {
+            refreshClaimId: null,
+            refreshClaimedAt: null,
+            refreshClaimExpiresAt: null,
+          },
+        })
+        .catch(() => undefined);
+      throw error;
+    }
+    return {
+      accountId,
+      alreadyDisconnected,
+      remoteRevoked: alreadyDisconnected ? false : remoteRevoked,
+    };
   }
 }

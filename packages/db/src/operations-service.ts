@@ -1,7 +1,7 @@
 import { hasAdminPermission, isAdminRole, maskName, type AdminRoleValue } from "@mundonettech/core";
 
 import type { Prisma, PrismaClient } from "./generated/client.js";
-import { acquireOperationLocks, assertUuid } from "./inventory-shared.js";
+import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
 import { recordAdminAction, type AdminActionAudit } from "./primitives.js";
 import type {
   OperationalNotification,
@@ -140,7 +140,7 @@ export class OperationsService {
     if (!/^[0-9a-f]{64}$/.test(input.eventKey)) {
       throw new TypeError("eventKey must be a lowercase SHA-256 hex digest.");
     }
-    await this.db.$transaction(async (tx) => {
+    await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [
         `order-payment:${input.orderId}`,
         "operations-notifications",

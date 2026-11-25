@@ -898,6 +898,11 @@ describe("A3 — role, privilege and future-table hardening", () => {
           }
         }
       } finally {
+        for (const role of dataApiRoles) {
+          await administrator
+            .query(`ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS`)
+            .catch(() => undefined);
+        }
         await administrator.end();
       }
     },
@@ -1079,6 +1084,405 @@ describe("A3 — natural soft-delete and referential actions", () => {
         [fixture.productId],
       );
       assert.equal(attributes.rows[0].count, 0);
+    });
+  });
+});
+
+describe("A3 — hardened URL redirect, UVT, soft-delete lifecycle, and updatedAt triggers", () => {
+  it("protects UrlRedirectCacheState from DELETE/TRUNCATE, bumps on TRUNCATE UrlRedirect, and blocks direct SQL cycles", async () => {
+    await withRollback(async (client) => {
+      await expectSqlViolation(client, `DELETE FROM "UrlRedirectCacheState"`, [], "55000");
+      await expectSqlViolation(client, `TRUNCATE "UrlRedirectCacheState"`, [], "55000");
+
+      const prefix = `/a3-cycle-${randomUUID()}`;
+      await client.query(
+        `INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2), ($2, $3)`,
+        [`${prefix}-a`, `${prefix}-b`, `${prefix}-c`],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "UrlRedirect" ("fromPath", "toPath") VALUES ($1, $2)`,
+        [`${prefix}-c`, `${prefix}-a`],
+        "23514",
+      );
+
+      const beforeTruncate = await client.query(
+        `SELECT "version" FROM "UrlRedirectCacheState"
+         WHERE "id" = '00000000-0000-0000-0000-000000000001'::uuid`,
+      );
+      await client.query(`TRUNCATE "UrlRedirect"`);
+      const afterTruncate = await client.query(
+        `SELECT "version" FROM "UrlRedirectCacheState"
+         WHERE "id" = '00000000-0000-0000-0000-000000000001'::uuid`,
+      );
+      assert.equal(
+        BigInt(afterTruncate.rows[0].version),
+        BigInt(beforeTruncate.rows[0].version) + 1n,
+      );
+    });
+  });
+
+  it("rejects invalid Order.uvtYear values even when cartId IS NULL", async () => {
+    await withRollback(async (client) => {
+      for (const invalidYear of [-1, 0, 1999, 10000]) {
+        await expectSqlViolation(
+          client,
+          `INSERT INTO "Order" (
+             "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus",
+             "uvtYear", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents"
+           ) VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', $2, 100000, 0, 0, 0, 100000)`,
+          [`A3UVT-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`, invalidYear],
+          "23514",
+          "Order_uvtYear_valid",
+        );
+      }
+
+      const validOrder = await client.query(
+        `INSERT INTO "Order" (
+           "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus",
+           "uvtYear", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents"
+         ) VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', 2026, 100000, 0, 0, 0, 100000)
+         RETURNING "cartId", "uvtYear"`,
+        [`A3UVT-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`],
+      );
+      assert.equal(validOrder.rows[0].cartId, null);
+      assert.equal(validOrder.rows[0].uvtYear, 2026);
+    });
+  });
+
+  it("blocks archiving StockLocation, ProductVariant, and Product while ChannelOrder is CANCELLED + REVIEW_REQUIRED", async () => {
+    await withRollback(async (client) => {
+      const adminUserId = await createAdmin(client);
+      const credentialId = randomUUID();
+      await client.query(
+        `INSERT INTO "IntegrationCredential" (
+           "id", "provider", "environment", "accountName", "keyVersion", "nonce",
+           "ciphertext", "authTag", "createdByAdminUserId"
+         ) VALUES ($1, 'mercado-libre', 'LOCAL', $2, 1, $3, $4, $5, $6)`,
+        [
+          credentialId,
+          `a3-meli-${randomUUID().slice(0, 12)}`,
+          randomBytes(12),
+          randomBytes(32),
+          randomBytes(16),
+          adminUserId,
+        ],
+      );
+      const fixture = await createCatalogFixture(client);
+      const locationId = await createLocationWithZeroStock(client, fixture.variantId);
+      const accountId = randomUUID();
+      await client.query(
+        `INSERT INTO "ChannelAccount" (
+           "id", "provider", "siteId", "environment", "credentialId", "externalAccountId",
+           "label", "status", "scopes", "tokenExpiresAt", "createdByAdminUserId"
+         ) VALUES (
+           $1, 'MERCADO_LIBRE', 'MCO', 'LOCAL', $2, $3, 'A3 Meli', 'ACTIVE',
+           ARRAY['offline_access', 'read', 'write'], CURRENT_TIMESTAMP + INTERVAL '1 hour', $4
+         )`,
+        [
+          accountId,
+          credentialId,
+          String(Math.floor(100000000 + Math.random() * 899999999)),
+          adminUserId,
+        ],
+      );
+
+      const channelOrderId = randomUUID();
+      await client.query(
+        `INSERT INTO "ChannelOrder" (
+           "id", "accountId", "variantId", "stockLocationId", "externalOrderId", "externalItemId",
+           "remoteStatus", "status", "stockStatus", "quantity", "unitPriceCents",
+           "grossAmountCents", "paidAmountCents", "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, 'cancelled', 'CANCELLED', 'REVIEW_REQUIRED',
+           1, 100000, 100000, 0, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+         )`,
+        [
+          channelOrderId,
+          accountId,
+          fixture.variantId,
+          locationId,
+          String(Math.floor(1000000000 + Math.random() * 8999999999)),
+          `MCO${Math.floor(1000000000 + Math.random() * 8999999999)}`,
+          randomBytes(32),
+        ],
+      );
+
+      await expectArchive(client, "StockLocation", locationId, false);
+      await expectArchive(client, "ProductVariant", fixture.variantId, false);
+      await expectArchive(client, "Product", fixture.productId, false);
+
+      await client.query(
+        `UPDATE "ChannelOrder" SET "stockStatus" = 'NOT_REQUIRED' WHERE "id" = $1`,
+        [channelOrderId],
+      );
+      await expectArchive(client, "StockLocation", locationId, true);
+      await expectArchive(client, "ProductVariant", fixture.variantId, true);
+      await expectArchive(client, "Product", fixture.productId, true);
+    });
+  });
+
+  it("blocks archiving StockLocation, ProductVariant, and Product while a CONFIRMED order has FAILED paymentStatus", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createCatalogFixture(client);
+      const locationId = await createLocationWithZeroStock(
+        client,
+        fixture.variantId,
+        "CLICK_COLLECT",
+      );
+      const order = await createOrder(client, {
+        variantId: fixture.variantId,
+        clickCollectLocationId: locationId,
+        orderStatus: "CONFIRMED",
+        paymentStatus: "FAILED",
+        fulfillmentStatus: "FULFILLED",
+      });
+
+      await expectArchive(client, "StockLocation", locationId, false);
+      await expectArchive(client, "ProductVariant", fixture.variantId, false);
+      await expectArchive(client, "Product", fixture.productId, false);
+
+      await client.query(
+        `UPDATE "Order" SET "orderStatus" = 'CANCELLED', "cancelledAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [order.id],
+      );
+      await expectArchive(client, "StockLocation", locationId, true);
+      await expectArchive(client, "ProductVariant", fixture.variantId, true);
+      await expectArchive(client, "Product", fixture.productId, true);
+    });
+  });
+
+  it("blocks archiving ProductVariant while referenced by an ACTIVE Bundle", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createCatalogFixture(client);
+      const bundleId = randomUUID();
+      await client.query(
+        `INSERT INTO "Bundle" ("id", "slug", "name", "status", "priceCents", "discountCents")
+         VALUES ($1, $2, 'A3 Bundle', 'ACTIVE', 150000, 10000)`,
+        [bundleId, `a3-bundle-${randomUUID()}`],
+      );
+      await client.query(
+        `INSERT INTO "BundleItem" ("bundleId", "variantId", "quantity") VALUES ($1, $2, 1)`,
+        [bundleId, fixture.variantId],
+      );
+
+      await expectArchive(client, "ProductVariant", fixture.variantId, false);
+      await client.query(`UPDATE "Bundle" SET "status" = 'ARCHIVED' WHERE "id" = $1`, [bundleId]);
+      await expectArchive(client, "ProductVariant", fixture.variantId, true);
+    });
+  });
+
+  it("blocks archiving Brand and Category while referenced by an active Product", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createCatalogFixture(client);
+      const replacementBrandId = randomUUID();
+      const replacementCategoryId = randomUUID();
+      await client.query(
+        `INSERT INTO "Brand" ("id", "slug", "name") VALUES ($1, $2, 'A3 Replacement Brand')`,
+        [replacementBrandId, `a3-replacement-brand-${randomUUID()}`],
+      );
+      await client.query(
+        `INSERT INTO "Category" ("id", "slug", "name", "materializedPath", "depth")
+         VALUES ($1, $2, 'A3 Replacement Category', '/', 0)`,
+        [replacementCategoryId, `a3-replacement-${randomUUID()}`],
+      );
+
+      await expectArchive(client, "Brand", fixture.brandId, false);
+      await expectArchive(client, "Category", fixture.categoryId, false);
+
+      await client.query(`UPDATE "Product" SET "brandId" = $1, "categoryId" = $2 WHERE "id" = $3`, [
+        replacementBrandId,
+        replacementCategoryId,
+        fixture.productId,
+      ]);
+      await expectArchive(client, "Brand", fixture.brandId, true);
+      await expectArchive(client, "Category", fixture.categoryId, true);
+    });
+  });
+
+  it("blocks archiving Organization while referenced by an active Contact", async () => {
+    await withRollback(async (client) => {
+      const organizationId = randomUUID();
+      const contactId = randomUUID();
+      await client.query(
+        `INSERT INTO "Organization" ("id", "legalName") VALUES ($1, 'A3 Organization SAS')`,
+        [organizationId],
+      );
+      await client.query(
+        `INSERT INTO "Contact" ("id", "organizationId", "status", "source", "retentionReviewAt")
+         VALUES ($1, $2, 'ACTIVE', 'web', CURRENT_TIMESTAMP + INTERVAL '30 days')`,
+        [contactId, organizationId],
+      );
+
+      await expectArchive(client, "Organization", organizationId, false);
+      await client.query(`UPDATE "Contact" SET "organizationId" = NULL WHERE "id" = $1`, [
+        contactId,
+      ]);
+      await expectArchive(client, "Organization", organizationId, true);
+    });
+  });
+
+  it("blocks archiving PriceList while referenced by an open DRAFT or SENT OpportunityProposal", async () => {
+    await withRollback(async (client) => {
+      const adminUserId = await createAdmin(client);
+      const organizationId = randomUUID();
+      const contactId = randomUUID();
+      const opportunityId = randomUUID();
+      const priceListId = randomUUID();
+      const proposalId = randomUUID();
+      const cartId = randomUUID();
+
+      await client.query(
+        `INSERT INTO "Organization" ("id", "legalName") VALUES ($1, 'A3 B2B SAS')`,
+        [organizationId],
+      );
+      await client.query(
+        `INSERT INTO "Contact" ("id", "organizationId", "status", "source", "retentionReviewAt")
+         VALUES ($1, $2, 'ACTIVE', 'b2b-web', CURRENT_TIMESTAMP + INTERVAL '30 days')`,
+        [contactId, organizationId],
+      );
+      await client.query(
+        `INSERT INTO "Opportunity" (
+           "id", "organizationId", "contactId", "status", "source", "requirements",
+           "privacyPolicyVersion", "acceptanceProofHash", "acceptedAt"
+         ) VALUES (
+           $1, $2, $3, 'QUALIFYING', 'b2b-web', 'Requerimiento corporativo A3',
+           '1.0', $4, CURRENT_TIMESTAMP
+         )`,
+        [opportunityId, organizationId, contactId, randomBytes(32)],
+      );
+      await client.query(
+        `INSERT INTO "PriceList" ("id", "code", "name", "status")
+         VALUES ($1, $2, 'A3 Price List', 'ACTIVE')`,
+        [priceListId, `A3PL_${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`],
+      );
+      await client.query(
+        `INSERT INTO "OpportunityProposal" (
+           "id", "opportunityId", "version", "status", "contentHash", "priceListId",
+           "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents",
+           "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays", "reservationMinutes",
+           "expiresAt", "createdByAdminUserId"
+         ) VALUES (
+           $1, $2, 1, 'DRAFT', $3, $4, 100000, 0, 0, 0, 100000,
+           'NO_RESPONSABLE_IVA', 5237400, 2026, 5, 60, CURRENT_TIMESTAMP + INTERVAL '7 days', $5
+         )`,
+        [proposalId, opportunityId, randomBytes(32), priceListId, adminUserId],
+      );
+
+      // DRAFT proposal blocks archiving PriceList with SQLSTATE 55000
+      await expectSqlViolation(
+        client,
+        `UPDATE "PriceList" SET "status" = 'ARCHIVED', "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [priceListId],
+        "55000",
+      );
+
+      // SENT proposal also blocks archiving PriceList with SQLSTATE 55000
+      await client.query(
+        `INSERT INTO "Cart" ("id", "accessTokenHash", "kind", "expiresAt")
+         VALUES ($1, $2, 'B2B', CURRENT_TIMESTAMP + INTERVAL '7 days')`,
+        [cartId, randomBytes(32)],
+      );
+      await client.query(
+        `UPDATE "OpportunityProposal"
+         SET "status" = 'SENT', "publicTokenHash" = $1, "cartId" = $2, "issuedAt" = CURRENT_TIMESTAMP
+         WHERE "id" = $3`,
+        [randomBytes(32), cartId, proposalId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "PriceList" SET "status" = 'ARCHIVED', "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [priceListId],
+        "55000",
+      );
+
+      // Closing the proposal allows archiving the PriceList
+      await client.query(
+        `UPDATE "OpportunityProposal" SET "status" = 'CANCELLED' WHERE "id" = $1`,
+        [proposalId],
+      );
+      await client.query(
+        `UPDATE "PriceList" SET "status" = 'ARCHIVED', "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [priceListId],
+      );
+      const archived = await client.query(
+        `SELECT "status", "deletedAt" FROM "PriceList" WHERE "id" = $1`,
+        [priceListId],
+      );
+      assert.equal(archived.rows[0].status, "ARCHIVED");
+      assert.ok(archived.rows[0].deletedAt instanceof Date);
+    });
+  });
+
+  it("blocks archiving Coupon via deferred constraint trigger while a CouponUsage remains RESERVED", async () => {
+    await withRollback(async (client) => {
+      const couponId = randomUUID();
+      const cartId = randomUUID();
+      const usageId = randomUUID();
+      await client.query(
+        `INSERT INTO "Coupon" ("id", "code", "name", "discountType", "status", "percentageBps")
+         VALUES ($1, $2, 'A3 Coupon', 'PERCENTAGE', 'ACTIVE', 1000)`,
+        [couponId, `A3CPN${randomUUID().replaceAll("-", "").slice(0, 10).toUpperCase()}`],
+      );
+      await client.query(
+        `INSERT INTO "Cart" ("id", "accessTokenHash", "kind", "couponId", "expiresAt")
+         VALUES ($1, $2, 'STOREFRONT', $3, CURRENT_TIMESTAMP + INTERVAL '1 day')`,
+        [cartId, randomBytes(32), couponId],
+      );
+      await client.query(
+        `INSERT INTO "CouponUsage" ("id", "couponId", "cartId", "status", "expiresAt")
+         VALUES ($1, $2, $3, 'RESERVED', CURRENT_TIMESTAMP + INTERVAL '1 hour')`,
+        [usageId, couponId, cartId],
+      );
+
+      // Deferred trigger permits the UPDATE statement itself, then fails when constraints are enforced
+      await client.query(`SAVEPOINT coupon_archive_probe`);
+      await client.query(`UPDATE "Coupon" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+        couponId,
+      ]);
+      await expectSqlViolation(
+        client,
+        `SET CONSTRAINTS "Coupon_validate_lifecycle" IMMEDIATE`,
+        [],
+        "23514",
+      );
+
+      // Releasing the usage in the same transaction lets the deferred check pass
+      await client.query(
+        `UPDATE "CouponUsage" SET "status" = 'RELEASED', "releasedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [usageId],
+      );
+      await client.query(`SET CONSTRAINTS "Coupon_validate_lifecycle" IMMEDIATE`);
+      await client.query(`RELEASE SAVEPOINT coupon_archive_probe`);
+
+      const archived = await client.query(`SELECT "deletedAt" FROM "Coupon" WHERE "id" = $1`, [
+        couponId,
+      ]);
+      assert.ok(archived.rows[0].deletedAt instanceof Date);
+    });
+  });
+
+  it("updates updatedAt via set_updated_at() trigger on raw SQL UPDATE of newly covered operations tables", async () => {
+    await withRollback(async (client) => {
+      const rateLimitId = randomUUID();
+      const hash = randomBytes(32);
+      const inserted = await client.query(
+        `INSERT INTO "OperationRateLimit" (
+           "id", "operation", "subjectType", "subjectHash", "ipHash",
+           "windowStartedAt", "count", "expiresAt", "createdAt", "updatedAt"
+         ) VALUES (
+           $1, 'a3.rate-limit', 'IP', $2, $2,
+           CURRENT_TIMESTAMP - INTERVAL '1 hour', 1, CURRENT_TIMESTAMP + INTERVAL '1 hour',
+           CURRENT_TIMESTAMP - INTERVAL '1 hour', CURRENT_TIMESTAMP - INTERVAL '1 hour'
+         ) RETURNING "updatedAt"`,
+        [rateLimitId, hash],
+      );
+      const updated = await client.query(
+        `UPDATE "OperationRateLimit" SET "count" = 2 WHERE "id" = $1 RETURNING "updatedAt"`,
+        [rateLimitId],
+      );
+      assert.ok(updated.rows[0].updatedAt instanceof Date);
+      assert.ok(updated.rows[0].updatedAt.getTime() > inserted.rows[0].updatedAt.getTime());
     });
   });
 });

@@ -2,12 +2,201 @@ import { createHash } from "node:crypto";
 
 import { normalizeEmail } from "@mundonettech/core";
 
-import type { Customer, PrismaClient } from "./generated/client.js";
-import { CrmError, suppressCustomerCrmLineageInTransaction } from "./crm-shared.js";
+import type { Contact, Customer, Prisma, PrismaClient } from "./generated/client.js";
+import {
+  CrmError,
+  findCustomerCrmLineageIds,
+  retryableLockDivergenceError,
+  suppressCustomerCrmLineageInTransaction,
+} from "./crm-shared.js";
 import { GrowthService, marketingEmailConsentGranted } from "./growth-service.js";
-import { acquireOperationLocks, assertUuid, inInventoryTransaction } from "./inventory-shared.js";
+import {
+  acquireOperationLocks,
+  assertUuid,
+  compareStrings,
+  inInventoryTransaction,
+} from "./inventory-shared.js";
 import { revokeCustomerLifecycleConsentInTransaction } from "./lifecycle-cancellation.js";
 import { cancelPendingMetaCapiForCustomerInTransaction } from "./meta-capi.js";
+
+export interface CustomerAnonymizationLockScope {
+  readonly cartIds: readonly string[];
+  readonly couponIds: readonly string[];
+  readonly orderIds: readonly string[];
+  readonly ticketIds: readonly string[];
+  readonly reviewIds: readonly string[];
+}
+
+export function hasNewIds(locked: readonly string[], current: readonly string[]): boolean {
+  if (current.length === 0) return false;
+  const held = new Set(locked);
+  return current.some((id) => !held.has(id));
+}
+
+export function sameSortedIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+export async function peekCustomerAnonymizationScope(
+  tx: Prisma.TransactionClient,
+  customerIds: readonly string[],
+): Promise<CustomerAnonymizationLockScope> {
+  const uniqueCustomerIds = [...new Set(customerIds)].sort(compareStrings);
+  if (uniqueCustomerIds.length === 0) {
+    return { cartIds: [], couponIds: [], orderIds: [], ticketIds: [], reviewIds: [] };
+  }
+  const [carts, orders, tickets, reviews] = await Promise.all([
+    tx.$queryRaw<Array<{ id: string; couponId: string | null }>>`
+      SELECT "id", "couponId" FROM "Cart"
+      WHERE "customerId" = ANY(${uniqueCustomerIds}::uuid[]) AND "status" = 'ACTIVE'
+      ORDER BY "id"
+    `,
+    tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Order"
+      WHERE "customerId" = ANY(${uniqueCustomerIds}::uuid[]) AND "anonymizedAt" IS NULL
+      ORDER BY "id"
+    `,
+    tx.supportTicket.findMany({
+      where: {
+        OR: [
+          { requesterCustomerId: { in: uniqueCustomerIds } },
+          { order: { customerId: { in: uniqueCustomerIds } } },
+        ],
+      },
+      select: { id: true, contactEmailSnapshot: true },
+      orderBy: { id: "asc" },
+    }),
+    tx.review.findMany({
+      where: {
+        authorDisplayName: { not: "Cliente verificado" },
+        OR: [
+          { requesterCustomerId: { in: uniqueCustomerIds } },
+          { orderItem: { order: { customerId: { in: uniqueCustomerIds } } } },
+        ],
+      },
+      select: { id: true },
+      orderBy: { id: "asc" },
+    }),
+  ]);
+  const cartIds = carts.map((cart) => cart.id);
+  const reservedUsages =
+    cartIds.length > 0
+      ? await tx.couponUsage.findMany({
+          where: { cartId: { in: cartIds }, status: "RESERVED" },
+          select: { couponId: true },
+        })
+      : [];
+  const couponIds = [
+    ...new Set([
+      ...carts.map((cart) => cart.couponId).filter((id): id is string => id !== null),
+      ...reservedUsages.map((usage) => usage.couponId),
+    ]),
+  ].sort(compareStrings);
+  const anonymizedEmails = new Set(
+    uniqueCustomerIds.map((id) => `anon-${id.replaceAll("-", "")}@anonymized.invalid`),
+  );
+  const ticketIds = tickets
+    .filter((ticket) => !anonymizedEmails.has(ticket.contactEmailSnapshot))
+    .map((ticket) => ticket.id)
+    .sort(compareStrings);
+  const reviewIds = reviews.map((review) => review.id).sort(compareStrings);
+  return {
+    cartIds,
+    couponIds,
+    orderIds: orders.map((order) => order.id),
+    ticketIds,
+    reviewIds,
+  };
+}
+
+export async function acquireCustomerContactLockHierarchy(
+  tx: Prisma.TransactionClient,
+  input: {
+    readonly customerIds: readonly string[];
+    readonly contactIds: readonly string[];
+    readonly scope: CustomerAnonymizationLockScope;
+  },
+): Promise<{ readonly customers: Customer[]; readonly contacts: Contact[] }> {
+  const uniqueCustomerIds = [...new Set(input.customerIds)].sort(compareStrings);
+  const uniqueContactIds = [...new Set(input.contactIds)].sort(compareStrings);
+  const { cartIds, couponIds, orderIds, ticketIds, reviewIds } = input.scope;
+
+  // Level 1: coupon-redemption:<couponId> (sorted) -> Cart FOR UPDATE (sorted by id)
+  if (couponIds.length > 0) {
+    await acquireOperationLocks(
+      tx,
+      couponIds.map((id) => `coupon-redemption:${id}`),
+    );
+  }
+  if (cartIds.length > 0) {
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Cart"
+      WHERE "id" = ANY(${[...cartIds]}::uuid[])
+      ORDER BY "id"
+      FOR UPDATE
+    `;
+  }
+
+  // Level 2: order-payment:<orderId> (sorted) -> Order FOR UPDATE (sorted by id)
+  if (orderIds.length > 0) {
+    await acquireOperationLocks(
+      tx,
+      orderIds.map((id) => `order-payment:${id}`),
+    );
+    await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Order"
+      WHERE "id" = ANY(${[...orderIds]}::uuid[])
+      ORDER BY "id"
+      FOR UPDATE
+    `;
+  }
+
+  // Level 3: ALL customer-level advisory locks in ONE sorted call -> Customer FOR UPDATE (sorted by id)
+  let customers: Customer[] = [];
+  if (uniqueCustomerIds.length > 0) {
+    await acquireOperationLocks(
+      tx,
+      uniqueCustomerIds.flatMap((id) => [
+        `crm-customer:${id}`,
+        `customer-account:${id}`,
+        `growth-customer:${id}`,
+        `store-credit:${id}`,
+      ]),
+    );
+    customers = await tx.$queryRaw<Customer[]>`
+      SELECT * FROM "Customer"
+      WHERE "id" = ANY(${uniqueCustomerIds}::uuid[])
+      ORDER BY "id"
+      FOR UPDATE
+    `;
+  }
+
+  // Level 4: ALL contact-level advisory locks in ONE sorted call -> Contact FOR UPDATE (sorted by id)
+  let contacts: Contact[] = [];
+  if (uniqueContactIds.length > 0) {
+    await acquireOperationLocks(
+      tx,
+      uniqueContactIds.map((id) => `crm-contact:${id}`),
+    );
+    contacts = await tx.$queryRaw<Contact[]>`
+      SELECT * FROM "Contact"
+      WHERE "id" = ANY(${uniqueContactIds}::uuid[])
+      ORDER BY "id"
+      FOR UPDATE
+    `;
+  }
+
+  // Level 5: review:<id>, support:<id> (sorted)
+  const level5Locks = [
+    ...reviewIds.map((id) => `review:${id}`),
+    ...ticketIds.map((id) => `support:${id}`),
+  ];
+  if (level5Locks.length > 0) {
+    await acquireOperationLocks(tx, level5Locks);
+  }
+
+  return { customers, contacts };
+}
 
 export type AccountErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION";
 
@@ -165,8 +354,10 @@ export class AccountService {
     customerId: string,
   ): Promise<Customer> {
     assertUuid(customerId, "customerId");
-    await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
-    await acquireOperationLocks(tx, [`customer-account:${customerId}`]);
+    await acquireOperationLocks(tx, [
+      `customer-account:${customerId}`,
+      `growth-customer:${customerId}`,
+    ]);
     const rows = await tx.$queryRaw<
       Customer[]
     >`SELECT * FROM "Customer" WHERE "id" = ${customerId}::uuid FOR UPDATE`;
@@ -533,17 +724,41 @@ export class AccountService {
     tx: import("./generated/client.js").Prisma.TransactionClient,
     customerId: string,
     auditInput: AccountAudit,
-    options: { readonly skipCrmCascade?: boolean } = {},
+    options: { readonly skipCrmCascade?: boolean; readonly alreadyLocked?: boolean } = {},
   ) {
     assertUuid(customerId, "customerId");
     const audit = this.audit(auditInput);
-    await acquireOperationLocks(tx, [`store-credit:${customerId}`]);
-    await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
-    await acquireOperationLocks(tx, [`customer-account:${customerId}`]);
-    const customers = await tx.$queryRaw<
-      Customer[]
-    >`SELECT * FROM "Customer" WHERE "id" = ${customerId}::uuid FOR UPDATE`;
-    const customer = customers[0];
+    let customer: Customer | undefined;
+    if (options.alreadyLocked) {
+      customer = (await tx.customer.findUnique({ where: { id: customerId } })) ?? undefined;
+    } else {
+      const peekScope = await peekCustomerAnonymizationScope(tx, [customerId]);
+      const peekContactIds = options.skipCrmCascade
+        ? []
+        : await findCustomerCrmLineageIds(tx, [customerId]);
+      const locked = await acquireCustomerContactLockHierarchy(tx, {
+        customerIds: [customerId],
+        contactIds: peekContactIds,
+        scope: peekScope,
+      });
+      customer = locked.customers.find((item) => item.id === customerId);
+      const [verifiedScope, verifiedContactIds] = await Promise.all([
+        peekCustomerAnonymizationScope(tx, [customerId]),
+        options.skipCrmCascade ? Promise.resolve([]) : findCustomerCrmLineageIds(tx, [customerId]),
+      ]);
+      if (
+        hasNewIds(peekScope.cartIds, verifiedScope.cartIds) ||
+        hasNewIds(peekScope.couponIds, verifiedScope.couponIds) ||
+        hasNewIds(peekScope.orderIds, verifiedScope.orderIds) ||
+        hasNewIds(peekScope.ticketIds, verifiedScope.ticketIds) ||
+        hasNewIds(peekScope.reviewIds, verifiedScope.reviewIds) ||
+        (!options.skipCrmCascade && !sameSortedIds(peekContactIds, verifiedContactIds))
+      ) {
+        throw retryableLockDivergenceError(
+          "Customer anonymization dependencies changed concurrently.",
+        );
+      }
+    }
     if (
       !customer ||
       !["ACTIVE", "GUEST"].includes(customer.status) ||
@@ -686,10 +901,22 @@ export class AccountService {
         "lastReminderOutcome" = 'SUPPRESSED'
       WHERE "customerId" IS NULL AND lower("contactEmail") = lower(${previousEmail})
     `;
-    await tx.cart.updateMany({
+    const activeCarts = await tx.cart.findMany({
       where: { customerId, status: "ACTIVE" },
-      data: { status: "CANCELLED" },
+      select: { id: true },
+      orderBy: { id: "asc" },
     });
+    if (activeCarts.length > 0) {
+      const activeCartIds = activeCarts.map((cart) => cart.id);
+      await tx.couponUsage.updateMany({
+        where: { cartId: { in: activeCartIds }, status: "RESERVED" },
+        data: { status: "RELEASED", releasedAt: now },
+      });
+      await tx.cart.updateMany({
+        where: { id: { in: activeCartIds }, status: "ACTIVE" },
+        data: { status: "CANCELLED" },
+      });
+    }
     await new GrowthService(tx).suppressCustomerGrowthInTransaction(tx, customerId, now);
     await tx.storeCreditAccount.updateMany({
       where: { customerId },

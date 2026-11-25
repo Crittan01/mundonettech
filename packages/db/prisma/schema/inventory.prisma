@@ -141,6 +141,7 @@ model InventoryLedger {
 
   @@unique([operationKey, operationSequence])
   @@index([variantId, locationId, occurredAt, id])
+  @@index([locationId, occurredAt])
   @@index([orderId, occurredAt])
   @@index([channelOrderId, occurredAt])
   @@index([purchaseOrderItemId, occurredAt])

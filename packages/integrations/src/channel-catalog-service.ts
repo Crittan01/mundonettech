@@ -641,6 +641,7 @@ export class ChannelCatalogService {
     try {
       return await this.db.$transaction(async (tx) => {
         await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+        await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${options.accountId}::uuid FOR SHARE`;
         const account = await tx.channelAccount.findUnique({ where: { id: options.accountId } });
         if (!account) throw new ChannelCatalogError("NOT_FOUND", "Channel account was not found.");
         this.assertEnvironment(account.environment);
@@ -886,8 +887,14 @@ export class ChannelCatalogService {
     assertUuid(options.listingId, "listingId");
     if (options.offerId) assertUuid(options.offerId, "offerId");
     await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
+    const peek = await this.db.channelListing.findUnique({
+      where: { id: options.listingId },
+      select: { accountId: true },
+    });
+    if (!peek) throw new ChannelCatalogError("NOT_FOUND", "Channel listing was not found.");
     const job = await this.db.$transaction(async (tx) => {
       await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+      await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${peek.accountId}::uuid FOR SHARE`;
       await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${options.listingId}::uuid FOR UPDATE`;
       const listing = await tx.channelListing.findUnique({
         where: { id: options.listingId },
@@ -895,6 +902,12 @@ export class ChannelCatalogService {
       });
       if (!listing) throw new ChannelCatalogError("NOT_FOUND", "Channel listing was not found.");
       this.assertEnvironment(listing.account.environment);
+      if (listing.account.status !== "ACTIVE") {
+        throw new ChannelCatalogError(
+          "REAUTH_REQUIRED",
+          "Reconnect the account before synchronizing.",
+        );
+      }
       if (listing.status === "CLOSED" && options.desiredStatus !== "CLOSED") {
         throw new ChannelCatalogError("CONFLICT", "A closed channel listing cannot be changed.");
       }
@@ -1182,23 +1195,60 @@ export class ChannelCatalogService {
   }
 
   private async claimNext(workerId: string, listingId?: string): Promise<JobWithRelations | null> {
-    const candidates = await this.db.channelSyncJob.findMany({
-      where: {
-        status: { in: ["PENDING", "RETRY_SCHEDULED"] },
-        listing: {
-          account: { environment: this.options.ring.environment },
-          ...(listingId ? { id: listingId } : {}),
-        },
-      },
-      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      take: 25,
-    });
+    const candidates = listingId
+      ? await this.db.$queryRaw<Array<{ id: string; listingId: string }>>`
+          SELECT job."id", job."listingId"
+          FROM "ChannelSyncJob" job
+          JOIN "ChannelListing" listing ON listing."id" = job."listingId"
+          JOIN "ChannelAccount" account ON account."id" = listing."accountId"
+          WHERE job."status" IN ('PENDING', 'RETRY_SCHEDULED')
+            AND job."availableAt" <= CURRENT_TIMESTAMP
+            AND job."attempts" < ${maxJobAttempts}
+            AND job."claimId" IS NULL
+            AND listing."syncClaimId" IS NULL
+            AND listing."id" = ${listingId}::uuid
+            AND account."environment" = ${this.options.ring.environment}::"IntegrationEnvironment"
+            AND account."status" = 'ACTIVE'
+            AND NOT EXISTS (
+              SELECT 1 FROM "ChannelSyncJob" active_job
+              WHERE active_job."listingId" = job."listingId"
+                AND active_job."status" = 'PROCESSING'
+            )
+          ORDER BY job."createdAt" ASC, job."id" ASC
+          LIMIT 25
+        `
+      : await this.db.$queryRaw<Array<{ id: string; listingId: string }>>`
+          SELECT job."id", job."listingId"
+          FROM "ChannelSyncJob" job
+          JOIN "ChannelListing" listing ON listing."id" = job."listingId"
+          JOIN "ChannelAccount" account ON account."id" = listing."accountId"
+          WHERE job."status" IN ('PENDING', 'RETRY_SCHEDULED')
+            AND job."availableAt" <= CURRENT_TIMESTAMP
+            AND job."attempts" < ${maxJobAttempts}
+            AND job."claimId" IS NULL
+            AND listing."syncClaimId" IS NULL
+            AND account."environment" = ${this.options.ring.environment}::"IntegrationEnvironment"
+            AND account."status" = 'ACTIVE'
+            AND NOT EXISTS (
+              SELECT 1 FROM "ChannelSyncJob" active_job
+              WHERE active_job."listingId" = job."listingId"
+                AND active_job."status" = 'PROCESSING'
+            )
+          ORDER BY job."createdAt" ASC, job."id" ASC
+          LIMIT 25
+        `;
     for (const candidate of candidates) {
       const claimId = randomUUID();
       const claimed = await this.db.$transaction(async (tx) => {
         const now = await this.now(tx);
-        await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${candidate.listingId}::uuid FOR UPDATE`;
-        await tx.$executeRaw`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${candidate.id}::uuid FOR UPDATE`;
+        const lockedListings = await tx.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT "id" FROM "ChannelListing" WHERE "id" = ${candidate.listingId}::uuid FOR UPDATE SKIP LOCKED`;
+        if (lockedListings.length !== 1) return null;
+        const lockedJobs = await tx.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${candidate.id}::uuid FOR UPDATE SKIP LOCKED`;
+        if (lockedJobs.length !== 1) return null;
         const job = await tx.channelSyncJob.findUnique({
           where: { id: candidate.id },
           include: {
@@ -1211,6 +1261,7 @@ export class ChannelCatalogService {
           !["PENDING", "RETRY_SCHEDULED"].includes(job.status) ||
           job.availableAt > now ||
           job.listing.syncClaimId ||
+          job.listing.account.status !== "ACTIVE" ||
           job.attempts >= maxJobAttempts
         ) {
           return null;
@@ -1864,36 +1915,63 @@ export class ChannelCatalogService {
   }
 
   private async queueStockDrift(audit: ChannelAuditContext, listingId?: string): Promise<void> {
-    const listings = await this.db.channelListing.findMany({
-      where: {
-        status: "ACTIVE",
-        lastProviderError: null,
-        account: { environment: this.options.ring.environment, status: "ACTIVE" },
-        ...(listingId ? { id: listingId } : {}),
-        offers: { some: { externalItemId: { not: null } } },
-      },
-      include: {
-        variant: { include: channelVariantInclude },
-        offers: { where: { externalItemId: { not: null } }, orderBy: { createdAt: "asc" } },
-      },
-      orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
-      take: 50,
-    });
-    let queued = 0;
-    for (const listing of listings) {
-      const stock = channelStockQuantities(listing.variant);
-      for (const offer of listing.offers) {
-        const expected = offer.logisticType === "FULFILLMENT" ? stock.full : stock.local;
-        if (offer.stockQuantity === expected) continue;
-        await this.enqueueSync({
-          listingId: listing.id,
-          offerId: offer.id,
-          kind: ChannelSyncJobKind.SYNC_LOCAL_STOCK,
-          audit: { ...audit, requestId: randomUUID() },
-        });
-        queued += 1;
-        if (queued >= 10) return;
-      }
+    const drifted = listingId
+      ? await this.db.$queryRaw<Array<{ listingId: string; offerId: string }>>`
+          SELECT listing."id" AS "listingId", offer."id" AS "offerId"
+          FROM "ChannelListing" listing
+          JOIN "ChannelAccount" account ON account."id" = listing."accountId"
+          JOIN "ChannelOffer" offer ON offer."listingId" = listing."id"
+          WHERE listing."status" = 'ACTIVE'
+            AND listing."lastProviderError" IS NULL
+            AND listing."id" = ${listingId}::uuid
+            AND account."environment" = ${this.options.ring.environment}::"IntegrationEnvironment"
+            AND account."status" = 'ACTIVE'
+            AND offer."externalItemId" IS NOT NULL
+            AND offer."stockQuantity" <> COALESCE((
+              SELECT SUM(GREATEST(0, sl."onHand" - sl."committed" - sl."safetyStock"))::bigint
+              FROM "StockLevel" sl
+              JOIN "StockLocation" loc ON loc."id" = sl."locationId"
+              WHERE sl."variantId" = listing."variantId"
+                AND loc."deletedAt" IS NULL
+                AND loc."type" = CASE
+                  WHEN offer."logisticType" = 'FULFILLMENT' THEN 'MELI_FULL'::"StockLocationType"
+                  ELSE 'LOCAL_MAIN'::"StockLocationType"
+                END
+            ), 0)
+          ORDER BY listing."updatedAt" ASC, listing."id" ASC, offer."createdAt" ASC, offer."id" ASC
+          LIMIT 10
+        `
+      : await this.db.$queryRaw<Array<{ listingId: string; offerId: string }>>`
+          SELECT listing."id" AS "listingId", offer."id" AS "offerId"
+          FROM "ChannelListing" listing
+          JOIN "ChannelAccount" account ON account."id" = listing."accountId"
+          JOIN "ChannelOffer" offer ON offer."listingId" = listing."id"
+          WHERE listing."status" = 'ACTIVE'
+            AND listing."lastProviderError" IS NULL
+            AND account."environment" = ${this.options.ring.environment}::"IntegrationEnvironment"
+            AND account."status" = 'ACTIVE'
+            AND offer."externalItemId" IS NOT NULL
+            AND offer."stockQuantity" <> COALESCE((
+              SELECT SUM(GREATEST(0, sl."onHand" - sl."committed" - sl."safetyStock"))::bigint
+              FROM "StockLevel" sl
+              JOIN "StockLocation" loc ON loc."id" = sl."locationId"
+              WHERE sl."variantId" = listing."variantId"
+                AND loc."deletedAt" IS NULL
+                AND loc."type" = CASE
+                  WHEN offer."logisticType" = 'FULFILLMENT' THEN 'MELI_FULL'::"StockLocationType"
+                  ELSE 'LOCAL_MAIN'::"StockLocationType"
+                END
+            ), 0)
+          ORDER BY listing."updatedAt" ASC, listing."id" ASC, offer."createdAt" ASC, offer."id" ASC
+          LIMIT 10
+        `;
+    for (const candidate of drifted) {
+      await this.enqueueSync({
+        listingId: candidate.listingId,
+        offerId: candidate.offerId,
+        kind: ChannelSyncJobKind.SYNC_LOCAL_STOCK,
+        audit: { ...audit, requestId: randomUUID() },
+      });
     }
   }
 

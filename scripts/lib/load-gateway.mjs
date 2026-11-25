@@ -113,8 +113,34 @@ function reviveCheckout(submission) {
   };
 }
 
+function isPgSqlState(value) {
+  return typeof value === "string" && /^[0-9A-Z]{5}$/.test(value) && !/^P\d{4}$/.test(value);
+}
+
 function errorCode(error) {
-  return typeof error?.code === "string" ? error.code : null;
+  const visited = new Set();
+  const stack = [error];
+  let firstCode = null;
+  let pgCode = null;
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+
+    for (const candidate of [current.originalCode, current.code, current.meta?.code]) {
+      if (typeof candidate !== "string" || candidate.length === 0) continue;
+      if (candidate === "40P01") return "40P01";
+      if (!firstCode) firstCode = candidate;
+      if (!pgCode && isPgSqlState(candidate)) pgCode = candidate;
+    }
+
+    if (current.driverAdapterError) stack.push(current.driverAdapterError);
+    if (current.cause) stack.push(current.cause);
+    if (current.meta) stack.push(current.meta);
+  }
+
+  return pgCode ?? firstCode;
 }
 
 function authenticated(request, token) {

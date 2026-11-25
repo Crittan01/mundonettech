@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   acquireOperationLocks,
+  hasUniqueViolation,
   inInventoryTransaction,
   isAdminSelfDealingCustomer,
   type PrismaClient,
@@ -73,64 +74,74 @@ export class StoreCreditService {
       reason,
       actorAdminUserId: input.audit.actorAdminUserId,
     });
-    return inInventoryTransaction(this.db, async (tx) => {
-      await acquireOperationLocks(tx, [`store-credit:${input.customerId}`]);
-      const actor = await assertFinancialActor(tx, input.audit.actorAdminUserId);
-      const existing = await tx.storeCreditEntry.findUnique({ where: { operationKey } });
-      if (existing) {
-        const account = await tx.storeCreditAccount.findUniqueOrThrow({
-          where: { id: existing.accountId },
-        });
-        if (
-          account.customerId !== input.customerId ||
-          !equalHash(existing.requestHash, requestHash)
-        ) {
-          throw new PaymentConflictError(
-            "Credit operation key belongs to another customer.",
-            "IDEMPOTENCY_CONFLICT",
-          );
+    try {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        await acquireOperationLocks(tx, [`store-credit:${input.customerId}`]);
+        const actor = await assertFinancialActor(tx, input.audit.actorAdminUserId);
+        const existing = await tx.storeCreditEntry.findUnique({ where: { operationKey } });
+        if (existing) {
+          const account = await tx.storeCreditAccount.findUniqueOrThrow({
+            where: { id: existing.accountId },
+          });
+          if (
+            account.customerId !== input.customerId ||
+            !equalHash(existing.requestHash, requestHash)
+          ) {
+            throw new PaymentConflictError(
+              "Credit operation key belongs to another customer.",
+              "IDEMPOTENCY_CONFLICT",
+            );
+          }
+          return snapshot(account);
         }
-        return snapshot(account);
-      }
-      await tx.customer.findFirstOrThrow({
-        where: { id: input.customerId, status: "ACTIVE", deletedAt: null },
-        select: { id: true },
-      });
-      let account = await tx.storeCreditAccount.findUnique({
-        where: { customerId_currency: { customerId: input.customerId, currency: "COP" } },
-      });
-      if (!account) {
-        account = await tx.storeCreditAccount.create({
-          data: { id: randomUUID(), customerId: input.customerId, currency: "COP" },
+        await tx.customer.findFirstOrThrow({
+          where: { id: input.customerId, status: "ACTIVE", deletedAt: null },
+          select: { id: true },
         });
-      }
-      if (!account.active) throw new PaymentConflictError("Store credit account is inactive.");
-      const result = await appendStoreCreditEntry(tx, {
-        accountId: account.id,
-        type: input.type,
-        operationKey,
-        requestHash,
-        amountCents: amount,
-        reason,
-        actorAdminUserId: input.audit.actorAdminUserId,
-      });
-      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
-        customerId: input.customerId,
-      });
-      await writePaymentAudit(tx, {
-        action: `STORE_CREDIT_${input.type}`,
-        targetType: "StoreCreditAccount",
-        targetId: account.id,
-        audit: input.audit,
-        selfDealing,
-        metadata: {
-          customerId: input.customerId,
-          amountCents: amount.toString(),
+        let account = await tx.storeCreditAccount.findUnique({
+          where: { customerId_currency: { customerId: input.customerId, currency: "COP" } },
+        });
+        if (!account) {
+          account = await tx.storeCreditAccount.create({
+            data: { id: randomUUID(), customerId: input.customerId, currency: "COP" },
+          });
+        }
+        if (!account.active) throw new PaymentConflictError("Store credit account is inactive.");
+        const result = await appendStoreCreditEntry(tx, {
+          accountId: account.id,
+          type: input.type,
           operationKey,
-        },
+          requestHash,
+          amountCents: amount,
+          reason,
+          actorAdminUserId: input.audit.actorAdminUserId,
+        });
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: input.customerId,
+        });
+        await writePaymentAudit(tx, {
+          action: `STORE_CREDIT_${input.type}`,
+          targetType: "StoreCreditAccount",
+          targetId: account.id,
+          audit: input.audit,
+          selfDealing,
+          metadata: {
+            customerId: input.customerId,
+            amountCents: amount.toString(),
+            operationKey,
+          },
+        });
+        return snapshot(result.account);
       });
-      return snapshot(result.account);
-    });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        throw new PaymentConflictError(
+          "Credit operation key was already used for another request.",
+          "IDEMPOTENCY_CONFLICT",
+        );
+      }
+      throw error;
+    }
   }
 
   async setActive(

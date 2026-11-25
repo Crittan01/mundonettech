@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { maskEmail, maskName, sanitizeAuditValue } from "@mundonettech/core";
 import {
+  AdminActorAuthorizationError,
   assertAdminActorInTransaction,
   Prisma,
   PrismaClient,
@@ -25,12 +26,6 @@ const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const htmlTagOrCommentPattern = /<(?:[a-zA-Z!/])/;
 const maxBlocksPerPage = 100;
-const contentWriteRoles = new Set([
-  "SUPERADMIN",
-  "OPERATIONS_MANAGER",
-  "STORE_MANAGER",
-  "CMS_EDITOR",
-]);
 
 export interface CmsAudit {
   readonly actorAdminUserId: string;
@@ -468,9 +463,12 @@ export class CmsService {
     try {
       return await this.db.$transaction(async (tx) => {
         const created = await tx.cmsPage.create({ data: page });
+        await this.validateMediaReferences(
+          tx,
+          validatedBlocks.map((block) => block.content),
+        );
         const createdBlocks: Prisma.JsonObject[] = [];
         for (const [position, block] of validatedBlocks.entries()) {
-          await this.validateMediaReferences(tx, block.content);
           const section = await tx.cmsSectionBlock.create({
             data: {
               pageId: created.id,
@@ -883,17 +881,40 @@ export class CmsService {
     assertUuid(context.actorAdminUserId, "actorAdminUserId");
     if (typeof isVisible !== "boolean") throw new CmsValidationError("isVisible must be boolean.");
     return this.db.$transaction(async (tx) => {
+      const pages = await tx.$queryRaw<Array<{ id: string; status: string }>>`
+        SELECT p."id", p."status"
+        FROM "CmsPage" p
+        JOIN "CmsSectionBlock" b ON b."pageId" = p."id"
+        WHERE b."id" = ${blockId}::uuid AND p."deletedAt" IS NULL
+        FOR UPDATE OF p
+      `;
+      const page = pages[0];
+      if (!page) throw new CmsNotFoundError("CMS block not found.");
       const rows = await tx.$queryRaw<CmsBlockAuditRecord[]>`
         SELECT b."id", b."pageId", b."blockType", b."position", b."isVisible"
         FROM "CmsSectionBlock" b
-        JOIN "CmsPage" p ON p."id" = b."pageId"
-        WHERE b."id" = ${blockId}::uuid AND p."deletedAt" IS NULL
+        WHERE b."id" = ${blockId}::uuid AND b."pageId" = ${page.id}::uuid
         FOR UPDATE OF b
       `;
       const existing = rows[0];
       if (!existing) throw new CmsNotFoundError("CMS block not found.");
       if (existing.isVisible === isVisible) {
         return tx.cmsSectionBlock.findUniqueOrThrow({ where: { id: blockId } });
+      }
+      if (page.status === "PUBLISHED" && !isVisible) {
+        const now = await databaseNow(tx);
+        const remainingPublishable = await tx.cmsBlockVersion.count({
+          where: {
+            status: "PUBLISHED",
+            effectiveAt: { lte: now },
+            block: { pageId: page.id, isVisible: true, id: { not: blockId } },
+          },
+        });
+        if (remainingPublishable === 0) {
+          throw new CmsConflictError(
+            "A published page requires at least one visible published block.",
+          );
+        }
       }
       const updated = await tx.cmsSectionBlock.update({
         where: { id: blockId },
@@ -912,22 +933,16 @@ export class CmsService {
     assertUuid(context.actorAdminUserId, "actorAdminUserId");
     return this.db.$transaction(async (tx) => {
       const now = await databaseNow(tx, at);
-      const actors = await tx.$queryRaw<
-        Array<{ id: string; role: string; status: string; deletedAt: Date | null }>
-      >`
-        SELECT "id", "role", "status", "deletedAt"
-        FROM "AdminUser"
-        WHERE "id" = ${context.actorAdminUserId}::uuid
-        FOR UPDATE
-      `;
-      const actor = actors[0];
-      if (
-        !actor ||
-        actor.status !== "ACTIVE" ||
-        actor.deletedAt !== null ||
-        !contentWriteRoles.has(actor.role)
-      ) {
-        throw new CmsConflictError("The CMS scheduler actor is not active or authorized.");
+      try {
+        await assertAdminActorInTransaction(tx, context.actorAdminUserId, "content:write");
+      } catch (error) {
+        if (
+          error instanceof AdminActorAuthorizationError ||
+          (error instanceof Error && error.name === "AdminActorAuthorizationError")
+        ) {
+          throw new CmsConflictError("The CMS scheduler actor is not active or authorized.");
+        }
+        throw error;
       }
       const affectedSlugs = new Set<string>();
       const versions = await tx.$queryRaw<
@@ -940,7 +955,8 @@ export class CmsService {
         JOIN "CmsPage" p ON p."id" = b."pageId"
         WHERE v."status" = 'SCHEDULED' AND v."effectiveAt" <= ${now} AND p."deletedAt" IS NULL
         ORDER BY v."id"
-        FOR UPDATE OF v
+        LIMIT 100
+        FOR UPDATE OF v SKIP LOCKED
       `;
       for (const version of versions) {
         const updated = await tx.cmsBlockVersion.update({
@@ -961,7 +977,8 @@ export class CmsService {
         FROM "CmsPage"
         WHERE "status" = 'SCHEDULED' AND "scheduledFor" <= ${now} AND "deletedAt" IS NULL
         ORDER BY "id"
-        FOR UPDATE
+        LIMIT 100
+        FOR UPDATE SKIP LOCKED
       `;
       let deferred = 0;
       for (const page of pages) {

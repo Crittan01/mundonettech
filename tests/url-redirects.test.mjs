@@ -350,9 +350,15 @@ describe("A1 — shared redirect cache generation across independent processes",
     const auditCount = await db.adminActionLog.count({
       where: { actorAdminUserId: actor.id, targetType: "UrlRedirect" },
     });
-    await db.urlRedirectCacheState.delete({ where: { id: cacheStateId } });
-
+    await assert.rejects(
+      db.urlRedirectCacheState.delete({ where: { id: cacheStateId } }),
+      /cannot be deleted/,
+    );
+    await db.$executeRawUnsafe(
+      `ALTER TABLE "UrlRedirectCacheState" DISABLE TRIGGER "UrlRedirectCacheState_enforce_monotonic"`,
+    );
     try {
+      await db.urlRedirectCacheState.delete({ where: { id: cacheStateId } });
       await assert.rejects(cache.resolve(source), /cache generation is not initialized/);
       await assert.rejects(
         service.create({ fromPath: rejectedSource, toPath: "/legal" }, audit),
@@ -393,6 +399,9 @@ describe("A1 — shared redirect cache generation across independent processes",
       if ((await currentGeneration()) === null) {
         await db.urlRedirectCacheState.create({ data: { version: generation } });
       }
+      await db.$executeRawUnsafe(
+        `ALTER TABLE "UrlRedirectCacheState" ENABLE TRIGGER "UrlRedirectCacheState_enforce_monotonic"`,
+      );
     }
 
     assert.equal((await cache.resolve(source)).toPath, "/productos");

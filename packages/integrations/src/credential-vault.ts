@@ -160,7 +160,7 @@ async function assertActor(
   permission: AdminPermission,
 ): Promise<void> {
   assertUuid(actorAdminUserId, "actorAdminUserId");
-  await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR UPDATE`;
+  await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR SHARE`;
   const actor = await tx.adminUser.findFirst({
     where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
     select: { role: true },
@@ -270,6 +270,17 @@ export class IntegrationCredentialVault {
 
   async reveal(id: string, expectedProvider?: string): Promise<Uint8Array> {
     const record = await this.activeRecord(id, expectedProvider);
+    return this.revealRecord(record, expectedProvider);
+  }
+
+  revealRecord(record: IntegrationCredential, expectedProvider?: string): Uint8Array {
+    if (
+      record.environment !== this.ring.environment ||
+      (expectedProvider !== undefined && record.provider !== expectedProvider)
+    ) {
+      throw new CredentialNotFoundError();
+    }
+    if (record.revokedAt) throw new CredentialRevokedError();
     return decryptIntegrationCredential(
       {
         ...record,
@@ -371,6 +382,19 @@ export class IntegrationCredentialVault {
         throw new CredentialNotFoundError();
       }
       if (existing.revokedAt) throw new CredentialRevokedError();
+      if (existing.provider === "mercado-libre") {
+        const accounts = await tx.$queryRaw<
+          Array<{ id: string; refreshClaimId: string | null }>
+        >`SELECT "id", "refreshClaimId" FROM "ChannelAccount" WHERE "credentialId" = ${existing.id}::uuid ORDER BY "id" FOR UPDATE`;
+        if (accounts.some((account) => account.refreshClaimId !== null)) {
+          throw new CredentialConflictError();
+        }
+        const activeAttempt = await tx.channelOAuthAttempt.findFirst({
+          where: { credentialId: existing.id, status: { in: ["PENDING", "PROCESSING"] } },
+          select: { id: true },
+        });
+        if (activeAttempt) throw new CredentialConflictError();
+      }
       const sealed = reencryptIntegrationCredential(
         {
           ...existing,
@@ -493,6 +517,7 @@ export class IntegrationCredentialVault {
       nextCursor: null;
     }>;
     reveal(id: string): Promise<Uint8Array>;
+    revealRecord(record: IntegrationCredential): Uint8Array;
   } {
     if (!providerPattern.test(provider)) {
       throw new TypeError("provider must be a lowercase identifier of at most 100 characters.");
@@ -512,6 +537,7 @@ export class IntegrationCredentialVault {
         return { items: records.map(descriptor), nextCursor: null };
       },
       reveal: (id) => this.reveal(id, provider),
+      revealRecord: (record) => this.revealRecord(record, provider),
     };
   }
 

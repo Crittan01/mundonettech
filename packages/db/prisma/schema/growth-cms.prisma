@@ -473,6 +473,7 @@ model LifecycleEnrollment {
   @@index([customerId, status])
   @@index([entryMembershipId, status])
   @@index([status, enteredAt])
+  @@index([consentId])
   @@map("LifecycleEnrollment")
 }
 
@@ -496,5 +497,6 @@ model LifecycleMessage {
   @@unique([enrollmentId, stepId])
   @@index([status, scheduledAt, id])
   @@index([customerId, status])
+  @@index([stepId])
   @@map("LifecycleMessage")
 }

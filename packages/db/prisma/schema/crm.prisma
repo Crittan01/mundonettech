@@ -103,6 +103,7 @@ model Contact {
   @@index([email])
   @@index([phoneE164])
   @@index([deletedAt])
+  @@index([mergedIntoContactId])
   @@map("Contact")
 }
 

@@ -244,6 +244,22 @@ export async function appendStoreCreditEntry(
   });
   if (!reference) throw new PaymentNotFoundError("Store credit account not found.");
   await acquireOperationLocks(tx, [`store-credit:${reference.customerId}`]);
+  const existingAfterLock = await tx.storeCreditEntry.findUnique({ where: { operationKey } });
+  if (existingAfterLock) {
+    if (
+      existingAfterLock.accountId !== options.accountId ||
+      !equalHash(existingAfterLock.requestHash, requestHash)
+    ) {
+      throw new PaymentConflictError(
+        "Store credit operation key was used for another request.",
+        "IDEMPOTENCY_CONFLICT",
+      );
+    }
+    const replayedAccount = await tx.storeCreditAccount.findUniqueOrThrow({
+      where: { id: options.accountId },
+    });
+    return { account: replayedAccount, replayed: true };
+  }
   const rows = await tx.$queryRaw<StoreCreditAccount[]>`
     SELECT * FROM "StoreCreditAccount" WHERE "id" = ${options.accountId}::uuid FOR UPDATE
   `;

@@ -165,6 +165,7 @@ model DisasterRecoveryDrill {
 
   @@index([environment, status, startedAt])
   @@index([startedAt])
+  @@index([backupRunId], map: "DisasterRecoveryDrill_backupRunId_idx")
   @@map("DisasterRecoveryDrill")
 }
 
@@ -430,6 +431,7 @@ model ChannelSyncJob {
   @@index([listingId, kind, status, createdAt])
   @@index([claimExpiresAt, status])
   @@index([createdByAdminUserId, createdAt])
+  @@index([offerId])
   @@map("ChannelSyncJob")
 }
 
@@ -576,6 +578,9 @@ model ChannelOrder {
   @@index([shipmentId, stockStatus])
   @@index([reconciliationStatus, externalUpdatedAt, id], map: "ChannelOrder_reconciliation_updated_idx")
   @@index([variantId, stockLocationId, stockStatus], map: "ChannelOrder_variant_location_stock_idx")
+  @@index([stockLocationId])
+  @@index([listingId])
+  @@index([offerId])
   @@map("ChannelOrder")
 }
 
@@ -702,5 +707,6 @@ model MetaCapiEvent {
   @@index([claimExpiresAt, status], map: "MetaCapiEvent_claim_expiry_status_idx")
   @@index([environment, status])
   @@index([reconciledByAdminUserId, createdAt], map: "MetaCapiEvent_reconciler_created_idx")
+  @@index([credentialId])
   @@map("MetaCapiEvent")
 }

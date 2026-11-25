@@ -6,13 +6,26 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 
 import {
+  AccountError,
+  AccountService,
   B2bService,
   CartService,
   CheckoutConflictError,
   CheckoutReviewRequiredError,
+  CrmRetentionService,
+  CrmService,
+  FinanceService,
+  GrowthService,
+  InventoryConflictError,
+  LifecycleService,
   OrderLifecycleService,
   OrderService,
   PaymentProvider,
+  PostSaleAdminService,
+  PostSaleError,
+  PostSaleService,
+  PricingService,
+  SegmentationService,
   createDatabaseClient,
   fulfillStock,
   releaseStock,
@@ -125,16 +138,23 @@ async function makeOrder() {
   return { cart, orderId: result.orderId };
 }
 
-async function makeStale(cartId) {
+async function makeStale(cartId, hours = 2) {
   await sql.query(`ALTER TABLE "Cart" DISABLE TRIGGER "Cart_set_updated_at"`);
   try {
     await sql.query(
-      `UPDATE "Cart" SET "updatedAt" = CURRENT_TIMESTAMP - INTERVAL '2 hours' WHERE "id" = $1`,
-      [cartId],
+      `UPDATE "Cart" SET "updatedAt" = CURRENT_TIMESTAMP - ($2::double precision * INTERVAL '1 hour') WHERE "id" = $1`,
+      [cartId, hours],
     );
   } finally {
     await sql.query(`ALTER TABLE "Cart" ENABLE TRIGGER "Cart_set_updated_at"`);
   }
+}
+
+async function expireOrderReservation(orderId) {
+  await sql.query(
+    `UPDATE "Order" SET "reservationExpiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE "id" = $1`,
+    [orderId],
+  );
 }
 
 async function openBarrier(keys) {
@@ -432,13 +452,17 @@ describe("A3 — canonical cart and coupon lock hierarchy", () => {
     try {
       const checkout = orders.checkout(input);
       await waitForAdvisoryWaiters(1);
-      const capture = lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
-      await waitForAdvisoryWaiters(2);
+      const startedAt = Date.now();
+      const whileBlocked = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.ok(Date.now() - startedAt < 5_000);
+      assert.deepEqual(whileBlocked, { detected: 0, expired: 0, outboxEvents: 0 });
+      assert.equal(await db.abandonedCart.count({ where: { cartId: cart.id } }), 0);
       await blocker.query("COMMIT");
-      const outcomes = await Promise.allSettled([checkout, capture]);
+      const outcomes = await Promise.allSettled([checkout]);
       assertNoRetryableFailure(outcomes);
       assert.equal(outcomes[0].status, "fulfilled");
-      assert.equal(outcomes[1].status, "fulfilled");
+      const afterCommit = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.deepEqual(afterCommit, { detected: 0, expired: 0, outboxEvents: 0 });
       assert.equal(await db.order.count({ where: { cartId: cart.id } }), 1);
       assert.equal(
         (await db.abandonedCart.findUniqueOrThrow({ where: { cartId: cart.id } })).status,
@@ -465,26 +489,35 @@ describe("A3 — canonical cart and coupon lock hierarchy", () => {
     try {
       const apply = carts.applyCoupon({ cartId: cart.id }, coupon.code);
       await waitForAdvisoryWaiters(1);
-      const capture = lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
-      await waitForAdvisoryWaiters(2);
+      const startedAt = Date.now();
+      const whileBlocked = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.ok(Date.now() - startedAt < 5_000);
+      assert.deepEqual(whileBlocked, { detected: 0, expired: 0, outboxEvents: 0 });
+      assert.equal(await db.abandonedCart.count({ where: { cartId: cart.id } }), 0);
       await blocker.query("COMMIT");
-      const outcomes = await Promise.allSettled([apply, capture]);
+      const outcomes = await Promise.allSettled([apply]);
       assertNoRetryableFailure(outcomes);
       assert.equal(outcomes[0].status, "fulfilled");
-      assert.equal(outcomes[1].status, "fulfilled");
       assert.equal(
         await db.couponUsage.count({ where: { cartId: cart.id, status: "RESERVED" } }),
         1,
       );
+      await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
       const eventCount = await db.domainOutbox.count({
         where: { aggregateType: "Cart", aggregateId: cart.id, eventType: "cart.abandoned.v1" },
       });
-      await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.ok(eventCount <= 1);
+      const repeat = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.deepEqual(repeat, { detected: 0, expired: 0, outboxEvents: 0 });
       assert.equal(
         await db.domainOutbox.count({
           where: { aggregateType: "Cart", aggregateId: cart.id, eventType: "cart.abandoned.v1" },
         }),
         eventCount,
+      );
+      assert.equal(
+        await db.couponUsage.count({ where: { cartId: cart.id, status: "RESERVED" } }),
+        1,
       );
     } finally {
       await blocker.query("ROLLBACK").catch(() => undefined);
@@ -495,8 +528,8 @@ describe("A3 — canonical cart and coupon lock hierarchy", () => {
   it("skips a row-locked poison candidate and fills the batch with the next cart", async () => {
     const blockedCart = await makeCart();
     const eligibleCart = await makeCart();
-    await makeStale(blockedCart.id);
-    await makeStale(eligibleCart.id);
+    await makeStale(blockedCart.id, 3);
+    await makeStale(eligibleCart.id, 2);
     const blocker = new pg.Client({ connectionString: harness.databaseUrl });
     await blocker.connect();
     await blocker.query("BEGIN");
@@ -543,10 +576,14 @@ describe("A3 — canonical cart and coupon lock hierarchy", () => {
     );
     const blocker = await beginCouponSwitch(cart, first, second);
     try {
-      const capture = lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
-      await waitForAdvisoryWaiters(1);
+      const startedAt = Date.now();
+      const whileBlocked = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.ok(Date.now() - startedAt < 5_000);
+      assert.equal(whileBlocked.expired, 0);
+      assert.equal(whileBlocked.outboxEvents, 0);
+      assert.equal(await db.abandonedCart.count({ where: { cartId: cart.id } }), 0);
       await blocker.query("COMMIT");
-      const result = await capture;
+      const result = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
       assert.equal(result.expired, 1);
       assert.equal(result.outboxEvents, 1);
       assert.equal(
@@ -555,7 +592,12 @@ describe("A3 — canonical cart and coupon lock hierarchy", () => {
         }),
         1,
       );
-      await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.equal(
+        await db.couponUsage.count({ where: { cartId: cart.id, status: "RESERVED" } }),
+        0,
+      );
+      const repeat = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60 });
+      assert.deepEqual(repeat, { detected: 0, expired: 0, outboxEvents: 0 });
       assert.equal(
         await db.domainOutbox.count({ where: { aggregateType: "Cart", aggregateId: cart.id } }),
         1,
@@ -785,10 +827,7 @@ describe("A3 — payment and reservation scheduler contention", () => {
       environment: "LOCAL",
       idempotencyKey: `bank-release-race:${randomUUID()}`,
     });
-    await db.order.update({
-      where: { id: orderId },
-      data: { reservationExpiresAt: new Date(Date.now() - 1_000) },
-    });
+    await expireOrderReservation(orderId);
     const blocker = await openBarrier([`order-payment:${orderId}`]);
     try {
       const confirmation = payments.confirmBankTransfer({
@@ -797,14 +836,18 @@ describe("A3 — payment and reservation scheduler contention", () => {
         audit,
       });
       await waitForAdvisoryWaiters(1);
-      const release = lifecycle.releaseExpiredOrderReservations();
-      await waitForAdvisoryWaiters(2);
+      const startedAt = Date.now();
+      const whileBlocked = await lifecycle.releaseExpiredOrderReservations();
+      assert.ok(Date.now() - startedAt < 5_000);
+      assert.equal(whileBlocked.releasedOrders, 0);
+      assert.equal(whileBlocked.orderIds.includes(orderId), false);
       await blocker.query("COMMIT");
-      const outcomes = await Promise.allSettled([confirmation, release]);
+      const outcomes = await Promise.allSettled([confirmation]);
       assertNoRetryableFailure(outcomes);
       assert.equal(outcomes[0].status, "fulfilled");
-      assert.equal(outcomes[1].status, "fulfilled");
-      assert.equal(outcomes[1].value.releasedOrders, 0);
+      const afterCommit = await lifecycle.releaseExpiredOrderReservations();
+      assert.equal(afterCommit.releasedOrders, 0);
+      assert.equal(afterCommit.orderIds.includes(orderId), false);
       const order = await db.order.findUniqueOrThrow({ where: { id: orderId } });
       assert.equal(order.orderStatus, "CONFIRMED");
       assert.equal(order.paymentStatus, "PAID");
@@ -854,10 +897,7 @@ describe("A3 — payment and reservation scheduler contention", () => {
       idempotencyKey: `bank-partial-second:${randomUUID()}`,
       amountCents: 40_000n,
     });
-    await db.order.update({
-      where: { id: orderId },
-      data: { reservationExpiresAt: new Date(Date.now() - 1_000) },
-    });
+    await expireOrderReservation(orderId);
     const blocker = await openBarrier([`order-payment:${orderId}`]);
     try {
       const confirmation = payments.confirmBankTransfer({
@@ -866,14 +906,18 @@ describe("A3 — payment and reservation scheduler contention", () => {
         audit,
       });
       await waitForAdvisoryWaiters(1);
-      const review = lifecycle.flagExpiredPartialPaymentReviews();
-      await waitForAdvisoryWaiters(2);
+      const startedAt = Date.now();
+      const whileBlocked = await lifecycle.flagExpiredPartialPaymentReviews();
+      assert.ok(Date.now() - startedAt < 5_000);
+      assert.equal(whileBlocked.reviewedOrders, 0);
+      assert.equal(whileBlocked.orderIds.includes(orderId), false);
       await blocker.query("COMMIT");
-      const outcomes = await Promise.allSettled([confirmation, review]);
+      const outcomes = await Promise.allSettled([confirmation]);
       assertNoRetryableFailure(outcomes);
       assert.equal(outcomes[0].status, "fulfilled");
-      assert.equal(outcomes[1].status, "fulfilled");
-      assert.equal(outcomes[1].value.reviewedOrders, 0);
+      const afterCommit = await lifecycle.flagExpiredPartialPaymentReviews();
+      assert.equal(afterCommit.reviewedOrders, 0);
+      assert.equal(afterCommit.orderIds.includes(orderId), false);
       assert.equal(
         (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
         "PAID",
@@ -926,7 +970,9 @@ describe("A3 — payment and reservation scheduler contention", () => {
       const outcomes = await Promise.allSettled([fulfillment, release]);
       assertNoRetryableFailure(outcomes);
       assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
-      assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+      const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+      assert.equal(rejected.length, 1);
+      assert.ok(rejected[0].reason instanceof InventoryConflictError);
       const after = await db.stockLevel.findFirstOrThrow({
         where: { locationId: inventory.locationId, variantId: catalog.variantId },
       });
@@ -1093,10 +1139,7 @@ describe("A3 — whole-transaction retry and B2B cancellation", () => {
     assert.ok(rejectedConversion.reason instanceof CheckoutConflictError);
     const orderId = converted.value.orderId;
     assert.equal(await db.order.count({ where: { cartId: proposal.cartId } }), 1);
-    await db.order.update({
-      where: { id: orderId },
-      data: { reservationExpiresAt: new Date(Date.now() - 1_000) },
-    });
+    await expireOrderReservation(orderId);
     const committedBeforeRelease = await committedTotal();
     const thirdInput = {
       ...firstInput,
@@ -1112,6 +1155,7 @@ describe("A3 — whole-transaction retry and B2B cancellation", () => {
       orders.checkout(thirdInput),
       orders.checkout(fourthInput),
       lifecycle.releaseExpiredOrderReservations(),
+      lifecycle.releaseExpiredOrderReservations(),
     ]);
     assertNoRetryableFailure(outcomes);
     assert.equal(outcomes[0].status, "rejected");
@@ -1119,7 +1163,12 @@ describe("A3 — whole-transaction retry and B2B cancellation", () => {
     assert.equal(outcomes[1].status, "rejected");
     assert.ok(outcomes[1].reason instanceof CheckoutConflictError);
     assert.equal(outcomes[2].status, "fulfilled");
-    assert.deepEqual(outcomes[2].value.orderIds, [orderId]);
+    assert.equal(outcomes[3].status, "fulfilled");
+    const releasedResults = [outcomes[2].value, outcomes[3].value].filter((result) =>
+      result.orderIds.includes(orderId),
+    );
+    assert.equal(releasedResults.length, 1);
+    assert.deepEqual(releasedResults[0].orderIds, [orderId]);
     assert.equal(await committedTotal(), committedBeforeRelease - 1);
     const order = await db.order.findUniqueOrThrow({
       where: { id: orderId },
@@ -1147,5 +1196,630 @@ describe("A3 — whole-transaction retry and B2B cancellation", () => {
       }),
       1,
     );
+  });
+});
+
+describe("A3 — newly hardened domain concurrency and anti-starvation regressions", () => {
+  it("prevents captureAbandonedCarts starvation behind already-detected abandoned carts", async () => {
+    await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60, limit: 100 });
+    const oldCarts = [];
+    for (const staleHours of [4, 3, 2]) {
+      const staleCart = await makeCart();
+      await makeStale(staleCart.id, staleHours);
+      oldCarts.push(staleCart);
+    }
+    const initial = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60, limit: 10 });
+    assert.equal(initial.detected, 3);
+    assert.equal(initial.expired, 0);
+    assert.equal(initial.outboxEvents, 3);
+    for (const staleCart of oldCarts) {
+      assert.equal(
+        (await db.abandonedCart.findUniqueOrThrow({ where: { cartId: staleCart.id } })).status,
+        "DETECTED",
+      );
+    }
+
+    const freshCart = await makeCart();
+    await makeStale(freshCart.id, 1.5);
+    const next = await lifecycle.captureAbandonedCarts({ inactivityMinutes: 60, limit: 1 });
+    assert.deepEqual(next, { detected: 1, expired: 0, outboxEvents: 1 });
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { cartId: freshCart.id } })).status,
+      "DETECTED",
+    );
+    assert.equal(
+      await db.domainOutbox.count({
+        where: { aggregateType: "Cart", aggregateId: freshCart.id, eventType: "cart.abandoned.v1" },
+      }),
+      1,
+    );
+    for (const staleCart of oldCarts) {
+      assert.equal(
+        await db.domainOutbox.count({
+          where: {
+            aggregateType: "Cart",
+            aggregateId: staleCart.id,
+            eventType: "cart.abandoned.v1",
+          },
+        }),
+        1,
+      );
+    }
+  });
+
+  it("serializes CartService.addBundle and revalidateLocked across inverse bundle orders without deadlocks", async () => {
+    const pricing = new PricingService(db);
+    const createdBundles = [
+      await pricing.upsertBundle(
+        null,
+        {
+          slug: `a3-bundle-one-${randomUUID().slice(0, 8)}`,
+          name: "Combo concurrencia uno",
+          description: "Combo de prueba para orden de bloqueos.",
+          status: "ACTIVE",
+          priceCents: "95000",
+          discountCents: "5000",
+          items: [{ sku: catalog.sku, quantity: 1 }],
+        },
+        audit,
+      ),
+      await pricing.upsertBundle(
+        null,
+        {
+          slug: `a3-bundle-two-${randomUUID().slice(0, 8)}`,
+          name: "Combo concurrencia dos",
+          description: "Segundo combo de prueba para orden de bloqueos.",
+          status: "ACTIVE",
+          priceCents: "95000",
+          discountCents: "5000",
+          items: [{ sku: catalog.sku, quantity: 1 }],
+        },
+        audit,
+      ),
+    ].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+    const [bundleA, bundleB] = createdBundles;
+
+    const cartA = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(24 * 30),
+    });
+    const cartB = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(24 * 30),
+    });
+    const cartC = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(24 * 30),
+    });
+    await carts.addBundle({ cartId: cartA.id }, bundleB.id, 1);
+    await carts.addBundle({ cartId: cartB.id }, bundleA.id, 1);
+    await carts.addBundle({ cartId: cartC.id }, bundleA.id, 1);
+    await carts.addBundle({ cartId: cartC.id }, bundleB.id, 1);
+
+    const blocker = await openBarrier([`bundle:${bundleA.id}`]);
+    try {
+      const addLowToHigh = carts.addBundle({ cartId: cartA.id }, bundleA.id, 1);
+      const addHighToLow = carts.addBundle({ cartId: cartB.id }, bundleB.id, 1);
+      const revalidate = carts.getById(cartC.id);
+      await waitForAdvisoryWaiters(3);
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled([addLowToHigh, addHighToLow, revalidate]);
+      assertNoRetryableFailure(outcomes);
+      for (const outcome of outcomes) {
+        assert.equal(outcome.status, "fulfilled");
+        const bundleIds = new Set(outcome.value.items.map((item) => item.bundle?.id));
+        assert.equal(bundleIds.has(bundleA.id), true);
+        assert.equal(bundleIds.has(bundleB.id), true);
+      }
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+  });
+
+  it("serializes AccountService.anonymize and CrmRetentionService.suppress without deadlocks", async () => {
+    const accounts = new AccountService(db, { privacyPolicyVersion: "2026-01" });
+    const crm = new CrmService(db);
+    const retention = new CrmRetentionService(db);
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `anon-crm-race-${randomUUID()}@example.test`,
+        givenName: "Camila",
+        familyName: "Vargas",
+        status: "ACTIVE",
+      },
+    });
+    const syncedContact = await crm.syncCustomerContact(customer.id);
+    const blocker = await openBarrier([`crm-customer:${customer.id}`]);
+    try {
+      const anonymizing = accounts.anonymize(customer.id, "ELIMINAR MI CUENTA", {
+        ipHash: hash(),
+        userAgentHash: hash(),
+      });
+      const suppressing = retention.suppress(
+        {
+          contactId: syncedContact.id,
+          expectedVersion: syncedContact.version,
+          reason: "DATA_SUBJECT_REQUEST",
+          privacyPolicyVersion: "2026-01",
+        },
+        audit,
+      );
+      await waitForAdvisoryWaiters(2);
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled([anonymizing, suppressing]);
+      assertNoRetryableFailure(outcomes);
+      assert.equal(outcomes[1].status, "fulfilled");
+      if (outcomes[0].status === "rejected") {
+        assert.ok(outcomes[0].reason instanceof AccountError);
+        assert.equal(outcomes[0].reason.code, "NOT_FOUND");
+      }
+      assert.equal(
+        (await db.customer.findUniqueOrThrow({ where: { id: customer.id } })).status,
+        "ANONYMIZED",
+      );
+      assert.equal(
+        (await db.contact.findUniqueOrThrow({ where: { id: syncedContact.id } })).status,
+        "ANONYMIZED",
+      );
+      const replay = await retention.suppress(
+        {
+          contactId: syncedContact.id,
+          expectedVersion: syncedContact.version,
+          reason: "DATA_SUBJECT_REQUEST",
+          privacyPolicyVersion: "2026-01",
+        },
+        audit,
+      );
+      assert.equal(replay.replayed, true);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+  });
+
+  it("qualifies a referral once across two concurrent paid orders without clobbering to REJECTED", async () => {
+    const growth = new GrowthService(db);
+    const referrer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `referrer-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+      },
+    });
+    const referred = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `referred-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+      },
+    });
+    const { code } = await growth.createReferralCode(referrer.id);
+    const referral = await growth.attributeReferral(referred.id, code);
+    assert.equal(referral.status, "ATTRIBUTED");
+
+    const secondCatalog = await seedCatalogFixture(sql);
+    await seedInventoryFixture(sql, secondCatalog);
+    const variant = await db.productVariant.findUniqueOrThrow({
+      where: { id: catalog.variantId },
+      select: { priceCents: true, compareAtPriceCents: true },
+    });
+    await db.productVariant.update({
+      where: { id: catalog.variantId },
+      data: { priceCents: 10_000_000n, compareAtPriceCents: 10_100_000n },
+    });
+    await db.productVariant.update({
+      where: { id: secondCatalog.variantId },
+      data: { priceCents: 10_000_000n, compareAtPriceCents: 10_100_000n },
+    });
+    let order1Id;
+    let order2Id;
+    try {
+      const cart1 = await carts.createStorefrontCart({
+        accessTokenHash: hash(),
+        customerId: referred.id,
+        expiresAt: future(24 * 30),
+      });
+      await carts.addVariant({ cartId: cart1.id }, catalog.variantId, 1);
+      const cart2 = await carts.createStorefrontCart({
+        accessTokenHash: hash(),
+        customerId: referred.id,
+        expiresAt: future(24 * 30),
+      });
+      await carts.addVariant({ cartId: cart2.id }, secondCatalog.variantId, 1);
+      order1Id = (await orders.checkout(await conversion(cart1, referred.email))).orderId;
+      order2Id = (await orders.checkout(await conversion(cart2, referred.email))).orderId;
+    } finally {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: {
+          priceCents: variant.priceCents,
+          compareAtPriceCents: variant.compareAtPriceCents,
+        },
+      });
+    }
+
+    const attempt1 = await payments.start({
+      orderId: order1Id,
+      provider: PaymentProvider.BANK_TRANSFER,
+      environment: "LOCAL",
+      idempotencyKey: `ref-race-1:${randomUUID()}`,
+    });
+    const attempt2 = await payments.start({
+      orderId: order2Id,
+      provider: PaymentProvider.BANK_TRANSFER,
+      environment: "LOCAL",
+      idempotencyKey: `ref-race-2:${randomUUID()}`,
+    });
+
+    const blocker = await openBarrier([
+      `growth-customer:${referred.id}`,
+      `growth-customer:${referrer.id}`,
+    ]);
+    try {
+      const confirm1 = payments.confirmBankTransfer({
+        paymentAttemptId: attempt1.id,
+        externalReference: `BANK-REF-1-${randomUUID()}`,
+        audit,
+      });
+      const confirm2 = payments.confirmBankTransfer({
+        paymentAttemptId: attempt2.id,
+        externalReference: `BANK-REF-2-${randomUUID()}`,
+        audit,
+      });
+      await waitForAdvisoryWaiters(2);
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled([confirm1, confirm2]);
+      assertNoRetryableFailure(outcomes);
+      assert.equal(outcomes[0].status, "fulfilled");
+      assert.equal(outcomes[1].status, "fulfilled");
+
+      const settledReferral = await db.referral.findUniqueOrThrow({ where: { id: referral.id } });
+      assert.equal(settledReferral.status, "QUALIFIED");
+      assert.equal(settledReferral.rejectionReason, null);
+      assert.ok([order1Id, order2Id].includes(settledReferral.orderId));
+      assert.equal(
+        (await db.customer.findUniqueOrThrow({ where: { id: referrer.id } })).loyaltyPoints,
+        50,
+      );
+      assert.equal(
+        (await db.customer.findUniqueOrThrow({ where: { id: referred.id } })).loyaltyPoints,
+        52,
+      );
+      assert.equal(
+        await db.loyaltyTxn.count({ where: { referralId: referral.id, type: "REFERRAL_EARN" } }),
+        2,
+      );
+      assert.equal(
+        await db.loyaltyTxn.count({ where: { customerId: referred.id, type: "EARN" } }),
+        2,
+      );
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+  });
+
+  it("serializes LifecycleService.enrollForJourney and transitionJourney without deadlocks", async () => {
+    const segmentation = new SegmentationService(db);
+    const campaigns = new LifecycleService(db);
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `lifecycle-race-${randomUUID()}@example.test`,
+        givenName: "Sofía",
+        status: "ACTIVE",
+      },
+    });
+    await db.consent.create({
+      data: {
+        customerId: customer.id,
+        purpose: "MARKETING_EMAIL",
+        status: "GRANTED",
+        source: "a3-concurrency",
+        policyVersion: "2026-01",
+        proofHash: hash(),
+      },
+    });
+    const draftSegment = await segmentation.createSegment(
+      {
+        name: `Segmento A3 ${randomUUID().slice(0, 8)}`,
+        definition: {
+          minFrequency: null,
+          maxFrequency: null,
+          minNetLtvCents: null,
+          maxNetLtvCents: null,
+          lastPurchaseWithinDays: null,
+          lastPurchaseOlderThanDays: null,
+          rfmClass: "PROSPECT",
+        },
+      },
+      audit,
+    );
+    const activeSegment = await segmentation.transitionSegment(
+      { segmentId: draftSegment.id, expectedVersion: draftSegment.version, action: "ACTIVATE" },
+      audit,
+    );
+    await segmentation.refreshActiveSegments(20);
+    const draftJourney = await campaigns.createJourney(
+      {
+        name: `Journey A3 ${randomUUID().slice(0, 8)}`,
+        segmentId: activeSegment.id,
+        steps: [
+          {
+            position: 0,
+            offsetMinutes: 0,
+            subject: "Hola {{customerFirstName}} de {{storeName}}",
+            htmlBody:
+              '<p>Hola {{customerFirstName}}.</p><p><a href="{{accountUrl}}">Cuenta</a></p><p><a href="{{unsubscribeUrl}}">Baja</a></p>',
+            textBody:
+              "Hola {{customerFirstName}}. {{storeName}}: {{accountUrl}}. Baja: {{unsubscribeUrl}}",
+            variables: ["accountUrl", "customerFirstName", "storeName", "unsubscribeUrl"],
+          },
+        ],
+      },
+      audit,
+    );
+    const activeJourney = await campaigns.transitionJourney(
+      { journeyId: draftJourney.id, expectedVersion: draftJourney.version, action: "ACTIVATE" },
+      audit,
+    );
+
+    const blocker = await openBarrier([`customer-segment:${activeSegment.id}`]);
+    try {
+      const enrolling = campaigns.enrollForJourney(activeJourney.id, 50);
+      const archiving = campaigns.transitionJourney(
+        { journeyId: activeJourney.id, expectedVersion: activeJourney.version, action: "ARCHIVE" },
+        audit,
+      );
+      await waitForAdvisoryWaiters(2);
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled([enrolling, archiving]);
+      assertNoRetryableFailure(outcomes);
+      assert.equal(outcomes[0].status, "fulfilled");
+      assert.equal(outcomes[1].status, "fulfilled");
+      assert.equal(
+        (await db.lifecycleJourney.findUniqueOrThrow({ where: { id: activeJourney.id } })).status,
+        "ARCHIVED",
+      );
+      assert.equal(
+        await db.lifecycleEnrollment.count({
+          where: { journeyId: activeJourney.id, status: "ACTIVE" },
+        }),
+        0,
+      );
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+      const latestSegment = await db.customerSegment.findUnique({
+        where: { id: activeSegment.id },
+      });
+      if (latestSegment && latestSegment.status !== "ARCHIVED") {
+        await segmentation
+          .transitionSegment(
+            {
+              segmentId: latestSegment.id,
+              expectedVersion: latestSegment.version,
+              action: "ARCHIVE",
+            },
+            audit,
+          )
+          .catch(() => undefined);
+      }
+    }
+  });
+
+  it("never reopens a resolved support ticket when a customer reply races with admin resolution", async () => {
+    const postSale = new PostSaleService(db);
+    const postSaleAdmin = new PostSaleAdminService(db);
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `support-toctou-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+      },
+    });
+    const created = await postSale.createSupportTicket(
+      { kind: "CUSTOMER", customerId: customer.id },
+      {
+        kind: "QUERY",
+        subject: "Consulta sobre estado de garantía A3",
+        message: "Necesito confirmar el resultado final de mi solicitud.",
+        idempotencyKey: `support-open-${randomUUID()}`,
+      },
+    );
+
+    let resolvePeekDone;
+    let resolveReleaseReply;
+    const peekDone = new Promise((resolve) => {
+      resolvePeekDone = resolve;
+    });
+    const releaseReply = new Promise((resolve) => {
+      resolveReleaseReply = resolve;
+    });
+    let paused = false;
+    const pausedDb = new Proxy(db, {
+      get(target, property) {
+        if (property !== "$transaction") return Reflect.get(target, property, target);
+        return (callback, options) =>
+          target.$transaction(async (tx) => {
+            const wrapped = new Proxy(tx, {
+              get(txTarget, txProperty) {
+                if (txProperty !== "supportTicket") {
+                  return Reflect.get(txTarget, txProperty, txTarget);
+                }
+                return new Proxy(txTarget.supportTicket, {
+                  get(modelTarget, modelProperty) {
+                    if (modelProperty !== "findUnique") {
+                      return Reflect.get(modelTarget, modelProperty, modelTarget);
+                    }
+                    return async (args) => {
+                      const result = await modelTarget.findUnique(args);
+                      if (!paused) {
+                        paused = true;
+                        resolvePeekDone();
+                        await releaseReply;
+                      }
+                      return result;
+                    };
+                  },
+                });
+              },
+            });
+            return callback(wrapped);
+          }, options);
+      },
+    });
+    const pausedPostSale = new PostSaleService(pausedDb);
+    const customerReply = pausedPostSale.replySupportTicket(
+      { kind: "CUSTOMER", customerId: customer.id },
+      {
+        ticketId: created.id,
+        body: "Respuesta tardía del cliente durante resolución.",
+        idempotencyKey: `support-cust-reply-${randomUUID()}`,
+        expectedVersion: 0,
+      },
+    );
+    await peekDone;
+    const resolved = await postSaleAdmin.replySupport({
+      ticketId: created.id,
+      body: "Tu solicitud fue resuelta de forma definitiva.",
+      status: "RESOLVED",
+      expectedVersion: 0,
+      idempotencyKey: `support-admin-resolve-${randomUUID()}`,
+      audit: { ...audit, requestId: randomUUID() },
+    });
+    assert.equal(resolved.replayed, false);
+    resolveReleaseReply();
+
+    await assert.rejects(
+      customerReply,
+      (error) => error instanceof PostSaleError && error.code === "CONFLICT",
+    );
+    const persisted = await db.supportTicket.findUniqueOrThrow({ where: { id: created.id } });
+    assert.equal(persisted.status, "RESOLVED");
+    assert.ok(persisted.resolvedAt);
+    assert.equal(persisted.version, 1);
+    assert.equal(await db.supportTicketMessage.count({ where: { ticketId: created.id } }), 2);
+
+    const second = await postSale.createSupportTicket(
+      { kind: "CUSTOMER", customerId: customer.id },
+      {
+        kind: "QUERY",
+        subject: "Segunda consulta concurrente soporte A3",
+        message: "Validación concurrente bajo barrera de bloqueo.",
+        idempotencyKey: `support-open-2-${randomUUID()}`,
+      },
+    );
+    const blocker = await openBarrier([`support:${second.id}`]);
+    try {
+      const adminRace = postSaleAdmin.replySupport({
+        ticketId: second.id,
+        body: "Resolución concurrente bajo barrera.",
+        status: "RESOLVED",
+        expectedVersion: 0,
+        idempotencyKey: `support-admin-race-${randomUUID()}`,
+        audit: { ...audit, requestId: randomUUID() },
+      });
+      const customerRace = postSale.replySupportTicket(
+        { kind: "CUSTOMER", customerId: customer.id },
+        {
+          ticketId: second.id,
+          body: "Mensaje concurrente del cliente bajo barrera.",
+          idempotencyKey: `support-cust-race-${randomUUID()}`,
+          expectedVersion: 0,
+        },
+      );
+      await waitForAdvisoryWaiters(2);
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled([adminRace, customerRace]);
+      assertNoRetryableFailure(outcomes);
+      assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+      const rejected = outcomes.filter((outcome) => outcome.status === "rejected");
+      assert.equal(rejected.length, 1);
+      assert.ok(rejected[0].reason instanceof PostSaleError);
+      assert.equal(rejected[0].reason.code, "CONFLICT");
+      const finalSecond = await db.supportTicket.findUniqueOrThrow({ where: { id: second.id } });
+      if (outcomes[0].status === "fulfilled") {
+        assert.equal(finalSecond.status, "RESOLVED");
+        assert.ok(finalSecond.resolvedAt);
+      } else {
+        assert.equal(finalSecond.status, "OPEN");
+      }
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+  });
+
+  it("serializes FinanceService.refreshFiscalWatch into monotonic snapshots and consistent alerts", async () => {
+    const finance = new FinanceService(db, {
+      uvtValueCents: 100_000n,
+      uvtYear: 2026,
+      thresholdUvt: 2,
+    });
+    const before = await finance.refreshFiscalWatch();
+    const { orderId } = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.BANK_TRANSFER,
+      environment: "LOCAL",
+      idempotencyKey: `fiscal-watch-race:${randomUUID()}`,
+    });
+    await payments.confirmBankTransfer({
+      paymentAttemptId: attempt.id,
+      externalReference: `BANK-FISCAL-${randomUUID()}`,
+      audit,
+    });
+
+    const blocker = await openBarrier(["fiscal-watch"]);
+    try {
+      const runs = [
+        finance.refreshFiscalWatch(),
+        finance.refreshFiscalWatch(),
+        finance.refreshFiscalWatch(),
+      ];
+      await waitForAdvisoryWaiters(3);
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled(runs);
+      assertNoRetryableFailure(outcomes);
+      for (const outcome of outcomes) {
+        assert.equal(outcome.status, "fulfilled");
+      }
+      const snapshots = outcomes.map((outcome) => outcome.value);
+      assert.equal(new Set(snapshots.map((snapshot) => snapshot.id)).size, 1);
+      assert.equal(new Set(snapshots.map((snapshot) => snapshot.grossCapturedCents)).size, 1);
+      assert.ok(
+        BigInt(snapshots[0].grossCapturedCents) >= BigInt(before.grossCapturedCents) + 100_000n,
+      );
+      const fiscalYear = snapshots[0].fiscalYear;
+      const persisted = await db.fiscalWatchSnapshot.findUniqueOrThrow({
+        where: { id: snapshots[0].id },
+      });
+      assert.equal(persisted.grossCapturedCents, BigInt(snapshots[0].grossCapturedCents));
+      const thresholdAlert = await db.notification.findUnique({
+        where: { deduplicationKey: `fiscal-watch:${fiscalYear}:threshold` },
+      });
+      const approachingAlert = await db.notification.findUnique({
+        where: { deduplicationKey: `fiscal-watch:${fiscalYear}:approaching` },
+      });
+      if (persisted.status === "THRESHOLD_REACHED") {
+        assert.ok(thresholdAlert);
+        assert.equal(thresholdAlert.resolvedAt, null);
+        assert.ok(!approachingAlert || approachingAlert.resolvedAt !== null);
+        assert.ok(persisted.thresholdReachedAt);
+      } else if (persisted.status === "APPROACHING_LIMIT") {
+        assert.ok(approachingAlert);
+        assert.equal(approachingAlert.resolvedAt, null);
+        assert.ok(!thresholdAlert || thresholdAlert.resolvedAt !== null);
+      } else {
+        assert.ok(!thresholdAlert || thresholdAlert.resolvedAt !== null);
+        assert.ok(!approachingAlert || approachingAlert.resolvedAt !== null);
+      }
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
   });
 });

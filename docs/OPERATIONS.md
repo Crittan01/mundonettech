@@ -88,7 +88,7 @@ Configura `POST /api/webhooks/resend` en el proveedor con su secreto Svix y `GET
 ## 4. Gates y suites
 
 ```bash
-make check            # docs/Git/idioma/fronteras/AST/caché/env/anti-PRD, lint, Prettier y typecheck total
+make check            # docs/Git/idioma/fronteras/AST/caché/seguridad/env/anti-PRD, lint, Prettier y typecheck total
 pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
 pnpm test:unit        # contratos Vitest de guardas, catálogo, WAC, seriales, CSV, IVA, Flex, UBL, Meta CAPI y proveedores
 pnpm test:integration # catálogo, inventario, checkout, RLS, bóveda, OAuth/User Products, packs/órdenes/ME2/Flex/Full, Meta CAPI, Shipping, Email, DIAN y DR real
@@ -116,7 +116,7 @@ Las sondas `GET /api/health/live` y `GET /api/health/ready` responden `no-store`
 
 `.github/workflows/ci.yml` corre en PRs contra `develop` y pushes a `develop`, con permisos de solo lectura y cancelación de ejecuciones duplicadas. Ejecuta tres jobs en paralelo (`checks-and-domain`, `e2e-owasp-k6` y `lighthouse`) más la compuerta `verify`, cada uno con `postgres:17.12-alpine` en `:54422`, health checks, secretos HMAC aleatorios y `EMAIL_SEND_DISABLED=1`; no requiere Supabase remoto ni cuentas comerciales. La acción de k6 está fijada por commit y la auditoría de dependencias productivas bloquea vulnerabilidades altas o críticas.
 
-Cobertura en paralelo: `checks-and-domain` (instalación frozen, auditoría de dependencias, validación/migración, `make check` con `guard:ast`, `pnpm test`, `verify-security-posture` y `pnpm test:rls`), `e2e-owasp-k6` (`pnpm build` standalone, Chromium, `pnpm test:e2e`, `pnpm test:owasp`, `pnpm test:k6` y árbol Git limpio) y `lighthouse` (`pnpm test:lighthouse`), consolidados en `verify`. Los diagnósticos Playwright y las evidencias Lighthouse/k6 se cargan como artefactos retenidos siete días.
+Cobertura en paralelo: `checks-and-domain` (instalación frozen, auditoría de dependencias, validación/migración, `make check` con `guard:ast` y `guard:security-surface`, `pnpm test`, `verify-security-posture` y `pnpm test:rls`), `e2e-owasp-k6` (`pnpm build` standalone, Chromium, `pnpm test:e2e`, `pnpm test:owasp`, `pnpm test:k6` y árbol Git limpio) y `lighthouse` (`pnpm test:lighthouse`), consolidados en `verify`. Los diagnósticos Playwright y las evidencias Lighthouse/k6 se cargan como artefactos retenidos siete días.
 
 ## 6. Build standalone y ambientes
 

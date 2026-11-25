@@ -61,30 +61,40 @@ export class CodReconciliationService {
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
         await assertFinancialActor(tx, input.audit.actorAdminUserId);
-        const existing = await tx.remittanceBatch.findUnique({
-          where: { reference },
-          include: { reconciliations: true },
-        });
-        if (existing) {
-          if (!equalHash(existing.requestHash, requestHash)) {
+        const replayExisting = (batch: {
+          id: string;
+          status: string;
+          requestHash: Uint8Array;
+          expectedCents: bigint;
+          receivedCents: bigint;
+          reconciliations: readonly { status: string; paymentAttemptId: string }[];
+        }): RemittanceResult => {
+          if (!equalHash(batch.requestHash, requestHash)) {
             throw new PaymentConflictError(
               "Remittance reference was used for another request.",
               "IDEMPOTENCY_CONFLICT",
             );
           }
           return {
-            batchId: existing.id,
-            status: existing.status,
-            expectedCents: existing.expectedCents.toString(),
-            receivedCents: existing.receivedCents.toString(),
-            reconciledAttemptIds: existing.reconciliations
+            batchId: batch.id,
+            status: batch.status,
+            expectedCents: batch.expectedCents.toString(),
+            receivedCents: batch.receivedCents.toString(),
+            reconciledAttemptIds: batch.reconciliations
               .filter((item) => item.status === "RECONCILED")
               .map((item) => item.paymentAttemptId),
-            discrepancyAttemptIds: existing.reconciliations
+            discrepancyAttemptIds: batch.reconciliations
               .filter((item) => item.status === "DISCREPANCY")
               .map((item) => item.paymentAttemptId),
             replayed: true,
           };
+        };
+        const existing = await tx.remittanceBatch.findUnique({
+          where: { reference },
+          include: { reconciliations: true },
+        });
+        if (existing) {
+          return replayExisting(existing);
         }
         const attempts = await tx.paymentAttempt.findMany({
           where: { id: { in: items.map((item) => item.paymentAttemptId) } },
@@ -96,6 +106,13 @@ export class CodReconciliationService {
           `cod-remittance:${reference}`,
           ...attempts.map((attempt) => `order-payment:${attempt.orderId}`),
         ]);
+        const existingAfterLock = await tx.remittanceBatch.findUnique({
+          where: { reference },
+          include: { reconciliations: true },
+        });
+        if (existingAfterLock) {
+          return replayExisting(existingAfterLock);
+        }
         const now = await databaseNow(tx);
         const expectedCents = items.reduce(
           (sum, item) =>

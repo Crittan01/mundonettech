@@ -16,7 +16,11 @@ import type {
   ProductStatus,
 } from "./generated/client.js";
 import { Prisma } from "./generated/client.js";
-import { compareStrings } from "./inventory-shared.js";
+import {
+  acquireOperationLocks,
+  compareStrings,
+  inInventoryTransaction,
+} from "./inventory-shared.js";
 import type {
   AdminCatalogPage,
   AdminCatalogStatus,
@@ -1794,7 +1798,7 @@ export class CatalogService {
       );
     }
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         await this.validateReferences(tx, product);
         const created = await tx.product.create({
           data: { ...product, variants: { create: this.variantData(variant) } },
@@ -1821,7 +1825,7 @@ export class CatalogService {
     inputUuid(id, "productId");
     const product = normalizeBaseInput(input);
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         const existingRows = await tx.$queryRaw<ProductAuditRecord[]>`
           SELECT "id", "slug", "name", "shortDescription", "description", "brandId",
                  "categoryId", "taxGroupId", "status", "authenticity", "retractPolicy",
@@ -1876,7 +1880,7 @@ export class CatalogService {
     inputUuid(productId, "productId");
     const variant = normalizeVariantInput(input);
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         const productRows = await tx.$queryRaw<
           Array<{ id: string; slug: string; status: ProductStatus }>
         >`
@@ -1966,7 +1970,7 @@ export class CatalogService {
     const attributeId = inputUuid(input.attributeId, "attributeId");
     const existingId = input.id ? inputUuid(input.id, "attributeValueId") : null;
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         const productRows = await tx.$queryRaw<
           Array<{ id: string; slug: string; categoryId: string }>
         >`
@@ -2013,16 +2017,24 @@ export class CatalogService {
                 data: { ...columns, productId, attributeId },
               });
         }
+        await acquireOperationLocks(tx, [`category-attribute:${product.categoryId}`]);
+        let categoryAttributeCreated = false;
         const categoryAttribute = await tx.categoryAttribute.findFirst({
           where: { categoryId: product.categoryId, attributeId },
         });
         if (!categoryAttribute) {
-          const position = await tx.categoryAttribute.count({
-            where: { categoryId: product.categoryId },
-          });
-          await tx.categoryAttribute.create({
-            data: { categoryId: product.categoryId, attributeId, position, required: false },
-          });
+          const positionRows = await tx.$queryRaw<Array<{ nextPosition: number }>>`
+            SELECT (COALESCE(MAX("position"), -1) + 1)::int AS "nextPosition"
+            FROM "CategoryAttribute"
+            WHERE "categoryId" = ${product.categoryId}::uuid
+          `;
+          const position = positionRows[0]?.nextPosition ?? 0;
+          const inserted = await tx.$executeRaw`
+            INSERT INTO "CategoryAttribute" ("categoryId", "attributeId", "position", "required")
+            VALUES (${product.categoryId}::uuid, ${attributeId}::uuid, ${position}::int, false)
+            ON CONFLICT ("categoryId", "attributeId") DO NOTHING
+          `;
+          categoryAttributeCreated = inserted > 0;
         }
         await writeCatalogAudit(
           tx,
@@ -2048,7 +2060,7 @@ export class CatalogService {
               valueType: definition.valueType,
             },
             valueChanged: previous === null || previous.normalizedValue !== saved.normalizedValue,
-            categoryAttributeCreated: categoryAttribute === null,
+            categoryAttributeCreated,
           },
         );
         return { id: saved.id, slug: product.slug };
@@ -2065,7 +2077,7 @@ export class CatalogService {
   ): Promise<{ id: string; slug: string }> {
     inputUuid(productId, "productId");
     inputUuid(attributeValueId, "attributeValueId");
-    return this.db.$transaction(async (tx) => {
+    return inInventoryTransaction(this.db, async (tx) => {
       const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
         SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;
@@ -2109,7 +2121,7 @@ export class CatalogService {
       throw new CatalogQueryError("Invalid compatibility fit.");
     }
     const notes = inputText(input.notes, "notes", 500);
-    return this.db.$transaction(async (tx) => {
+    return inInventoryTransaction(this.db, async (tx) => {
       const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
         SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;
@@ -2174,7 +2186,7 @@ export class CatalogService {
   ): Promise<{ id: string; slug: string }> {
     inputUuid(productId, "productId");
     inputUuid(compatibilityId, "compatibilityId");
-    return this.db.$transaction(async (tx) => {
+    return inInventoryTransaction(this.db, async (tx) => {
       const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
         SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;

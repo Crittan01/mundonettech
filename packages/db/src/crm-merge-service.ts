@@ -518,12 +518,15 @@ export class CrmMergeService {
             (id): id is string => id !== null,
           ),
         ),
-      ];
+      ].sort();
       if (requiredOrgIds.length > 0) {
-        const activeOrgs = await tx.organization.count({
-          where: { id: { in: requiredOrgIds }, deletedAt: null },
-        });
-        if (activeOrgs !== requiredOrgIds.length) {
+        const activeOrgs = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "Organization"
+          WHERE "id" = ANY(${requiredOrgIds}::uuid[]) AND "deletedAt" IS NULL
+          ORDER BY "id"
+          FOR SHARE
+        `;
+        if (activeOrgs.length !== requiredOrgIds.length) {
           throw new CrmError(
             "CONFLICT",
             "Cannot reverse merge because an associated organization was archived.",

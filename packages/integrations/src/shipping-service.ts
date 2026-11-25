@@ -84,7 +84,7 @@ export class ShippingService {
       const rows = await db.$queryRaw<Array<{ role: string }>>`
         SELECT "role"::text AS "role" FROM "AdminUser"
         WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
-        FOR UPDATE
+        FOR SHARE
       `;
       role = rows[0]?.role;
     } else {
@@ -805,6 +805,13 @@ export class ShippingService {
             where: { id: fulfillment.id },
             data: { status: "RECONCILING", version: { increment: 1 } },
           });
+        await writeShippingOutbox(tx, {
+          eventType: "shipping.provider.uncertain.v1",
+          aggregateType: "ShipmentPackage",
+          aggregateId: packageId,
+          deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1`,
+          payload: { orderId: fulfillment.orderId, shipmentId: record.shipmentId, packageId },
+        });
         return { outcome: "UNCERTAIN" as const, record };
       }
       if (record.status !== "SEALED" && record.status !== "CLAIMED")
@@ -971,13 +978,18 @@ export class ShippingService {
         packageId,
       });
       if (!record) throw new ShippingNotFoundError("Shipment package not found.");
-      if (record.status !== "RECONCILING")
+      if (
+        record.status !== "RECONCILING" ||
+        record.requestStartedAt?.getTime() !== current.record.requestStartedAt?.getTime() ||
+        record.claimedBy !== current.record.claimedBy
+      ) {
         return {
           packageId,
           status: record.status,
           trackingCode: record.trackingCode,
           replayed: true,
         };
+      }
       if (fulfillment.status === "CANCELLED" || shipment.status === "CANCELLED")
         throw new ShippingConflictError("A cancelled shipment cannot reconcile a provider label.");
       await tx.shipmentPackage.update({

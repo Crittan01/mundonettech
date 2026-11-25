@@ -1077,7 +1077,16 @@ export class CartService {
     assertUuid(bundleId, "bundleId");
     assertCartQuantity(quantity);
     return this.mutate(reference, audit, "CART_BUNDLE_ADDED", async (tx, cart) => {
-      await acquireOperationLocks(tx, [`bundle:${bundleId}`]);
+      const bundleLockIds = [
+        ...new Set([
+          bundleId,
+          ...cart.items.map((item) => item.bundleId).filter((id): id is string => id !== null),
+        ]),
+      ];
+      await acquireOperationLocks(
+        tx,
+        bundleLockIds.map((id) => `bundle:${id}`),
+      );
       const bundle = await tx.bundle.findFirst({
         where: { id: bundleId, status: "ACTIVE", deletedAt: null },
         include: {
@@ -1157,6 +1166,16 @@ export class CartService {
     return this.mutate(reference, audit, "CART_BUNDLE_QUANTITY_UPDATED", async (tx, cart) => {
       const group = cart.items.filter((item) => item.bundleId === bundleId);
       if (group.length === 0) throw new CartNotFoundError("Bundle is not in this cart.");
+      const bundleLockIds = [
+        ...new Set([
+          bundleId,
+          ...cart.items.map((item) => item.bundleId).filter((id): id is string => id !== null),
+        ]),
+      ];
+      await acquireOperationLocks(
+        tx,
+        bundleLockIds.map((id) => `bundle:${id}`),
+      );
       if (quantity === 0) {
         await tx.cartItem.deleteMany({ where: { cartId: cart.id, bundleId } });
         return;
@@ -1228,12 +1247,17 @@ export class CartService {
       throw new CouponError("INVALID_CODE", "Coupon code format is invalid.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
-      const coupon = await tx.coupon.findFirst({
+      const peekedCoupon = await tx.coupon.findFirst({
         where: { code, deletedAt: null },
+        select: { id: true },
+      });
+      if (!peekedCoupon) throw new CouponError("NOT_FOUND", "Coupon was not found.");
+      await acquireOperationLocks(tx, [`coupon-redemption:${peekedCoupon.id}`]);
+      const coupon = await tx.coupon.findFirst({
+        where: { id: peekedCoupon.id, code, deletedAt: null },
         include: { products: true, categories: true },
       });
       if (!coupon) throw new CouponError("NOT_FOUND", "Coupon was not found.");
-      await acquireOperationLocks(tx, [`coupon-redemption:${coupon.id}`]);
       const { cart, now } = await lockCart(tx, reference);
       assertActiveCart(cart, now);
       assertAdminMutable(cart, audit);
@@ -1484,76 +1508,81 @@ export class CartService {
     const accessTokenHash = assertTokenHash(input.accessTokenHash, "accessTokenHash");
     const expiresAt = validateExpiration(input.expiresAt, "expiresAt");
     if (input.customerId) assertUuid(input.customerId, "customerId");
-    return inInventoryTransaction(this.db, async (tx) => {
-      const peek = await tx.cart.findFirst({
-        where: { assistedTokenHash },
-        select: { couponId: true },
-      });
-      if (peek?.couponId && input.customerId) {
-        await acquireOperationLocks(tx, [`coupon-redemption:${peek.couponId}`]);
-      }
-      const rows = await tx.$queryRaw<
-        Cart[]
-      >`SELECT * FROM "Cart" WHERE "assistedTokenHash" = ${assistedTokenHash} FOR UPDATE`;
-      if (!rows[0]) throw new CartNotFoundError("Assisted payment link not found.");
-      const cart = await loadCart(tx, rows[0].id);
-      const now = await databaseNow(tx);
-      if (
-        cart.status !== "ACTIVE" ||
-        cart.kind !== "ASSISTED" ||
-        cart.assistedClaimedAt ||
-        !cart.assistedExpiresAt ||
-        cart.assistedExpiresAt <= now ||
-        expiresAt <= now
-      )
-        throw new CartStateError("Assisted payment link is unavailable or expired.");
-      if (cart.customerId && cart.customerId !== (input.customerId ?? null)) {
-        throw new CartStateError(
-          "This assisted sale requires signing in with the assigned customer account.",
-        );
-      }
-      let nextCustomerId = cart.customerId;
-      let nextCouponId = cart.couponId;
-      let detachedCoupon = false;
-      if (!cart.customerId && input.customerId) {
-        const customer = await tx.customer.findFirst({
-          where: { id: input.customerId, deletedAt: null, status: { not: "ANONYMIZED" } },
-          select: { id: true },
+    try {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        const peek = await tx.cart.findFirst({
+          where: { assistedTokenHash },
+          select: { couponId: true },
         });
-        if (!customer) throw new CartValidationError("Customer is not available.");
-        if (cart.couponId !== (peek?.couponId ?? null)) retryCouponDivergence();
-        const transferred = await transferCouponToCustomer(
+        if (peek?.couponId && input.customerId) {
+          await acquireOperationLocks(tx, [`coupon-redemption:${peek.couponId}`]);
+        }
+        const rows = await tx.$queryRaw<
+          Cart[]
+        >`SELECT * FROM "Cart" WHERE "assistedTokenHash" = ${assistedTokenHash} FOR UPDATE`;
+        if (!rows[0]) throw new CartNotFoundError("Assisted payment link not found.");
+        const cart = await loadCart(tx, rows[0].id);
+        const now = await databaseNow(tx);
+        if (
+          cart.status !== "ACTIVE" ||
+          cart.kind !== "ASSISTED" ||
+          cart.assistedClaimedAt ||
+          !cart.assistedExpiresAt ||
+          cart.assistedExpiresAt <= now ||
+          expiresAt <= now
+        )
+          throw new CartStateError("Assisted payment link is unavailable or expired.");
+        if (cart.customerId && cart.customerId !== (input.customerId ?? null)) {
+          throw new CartStateError(
+            "This assisted sale requires signing in with the assigned customer account.",
+          );
+        }
+        let nextCustomerId = cart.customerId;
+        let nextCouponId = cart.couponId;
+        let detachedCoupon = false;
+        if (!cart.customerId && input.customerId) {
+          const customer = await tx.customer.findFirst({
+            where: { id: input.customerId, deletedAt: null, status: { not: "ANONYMIZED" } },
+            select: { id: true },
+          });
+          if (!customer) throw new CartValidationError("Customer is not available.");
+          if (cart.couponId !== (peek?.couponId ?? null)) retryCouponDivergence();
+          const transferred = await transferCouponToCustomer(
+            tx,
+            cart,
+            input.customerId,
+            expiresAt,
+            now,
+          );
+          nextCustomerId = input.customerId;
+          nextCouponId = transferred.couponId;
+          detachedCoupon = transferred.detached;
+        }
+        await tx.cart.update({
+          where: { id: cart.id },
+          data: {
+            customerId: nextCustomerId,
+            couponId: nextCouponId,
+            assistedTokenHash: null,
+            assistedClaimedAt: now,
+            accessTokenHash,
+            expiresAt,
+          },
+        });
+        const snapshot = await this.revalidateLocked(
           tx,
-          cart,
-          input.customerId,
-          expiresAt,
+          cart.id,
           now,
+          detachedCoupon ? [{ code: "COUPON_INVALID" }] : [],
         );
-        nextCustomerId = input.customerId;
-        nextCouponId = transferred.couponId;
-        detachedCoupon = transferred.detached;
-      }
-      await tx.cart.update({
-        where: { id: cart.id },
-        data: {
-          customerId: nextCustomerId,
-          couponId: nextCouponId,
-          assistedTokenHash: null,
-          assistedClaimedAt: now,
-          accessTokenHash,
-          expiresAt,
-        },
+        if (!snapshot.canContinue)
+          throw new CartStateError("Resolve cart issues before accepting the assisted sale.");
+        return snapshot;
       });
-      const snapshot = await this.revalidateLocked(
-        tx,
-        cart.id,
-        now,
-        detachedCoupon ? [{ code: "COUPON_INVALID" }] : [],
-      );
-      if (!snapshot.canContinue)
-        throw new CartStateError("Resolve cart issues before accepting the assisted sale.");
-      return snapshot;
-    });
+    } catch (error) {
+      if (hasUniqueViolation(error)) throw new CartStateError("Cart access token already exists.");
+      throw error;
+    }
   }
 
   async cancelAssistedCart(cartId: string, audit: PricingMutationAudit): Promise<CartSnapshot> {

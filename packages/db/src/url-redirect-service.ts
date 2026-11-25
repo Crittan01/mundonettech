@@ -10,6 +10,7 @@ import {
 
 import type { CatalogMutationAudit } from "./catalog-types.js";
 import { Prisma, PrismaClient, type UrlRedirect } from "./generated/client.js";
+import { inInventoryTransaction } from "./inventory-shared.js";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const urlRedirectCacheStateId = "00000000-0000-0000-0000-000000000001";
@@ -226,7 +227,7 @@ export class UrlRedirectService {
   async create(input: UrlRedirectInput, context: CatalogMutationAudit): Promise<UrlRedirect> {
     const normalized = normalizeInput(input);
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         await lockGraph(tx);
         if (normalized.active) {
           assertGraph(normalized.fromPath, normalized.toPath, await activeEdges(tx));
@@ -247,7 +248,7 @@ export class UrlRedirectService {
     assertUuid(id, "redirectId");
     const normalized = normalizeInput(input);
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         await lockGraph(tx);
         const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
         if (!existing) throw new UrlRedirectNotFoundError();
@@ -274,7 +275,7 @@ export class UrlRedirectService {
       throw new UrlRedirectValidationError("Redirect active flag must be boolean.");
     }
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         await lockGraph(tx);
         const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
         if (!existing) throw new UrlRedirectNotFoundError();
@@ -298,7 +299,7 @@ export class UrlRedirectService {
 
   async archive(id: string, context: CatalogMutationAudit) {
     assertUuid(id, "redirectId");
-    return this.db.$transaction(async (tx) => {
+    return inInventoryTransaction(this.db, async (tx) => {
       await lockGraph(tx);
       const existing = await tx.urlRedirect.findFirst({ where: { id, deletedAt: null } });
       if (!existing) throw new UrlRedirectNotFoundError();

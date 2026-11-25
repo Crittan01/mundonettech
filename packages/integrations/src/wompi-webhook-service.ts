@@ -234,12 +234,14 @@ export class WompiWebhookService {
         transaction,
       },
       resolution,
+      { syntheticTimestamp: true },
     );
   }
 
   private async recordFailure(event: WompiTransactionEvent, error: unknown): Promise<void> {
     const errorCode = externalErrorCode(error);
     await inInventoryTransaction(this.db, async (tx) => {
+      await acquireOperationLocks(tx, [`wompi-webhook:${PaymentProvider.WOMPI}:${event.eventKey}`]);
       const key = { provider: PaymentProvider.WOMPI, eventKey: event.eventKey } as const;
       const existing = await tx.paymentWebhookEvent.findUnique({
         where: { provider_eventKey: key },
@@ -276,6 +278,7 @@ export class WompiWebhookService {
   private async apply(
     event: WompiTransactionEvent,
     resolution: WompiResolution,
+    options: { readonly syntheticTimestamp?: boolean } = {},
   ): Promise<WompiWebhookResult> {
     try {
       return await inInventoryTransaction(this.db, async (tx): Promise<WompiWebhookResult> => {
@@ -382,6 +385,7 @@ export class WompiWebhookService {
           );
         }
         const now = await databaseNow(tx);
+        const effectiveOccurredAt = options.syntheticTimestamp ? now : event.occurredAt;
         const finish = async (
           status: "PROCESSED" | "IGNORED",
           errorCode: string | null = null,
@@ -392,7 +396,16 @@ export class WompiWebhookService {
           });
           return { eventKey: event.eventKey, status, attemptId: attempt.id, replayed: false };
         };
-        if (attempt.providerOccurredAt && attempt.providerOccurredAt > event.occurredAt) {
+        const incomingTerminal =
+          transaction.status === "APPROVED" || transaction.status === "VOIDED";
+        const attemptIsNonTerminal = !["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(
+          attempt.status,
+        );
+        if (
+          attempt.providerOccurredAt &&
+          attempt.providerOccurredAt > effectiveOccurredAt &&
+          !(incomingTerminal && (attemptIsNonTerminal || attempt.providerStatus === "PENDING"))
+        ) {
           return finish("IGNORED", "STALE_EVENT");
         }
         if (order.orderStatus === "CANCELLED") {
@@ -453,7 +466,7 @@ export class WompiWebhookService {
                 data: {
                   status: "PENDING",
                   providerStatus: "PENDING",
-                  providerOccurredAt: event.occurredAt,
+                  ...(options.syntheticTimestamp ? {} : { providerOccurredAt: event.occurredAt }),
                 },
               });
             }
@@ -485,7 +498,11 @@ export class WompiWebhookService {
             capture = capture
               ? await tx.paymentTransaction.update({
                   where: { id: capture.id },
-                  data: { status: "SUCCEEDED", completedAt: event.occurredAt, ...captureData },
+                  data: {
+                    status: "SUCCEEDED",
+                    completedAt: effectiveOccurredAt,
+                    ...captureData,
+                  },
                 })
               : await tx.paymentTransaction.create({
                   data: {
@@ -495,7 +512,7 @@ export class WompiWebhookService {
                     status: "SUCCEEDED",
                     amountCents: attempt.amountCents,
                     requestHash: operationHash,
-                    completedAt: event.occurredAt,
+                    completedAt: effectiveOccurredAt,
                     ...captureData,
                   },
                 });
@@ -506,8 +523,8 @@ export class WompiWebhookService {
               data: {
                 status: "SUCCEEDED",
                 providerStatus: "APPROVED",
-                providerOccurredAt: event.occurredAt,
-                completedAt: event.occurredAt,
+                providerOccurredAt: effectiveOccurredAt,
+                completedAt: effectiveOccurredAt,
               },
             });
             await refreshOrderPaymentStatus(tx, order.id);
@@ -549,7 +566,7 @@ export class WompiWebhookService {
                       status: "SUCCEEDED",
                       externalId: transaction.id,
                       statusMessage: transaction.statusMessage,
-                      completedAt: event.occurredAt,
+                      completedAt: effectiveOccurredAt,
                     },
                   })
               : await tx.paymentTransaction.create({
@@ -563,7 +580,7 @@ export class WompiWebhookService {
                     providerReference: transaction.reference,
                     requestHash: paymentDigest({ operation: "WOMPI_VOID", attemptId: attempt.id }),
                     statusMessage: transaction.statusMessage,
-                    completedAt: event.occurredAt,
+                    completedAt: effectiveOccurredAt,
                   },
                 });
             await new GrowthService(tx).reverseVoidedPaymentInTransaction(tx, voidTxn.id);
@@ -574,7 +591,7 @@ export class WompiWebhookService {
                 where: { id: capture.id },
                 data: {
                   status: "CANCELLED",
-                  completedAt: event.occurredAt,
+                  completedAt: effectiveOccurredAt,
                   statusMessage: transaction.statusMessage,
                 },
               });
@@ -584,8 +601,8 @@ export class WompiWebhookService {
               data: {
                 status: "CANCELLED",
                 providerStatus: "VOIDED",
-                providerOccurredAt: event.occurredAt,
-                completedAt: event.occurredAt,
+                providerOccurredAt: effectiveOccurredAt,
+                completedAt: effectiveOccurredAt,
               },
             });
             await refreshOrderPaymentStatus(tx, order.id);
@@ -600,7 +617,7 @@ export class WompiWebhookService {
         if (capture && !["FAILED", "CANCELLED"].includes(capture.status)) {
           await tx.paymentTransaction.update({
             where: { id: capture.id },
-            data: { status: "FAILED", completedAt: event.occurredAt, ...captureData },
+            data: { status: "FAILED", completedAt: effectiveOccurredAt, ...captureData },
           });
         } else if (!capture) {
           await tx.paymentTransaction.create({
@@ -611,7 +628,7 @@ export class WompiWebhookService {
               status: "FAILED",
               amountCents: attempt.amountCents,
               requestHash: operationHash,
-              completedAt: event.occurredAt,
+              completedAt: effectiveOccurredAt,
               ...captureData,
             },
           });
@@ -622,9 +639,9 @@ export class WompiWebhookService {
             data: {
               status: "FAILED",
               providerStatus: transaction.status,
-              providerOccurredAt: event.occurredAt,
+              providerOccurredAt: effectiveOccurredAt,
               failureCode: transaction.status,
-              completedAt: event.occurredAt,
+              completedAt: effectiveOccurredAt,
             },
           });
           await refreshOrderPaymentStatus(tx, order.id);

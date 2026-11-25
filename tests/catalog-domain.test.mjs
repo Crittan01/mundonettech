@@ -109,12 +109,35 @@ describe("F1.1 — persisted catalog graph", () => {
     assert.deepEqual(await searchForFixtureProduct("nueva"), [fixture.productId]);
     assert.deepEqual(await searchForFixtureProduct("acme"), []);
 
-    await client.query(`UPDATE "Brand" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
-      fixture.brandId,
+    // Soft-deleting a brand referenced by an active product is blocked by Brand_validate_lifecycle
+    await assert.rejects(
+      client.query(`UPDATE "Brand" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+        fixture.brandId,
+      ]),
+      (error) => error.code === "23514",
+    );
+
+    // Changing brand on product updates searchVector, restoring adds the original brand back, and archiving an unreferenced brand succeeds
+    const alternateBrand = await client.query(
+      `INSERT INTO "Brand" ("slug", "name") VALUES ($1, 'Marca Alterna') RETURNING "id"`,
+      [`alternate-brand-${randomUUID()}`],
+    );
+    await client.query(`UPDATE "Product" SET "brandId" = $1 WHERE "id" = $2`, [
+      alternateBrand.rows[0].id,
+      fixture.productId,
     ]);
     assert.deepEqual(await searchForFixtureProduct("nueva"), []);
-    await client.query(`UPDATE "Brand" SET "deletedAt" = NULL WHERE "id" = $1`, [fixture.brandId]);
+    assert.deepEqual(await searchForFixtureProduct("alterna"), [fixture.productId]);
+    await client.query(`UPDATE "Product" SET "brandId" = $1 WHERE "id" = $2`, [
+      fixture.brandId,
+      fixture.productId,
+    ]);
     assert.deepEqual(await searchForFixtureProduct("nueva"), [fixture.productId]);
+    assert.deepEqual(await searchForFixtureProduct("alterna"), []);
+
+    await client.query(`UPDATE "Brand" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+      alternateBrand.rows[0].id,
+    ]);
 
     await client.query(`UPDATE "AttributeDefinition" SET "searchable" = false WHERE "id" = $1`, [
       fixture.attributeId,
@@ -129,6 +152,17 @@ describe("F1.1 — persisted catalog graph", () => {
       fixture.variantId,
     ]);
     assert.deepEqual(await searchForFixtureProduct("MPN-UPDATED-77"), [fixture.productId]);
+
+    // Soft-deleting a variant referenced by an active bundle is blocked until the bundle is archived
+    await assert.rejects(
+      client.query(`UPDATE "ProductVariant" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`, [
+        fixture.variantId,
+      ]),
+      (error) => error.code === "23514",
+    );
+    await client.query(`UPDATE "Bundle" SET "status" = 'ARCHIVED' WHERE "id" = $1`, [
+      fixture.bundleId,
+    ]);
     await client.query(
       `UPDATE "ProductVariant" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
       [fixture.variantId],

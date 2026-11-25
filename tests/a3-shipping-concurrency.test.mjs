@@ -78,6 +78,36 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function openAdvisoryBarrier(keys) {
+  const client = new pg.Client({ connectionString: harness.databaseUrl });
+  await client.connect();
+  await client.query("BEGIN");
+  for (const key of [...new Set(keys)].sort()) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
+  }
+  return client;
+}
+
+async function waitForLockWait({ minimum = 1, waitEvent = null, timeoutMs = 5_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await sql.query(
+      `SELECT count(*)::int AS count
+       FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND pid <> pg_backend_pid()
+         AND wait_event_type = 'Lock'
+         AND ($1::text IS NULL OR wait_event = $1)`,
+      [waitEvent],
+    );
+    if (result.rows[0].count >= minimum) return;
+    await delay(20);
+  }
+  throw new Error(
+    `Expected at least ${minimum} PostgreSQL lock waiter(s)${waitEvent ? ` (${waitEvent})` : ""}.`,
+  );
+}
+
 function contact() {
   return {
     email: `shipping-concurrency-${randomUUID()}@example.test`,
@@ -185,7 +215,44 @@ function pauseBeforeFulfillmentLock(client, reached, release) {
   });
 }
 
-function makeShipping(db, { uncertain = false } = {}) {
+function pauseAfterOrderSkipLock(client, targetOrderId, reached, release) {
+  let paused = false;
+  return bindClient(client, (callback, ...options) => {
+    if (typeof callback !== "function") return client.$transaction(callback, ...options);
+    return client.$transaction(
+      async (tx) => {
+        const wrapped = new Proxy(tx, {
+          get(target, property) {
+            if (property === "$queryRaw") {
+              return async (...args) => {
+                const query = Array.isArray(args[0]) ? args[0].join(" ") : String(args[0]);
+                const result = await target.$queryRaw(...args);
+                if (
+                  !paused &&
+                  query.includes('FROM "Order"') &&
+                  query.includes("FOR UPDATE SKIP LOCKED") &&
+                  Array.isArray(result) &&
+                  result.some((row) => row?.id === targetOrderId)
+                ) {
+                  paused = true;
+                  reached.resolve();
+                  await release.promise;
+                }
+                return result;
+              };
+            }
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        return callback(wrapped);
+      },
+      ...options,
+    );
+  });
+}
+
+function makeShipping(db, { uncertain = false, createLabel, findLabel } = {}) {
   const plaintext = new TextEncoder().encode(JSON.stringify(aveonline));
   return new ShippingService(db, {
     vault: {
@@ -202,6 +269,7 @@ function makeShipping(db, { uncertain = false } = {}) {
       async createLabel(request) {
         providerCalls.push(request.requestKey);
         const sequence = providerCalls.length;
+        if (createLabel) return createLabel(request, sequence);
         if (uncertain) {
           throw new ShippingProviderError("Uncertain test outcome", "NETWORK_UNCERTAIN");
         }
@@ -212,7 +280,8 @@ function makeShipping(db, { uncertain = false } = {}) {
           labelUrl: `https://carrier.example.test/guides/${sequence}`,
         };
       },
-      async findLabel() {
+      async findLabel(requestKey) {
+        if (findLabel) return findLabel(requestKey);
         return null;
       },
     }),
@@ -457,16 +526,41 @@ describe("A3 shipping lock hierarchy and claim fencing", () => {
     );
     assert.equal(order.orderStatus, "CONFIRMED");
 
+    const barrier = await openAdvisoryBarrier([`order-payment:${retryOrder.orderId}`]);
+    try {
+      const startedAt = Date.now();
+      const skipped = await lifecycleB.releaseExpiredOrderReservations({ limit: 20 });
+      assert.ok(Date.now() - startedAt < 5_000);
+      assert.equal(skipped.orderIds.includes(retryOrder.orderId), false);
+      await barrier.query("COMMIT");
+    } finally {
+      await barrier.query("ROLLBACK").catch(() => undefined);
+      await barrier.end();
+    }
+
     const reached = deferred();
     const release = deferred();
+    const expiryLocked = deferred();
+    const releaseExpiry = deferred();
     const pausedDb = pauseSecondOrderLock(dbA, reached, release);
     const pausedShipping = makeShipping(pausedDb);
+    const pausedLifecycle = new OrderLifecycleService(
+      pauseAfterOrderSkipLock(dbB, retryOrder.orderId, expiryLocked, releaseExpiry),
+    );
+    let results;
     const picking = pausedShipping.startPicking(retryOrder.shipmentId, audit);
-    await reached.promise;
-    const expiring = lifecycleB.releaseExpiredOrderReservations({ limit: 20 });
-    await delay(100);
-    release.resolve();
-    const results = await Promise.allSettled([picking, expiring]);
+    try {
+      await reached.promise;
+      const expiring = pausedLifecycle.releaseExpiredOrderReservations({ limit: 20 });
+      await expiryLocked.promise;
+      release.resolve();
+      await waitForLockWait({ minimum: 1 });
+      releaseExpiry.resolve();
+      results = await Promise.allSettled([picking, expiring]);
+    } finally {
+      release.resolve();
+      releaseExpiry.resolve();
+    }
     assertNoDeadlock(results);
     assert.equal(results[0].status, "rejected");
     assert.ok(results[0].reason instanceof ShippingConflictError);
@@ -544,7 +638,7 @@ describe("A3 shipping lock hierarchy and claim fencing", () => {
       );
       const expiring = lifecycleB.releaseExpiredOrderReservations({ limit: 20 });
       release.resolve();
-      await delay(75);
+      await waitForLockWait({ minimum: 2 });
       [inversePackageLock] = await Promise.allSettled([
         inverse.query(`SELECT "id" FROM "ShipmentPackage" WHERE "id" = $1 FOR UPDATE`, [
           fixture.packageId,
@@ -615,5 +709,120 @@ describe("A3 shipping lock hierarchy and claim fencing", () => {
       1,
     );
     assert.equal(await dbA.inventoryLedger.count(), ledgerBefore);
+  });
+
+  it("emits shipping.provider.uncertain.v1 when an expired CLAIMED package with requestStartedAt moves to RECONCILING", async () => {
+    const fixture = await makePackedOrder();
+    const providerEntered = deferred();
+    const releaseProvider = deferred();
+    const crashedShipping = makeShipping(dbA, {
+      createLabel: async () => {
+        providerEntered.resolve();
+        await releaseProvider.promise;
+        throw new ShippingProviderError("Simulated worker crash", "NETWORK_UNCERTAIN");
+      },
+    });
+    const crashedWorker = crashedShipping.processLabel(fixture.packageId, "worker:crashed");
+    try {
+      await providerEntered.promise;
+      await sql.query(
+        `UPDATE "ShipmentPackage" SET "claimExpiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 minute' WHERE "id" = $1`,
+        [fixture.packageId],
+      );
+      const recovery = await shippingB.processLabel(fixture.packageId, "worker:recovery");
+      assert.equal(recovery.status, "RECONCILING");
+      assert.equal(recovery.replayed, false);
+
+      const record = await dbA.shipmentPackage.findUniqueOrThrow({
+        where: { id: fixture.packageId },
+      });
+      assert.equal(record.status, "RECONCILING");
+      assert.ok(record.requestStartedAt);
+      const fulfillment = await dbA.orderFulfillment.findUniqueOrThrow({
+        where: { shipmentId: fixture.shipmentId },
+      });
+      assert.equal(fulfillment.status, "RECONCILING");
+      const outbox = await dbA.domainOutbox.findUnique({
+        where: { deduplicationKey: `shipment-package:${fixture.packageId}:provider-uncertain:v1` },
+      });
+      assert.ok(outbox);
+      assert.equal(outbox.eventType, "shipping.provider.uncertain.v1");
+      assert.equal(outbox.aggregateId, fixture.packageId);
+    } finally {
+      releaseProvider.resolve();
+    }
+    const lateOutcome = await crashedWorker;
+    assert.equal(lateOutcome.status, "RECONCILING");
+    assert.equal(lateOutcome.replayed, true);
+    assert.equal(providerCalls.length, 1);
+    assert.equal(
+      await dbA.domainOutbox.count({
+        where: { aggregateId: fixture.packageId, eventType: "shipping.provider.uncertain.v1" },
+      }),
+      1,
+    );
+  });
+
+  it("ignores stale reconcileLabel findLabel null from Attempt 1 after Attempt 2 enters RECONCILING", async () => {
+    const fixture = await makePackedOrder();
+    const uncertainShipping = makeShipping(dbA, { uncertain: true });
+    const attempt1 = await uncertainShipping.processLabel(fixture.packageId, "worker:attempt-1");
+    assert.equal(attempt1.status, "RECONCILING");
+    const afterAttempt1 = await dbA.shipmentPackage.findUniqueOrThrow({
+      where: { id: fixture.packageId },
+    });
+    assert.ok(afterAttempt1.requestStartedAt);
+
+    const findEntered = deferred();
+    const releaseFind = deferred();
+    const staleReconciler = makeShipping(dbA, {
+      findLabel: async () => {
+        findEntered.resolve();
+        await releaseFind.promise;
+        return null;
+      },
+    });
+    const staleCall = staleReconciler.reconcileLabel(fixture.packageId, "worker:reconcile-stale");
+    let afterAttempt2;
+    try {
+      await findEntered.promise;
+      const reset = await shippingB.reconcileLabel(fixture.packageId, "worker:reconcile-first");
+      assert.equal(reset.status, "SEALED");
+      assert.equal(reset.replayed, false);
+
+      await delay(5);
+      const attempt2 = await uncertainShipping.processLabel(fixture.packageId, "worker:attempt-1");
+      assert.equal(attempt2.status, "RECONCILING");
+      afterAttempt2 = await dbA.shipmentPackage.findUniqueOrThrow({
+        where: { id: fixture.packageId },
+      });
+      assert.ok(afterAttempt2.requestStartedAt);
+      assert.ok(
+        afterAttempt2.requestStartedAt.getTime() > afterAttempt1.requestStartedAt.getTime(),
+      );
+    } finally {
+      releaseFind.resolve();
+    }
+
+    const staleResult = await staleCall;
+    assert.equal(staleResult.status, "RECONCILING");
+    assert.equal(staleResult.replayed, true);
+
+    const finalPackage = await dbA.shipmentPackage.findUniqueOrThrow({
+      where: { id: fixture.packageId },
+    });
+    assert.equal(finalPackage.status, "RECONCILING");
+    assert.equal(finalPackage.requestStartedAt.getTime(), afterAttempt2.requestStartedAt.getTime());
+    assert.equal(
+      (await dbA.orderFulfillment.findUniqueOrThrow({ where: { shipmentId: fixture.shipmentId } }))
+        .status,
+      "RECONCILING",
+    );
+    assert.equal(
+      await dbA.shipmentEvent.count({
+        where: { packageId: fixture.packageId, type: "PROVIDER_REJECTED" },
+      }),
+      1,
+    );
   });
 });

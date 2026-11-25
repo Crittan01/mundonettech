@@ -780,6 +780,19 @@ export class ChannelOrderService {
     return inInventoryTransaction(this.db, async (tx) => {
       await this.assertAccountFence(tx, account.id, account);
       await acquireOperationLocks(tx, [`channel-order:${account.id}:${snapshot.externalId}`]);
+      const existingPeek = await tx.channelOrder.findUnique({
+        where: {
+          accountId_externalOrderId: {
+            accountId: account.id,
+            externalOrderId: snapshot.externalId,
+          },
+        },
+        select: { id: true },
+      });
+      if (existingPeek) {
+        await acquireOperationLocks(tx, [`channel-order-id:${existingPeek.id}`]);
+        await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${existingPeek.id}::uuid FOR UPDATE`;
+      }
       const existing = await tx.channelOrder.findUnique({
         where: {
           accountId_externalOrderId: {
@@ -1177,17 +1190,36 @@ export class ChannelOrderService {
       if (order?.packId && pack && order.packId !== pack.id) {
         throw new ChannelOrderError("CONFLICT", "The shipment and order packs do not match.");
       }
-      const linkedOrders = pack
+      const candidateOrders = pack
         ? await tx.channelOrder.findMany({
             where: { accountId: account.id, packId: pack.id },
+            select: { id: true },
           })
-        : snapshot.externalOrderId
-          ? [order]
+        : snapshot.externalOrderId && order
+          ? [{ id: order.id }]
           : [];
-      if (linkedOrders.length === 0 || linkedOrders.some((candidate) => !candidate)) {
+      if (candidateOrders.length === 0) {
         throw new ChannelOrderError("NOT_FOUND", "No persisted orders own this shipment.");
       }
-      if (order && !linkedOrders.some((candidate) => candidate?.id === order.id)) {
+      const linkedOrderIds = [...new Set(candidateOrders.map((candidate) => candidate.id))].sort();
+      await acquireOperationLocks(
+        tx,
+        linkedOrderIds.map((id) => `channel-order-id:${id}`),
+      );
+      await tx.$executeRaw`
+        SELECT "id" FROM "ChannelOrder"
+        WHERE "id" = ANY(${linkedOrderIds}::uuid[])
+        ORDER BY "id"
+        FOR UPDATE
+      `;
+      const linkedOrders = await tx.channelOrder.findMany({
+        where: { id: { in: linkedOrderIds } },
+        orderBy: { id: "asc" },
+      });
+      if (linkedOrders.length !== linkedOrderIds.length) {
+        throw new ChannelOrderError("NOT_FOUND", "No persisted orders own this shipment.");
+      }
+      if (order && !linkedOrders.some((candidate) => candidate.id === order.id)) {
         throw new ChannelOrderError("CONFLICT", "The shipment order is outside its pack.");
       }
       const parent = pack ? { packId: pack.id } : { orderId: linkedOrders[0]!.id };
@@ -1351,6 +1383,7 @@ export class ChannelOrderService {
     await inInventoryTransaction(this.db, async (tx) => {
       await this.assertAccountFence(tx, target.accountId, options.account);
       await acquireOperationLocks(tx, [`channel-order-id:${orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
       let order = (await tx.channelOrder.findUnique({
         where: { id: orderId },
         include: {
@@ -1637,6 +1670,7 @@ export class ChannelOrderService {
     await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
     await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
         where: { id: options.orderId },
         include: { account: true, offer: true },
@@ -1739,6 +1773,7 @@ export class ChannelOrderService {
     await this.actor(this.db, options.audit.actorAdminUserId, "finance:read");
     await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
         where: { id: options.orderId },
         include: { account: true },
@@ -1810,6 +1845,7 @@ export class ChannelOrderService {
       await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
       await this.actor(tx, options.audit.actorAdminUserId, "finance:read");
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
+      await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
         where: { id: options.orderId },
         include: { account: true },
@@ -2053,18 +2089,27 @@ export class ChannelOrderService {
             : "CHANNEL_SYNC_UNCERTAIN";
         const terminal = event.attempts >= 8 || code === "UNAUTHORIZED" || code === "INVALID_INPUT";
         if (terminal) {
-          await failDomainOutbox(this.db, { id: event.id, workerId, error: code.slice(0, 100) });
-          failed += 1;
+          const failedNow = await failDomainOutbox(this.db, {
+            id: event.id,
+            workerId,
+            error: code.slice(0, 100),
+          });
+          if (failedNow) {
+            failed += 1;
+            failures.push({ eventId: event.id, code });
+          }
         } else {
-          await retryDomainOutbox(this.db, {
+          const retriedNow = await retryDomainOutbox(this.db, {
             id: event.id,
             workerId,
             availableAt: new Date(Date.now() + Math.min(300_000, 5_000 * 2 ** event.attempts)),
             error: code.slice(0, 100),
           });
-          retries += 1;
+          if (retriedNow) {
+            retries += 1;
+            failures.push({ eventId: event.id, code });
+          }
         }
-        failures.push({ eventId: event.id, code });
       }
     }
     return { claimed: events.length, completed, retries, failed, failures };

@@ -276,7 +276,7 @@ async function lockedSettings(
   tx: Prisma.TransactionClient,
   defaults: CheckoutDefaults,
 ): Promise<RuntimeSettings> {
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('store-settings-default'))`;
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock_shared(hashtext('store-settings-default'))`;
   const stored = await tx.storeSettings.findUnique({ where: { key: "default" } });
   return validateSettings(stored ? settingsFromRecord(stored) : defaults);
 }
@@ -458,24 +458,6 @@ function retryCouponDivergence(): never {
   };
   error.code = "40001";
   throw error;
-}
-
-async function inCheckoutTransaction<T>(
-  db: PrismaClient,
-  callback: (tx: Prisma.TransactionClient) => Promise<T>,
-): Promise<T> {
-  return inInventoryTransaction(db, async (tx) => {
-    try {
-      return await callback(tx);
-    } catch (error) {
-      if ((error as { code?: unknown } | null)?.code !== "P2034") throw error;
-      const retry = new Error("Checkout transaction conflict; retrying.", {
-        cause: error,
-      }) as Error & { code: string };
-      retry.code = "40001";
-      throw retry;
-    }
-  });
 }
 
 function receiptHash(
@@ -860,12 +842,9 @@ export class OrderService {
         }
       }
       return quotes.sort((left, right) => {
-        const cost =
-          left.shippingCents < right.shippingCents
-            ? -1
-            : left.shippingCents > right.shippingCents
-              ? 1
-              : 0;
+        const leftShipping = BigInt(left.shippingCents);
+        const rightShipping = BigInt(right.shippingCents);
+        const cost = leftShipping < rightShipping ? -1 : leftShipping > rightShipping ? 1 : 0;
         return cost || compareStrings(left.zoneCode, right.zoneCode);
       });
     });
@@ -938,7 +917,7 @@ export class OrderService {
     const deliveryNotes = optionalText(input.fulfillment.deliveryNotes, "deliveryNotes", 500);
 
     try {
-      return await inCheckoutTransaction(this.db, async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
         const acquired = await acquireIdempotencyKey(tx, {
           scope: checkoutScope,
           ...idempotency,
@@ -1193,9 +1172,24 @@ export class OrderService {
 
         let customerId = locked.customerId;
         if (customerId) {
-          const customer = await tx.customer.findFirst({
-            where: { id: customerId, deletedAt: null, status: { not: "ANONYMIZED" } },
-          });
+          await acquireOperationLocks(tx, [`crm-customer:${customerId}`]);
+          const customerRows = await tx.$queryRaw<
+            Array<{
+              id: string;
+              email: string;
+              givenName: string | null;
+              familyName: string | null;
+              phoneE164: string | null;
+            }>
+          >`
+            SELECT "id", "email", "givenName", "familyName", "phoneE164"
+            FROM "Customer"
+            WHERE "id" = ${customerId}::uuid
+              AND "deletedAt" IS NULL
+              AND "status" <> 'ANONYMIZED'
+            FOR UPDATE
+          `;
+          const customer = customerRows[0];
           if (!customer) throw new CheckoutConflictError("The assigned customer is unavailable.");
           if (customer.email !== contact.email) throw new CheckoutAuthenticationRequiredError();
           if (!customer.givenName || !customer.familyName || !customer.phoneE164) {
@@ -1210,11 +1204,23 @@ export class OrderService {
           }
         } else {
           await acquireOperationLocks(tx, [`checkout-customer:${contact.email}`]);
+          const peekedCustomer = await tx.customer.findFirst({
+            where: { email: contact.email, deletedAt: null },
+            select: { id: true },
+          });
+          if (peekedCustomer) {
+            await acquireOperationLocks(tx, [`crm-customer:${peekedCustomer.id}`]);
+          }
           const existingRows = await tx.$queryRaw<Array<{ id: string; status: string }>>`
             SELECT "id", "status" FROM "Customer"
             WHERE "email" = ${contact.email} AND "deletedAt" IS NULL FOR UPDATE
           `;
           const existing = existingRows[0];
+          if (existing?.id !== peekedCustomer?.id) {
+            const retry = new Error("Customer lock diverged") as Error & { code: string };
+            retry.code = "40001";
+            throw retry;
+          }
           if (existing?.status === "ACTIVE" && locked.kind !== "B2B") {
             throw new CheckoutAuthenticationRequiredError();
           }
@@ -1244,6 +1250,7 @@ export class OrderService {
               },
             });
             customerId = customer.id;
+            await acquireOperationLocks(tx, [`crm-customer:${customerId}`]);
           }
         }
         await new CrmService(this.db).syncCustomerContactInTransaction(tx, customerId, {

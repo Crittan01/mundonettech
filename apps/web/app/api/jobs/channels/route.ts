@@ -71,10 +71,31 @@ export async function POST(request: Request) {
       ipHash: security.ipHash,
       userAgentHash: security.userAgentHash,
     };
-    const result = await channelAccountService(db).refreshDueAccounts(audit);
+    const errors: Array<{ stage: string; code: string }> = [];
+    const stageErrorCode = (error: unknown): string => {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof error.code === "string"
+      ) {
+        return error.code;
+      }
+      return error instanceof Error ? error.name : "STAGE_FAILED";
+    };
+
+    let refresh: Awaited<
+      ReturnType<ReturnType<typeof channelAccountService>["refreshDueAccounts"]>
+    > | null = null;
+    try {
+      refresh = await channelAccountService(db).refreshDueAccounts(audit);
+    } catch (error) {
+      errors.push({ stage: "refreshDueAccounts", code: stageErrorCode(error) });
+    }
+
     let ingestion: Awaited<
       ReturnType<ReturnType<typeof channelOrderService>["processResourceEvents"]>
-    >;
+    > | null = null;
     try {
       ingestion = await channelOrderService(db).processResourceEvents(
         { ...audit, requestId: randomUUID() },
@@ -83,14 +104,44 @@ export async function POST(request: Request) {
       if (ingestion.claimed > 0) revalidateTag("catalog:inventory", { expire: 0 });
     } catch (error) {
       revalidateTag("catalog:inventory", { expire: 0 });
-      throw error;
+      errors.push({ stage: "processResourceEvents", code: stageErrorCode(error) });
     }
-    const sync = await channelCatalogService(db).processSyncJobs(
-      { ...audit, requestId: randomUUID() },
-      { limit: 10 },
-    );
-    await new OperationsService(db).synchronizeNotifications();
-    return Response.json({ ...result, ingestion, sync }, { headers });
+
+    let sync: Awaited<
+      ReturnType<ReturnType<typeof channelCatalogService>["processSyncJobs"]>
+    > | null = null;
+    if (ingestion !== null) {
+      try {
+        sync = await channelCatalogService(db).processSyncJobs(
+          { ...audit, requestId: randomUUID() },
+          { limit: 10 },
+        );
+      } catch (error) {
+        errors.push({ stage: "processSyncJobs", code: stageErrorCode(error) });
+      }
+    }
+
+    let notificationsSynchronized = false;
+    try {
+      await new OperationsService(db).synchronizeNotifications();
+      notificationsSynchronized = true;
+    } catch (error) {
+      errors.push({ stage: "synchronizeNotifications", code: stageErrorCode(error) });
+    }
+
+    if (errors.length > 0) {
+      return Response.json(
+        {
+          ...(refresh ?? {}),
+          ...(ingestion ? { ingestion } : {}),
+          ...(sync ? { sync } : {}),
+          notificationsSynchronized,
+          errors,
+        },
+        { status: 500, headers },
+      );
+    }
+    return Response.json({ ...refresh!, ingestion: ingestion!, sync: sync! }, { headers });
   } catch {
     return Response.json(
       { error: "Channel scheduler execution failed." },

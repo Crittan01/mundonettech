@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
@@ -94,6 +95,40 @@ function future(hours = 72) {
   return new Date(Date.now() + hours * 3_600_000);
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
+async function openAdvisoryBarrier(keys) {
+  const client = new pg.Client({ connectionString: harness.databaseUrl });
+  await client.connect();
+  await client.query("BEGIN");
+  for (const key of [...new Set(keys)].sort()) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
+  }
+  return client;
+}
+
+async function waitForAdvisoryWaiters(minimum = 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    const result = await sql.query(
+      `SELECT count(*)::int AS count
+       FROM pg_stat_activity
+       WHERE datname = current_database()
+         AND pid <> pg_backend_pid()
+         AND wait_event_type = 'Lock'
+         AND wait_event = 'advisory'`,
+    );
+    if (result.rows[0].count >= minimum) return;
+    await delay(20);
+  }
+  throw new Error(`Expected at least ${minimum} advisory-lock waiter(s).`);
+}
+
 async function makeCustomer() {
   const id = randomUUID();
   const email = `credit-${randomUUID()}@example.test`;
@@ -179,6 +214,9 @@ function wompiEvent(attempt, status, occurredAt = new Date(), externalId = null)
       `${properties.map((path) => path.split(".").reduce((value, key) => value?.[key], data)).join("")}${timestamp}${wompiCredentials.eventsSecret}`,
     )
     .digest("hex");
+  const eventKey = createHash("sha256")
+    .update(`wompi-event:${transaction.id}:${timestamp}:${checksum}`)
+    .digest("hex");
   return {
     body: JSON.stringify({
       event: "transaction.updated",
@@ -190,6 +228,7 @@ function wompiEvent(attempt, status, occurredAt = new Date(), externalId = null)
     }),
     externalId: transaction.id,
     checksum,
+    eventKey,
   };
 }
 
@@ -215,6 +254,21 @@ before(
         status: "ACTIVE",
       },
     });
+    const extraUnits = Array.from({ length: 20 }, (_, index) => ({
+      id: randomUUID(),
+      serial: `EXTRA-PAY-${randomUUID().slice(0, 8).toUpperCase()}-${index + 1}`,
+    }));
+    await sql.query(
+      `UPDATE "StockLevel" SET "onHand" = "onHand" + 20 WHERE "locationId" = $1 AND "variantId" = $2`,
+      [inventory.locationId, catalog.variantId],
+    );
+    for (const unit of extraUnits) {
+      await sql.query(
+        `INSERT INTO "SerializedUnit" ("id", "variantId", "locationId", "serial")
+         VALUES ($1, $2, $3, $4)`,
+        [unit.id, catalog.variantId, inventory.locationId, unit.serial],
+      );
+    }
     const customer = await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } });
     customerEmail = customer.email;
     audit = {
@@ -972,13 +1026,25 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     });
     const approved = wompiEvent(attempt, "APPROVED");
     const input = { body: approved.body, environment: "LOCAL" };
-    const results = await Promise.all([webhooks.process(input), webhooks.process(input)]);
+    const blocker = await openAdvisoryBarrier([`wompi-webhook:WOMPI:${approved.eventKey}`]);
+    let results;
+    try {
+      const firstWorker = webhooks.process(input);
+      const secondWorker = webhooks.process(input);
+      await waitForAdvisoryWaiters(2);
+      await blocker.query("COMMIT");
+      results = await Promise.all([firstWorker, secondWorker]);
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
     assert.deepEqual(
       results.map((result) => result.status),
       ["PROCESSED", "PROCESSED"],
     );
     assert.deepEqual(results.map((result) => result.replayed).sort(), [false, true]);
     assert.equal(new Set(results.map((result) => result.eventKey)).size, 1);
+    assert.equal(results[0].eventKey, approved.eventKey);
     const webhook = await db.paymentWebhookEvent.findUniqueOrThrow({
       where: {
         provider_eventKey: { provider: PaymentProvider.WOMPI, eventKey: results[0].eventKey },
@@ -1375,5 +1441,397 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       db.adminActionLog.count(),
     ]);
     assert.deepEqual(financialAfter, financialBefore);
+  });
+
+  it("handles VOID_STATE_REVIEW for FAILED and CANCELLED local voids and DUPLICATE_REFERENCE for mismatched void externalId", async () => {
+    const orderId1 = await makeOrder();
+    const attempt1 = await payments.start({
+      orderId: orderId1,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-void-state-review:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved1 = wompiEvent(attempt1, "APPROVED");
+    await webhooks.process({ body: approved1.body, environment: "LOCAL" });
+
+    const rejectingVoidGateway = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: "cutoff_passed" }), { status: 422 }),
+    });
+    await assert.rejects(
+      rejectingVoidGateway.void(attempt1.id, audit),
+      (error) => error instanceof PaymentProviderError && error.code === "HTTP_ERROR",
+    );
+    const failedVoid = await db.paymentTransaction.findFirstOrThrow({
+      where: { attemptId: attempt1.id, kind: "VOID" },
+    });
+    assert.equal(failedVoid.status, "FAILED");
+
+    const voidAfterFailed = wompiEvent(
+      attempt1,
+      "VOIDED",
+      new Date(Date.now() + 1_000),
+      approved1.externalId,
+    );
+    const failedReviewResult = await webhooks.process({
+      body: voidAfterFailed.body,
+      environment: "LOCAL",
+    });
+    assert.equal(failedReviewResult.status, "IGNORED");
+    assert.equal(failedReviewResult.replayed, false);
+    const failedReviewWebhook = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: {
+        provider_eventKey: {
+          provider: PaymentProvider.WOMPI,
+          eventKey: failedReviewResult.eventKey,
+        },
+      },
+    });
+    assert.equal(failedReviewWebhook.status, "IGNORED");
+    assert.equal(failedReviewWebhook.errorCode, "VOID_STATE_REVIEW");
+    const failedReviewOutbox = await db.domainOutbox.findUnique({
+      where: { deduplicationKey: `payment-webhook:${failedReviewResult.eventKey}:late-review:v1` },
+    });
+    assert.ok(failedReviewOutbox);
+    assert.equal(failedReviewOutbox.eventType, "payment.late-review-required.v1");
+    assert.equal(failedReviewOutbox.payload.localVoidStatus, "FAILED");
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId1 } })).paymentStatus,
+      "PAID",
+    );
+
+    const refundId = await requestFullRefund(orderId1);
+    const refundGateway = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              id: 9912,
+              v2_refund_id: `v2-${randomUUID()}`,
+              status: "APPROVED",
+              status_message: "",
+              amount_in_cents: 100000,
+              transaction_id: approved1.externalId,
+            },
+          }),
+          { status: 201 },
+        ),
+    });
+    await refundGateway.refund(refundId, audit);
+    assert.equal(
+      (await db.paymentTransaction.findUniqueOrThrow({ where: { id: failedVoid.id } })).status,
+      "CANCELLED",
+    );
+
+    const voidAfterCancelled = wompiEvent(
+      attempt1,
+      "VOIDED",
+      new Date(Date.now() + 3_000),
+      approved1.externalId,
+    );
+    const cancelledReviewResult = await webhooks.process({
+      body: voidAfterCancelled.body,
+      environment: "LOCAL",
+    });
+    assert.equal(cancelledReviewResult.status, "IGNORED");
+    assert.equal(cancelledReviewResult.replayed, false);
+    const cancelledReviewWebhook = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: {
+        provider_eventKey: {
+          provider: PaymentProvider.WOMPI,
+          eventKey: cancelledReviewResult.eventKey,
+        },
+      },
+    });
+    assert.equal(cancelledReviewWebhook.status, "IGNORED");
+    assert.equal(cancelledReviewWebhook.errorCode, "VOID_STATE_REVIEW");
+    const cancelledReviewOutbox = await db.domainOutbox.findUnique({
+      where: {
+        deduplicationKey: `payment-webhook:${cancelledReviewResult.eventKey}:late-review:v1`,
+      },
+    });
+    assert.ok(cancelledReviewOutbox);
+    assert.equal(cancelledReviewOutbox.eventType, "payment.late-review-required.v1");
+    assert.equal(cancelledReviewOutbox.payload.localVoidStatus, "CANCELLED");
+
+    const orderId2 = await makeOrder();
+    const attempt2 = await payments.start({
+      orderId: orderId2,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-void-dup-ref:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved2 = wompiEvent(attempt2, "APPROVED");
+    await webhooks.process({ body: approved2.body, environment: "LOCAL" });
+    const otherVoidExternalId = `trx-other-void-${randomUUID()}`;
+    const mismatchedVoid = await db.paymentTransaction.create({
+      data: {
+        attemptId: attempt2.id,
+        provider: PaymentProvider.WOMPI,
+        kind: "VOID",
+        status: "PROCESSING",
+        amountCents: attempt2.amountCents,
+        externalId: otherVoidExternalId,
+        providerReference: `void:${attempt2.id}`,
+        requestHash: hash(),
+      },
+    });
+    const duplicateVoidEvent = wompiEvent(
+      attempt2,
+      "VOIDED",
+      new Date(Date.now() + 1_000),
+      approved2.externalId,
+    );
+    await assert.rejects(
+      webhooks.process({ body: duplicateVoidEvent.body, environment: "LOCAL" }),
+      (error) =>
+        error instanceof PaymentConflictError &&
+        error.code === "DUPLICATE_REFERENCE" &&
+        error.message.includes("Wompi void"),
+    );
+    const failedDupWebhook = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: {
+        provider_eventKey: {
+          provider: PaymentProvider.WOMPI,
+          eventKey: duplicateVoidEvent.eventKey,
+        },
+      },
+    });
+    assert.equal(failedDupWebhook.status, "FAILED");
+    assert.equal(failedDupWebhook.errorCode, "DUPLICATE_REFERENCE");
+    const persistedVoid = await db.paymentTransaction.findUniqueOrThrow({
+      where: { id: mismatchedVoid.id },
+    });
+    assert.equal(persistedVoid.status, "PROCESSING");
+    assert.equal(persistedVoid.externalId, otherVoidExternalId);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId2 } })).paymentStatus,
+      "PAID",
+    );
+  });
+
+  it("does not drop an earlier-timestamp APPROVED webhook as STALE_EVENT after synchronize or PENDING", async () => {
+    const orderId1 = await makeOrder();
+    const attempt1 = await payments.start({
+      orderId: orderId1,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-sync-pending:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const externalId1 = `trx-sync-pending-${randomUUID()}`;
+    const pendingSyncGateway = new WompiWebhookService(db, {
+      vault,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              id: externalId1,
+              reference: attempt1.reference,
+              status: "PENDING",
+              amount_in_cents: Number(attempt1.amountCents),
+              currency: "COP",
+              status_message: "Pendiente",
+            },
+          }),
+          { status: 200 },
+        ),
+    });
+    const synced = await pendingSyncGateway.synchronize({
+      externalId: externalId1,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      expectedOrderId: orderId1,
+    });
+    assert.equal(synced.status, "PROCESSED");
+    const afterSyncAttempt = await db.paymentAttempt.findUniqueOrThrow({
+      where: { id: attempt1.id },
+    });
+    assert.equal(afterSyncAttempt.status, "PENDING");
+    assert.equal(afterSyncAttempt.providerStatus, "PENDING");
+    assert.equal(afterSyncAttempt.providerOccurredAt, null);
+
+    const earlierApproved1 = wompiEvent(
+      attempt1,
+      "APPROVED",
+      new Date(Date.now() - 60_000),
+      externalId1,
+    );
+    const approvedResult1 = await webhooks.process({
+      body: earlierApproved1.body,
+      environment: "LOCAL",
+    });
+    assert.equal(approvedResult1.status, "PROCESSED");
+    assert.equal(approvedResult1.replayed, false);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId1 } })).paymentStatus,
+      "PAID",
+    );
+    assert.equal(
+      (await db.paymentAttempt.findUniqueOrThrow({ where: { id: attempt1.id } })).status,
+      "SUCCEEDED",
+    );
+    const approvedWebhook1 = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: {
+        provider_eventKey: {
+          provider: PaymentProvider.WOMPI,
+          eventKey: approvedResult1.eventKey,
+        },
+      },
+    });
+    assert.equal(approvedWebhook1.status, "PROCESSED");
+    assert.equal(approvedWebhook1.errorCode, null);
+
+    const orderId2 = await makeOrder();
+    const attempt2 = await payments.start({
+      orderId: orderId2,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-pending-then-earlier-approved:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const externalId2 = `trx-pending-order-${randomUUID()}`;
+    const laterPending = wompiEvent(attempt2, "PENDING", new Date(), externalId2);
+    const pendingRes = await webhooks.process({ body: laterPending.body, environment: "LOCAL" });
+    assert.equal(pendingRes.status, "PROCESSED");
+    assert.ok(
+      (await db.paymentAttempt.findUniqueOrThrow({ where: { id: attempt2.id } }))
+        .providerOccurredAt,
+    );
+    const earlierApproved2 = wompiEvent(
+      attempt2,
+      "APPROVED",
+      new Date(Date.now() - 60_000),
+      externalId2,
+    );
+    const approvedResult2 = await webhooks.process({
+      body: earlierApproved2.body,
+      environment: "LOCAL",
+    });
+    assert.equal(approvedResult2.status, "PROCESSED");
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId2 } })).paymentStatus,
+      "PAID",
+    );
+  });
+
+  it("completes PaymentRefundService.void idempotently without PostgreSQL 55000 when VOIDED webhook settles first", async () => {
+    const orderId1 = await makeOrder();
+    const attempt1 = await payments.start({
+      orderId: orderId1,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-void-race-ok:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved1 = wompiEvent(attempt1, "APPROVED");
+    await webhooks.process({ body: approved1.body, environment: "LOCAL" });
+
+    const voidEntered1 = deferred();
+    const releaseVoid1 = deferred();
+    const voidGateway1 = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () => {
+        voidEntered1.resolve();
+        await releaseVoid1.promise;
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: approved1.externalId,
+              status: "VOIDED",
+              status_message: "Anulada",
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    const voidPromise1 = voidGateway1.void(attempt1.id, audit);
+    try {
+      await voidEntered1.promise;
+      const voided1 = wompiEvent(
+        attempt1,
+        "VOIDED",
+        new Date(Date.now() + 1_000),
+        approved1.externalId,
+      );
+      const webhookOutcome1 = await webhooks.process({ body: voided1.body, environment: "LOCAL" });
+      assert.equal(webhookOutcome1.status, "PROCESSED");
+      assert.equal(webhookOutcome1.replayed, false);
+    } finally {
+      releaseVoid1.resolve();
+    }
+    const voidResult1 = await voidPromise1;
+    assert.equal(voidResult1.status, "COMPLETED");
+    assert.equal(voidResult1.pendingTransactionIds.length, 0);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId1 } })).paymentStatus,
+      "REFUNDED",
+    );
+    assert.equal(
+      await db.paymentTransaction.count({
+        where: { attemptId: attempt1.id, kind: "VOID", status: "SUCCEEDED" },
+      }),
+      1,
+    );
+
+    const orderId2 = await makeOrder();
+    const attempt2 = await payments.start({
+      orderId: orderId2,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-void-race-422:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved2 = wompiEvent(attempt2, "APPROVED");
+    await webhooks.process({ body: approved2.body, environment: "LOCAL" });
+
+    const voidEntered2 = deferred();
+    const releaseVoid2 = deferred();
+    const voidGateway2 = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () => {
+        voidEntered2.resolve();
+        await releaseVoid2.promise;
+        return new Response(JSON.stringify({ error: "already_voided" }), { status: 422 });
+      },
+    });
+    const voidPromise2 = voidGateway2.void(attempt2.id, audit);
+    try {
+      await voidEntered2.promise;
+      const voided2 = wompiEvent(
+        attempt2,
+        "VOIDED",
+        new Date(Date.now() + 1_000),
+        approved2.externalId,
+      );
+      const webhookOutcome2 = await webhooks.process({ body: voided2.body, environment: "LOCAL" });
+      assert.equal(webhookOutcome2.status, "PROCESSED");
+    } finally {
+      releaseVoid2.resolve();
+    }
+    const voidResult2 = await voidPromise2;
+    assert.equal(voidResult2.status, "COMPLETED");
+    assert.equal(voidResult2.pendingTransactionIds.length, 0);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId2 } })).paymentStatus,
+      "REFUNDED",
+    );
+    assert.equal(
+      await db.paymentTransaction.count({
+        where: { attemptId: attempt2.id, kind: "VOID", status: "SUCCEEDED" },
+      }),
+      1,
+    );
   });
 });

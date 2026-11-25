@@ -17,9 +17,9 @@
 ## 2. Fase Activa — Auditoría Integral Pre-Calle (`A1`–`A10`, 0-supuestos)
 
 - `[x]` ✅ **Fases 0–6 en CI (`F0.1`–`F6.4`, `ADR-001`..`045`):** `474` archivos, `29` págs. Cliente, `43` págs. Admin, `22` APIs, `131` tablas PG 17 y `99` suites.
-- `[x]` ✅ **`A1` — Grafo AST, Código Muerto y Caché (`ADR-046`):** `guard:ast` en `make check` (`558` fuentes, `2.784` exports, `23` familias caché, `94` env vars), `ProductMediaService` R2, generación `UrlRedirectCacheState` y paridad 1:1 certificadas.
-- `[x]` ✅ **`A2` — Seguridad Zero-Trust (`ADR-047`):** `guard:security-surface` sobre 56 módulos/166 actions/168 handlers/proxy, CSRF MPA + cookies `httpOnly`/TOTP, SSRF/HMAC/cuotas anti-rotación, RSC/logs sin PII/WAC, uploads streaming y `38` migraciones/`133` tablas/`2.306` RLS (`981` pruebas, OWASP y `80` E2E).
-- `[R]` **`A3` — Esquema PG 17, Índices y Concurrencia (`ADR-048`, `audit/a3-db-constraints-locks`):** manifiesto exacto `133` tablas/`577` CHECK/`274` FK/`138` funciones/`601` índices/`229` triggers/`40` migraciones, no negatividad semántica, soft-delete/ciclo de vida y roles/ACL Supabase; jerarquías Retail/Asistida/B2B/ML/pagos/envíos, fences idempotentes y carreras reales sin inanición ni `40P01` (`1.047` pruebas, k6 `0` deadlocks/`76` invariantes).
+- `[x]` ✅ **`A1` — Grafo AST, Código Muerto y Caché (`ADR-046`):** `guard:ast` en `make check`, `ProductMediaService` R2 y generación `UrlRedirectCacheState` con paridad 1:1.
+- `[x]` ✅ **`A2` — Seguridad Zero-Trust (`ADR-047`):** `guard:security-surface` (56 módulos/166 actions/168 handlers/proxy), CSRF MPA, cookies `httpOnly`/TOTP, SSRF/HMAC/cuotas, uploads streaming y `2.306` RLS.
+- `[x]` ✅ **`A3` — Esquema PG 17, Índices y Concurrencia (`ADR-048`):** manifiesto `133` tablas/`579` CHECK/`274` FK/`143` funcs (`search_path` fijo)/`622` índices/`244` triggers/`40` mig., `attacl`/`authenticator`/`pg_default_acl`, soft-delete/`UrlRedirectCacheState`, jerarquías acíclicas, `AdminUser FOR SHARE`, fences y barridos sin inanición (`1.072` pruebas, `2.306` RLS, k6 `0` deadlocks/`76` inv.).
 - `[ ]` **`A4` — Espejo Admin ↔ Cliente: Catálogo, Media 360°/3D, WAC, Precios y CMS/SEO (`audit/a4-catalog-media-cms`):** cruzar `/admin/{catalogo,precios,contenido,configuracion}` ↔ `/`, `/productos`, `/categoria`, `/marca`, `/producto`, `/comparar`, `/pagina`, `/ayuda`, `/legal`, `/sitemap*`: toda mutación Admin refleja al instante en Cliente/JSON-LD sin caché obsoleta.
 - `[ ]` **`A5` — Espejo Admin ↔ Cliente: Carrito, Checkout, Venta Asistida, Pagos, Logística y DIAN (`audit/a5-checkout-payments-shipping`):** cruzar `/carrito`, `/checkout`, `/pagar/[token]`, `/recibo/[token]` ↔ `/admin/{venta-asistida,pagos,logistica,pedidos,facturacion}` + Wompi/Aveonline/Flex/Resend/Outbox: `safetyStock`, cupones, IVA dual/UVT, *pick & pack* multi-bulto y recibos/DIAN punta a punta.
 - `[ ]` **`A6` — Espejo Admin ↔ Cliente: Cuenta, Posventa 2FA, RMA/Seriales, PQR, Reseñas y Finanzas (`audit/a6-postsale-rma-finance`):** cruzar `(auth)/*`, `/mi-cuenta/*`, `/pedido/[token]` ↔ `/admin/{hoy,dashboard,posventa,resenas,finanzas}`: retracto (18 festivos CO), garantías/cambios `SerializedUnit` (Serial/IMEI), moderación, `OrderRefund` y cuadre `BigInt` + `3.500 UVT`.
@@ -33,6 +33,6 @@
 
 ## 3. Handoff
 
-- **Siguiente:** **Auditor/Certificador `A3`** (`audit/a3-db-constraints-locks`; revisar el 100 % del diff y costuras, elevar cualquier brecha y certificar antes de `A4`; `feat/f7-*` congelado).
-- **Leer:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `packages/db/README.md` y `packages/integrations/README.md` (`ADR-048`).
-- **Implementado `[R]` (`A3`):** manifiesto `pg_catalog`, índices/ciclo de vida y locks/fences con carreras reales; `40` migraciones/`133` tablas/`2.306` RLS, `1.047` pruebas, build, `db:verify`, k6 (`0` deadlocks/`76` invariantes) y auditoría de dependencias verdes.
+- **Siguiente:** **Implementador `A4`** (partir de `develop` limpio → rama `audit/a4-catalog-media-cms`; espejo Admin ↔ Cliente de catálogo, media 360°/3D, WAC, precios y CMS/SEO; `feat/f7-*` congelado).
+- **Leer:** `AGENTS.md`, `docs/STATE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `packages/db/README.md`, `packages/media/README.md` y `packages/cms/README.md`.
+- **Certificado `[x]` (`A3`):** 2.ª auditoría adversarial multi-agente cerrada; `40` mig./`133` tablas/`2.306` RLS, `1.072` pruebas, build, `db:verify`, k6 (`0` deadlocks/`76` inv.) y `audit:dependencies` verdes.
