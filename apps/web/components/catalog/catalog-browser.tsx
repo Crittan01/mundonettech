@@ -43,9 +43,16 @@ export function CatalogBrowser({
           <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">{description}</p>
         </div>
       ) : null}
-      <form action={basePath} className="grid gap-4 rounded-2xl border border-border bg-card p-5">
+      <form
+        key={new URLSearchParams(params).toString()}
+        action={basePath}
+        className="grid gap-4 rounded-2xl border border-border bg-card p-5"
+      >
         {fixedFilter ? (
           <input type="hidden" name={fixedFilter.kind} value={fixedFilter.value} />
+        ) : null}
+        {compareSlugs.length > 0 ? (
+          <input type="hidden" name="comparar" value={compareSlugs.join(",")} />
         ) : null}
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="space-y-2 lg:col-span-2">
@@ -101,7 +108,7 @@ export function CatalogBrowser({
               name="precioMin"
               type="number"
               min="0"
-              step="1000"
+              step="1"
               inputMode="numeric"
               defaultValue={params.precioMin ?? ""}
             />
@@ -113,7 +120,7 @@ export function CatalogBrowser({
               name="precioMax"
               type="number"
               min="0"
-              step="1000"
+              step="1"
               inputMode="numeric"
               defaultValue={params.precioMax ?? ""}
             />
@@ -123,10 +130,10 @@ export function CatalogBrowser({
             <select
               id="catalog-sort"
               name="orden"
-              defaultValue={params.orden ?? ""}
+              defaultValue={params.orden ?? "newest"}
               className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
             >
-              <option value="">Más recientes</option>
+              <option value="newest">Más recientes</option>
               <option value="relevance">Relevancia</option>
               <option value="price_asc">Menor precio</option>
               <option value="price_desc">Mayor precio</option>

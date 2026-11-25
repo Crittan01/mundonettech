@@ -3,8 +3,10 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as core from "../../packages/core/dist/index.js";
+import * as cmsPackage from "../../packages/cms/dist/index.js";
 import * as db from "../../packages/db/dist/index.js";
 import * as integrations from "../../packages/integrations/dist/index.js";
+import * as media from "../../packages/media/dist/index.js";
 import { loadActionModule } from "./a2-action-loader.js";
 
 interface ActionResult {
@@ -151,14 +153,21 @@ const journeys = {
 
 const mocks: Record<string, unknown> = {
   "@mundonettech/core": core,
+  "@mundonettech/cms": cmsPackage,
+  "@mundonettech/config/store": {
+    storeConfig: { name: "MundoNetTech", domain: "example.test" },
+  },
   "@mundonettech/db": {
     ...db,
     AdminOperationRateLimitError,
     consumeAdminOperationRateLimit: consumeRateLimit,
   },
   "@mundonettech/integrations": integrations,
+  "@mundonettech/media": media,
   "next/cache": { revalidatePath, updateTag },
+  "next/navigation": { redirect: vi.fn() },
   "@/lib/action-state": actionState,
+  "@/lib/admin-pricing-presenters": { bogotaInputValue: vi.fn(() => "") },
   "@/lib/db": { getDatabase },
   "@/lib/security/admin-auth": { getAdminSession, AdminAuthorizationError },
   "@/lib/security/request-context": { getRequestSecurityContext },
@@ -207,6 +216,10 @@ const mocks: Record<string, unknown> = {
 };
 
 const moduleNames = [
+  "admin-catalog",
+  "admin-pricing",
+  "admin-cms",
+  "admin-redirects",
   "admin-payments",
   "admin-logistics",
   "admin-invoices",
@@ -221,6 +234,10 @@ const modules = Object.fromEntries(
 ) as Record<(typeof moduleNames)[number], ActionModule>;
 
 const modulePermissions: Record<(typeof moduleNames)[number], string> = {
+  "admin-catalog": "catalog:write",
+  "admin-pricing": "pricing:write",
+  "admin-cms": "content:write",
+  "admin-redirects": "content:write",
   "admin-payments": "payments:write",
   "admin-logistics": "fulfillment:write",
   "admin-invoices": "invoices:write",
@@ -231,6 +248,7 @@ const modulePermissions: Record<(typeof moduleNames)[number], string> = {
   "admin-lifecycle": "crm:write",
 };
 const specialPermissions: Record<string, string> = {
+  saveStoreSettingsAction: "settings:write",
   markNotificationReadAction: "dashboard:read",
   moderateReviewAction: "reviews:write",
   mergeCrmContactsAction: "crm:merge",
@@ -249,7 +267,7 @@ beforeEach(() => {
   });
 });
 
-describe("A2 — autorización y cierre de los 51 actions administrativos asignados", () => {
+describe("A2/A4 — autorización y cierre de los 82 actions administrativos asignados", () => {
   it("exige el permiso exacto y MFA antes de rechazar campos desconocidos sin tocar servicios", async () => {
     let count = 0;
     for (const [moduleName, actions] of Object.entries(modules) as [
@@ -274,7 +292,7 @@ describe("A2 — autorización y cierre de los 51 actions administrativos asigna
         expect(options.requireRecentMfa, actionName).toBe(true);
       }
     }
-    expect(count).toBe(51);
+    expect(count).toBe(82);
     for (const [name, effect] of Object.entries(effects)) {
       expect(effect, name).not.toHaveBeenCalled();
     }

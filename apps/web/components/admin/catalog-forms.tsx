@@ -90,15 +90,19 @@ function VariantFields({
   variant,
   values,
   idPrefix,
+  statusName = "status",
+  defaultIsDefault = false,
 }: {
   variant?: Partial<CatalogVariantInput> | undefined;
   values?: Record<string, string> | undefined;
   idPrefix: string;
+  statusName?: string;
+  defaultIsDefault?: boolean;
 }) {
   const defaultChecked = values
     ? ["on", "true"].includes(values.isDefault ?? "")
-    : (variant?.isDefault ?? true);
-  const statusDefault = values?.status ?? variant?.status ?? "ACTIVE";
+    : (variant?.isDefault ?? defaultIsDefault);
+  const statusDefault = values?.[statusName] ?? variant?.status ?? "ACTIVE";
   return (
     <fieldset className="grid gap-4 rounded-xl border border-border p-4 sm:grid-cols-2 lg:grid-cols-3">
       <legend className="px-2 font-semibold">Datos de la variante</legend>
@@ -193,7 +197,7 @@ function VariantFields({
         <Select
           key={`${idPrefix}-status-${statusDefault}`}
           id={`${idPrefix}-status`}
-          name="status"
+          name={statusName}
           defaultValue={statusDefault}
           focusRing={false}
         >
@@ -233,7 +237,14 @@ export function CatalogProductForm({
     <form action={action} className="space-y-6 rounded-xl border border-border bg-card p-5">
       {product ? <input type="hidden" name="productId" value={product.id} /> : null}
       <ProductBaseFields references={references} product={product} values={values} />
-      {mode === "create" ? <VariantFields idPrefix="initial-variant" values={values} /> : null}
+      {mode === "create" ? (
+        <VariantFields
+          idPrefix="initial-variant"
+          values={values}
+          statusName="variantStatus"
+          defaultIsDefault
+        />
+      ) : null}
       <Button type="submit" disabled={pending}>
         {pending ? "Guardando…" : mode === "create" ? "Crear producto" : "Guardar producto"}
       </Button>

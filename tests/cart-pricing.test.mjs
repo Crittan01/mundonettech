@@ -5,10 +5,12 @@ import { after, before, describe, it } from "node:test";
 import pg from "pg";
 
 import {
+  AdminActorAuthorizationError,
   CartNotFoundError,
   CartService,
   CartStateError,
   CartStockError,
+  CatalogService,
   CouponError,
   PricingConflictError,
   PricingService,
@@ -449,6 +451,64 @@ describe("F3.1 — bundles and assisted sale lifecycle", () => {
     snapshot = await service.getById(cart.id);
     assert.equal(snapshot.canContinue, false);
     assert.ok(snapshot.issues.some((issue) => issue.code === "BUNDLE_UNAVAILABLE"));
+  });
+
+  it("removes invalid bundles from PDP and blocks existing carts after a component price drop", async () => {
+    await sql.query(`UPDATE "ProductVariant" SET "priceCents" = 100000 WHERE "id" = $1`, [
+      catalog.variantId,
+    ]);
+    const fixedPrice = await pricing.upsertBundle(
+      null,
+      {
+        slug: `fixed-bundle-${randomUUID()}`,
+        name: "Bundle de precio fijo verificable",
+        status: "ACTIVE",
+        priceCents: "180000",
+        discountCents: "10000",
+        items: [{ sku: catalog.sku, quantity: 2 }],
+      },
+      audit,
+    );
+    const cart = await createCart();
+    const catalogService = new CatalogService(db);
+    try {
+      await service.addBundle({ cartId: cart.id }, fixedPrice.id, 1);
+      const initial = await catalogService.getProductBySlug(await productSlug());
+      const initialBundle = initial.bundles.find((bundle) => bundle.id === fixedPrice.id);
+      assert.equal(initialBundle?.effectivePriceCents, "170000");
+      assert.equal(initialBundle?.savingsCents, "30000");
+      assert.ok((initialBundle?.available ?? 0) >= 1);
+
+      // Bundle with components below required sellable stock disappears from PDP
+      await sql.query(`UPDATE "StockLevel" SET "safetyStock" = "onHand" WHERE "variantId" = $1`, [
+        catalog.variantId,
+      ]);
+      const outOfStockPdp = await catalogService.getProductBySlug(await productSlug());
+      assert.equal(
+        outOfStockPdp.bundles.some((bundle) => bundle.id === fixedPrice.id),
+        false,
+      );
+      await sql.query(`UPDATE "StockLevel" SET "safetyStock" = 2 WHERE "variantId" = $1`, [
+        catalog.variantId,
+      ]);
+
+      await sql.query(`UPDATE "ProductVariant" SET "priceCents" = 10000 WHERE "id" = $1`, [
+        catalog.variantId,
+      ]);
+      const invalid = await service.getById(cart.id);
+      assert.equal(invalid.canContinue, false);
+      assert.ok(invalid.issues.some((issue) => issue.code === "BUNDLE_PRICE_INVALID"));
+      const pdp = await catalogService.getProductBySlug(await productSlug());
+      assert.equal(
+        pdp.bundles.some((bundle) => bundle.id === fixedPrice.id),
+        false,
+      );
+    } finally {
+      await sql.query(`UPDATE "ProductVariant" SET "priceCents" = 100000 WHERE "id" = $1`, [
+        catalog.variantId,
+      ]);
+      await pricing.archiveBundle(fixedPrice.id, audit);
+    }
   });
 
   it("issues hashed one-time links and atomically transfers an assisted cart", async () => {
@@ -901,6 +961,81 @@ describe("A2 — pricing operational audit before/after and rollback", () => {
       "Debe revertirse",
     ]) {
       assert.equal(serialized.includes(forbidden), false, forbidden);
+    }
+  });
+
+  it("revalidates catalog:write and pricing:write actors inside the mutation transaction", async () => {
+    const actors = await Promise.all([
+      db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `catalog-forbidden-${randomUUID()}@example.test`,
+          displayName: "Catalog Forbidden Admin",
+          role: "CMS_EDITOR",
+          status: "ACTIVE",
+        },
+      }),
+      db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `catalog-suspended-${randomUUID()}@example.test`,
+          displayName: "Catalog Suspended Admin",
+          role: "SUPERADMIN",
+          status: "SUSPENDED",
+        },
+      }),
+    ]);
+    const catalogService = new CatalogService(db);
+    for (const actor of actors) {
+      const actorAudit = {
+        actorAdminUserId: actor.id,
+        ipHash: hash(),
+        userAgentHash: null,
+      };
+      const suffix = randomUUID();
+      const slug = `forbidden-product-${suffix}`;
+      await assert.rejects(
+        catalogService.createProduct(
+          {
+            slug,
+            name: "Producto que debe revertirse",
+            brandId: catalog.brandId,
+            categoryId: catalog.categoryId,
+            taxGroupId: catalog.taxGroupId,
+            status: "DRAFT",
+            authenticity: "ORIGINAL",
+            retractPolicy: "STANDARD",
+            warrantyMonths: 0,
+            trackSerial: false,
+            variant: {
+              sku: `FORBIDDEN-${suffix.toUpperCase()}`,
+              priceCents: "10000",
+              costCents: "5000",
+              weightGrams: 100,
+              lengthMillimeters: 100,
+              widthMillimeters: 100,
+              heightMillimeters: 100,
+              isDefault: true,
+              status: "ACTIVE",
+            },
+          },
+          actorAudit,
+        ),
+        AdminActorAuthorizationError,
+      );
+      assert.equal(await db.product.count({ where: { slug } }), 0);
+
+      const minimumQuantity = 500_000 + Math.floor(Math.random() * 100_000);
+      await assert.rejects(
+        pricing.upsertWholesaleTier(
+          null,
+          { scope: "GLOBAL", minimumQuantity, unitPriceCents: "9000", active: true },
+          actorAudit,
+        ),
+        AdminActorAuthorizationError,
+      );
+      assert.equal(await db.wholesaleTier.count({ where: { minimumQuantity } }), 0);
+      assert.equal(await db.adminActionLog.count({ where: { actorAdminUserId: actor.id } }), 0);
     }
   });
 });

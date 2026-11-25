@@ -127,6 +127,7 @@ describe("F2.1 — typed composable CMS blocks", () => {
         { "store.long": "x".repeat(90) },
       ),
     ).toThrow();
+    expect(() => interpolateCmsText("<{{store.name}}>", tokens)).toThrow(/HTML/);
   });
 });
 

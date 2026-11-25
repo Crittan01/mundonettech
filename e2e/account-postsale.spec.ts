@@ -491,7 +491,9 @@ test("customer account validates bad cursors and anonymizes irreversibly with cl
     .toBe(true);
   await page.goto(`${productPath}#resenas`);
   await expect(page.locator("#resenas").getByText(privateName).first()).toBeVisible();
-  const cursorPath = await page.getByRole("link", { name: "Ver más reseñas" }).getAttribute("href");
+  const cursorPath = await page
+    .getByRole("link", { name: "Ver siguiente página de reseñas" })
+    .getAttribute("href");
   expect(cursorPath).toContain("reviewCursor=");
   await page.goto(cursorPath!);
   await expect(page.locator("#resenas").getByText(privateName).first()).toBeVisible();
@@ -607,7 +609,7 @@ test("review pagination preserves only the validated non-default variant", async
     "true",
   );
   await expect(page.locator("#resenas > ol > li")).toHaveCount(10);
-  const moreReviews = page.getByRole("link", { name: "Ver más reseñas" });
+  const moreReviews = page.getByRole("link", { name: "Ver siguiente página de reseñas" });
   const href = await moreReviews.getAttribute("href");
   expect(href).toBeTruthy();
   const nextUrl = new URL(href!, "http://127.0.0.1:4110");

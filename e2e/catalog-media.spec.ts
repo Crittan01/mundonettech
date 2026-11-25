@@ -221,6 +221,23 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
     expect(await merchantAfterUpload.text()).toContain(imageUrl!);
     expect(await metaAfterUpload.text()).toContain(imageUrl!);
 
+    const objectCountBeforeRetry = objects.size;
+    await page.goto(`/admin/catalogo/${product.id}`);
+    await uploadForm.getByLabel("Texto alternativo", { exact: true }).fill(imageAlt);
+    await uploadForm.getByLabel("Imagen JPEG, PNG, WebP, HEIC o AVIF").setInputFiles({
+      name: "front-retry.png",
+      mimeType: "image/png",
+      buffer: createPng(64, 48),
+    });
+    await uploadForm.getByRole("button", { name: "Procesar y publicar medio" }).click();
+    await expect(page.getByText(/se reutilizó sin duplicar el registro/)).toBeVisible();
+    expect(
+      await db.productMedia.count({
+        where: { productId: product.id, altText: imageAlt, deletedAt: null },
+      }),
+    ).toBe(1);
+    expect(objects.size).toBe(objectCountBeforeRetry);
+
     await page.goto(`/admin/catalogo/${product.id}`);
     await uploadForm.getByLabel("Tipo de medio").selectOption("SPIN_360");
     await uploadForm.getByLabel("Texto alternativo", { exact: true }).fill(spinAlt);
@@ -231,7 +248,21 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
     await uploadForm.getByRole("button", { name: "Procesar y publicar medio" }).click();
     await expect(page.getByText(/Medio validado, almacenado en R2/)).toBeVisible();
     await page.goto(`/producto/${product.slug}`);
-    await expect(page.getByRole("slider", { name: spinAlt })).toBeVisible();
+    const spin = page.getByRole("slider", { name: spinAlt });
+    await expect(spin).toBeVisible();
+    await spin.focus();
+    await spin.press("End");
+    await expect(spin).toHaveAttribute("aria-valuenow", "2");
+    await expect(spin).toHaveAttribute("aria-valuetext", "Vista 2 de 2");
+    await expect(page.getByRole("img", { name: `${spinAlt}, vista 2` })).toBeVisible();
+    await spin.press("Home");
+    await expect(spin).toHaveAttribute("aria-valuenow", "1");
+    await spin.press("ArrowLeft");
+    await expect(spin).toHaveAttribute("aria-valuenow", "2");
+    await page.getByRole("button", { name: "Vista anterior" }).click();
+    await expect(spin).toHaveAttribute("aria-valuenow", "1");
+    await page.getByRole("button", { name: "Vista siguiente" }).click();
+    await expect(spin).toHaveAttribute("aria-valuenow", "2");
 
     await page.goto(`/admin/catalogo/${product.id}`);
     await uploadForm.getByLabel("Tipo de medio").selectOption("MODEL_3D");
@@ -244,18 +275,60 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
     await uploadForm.getByLabel("Modelo USDZ para AR en iOS (opcional)").setInputFiles({
       name: "model.usdz",
       mimeType: "model/vnd.usdz+zip",
-      buffer: createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-e2e-model") }]),
+      buffer: createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-e2e-model") }]),
     });
     await uploadForm.getByRole("button", { name: "Procesar y publicar medio" }).click();
     await expect(page.getByText(/Medio validado, almacenado en R2/)).toBeVisible();
+    const storedModel = await db.productMedia.findFirstOrThrow({
+      where: { productId: product.id, altText: modelAlt, deletedAt: null },
+    });
+    const modelRequests: string[] = [];
+    page.on("request", (request) => modelRequests.push(request.url()));
     await page.goto(`/producto/${product.slug}`);
-    await expect(page.getByRole("button", { name: "Explorar en 3D / AR" })).toBeVisible();
+    const modelStart = page.getByRole("button", { name: "Explorar en 3D / AR" });
+    await expect(modelStart).toBeVisible();
+    await expect(page.locator("model-viewer")).toHaveCount(0);
+    expect(modelRequests.some((url) => url.includes(storedModel.storageKey))).toBe(false);
+    let releaseModelRequest!: () => void;
+    const modelRequestGate = new Promise<void>((resolve) => {
+      releaseModelRequest = resolve;
+    });
+    const modelRoute = `**/${storedModel.storageKey}`;
+    await page.route(modelRoute, async (route) => {
+      await modelRequestGate;
+      await route.continue().catch(() => undefined);
+    });
+    await modelStart.focus();
+    await modelStart.press("Enter");
+    const modelViewer = page.locator("model-viewer");
+    await expect(modelViewer).toBeVisible();
+    await expect
+      .poll(() => modelRequests.some((url) => url.includes(storedModel.storageKey)))
+      .toBe(true);
+    await expect(modelViewer).toHaveAttribute("ios-src", new RegExp(storedModel.usdzKey!));
+    await expect(modelViewer).toHaveAttribute("ar-modes", /quick-look/);
+    await page.getByRole("button", { name: "Volver a vista fija" }).click();
+    await expect(page.locator("model-viewer")).toHaveCount(0);
+    await expect(modelStart).toBeVisible();
+    releaseModelRequest();
+    await page.unroute(modelRoute);
 
     await page.goto(`/admin/catalogo/${product.id}`);
     const imageCard = page.getByRole("listitem").filter({ hasText: imageAlt });
     await imageCard.getByLabel("Texto alternativo").fill(updatedAlt);
+    await imageCard.getByLabel("Posición", { exact: true }).fill("2");
     await imageCard.getByRole("button", { name: "Guardar texto y orden" }).click();
     await expect(page.getByText(/Texto alternativo y orden actualizados/)).toBeVisible();
+    const activePositions = await db.productMedia.findMany({
+      where: { productId: product.id, deletedAt: null, altText: { contains: runSuffix } },
+      select: { altText: true, position: true },
+      orderBy: { position: "asc" },
+    });
+    expect(activePositions).toEqual([
+      { altText: spinAlt, position: 0 },
+      { altText: modelAlt, position: 1 },
+      { altText: updatedAlt, position: 2 },
+    ]);
     await page.goto(`/producto/${product.slug}`);
     await expect(page.getByRole("img", { name: updatedAlt, exact: true })).toBeVisible();
 
@@ -343,6 +416,73 @@ test.describe.serial("Admin → R2 → ProductMedia → Cliente", () => {
     });
     expect(spin.altText).toBe(spinAlt);
   });
+
+  test("catalog upload and Server Action endpoints reject CSRF, RBAC and stale MFA before persistence", async ({
+    page,
+  }) => {
+    const attemptedAlt = `Upload bloqueado ${runSuffix}`;
+    const multipart = {
+      productId: product.id,
+      variantId: "",
+      altText: attemptedAlt,
+      mediaType: "IMAGE",
+      file: { name: "blocked.png", mimeType: "image/png", buffer: createPng(32, 32) },
+    };
+
+    await authenticateAdmin(page, writer);
+    const crossSite = await page.request.post("/api/admin/catalog-media/upload", {
+      headers: { Origin: "https://evil.example" },
+      multipart,
+    });
+    expect(crossSite.status()).toBe(403);
+    expect(await crossSite.json()).toEqual({ ok: false, error: "invalid_origin" });
+    expect(crossSite.headers()["cache-control"]).toContain("no-store");
+
+    const activeMedia = await db.productMedia.findFirstOrThrow({
+      where: { productId: product.id, altText: sharedSpinAlt, deletedAt: null },
+    });
+    const actionCsrf = await page.request.post(`/admin/catalogo/${product.id}`, {
+      headers: { Origin: "https://evil.example", "Next-Action": "a4-catalog-media" },
+      form: {
+        productId: product.id,
+        mediaId: activeMedia.id,
+        altText: attemptedAlt,
+        position: String(activeMedia.position),
+      },
+    });
+    expect(actionCsrf.status()).toBe(403);
+    expect(actionCsrf.headers()["cache-control"]).toContain("no-store");
+
+    await authenticateAdmin(page, reader);
+    const forbidden = await page.request.post("/api/admin/catalog-media/upload", {
+      headers: { Origin: "http://127.0.0.1:4110" },
+      multipart,
+    });
+    expect(forbidden.status()).toBe(403);
+    expect(await forbidden.json()).toEqual({ ok: false, error: "forbidden" });
+
+    await authenticateAdmin(page, writer, 900);
+    const stale = await page.request.post("/api/admin/catalog-media/upload", {
+      headers: { Origin: "http://127.0.0.1:4110" },
+      multipart,
+    });
+    expect(stale.status()).toBe(403);
+    expect(await stale.json()).toEqual({ ok: false, error: "mfa_stale" });
+
+    await page.context().clearCookies();
+    const anonymous = await page.request.post("/api/admin/catalog-media/upload", {
+      headers: { Origin: "http://127.0.0.1:4110" },
+      multipart,
+    });
+    expect(anonymous.status()).toBe(401);
+    expect(await anonymous.json()).toEqual({ ok: false, error: "unauthorized" });
+    expect(
+      await db.productMedia.count({ where: { productId: product.id, altText: attemptedAlt } }),
+    ).toBe(0);
+    expect(
+      (await db.productMedia.findUniqueOrThrow({ where: { id: activeMedia.id } })).altText,
+    ).toBe(sharedSpinAlt);
+  });
 });
 
 test.describe.serial("Admin CMS media Route Handler → R2 → metadata lifecycle", () => {
@@ -369,6 +509,25 @@ test.describe.serial("Admin CMS media Route Handler → R2 → metadata lifecycl
     const stored = await db.cmsMedia.findFirstOrThrow({ where: { altText: alt } });
     expect(objects.has(stored.storageKey)).toBe(true);
     expect(objects.has(stored.storageKey.replace(/\.webp$/, ".avif"))).toBe(true);
+    const objectCountBeforeRetry = objects.size;
+
+    await form.getByLabel("Texto alternativo").fill(alt);
+    await form.getByLabel("Imagen JPEG, PNG, WebP, HEIC o AVIF").setInputFiles({
+      name: "cms-retry.png",
+      mimeType: "image/png",
+      buffer: createPng(72, 48),
+    });
+    await form.getByRole("button", { name: "Procesar y subir imagen" }).click();
+    await expect(
+      page.getByText(/La imagen ya existía; se reutilizó el activo persistido/),
+    ).toBeVisible();
+    expect(await db.cmsMedia.count({ where: { contentHash: stored.contentHash } })).toBe(1);
+    expect(objects.size).toBe(objectCountBeforeRetry);
+    expect(
+      await db.adminActionLog.count({
+        where: { targetType: "CmsMedia", targetId: stored.id, action: "CMS_MEDIA_CREATED" },
+      }),
+    ).toBe(1);
 
     const card = page.getByRole("article").filter({ has: page.getByRole("img", { name: alt }) });
     await expect(card).toBeVisible();
@@ -409,5 +568,35 @@ test.describe.serial("Admin CMS media Route Handler → R2 → metadata lifecycl
     expect(
       logs.every((entry) => entry.requestId !== null || entry.action !== "CMS_MEDIA_CREATED"),
     ).toBe(true);
+  });
+
+  test("CMS upload rejects cross-site and stale-MFA requests without creating media or objects", async ({
+    page,
+  }) => {
+    const alt = `CMS upload bloqueado ${runSuffix}`;
+    const multipart = {
+      altText: alt,
+      file: { name: "blocked.png", mimeType: "image/png", buffer: createPng(32, 32) },
+    };
+    const objectCount = objects.size;
+
+    await authenticateAdmin(page, writer);
+    const crossSite = await page.request.post("/api/admin/cms-media/upload", {
+      headers: { Origin: "https://evil.example" },
+      multipart,
+    });
+    expect(crossSite.status()).toBe(403);
+    expect(await crossSite.json()).toEqual({ ok: false, error: "invalid_origin" });
+    expect(crossSite.headers()["x-robots-tag"]).toContain("noindex");
+
+    await authenticateAdmin(page, writer, 900);
+    const stale = await page.request.post("/api/admin/cms-media/upload", {
+      headers: { Origin: "http://127.0.0.1:4110" },
+      multipart,
+    });
+    expect(stale.status()).toBe(403);
+    expect(await stale.json()).toEqual({ ok: false, error: "mfa_stale" });
+    expect(await db.cmsMedia.count({ where: { altText: alt } })).toBe(0);
+    expect(objects.size).toBe(objectCount);
   });
 });

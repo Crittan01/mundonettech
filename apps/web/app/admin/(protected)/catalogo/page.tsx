@@ -59,6 +59,7 @@ export default async function AdminCatalogPage({ searchParams }: PageProps<"/adm
         ) : null}
       </div>
       <form
+        key={`${q}|${status ?? ""}`}
         action="/admin/catalogo"
         className="flex flex-wrap gap-3 rounded-xl border border-border bg-card p-4"
       >

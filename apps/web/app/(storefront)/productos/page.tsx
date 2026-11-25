@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { Suspense } from "react";
 
 import { CatalogBrowser } from "@/components/catalog/catalog-browser";
@@ -5,9 +6,17 @@ import { searchCatalog } from "@/lib/catalog";
 import { parseCatalogParams } from "@/lib/catalog-params";
 import { getPublicMediaOrigin } from "@/lib/env";
 
-export const metadata = {
+export const metadata: Metadata = {
   title: "Catálogo de tecnología",
   description: "Explora computadores, audio, energía y accesorios con disponibilidad real.",
+  alternates: { canonical: "/productos" },
+  openGraph: {
+    type: "website",
+    locale: "es_CO",
+    url: "/productos",
+    title: "Catálogo de tecnología",
+    description: "Explora computadores, audio, energía y accesorios con disponibilidad real.",
+  },
 };
 
 const title = "Catálogo de tecnología";

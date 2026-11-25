@@ -1,7 +1,7 @@
 import "server-only";
 
 import { storeConfig } from "@mundonettech/config/store";
-import { buildProductJsonLd } from "@mundonettech/core";
+import { buildProductJsonLd, normalizeXmlText } from "@mundonettech/core";
 import type { CatalogProductDetail } from "@mundonettech/db";
 
 import { resolveCatalogMediaUrl } from "@/components/catalog/media-url";
@@ -47,9 +47,14 @@ export function getProductStructuredData(
   reviewSummary?: { count: number; averageRating: number },
 ) {
   const canonical = productUrl(product);
+  const description = normalizeXmlText(
+    product.shortDescription?.trim() || product.description?.trim() || product.name,
+    5000,
+    "product.description",
+  );
   return buildProductJsonLd({
     name: product.name,
-    description: product.shortDescription ?? product.description ?? product.name,
+    description,
     url: canonical,
     brandName: product.brand.name,
     categoryName: product.category.name,

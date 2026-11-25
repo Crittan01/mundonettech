@@ -378,9 +378,9 @@ export async function CmsPageRenderer({
   );
   const faqItems = preview
     ? []
-    : page.blocks.flatMap((block) =>
-        block.isVisible && block.type === "FAQ" ? block.content.items : [],
-      );
+    : page.blocks
+        .flatMap((block) => (block.isVisible && block.type === "FAQ" ? block.content.items : []))
+        .slice(0, 100);
   return (
     <div className="space-y-14" data-cms-page={page.id}>
       {faqItems.length ? <JsonLd data={buildFaqJsonLd(faqItems)} /> : null}

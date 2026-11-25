@@ -46,7 +46,7 @@ before(
         authUserId: randomUUID(),
         email: `cms-${randomUUID()}@example.test`,
         displayName: "CMS Test",
-        role: "CMS_EDITOR",
+        role: "OPERATIONS_MANAGER",
         status: "ACTIVE",
       },
     });
@@ -131,6 +131,22 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
       ],
       audit,
     );
+    const renameA = `${slug}-a`;
+    const renameB = `${slug}-b`;
+    const renamed = await Promise.all([
+      service.updatePage(page.id, { slug: renameA, title: "Página editorial A" }, audit),
+      service.updatePage(page.id, { slug: renameB, title: "Página editorial B" }, audit),
+    ]);
+    assert.equal(new Set(renamed.map((result) => result.previousSlug)).size, 2);
+    assert.ok(renamed.some((result) => result.previousSlug === slug));
+    const currentSlug = (await db.cmsPage.findUniqueOrThrow({ where: { id: page.id } })).slug;
+    assert.ok([renameA, renameB].includes(currentSlug));
+    const restored = await service.updatePage(
+      page.id,
+      { slug, title: "Página editorial", seoTitle: "Editorial" },
+      audit,
+    );
+    assert.equal(restored.previousSlug, currentSlug);
     await assert.rejects(
       service.createPage({ slug, title: "Duplicada" }, [], audit),
       CmsConflictError,
@@ -402,12 +418,30 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
     for (const badSettings of [
       { ...input, timeZone: "Invalid/Nowhere" },
       { ...input, currency: "co" },
+      { ...input, currency: "ZZZ" },
+      { ...input, currency: "USD" },
       { ...input, orderNumberPrefix: "123" },
       { ...input, orderNumberPadding: 0 },
       { ...input, annualRevenueAlertUvt: 0 },
     ]) {
       await assert.rejects(settings.save(badSettings, audit), CmsValidationError);
     }
+    const editorOnly = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `settings-denied-${randomUUID()}@example.test`,
+        displayName: "Editorial Only",
+        role: "CMS_EDITOR",
+        status: "ACTIVE",
+      },
+    });
+    await assert.rejects(
+      settings.save(
+        { ...input, annualRevenueAlertUvt: 9999 },
+        { ...audit, actorAdminUserId: editorOnly.id },
+      ),
+    );
+    assert.equal((await settings.get()).annualRevenueAlertUvt, 3500);
 
     // Direct PostgreSQL 17 CHECK constraint negative verification
     await assert.rejects(
@@ -424,6 +458,88 @@ describe("F2.1 — CMS pages, immutable versions, concurrency and scheduling", (
         "   ",
       ]),
       (error) => error.code === "23514",
+    );
+  });
+
+  it("bounds scheduled work without starving publishable pages behind deferred pages", async () => {
+    const now = new Date((await db.$queryRaw`SELECT CURRENT_TIMESTAMP AS now`)[0].now);
+    const future = new Date(now.getTime() + 60_000);
+    const deferredIds = Array.from(
+      { length: 100 },
+      (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    );
+    await db.cmsPage.createMany({
+      data: deferredIds.map((id, index) => ({
+        id,
+        slug: `deferred-batch-${index}-${randomUUID()}`,
+        title: `Diferida ${index}`,
+        status: "SCHEDULED",
+        scheduledFor: future,
+      })),
+    });
+    const publishable = await service.createPage(
+      { slug: `last-batch-${randomUUID()}`, title: "Publicable después de diferidas" },
+      [{ type: "RICH_TEXT", content: { body: "Contenido vigente" } }],
+      audit,
+    );
+    const detail = await service.getPage(publishable.id);
+    await service.publishVersion(detail.blocks[0].versions[0].id, audit);
+    await service.schedulePage(publishable.id, future, audit);
+    const lastId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    await rawPg.query('UPDATE "CmsPage" SET "id" = $1 WHERE "id" = $2', [lastId, publishable.id]);
+
+    const result = await service.publishScheduled(audit, new Date(future.getTime() + 1000));
+    assert.equal(result.pagesDeferred, 100);
+    assert.equal(result.pages, 1);
+    assert.ok(result.affectedSlugs.includes(publishable.slug));
+    assert.equal(
+      (await db.cmsPage.findUniqueOrThrow({ where: { id: lastId } })).status,
+      "PUBLISHED",
+    );
+
+    const boundedIds = Array.from(
+      { length: 101 },
+      (_, index) => `00000000-0000-4000-9000-${String(index).padStart(12, "0")}`,
+    );
+    await db.cmsPage.createMany({
+      data: boundedIds.map((id, index) => ({
+        id,
+        slug: `bounded-batch-${index}-${randomUUID()}`,
+        title: `Publicable acotada ${index}`,
+        status: "SCHEDULED",
+        scheduledFor: future,
+      })),
+    });
+    await db.cmsSectionBlock.createMany({
+      data: boundedIds.map((id) => ({
+        id,
+        pageId: id,
+        blockType: "RICH_TEXT",
+        position: 0,
+      })),
+    });
+    await db.cmsBlockVersion.createMany({
+      data: boundedIds.map((id) => ({
+        id,
+        blockId: id,
+        version: 1,
+        content: { body: "Contenido vigente" },
+        contentHash: new Uint8Array(32),
+        status: "PUBLISHED",
+        effectiveAt: now,
+        publishedAt: now,
+        createdByAdminUserId: audit.actorAdminUserId,
+      })),
+    });
+
+    const firstBatch = await service.publishScheduled(audit, new Date(future.getTime() + 1000));
+    const secondBatch = await service.publishScheduled(audit, new Date(future.getTime() + 1000));
+    assert.equal(firstBatch.pages, 100);
+    assert.equal(firstBatch.pagesDeferred, 100);
+    assert.equal(secondBatch.pages, 1);
+    assert.equal(
+      await db.cmsPage.count({ where: { id: { in: boundedIds }, status: "SCHEDULED" } }),
+      0,
     );
   });
 });
@@ -458,6 +574,16 @@ describe("F2.1 — CMS media with sharp-safe, R2 compensation and reference lock
       assert.equal(objects.size, objectCount);
 
       await mediaService.updateAltText(firstRace.media.id, "Texto actualizado", audit);
+      const mediaAuditCount = await db.adminActionLog.count({
+        where: { targetType: "CmsMedia", targetId: firstRace.media.id },
+      });
+      await mediaService.updateAltText(firstRace.media.id, "Texto actualizado", audit);
+      assert.equal(
+        await db.adminActionLog.count({
+          where: { targetType: "CmsMedia", targetId: firstRace.media.id },
+        }),
+        mediaAuditCount,
+      );
       await assert.rejects(
         mediaService.updateAltText(firstRace.media.id, "<script>xss</script>", audit),
         CmsValidationError,
@@ -576,7 +702,7 @@ describe("F2.1 — CMS media with sharp-safe, R2 compensation and reference lock
       );
       assert.equal(objects.has(archivable.media.storageKey), true);
 
-      // 2. Brand-new image upload failing DB FK cleans all newly uploaded R2 derivatives
+      // 2. Unauthorized actor is rejected BEFORE writing any R2 derivatives
       const before = objects.size;
       await assert.rejects(
         mediaService.upload(
@@ -586,17 +712,41 @@ describe("F2.1 — CMS media with sharp-safe, R2 compensation and reference lock
       );
       assert.equal(objects.size, before);
 
-      // 3. Double failure (DB failure + R2 delete failure) throws AggregateError
+      // 3. Mid-flight DB failure + R2 delete failure throws AggregateError
+      const transientActor = await db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `cms-transient-${randomUUID()}@example.test`,
+          displayName: "Transient CMS Actor",
+          role: "CMS_EDITOR",
+          status: "ACTIVE",
+        },
+        select: { id: true },
+      });
+      const originalPut = client.put.bind(client);
+      let revoked = false;
+      client.put = async (input) => {
+        const res = await originalPut(input);
+        if (!revoked) {
+          revoked = true;
+          await db.adminUser.update({
+            where: { id: transientActor.id },
+            data: { status: "SUSPENDED" },
+          });
+        }
+        return res;
+      };
       failDeletes = true;
       try {
         await assert.rejects(
           mediaService.upload(
             { bytes: createPng(44, 28), filename: "double-fail.png", altText: "Doble fallo" },
-            { ...audit, actorAdminUserId: randomUUID() },
+            { ...audit, actorAdminUserId: transientActor.id },
           ),
           (error) => error instanceof AggregateError && error.errors.length >= 2,
         );
       } finally {
+        client.put = originalPut;
         failDeletes = false;
       }
     } finally {
@@ -678,6 +828,52 @@ describe("A2 — CMS media/settings audit, operator masking and rollback", () =>
       assert.equal(createdLog.metadata.after.id, uploaded.media.id);
       assert.equal(createdLog.metadata.after.deleted, false);
       assert.equal(createdLog.metadata.after.derivativeCount, 2);
+
+      const financeOnly = await db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `media-denied-${randomUUID()}@example.test`,
+          displayName: "Finance Only",
+          role: "FINANCE_ANALYST",
+          status: "ACTIVE",
+        },
+      });
+      await assert.rejects(
+        media.updateAltText(uploaded.media.id, "Cambio no autorizado", {
+          ...audit,
+          actorAdminUserId: financeOnly.id,
+        }),
+      );
+      await assert.rejects(
+        media.archive(uploaded.media.id, { ...audit, actorAdminUserId: financeOnly.id }),
+      );
+      // CmsService no-op branches MUST also enforce transactional RBAC
+      const noopPage = await service.createPage(
+        { slug: `noop-rbac-${randomUUID()}`, title: "Página RBAC No-Op" },
+        [{ type: "HERO", content: { heading: "Hola" } }],
+        audit,
+      );
+      const deniedAudit = { ...audit, actorAdminUserId: financeOnly.id };
+      await assert.rejects(
+        service.updatePage(
+          noopPage.id,
+          { slug: noopPage.slug, title: noopPage.title },
+          deniedAudit,
+        ),
+      );
+      const noopBlocks = await db.cmsSectionBlock.findMany({ where: { pageId: noopPage.id } });
+      await assert.rejects(
+        service.reorderBlocks(
+          noopPage.id,
+          noopBlocks.map((b) => b.id),
+          deniedAudit,
+        ),
+      );
+      await assert.rejects(service.setBlockVisibility(noopBlocks[0].id, true, deniedAudit));
+      assert.equal(
+        (await db.cmsMedia.findUniqueOrThrow({ where: { id: uploaded.media.id } })).altText,
+        uploaded.media.altText,
+      );
 
       await media.updateAltText(uploaded.media.id, "Texto posterior con +573001112233", audit);
       const updateLog = await db.adminActionLog.findFirstOrThrow({

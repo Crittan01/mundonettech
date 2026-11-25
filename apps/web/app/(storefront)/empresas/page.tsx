@@ -1,9 +1,27 @@
+import { storeConfig } from "@mundonettech/config/store";
+import type { Metadata } from "next";
+
 import { B2bLeadForm } from "@/components/b2b/lead-form";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
 
-export const metadata = {
+const canonical = new URL("/empresas", storeConfig.url).toString();
+
+export const metadata: Metadata = {
   title: "Ventas a empresas",
   description: "Solicita una propuesta comercial para compras corporativas y al por mayor.",
+  alternates: { canonical },
+  openGraph: {
+    type: "website",
+    locale: "es_CO",
+    url: canonical,
+    title: "Ventas a empresas",
+    description: "Solicita una propuesta comercial para compras corporativas y al por mayor.",
+  },
+  twitter: {
+    card: "summary",
+    title: "Ventas a empresas",
+    description: "Solicita una propuesta comercial para compras corporativas y al por mayor.",
+  },
 };
 
 export default async function BusinessPage() {

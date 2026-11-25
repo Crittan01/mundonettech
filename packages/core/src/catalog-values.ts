@@ -89,12 +89,17 @@ export function assertCatalogMoney(
   costCents: bigint,
   compareAtPriceCents?: bigint,
 ): void {
-  if (
-    priceCents < 0n ||
-    costCents < 0n ||
-    (compareAtPriceCents !== undefined && compareAtPriceCents < 0n)
-  ) {
-    throw new RangeError("Catalog monetary values must be non-negative integer cents.");
+  for (const [field, value] of [
+    ["priceCents", priceCents],
+    ["costCents", costCents],
+    ["compareAtPriceCents", compareAtPriceCents],
+  ] as const) {
+    if (value !== undefined && typeof value !== "bigint") {
+      throw new TypeError(`${field} must be a BigInt.`);
+    }
+    if (value !== undefined && (value < 0n || value > maxSignedBigInt)) {
+      throw new RangeError(`${field} must fit a non-negative signed BIGINT.`);
+    }
   }
   if (compareAtPriceCents !== undefined && compareAtPriceCents < priceCents) {
     throw new RangeError("Compare-at price cannot be lower than the effective price.");

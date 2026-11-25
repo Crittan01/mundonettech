@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
-import { helpArticles } from "../config/dist/help-center.config.js";
+import { helpArticles, helpFaqs } from "../config/dist/help-center.config.js";
 
 async function expectAccessible(page: Page) {
   const report = await new AxeBuilder({ page })
@@ -25,7 +25,17 @@ test("help center searches real guides, handles empty and invalid input, and rem
   await expect(page.locator('header a[href="/ayuda"]')).toBeVisible();
   await expect(page.locator('footer a[href="/ayuda"]')).toBeVisible();
   const structuredData = await page.locator('script[type="application/ld+json"]').allTextContents();
-  expect(structuredData.some((entry) => entry.includes('"@type":"FAQPage"'))).toBe(true);
+  const faqScript = structuredData.find((entry) => entry.includes('"@type":"FAQPage"'));
+  expect(faqScript).toBeTruthy();
+  const faqData = JSON.parse(faqScript!) as {
+    mainEntity: Array<{ name: string; acceptedAnswer: { text: string } }>;
+  };
+  expect(
+    faqData.mainEntity.map((item) => ({
+      question: item.name,
+      answer: item.acceptedAnswer.text,
+    })),
+  ).toEqual([...helpFaqs]);
   expect(structuredData.some((entry) => entry.includes('"@type":"BreadcrumbList"'))).toBe(true);
 
   const search = page.getByRole("searchbox", { name: "Palabras clave" });
@@ -71,7 +81,29 @@ test("all help articles expose canonical metadata, useful actions, related guide
       "href",
       `https://mundonettech.co/ayuda/${article.slug}`,
     );
+    await expect(page.locator('meta[name="description"]')).toHaveAttribute(
+      "content",
+      article.summary,
+    );
     await expect(page.locator("article section")).toHaveCount(article.sections.length);
+    expect(await page.locator("article section h2").allTextContents()).toEqual(
+      article.sections.map((section) => section.heading),
+    );
+    const expectedRelated = helpArticles
+      .filter(
+        (candidate) => candidate.category === article.category && candidate.slug !== article.slug,
+      )
+      .slice(0, 3);
+    const related = page.getByRole("navigation", { name: "Guías relacionadas" });
+    await expect(related.locator("li")).toHaveCount(expectedRelated.length);
+    expect(await related.locator("a").allTextContents()).toEqual(
+      expectedRelated.map((candidate) => candidate.title),
+    );
+    for (const link of article.sections.flatMap((section) => section.links ?? [])) {
+      await expect(
+        page.locator("article section").getByRole("link", { name: link.label, exact: true }),
+      ).toHaveAttribute("href", link.href);
+    }
     await expect(
       page
         .getByRole("navigation", { name: "Migas de pan" })

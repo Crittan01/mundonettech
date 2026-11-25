@@ -11,7 +11,7 @@ import {
   CouponForm,
   WholesaleTierForm,
 } from "@/components/admin/pricing-forms";
-import { bogotaInputValue } from "@/lib/admin-pricing-presenters";
+import { bogotaInputValue, formatBogotaDate } from "@/lib/admin-pricing-presenters";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -90,9 +90,25 @@ export default async function EditPricingPage({
               </dd>
             </div>
             <div>
-              <dt className="inline font-medium">Actualizado: </dt>
-              <dd className="inline">{record.updatedAt.toISOString()}</dd>
+              <dt className="inline font-medium">Actualizado (hora de Colombia): </dt>
+              <dd className="inline">{formatBogotaDate(record.updatedAt)}</dd>
             </div>
+            {wholesale ? (
+              <>
+                <div>
+                  <dt className="inline font-medium">Alcance: </dt>
+                  <dd className="inline">{wholesale.scope}</dd>
+                </div>
+                <div>
+                  <dt className="inline font-medium">Cantidad mínima: </dt>
+                  <dd className="inline">{wholesale.minimumQuantity}</dd>
+                </div>
+                <div>
+                  <dt className="inline font-medium">Precio unitario: </dt>
+                  <dd className="inline">{formatCopCents(wholesale.unitPriceCents)}</dd>
+                </div>
+              </>
+            ) : null}
             {coupon ? (
               <div>
                 <dt className="inline font-medium">Subtotal mínimo: </dt>
@@ -100,10 +116,28 @@ export default async function EditPricingPage({
               </div>
             ) : null}
             {bundle ? (
-              <div>
-                <dt className="inline font-medium">Descuento: </dt>
-                <dd className="inline">{formatCopCents(bundle.discountCents)}</dd>
-              </div>
+              <>
+                <div>
+                  <dt className="inline font-medium">Precio base: </dt>
+                  <dd className="inline">
+                    {bundle.priceCents !== null
+                      ? formatCopCents(bundle.priceCents)
+                      : "Suma de componentes"}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="inline font-medium">Descuento: </dt>
+                  <dd className="inline">{formatCopCents(bundle.discountCents)}</dd>
+                </div>
+                <div>
+                  <dt className="inline font-medium">Componentes: </dt>
+                  <dd className="inline">
+                    {bundle.items
+                      .map((item) => `${item.variant.sku} × ${item.quantity}`)
+                      .join(", ")}
+                  </dd>
+                </div>
+              </>
             ) : null}
           </dl>
         </section>

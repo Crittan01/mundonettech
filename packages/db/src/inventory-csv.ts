@@ -5,6 +5,7 @@ import {
   type InventoryStockCsvRow,
 } from "@mundonettech/core";
 
+import { Prisma } from "./generated/client.js";
 import type { DatabaseExecutor } from "./primitives.js";
 import {
   InventoryConflictError,
@@ -274,24 +275,75 @@ export async function importInventoryStockCsv(
   }
 }
 
-export async function exportInventoryStockCsv(db: DatabaseExecutor): Promise<string> {
-  const levels = await db.stockLevel.findMany({
+function levelKey(locationId: string, variantId: string): string {
+  return `${locationId}:${variantId}`;
+}
+
+async function readInventorySnapshot(executor: DatabaseExecutor) {
+  const levels = await executor.stockLevel.findMany({
     where: {
       location: { deletedAt: null },
       variant: { deletedAt: null, product: { deletedAt: null } },
     },
-    include: { location: true, variant: true },
+    include: {
+      location: true,
+      variant: { include: { product: { select: { trackSerial: true } } } },
+    },
     orderBy: [{ location: { code: "asc" } }, { variant: { sku: "asc" } }],
   });
+  const units = levels.length
+    ? await executor.serializedUnit.findMany({
+        where: {
+          status: { in: ["IN_STOCK", "RESERVED", "QUARANTINED"] },
+          location: { deletedAt: null },
+          variant: { deletedAt: null, product: { deletedAt: null, trackSerial: true } },
+        },
+        orderBy: [{ locationId: "asc" }, { variantId: "asc" }, { serial: "asc" }, { id: "asc" }],
+      })
+    : [];
+  return { levels, units };
+}
+
+export async function exportInventoryStockCsv(db: DatabaseExecutor): Promise<string> {
+  const { levels, units } =
+    "$transaction" in db && typeof db.$transaction === "function"
+      ? await db.$transaction((tx) => readInventorySnapshot(tx), {
+          isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+        })
+      : await readInventorySnapshot(db);
+  const unitsByLevel = new Map<string, typeof units>();
+  for (const unit of units) {
+    const key = levelKey(unit.locationId, unit.variantId);
+    const entries = unitsByLevel.get(key) ?? [];
+    entries.push(unit);
+    unitsByLevel.set(key, entries);
+  }
+  for (const level of levels) {
+    if (!level.variant.product.trackSerial) continue;
+    const count = unitsByLevel.get(levelKey(level.locationId, level.variantId))?.length ?? 0;
+    if (count !== level.onHand) {
+      throw new InventoryConflictError(
+        `Serialized stock parity failed for ${level.location.code}/${level.variant.sku}: ${count} units for ${level.onHand} on hand.`,
+      );
+    }
+  }
   return serializeCsv([
     ["locationCode", "sku", "onHand", "safetyStock", "unitCostCents", "serials"],
-    ...levels.map((level) => [
-      level.location.code,
-      level.variant.sku,
-      level.onHand,
-      level.safetyStock,
-      level.weightedAvgCostCents,
-      "",
-    ]),
+    ...levels.map((level) => {
+      const serials = level.variant.product.trackSerial
+        ? (unitsByLevel.get(levelKey(level.locationId, level.variantId)) ?? []).map((unit) => ({
+            serial: unit.serial,
+            ...(unit.imei ? { imei: unit.imei } : {}),
+          }))
+        : [];
+      return [
+        level.location.code,
+        level.variant.sku,
+        level.onHand,
+        level.safetyStock,
+        level.weightedAvgCostCents,
+        level.variant.product.trackSerial ? JSON.stringify(serials) : "",
+      ];
+    }),
   ]);
 }

@@ -181,7 +181,9 @@ export default async function AdminPricingPage({ searchParams }: PageProps<"/adm
               0n,
             );
             const base = bundle.priceCents ?? components;
-            const effective = base - bundle.discountCents;
+            const invalidPrice =
+              bundle.discountCents > base || base - bundle.discountCents > components;
+            const effective = invalidPrice ? 0n : base - bundle.discountCents;
             return (
               <article key={bundle.id} className="rounded-xl border border-border bg-card p-5">
                 <div className="flex flex-wrap items-start justify-between gap-4">
@@ -192,7 +194,14 @@ export default async function AdminPricingPage({ searchParams }: PageProps<"/adm
                     </p>
                   </div>
                   <div className="sm:text-right">
-                    <p className="text-lg font-bold">{formatCopCents(effective)}</p>
+                    <p className="text-lg font-bold">
+                      {invalidPrice ? "Precio no vendible" : formatCopCents(effective)}
+                    </p>
+                    {invalidPrice ? (
+                      <p role="alert" className="mt-1 text-sm text-destructive">
+                        Ajusta el precio base o el descuento: supera el total actual de componentes.
+                      </p>
+                    ) : null}
                     <Link
                       href={`/admin/precios/bundles/${bundle.id}`}
                       className="text-sm text-primary hover:underline"

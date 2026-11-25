@@ -46,6 +46,9 @@ export function centsToDecimalString(value: string): string {
     throw new TypeError("Monetary cents must be a non-negative integer string.");
   }
   const cents = BigInt(value);
+  if (cents > 9_223_372_036_854_775_807n) {
+    throw new RangeError("Monetary cents exceed signed BIGINT bounds.");
+  }
   return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
 }
 

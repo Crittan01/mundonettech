@@ -2,6 +2,7 @@ import {
   adminNavigation,
   allocateProportionally,
   calculateCartPricing,
+  formatSignedCopCents,
   hasAdminPermission,
   normalizeCouponCode,
   selectWholesaleTier,
@@ -283,5 +284,12 @@ describe("promotion validation and RBAC", () => {
     expect(adminNavigation("STORE_MANAGER").map((entry) => entry.href)).toEqual(
       expect.arrayContaining(["/admin/precios", "/admin/venta-asistida"]),
     );
+  });
+
+  it("formats the complete signed INT8 range and rejects underflow", () => {
+    expect(() => formatSignedCopCents("-9223372036854775808")).not.toThrow();
+    expect(() => formatSignedCopCents("9223372036854775807")).not.toThrow();
+    expect(() => formatSignedCopCents("-9223372036854775809")).toThrow(RangeError);
+    expect(() => formatSignedCopCents("9223372036854775808")).toThrow(RangeError);
   });
 });

@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
 
 import { sanitizeAuditValue } from "@mundonettech/core";
-import { Prisma, PrismaClient, type ProductMedia } from "@mundonettech/db";
+import {
+  assertAdminActorInTransaction,
+  Prisma,
+  PrismaClient,
+  type ProductMedia,
+} from "@mundonettech/db";
 
 import { inspectImageMagic } from "./image-safety.js";
 import { validateGlb, validateUsdz } from "./model-safety.js";
 import {
+  MediaSourceValidationError,
   storeImageDerivatives,
   storeModel3d,
   storeSpin360,
@@ -238,24 +244,32 @@ export class ProductMediaService {
 
   private requireStorage(): R2MediaStorage {
     if (!this.storage) {
-      throw new ProductMediaValidationError("R2 storage is required for product media uploads.");
+      throw new Error("R2 storage is required for product media uploads.");
     }
     return this.storage;
   }
 
-  private async assertTargetExists(target: NormalizedTarget): Promise<void> {
-    const product = await this.db.product.findFirst({
-      where: { id: target.productId, deletedAt: null },
-      select: { id: true },
-    });
-    if (!product) throw new ProductMediaNotFoundError("Product not found.");
-    if (target.variantId) {
-      const variant = await this.db.productVariant.findFirst({
-        where: { id: target.variantId, productId: target.productId, deletedAt: null },
+  private async assertActorAndTargetBeforeUpload(
+    target: NormalizedTarget,
+    audit: ProductMediaAudit,
+  ): Promise<void> {
+    await this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
+      const product = await tx.product.findFirst({
+        where: { id: target.productId, deletedAt: null },
         select: { id: true },
       });
-      if (!variant) throw new ProductMediaNotFoundError("Variant does not belong to the product.");
-    }
+      if (!product) throw new ProductMediaNotFoundError("Product not found.");
+      if (target.variantId) {
+        const variant = await tx.productVariant.findFirst({
+          where: { id: target.variantId, productId: target.productId, deletedAt: null },
+          select: { id: true },
+        });
+        if (!variant) {
+          throw new ProductMediaNotFoundError("Variant does not belong to the product.");
+        }
+      }
+    });
   }
 
   private async lockTarget(
@@ -305,16 +319,27 @@ export class ProductMediaService {
     keys: readonly string[],
   ): Promise<Set<string>> {
     if (keys.length === 0) return new Set();
-    const values = Prisma.join(keys.map((key) => Prisma.sql`(${key})`));
+    const values = Prisma.join(
+      keys.map((key) => {
+        const prefixMatch = /^(catalog\/[^/]+\/[^/]+\/image\/[0-9a-f]{64})\/[^/]+$/.exec(key);
+        const imagePrefix = prefixMatch?.[1] ? `${prefixMatch[1]}/` : null;
+        return Prisma.sql`(${key}, ${imagePrefix}::text)`;
+      }),
+    );
     const rows = await tx.$queryRaw<Array<{ key: string; referenced: boolean }>>`
-      WITH candidates("key") AS (
-        SELECT * FROM (VALUES ${values}) AS supplied("key")
+      WITH candidates("key", "imagePrefix") AS (
+        SELECT * FROM (VALUES ${values}) AS supplied("key", "imagePrefix")
       )
       SELECT candidates."key", EXISTS (
         SELECT 1 FROM "ProductMedia" pm
         WHERE pm."storageKey" = candidates."key"
           OR pm."posterKey" = candidates."key"
           OR pm."usdzKey" = candidates."key"
+          OR (
+            candidates."imagePrefix" IS NOT NULL
+            AND pm."mediaType" = 'IMAGE'
+            AND left(pm."storageKey", length(candidates."imagePrefix")) = candidates."imagePrefix"
+          )
           OR jsonb_path_exists(
             pm."frames", '$[*].key ? (@ == $key)',
             jsonb_build_object('key', candidates."key")
@@ -420,6 +445,7 @@ export class ProductMediaService {
   ): Promise<ProductMediaUploadResult> {
     try {
       return await this.db.$transaction(async (tx) => {
+        await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
         const product = await this.lockTarget(tx, target);
         const existing = await tx.productMedia.findFirst({
           where: { storageKey: prepared.storageKey, deletedAt: null },
@@ -504,7 +530,7 @@ export class ProductMediaService {
     const target = normalizeTarget(input);
     validateAudit(audit);
     validateBytes(input.bytes, productMediaLimits.imageBytes, "Image bytes");
-    await this.assertTargetExists(target);
+    await this.assertActorAndTargetBeforeUpload(target, audit);
     const storage = this.requireStorage();
     let stored;
     try {
@@ -516,15 +542,7 @@ export class ProductMediaService {
         { cleanup: (keys) => this.compensate(target.productId, [keys]) },
       );
     } catch (error) {
-      if (error instanceof ProductMediaValidationError) throw error;
-      if (
-        error instanceof TypeError ||
-        error instanceof RangeError ||
-        (error instanceof Error &&
-          /Unsupported|Invalid|SVG|EXIF|pixel|dimension|magic|corrupt|header|ispe/i.test(
-            error.message,
-          ))
-      ) {
+      if (error instanceof MediaSourceValidationError) {
         throw new ProductMediaValidationError(error.message);
       }
       throw error;
@@ -587,12 +605,20 @@ export class ProductMediaService {
         throw new ProductMediaValidationError("SPIN_360 exceeds the aggregate byte limit.");
       }
     }
-    await this.assertTargetExists(target);
+    await this.assertActorAndTargetBeforeUpload(target, audit);
     const storage = this.requireStorage();
     const prefix = `${targetPrefix(target, "spin")}-${spinDigest(input.frames)}`;
-    const stored = await storeSpin360(storage, input.frames, prefix, undefined, {
-      cleanup: (keys) => this.compensate(target.productId, [keys]),
-    });
+    let stored;
+    try {
+      stored = await storeSpin360(storage, input.frames, prefix, undefined, {
+        cleanup: (keys) => this.compensate(target.productId, [keys]),
+      });
+    } catch (error) {
+      if (error instanceof MediaSourceValidationError) {
+        throw new ProductMediaValidationError(error.message);
+      }
+      throw error;
+    }
     const objectGroups = stored.map((frame) => frame.derivatives.map((item) => item.key));
     let primary: StoredImageDerivative;
     try {
@@ -647,7 +673,7 @@ export class ProductMediaService {
         error instanceof Error ? error.message : "Invalid 3D model asset.",
       );
     }
-    await this.assertTargetExists(target);
+    await this.assertActorAndTargetBeforeUpload(target, audit);
     const storage = this.requireStorage();
     const prefix = targetPrefix(target, "model");
     const objectGroups: string[][] = [];
@@ -710,6 +736,7 @@ export class ProductMediaService {
       throw new ProductMediaValidationError("Invalid product media position.");
     }
     return this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
       const product = await this.lockTarget(tx, { productId, variantId: null });
       const rows = await tx.$queryRaw<ProductMedia[]>`
         SELECT * FROM "ProductMedia"
@@ -790,6 +817,7 @@ export class ProductMediaService {
     assertUuid(mediaId, "mediaId");
     validateAudit(audit);
     return this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
       const product = await this.lockTarget(tx, { productId, variantId: null });
       const rows = await tx.$queryRaw<Array<ProductMedia & { now: Date }>>`
         SELECT "ProductMedia".*, CURRENT_TIMESTAMP AS "now" FROM "ProductMedia"

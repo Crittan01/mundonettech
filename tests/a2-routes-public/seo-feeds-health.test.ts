@@ -102,6 +102,18 @@ describe("sitemap routes", () => {
     expect(mocks.getSitemapPartitions).toHaveBeenCalledOnce();
   });
 
+  it("returns neutral 500 responses when sitemap data cannot be read", async () => {
+    mocks.getSitemapPartitions.mockRejectedValue(new Error("private database details"));
+    const index = await sitemapRoute.GET();
+    const partition = await partitionRequest("0.xml");
+    expect(index.status).toBe(500);
+    expect(partition.status).toBe(500);
+    expectNoStoreNoIndex(index);
+    expectNoStoreNoIndex(partition);
+    expect(await index.text()).toBe("Sitemap unavailable.");
+    expect(await partition.text()).toBe("Sitemap unavailable.");
+  });
+
   it("rejects every method outside GET without reading data", async () => {
     await expectMethodAllowlist(sitemapRoute);
     await expectMethodAllowlist(partitionRoute);
@@ -135,6 +147,19 @@ describe("public catalog feeds", () => {
     const csv = await response.text();
     expect(csv).toContain('"\'=formula"');
     expect(csv).not.toContain("internal-variant-id");
+  });
+
+  it("returns neutral 500 responses when feed generation fails", async () => {
+    mocks.getGoogleMerchantFeed.mockRejectedValue(new Error("private merchant failure"));
+    mocks.getMetaCatalogFeed.mockRejectedValue(new Error("private meta failure"));
+    const google = await googleRoute.GET();
+    const meta = await metaRoute.GET();
+    expect(google.status).toBe(500);
+    expect(meta.status).toBe(500);
+    expectNoStoreNoIndex(google);
+    expectNoStoreNoIndex(meta);
+    expect(await google.text()).toBe("Feed unavailable.");
+    expect(await meta.text()).toBe("Feed unavailable.");
   });
 
   it("rejects mutations and automatic HEAD fallback without reading feeds", async () => {

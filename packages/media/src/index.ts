@@ -7,7 +7,12 @@ export type { ModelSafetyResult } from "./model-safety.js";
 export { normalizeStorageKey } from "./storage-keys.js";
 export { R2MediaStorage } from "./r2-storage.js";
 export type { R2StorageConfig, StoreObjectInput, StoredObject } from "./r2-storage.js";
-export { storeImageDerivatives, storeSpin360, storeModel3d } from "./pipeline.js";
+export {
+  MediaSourceValidationError,
+  storeImageDerivatives,
+  storeSpin360,
+  storeModel3d,
+} from "./pipeline.js";
 export type { StoredImageDerivative } from "./pipeline.js";
 export {
   ProductMediaConflictError,

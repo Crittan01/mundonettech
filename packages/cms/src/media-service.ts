@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { maskEmail, maskName, sanitizeAuditValue } from "@mundonettech/core";
-import { Prisma, PrismaClient } from "@mundonettech/db";
+import { assertAdminActorInTransaction, Prisma, PrismaClient } from "@mundonettech/db";
 import {
+  MediaSourceValidationError,
   R2MediaStorage,
   storeImageDerivatives,
   type StoredImageDerivative,
@@ -102,36 +103,59 @@ export class CmsMediaService {
     return { items: page, nextCursor: items.length > limit ? (page.at(-1)?.id ?? null) : null };
   }
 
+  private async hasSharedReference(
+    hashBytes: Uint8Array<ArrayBuffer>,
+    keys: readonly string[],
+  ): Promise<boolean> {
+    if (keys.length === 0) return false;
+    try {
+      const values = Prisma.join(keys.map((key) => Prisma.sql`(${key})`));
+      const rows = await this.db.$queryRaw<Array<{ referenced: boolean }>>`
+        SELECT EXISTS (
+          SELECT 1
+          FROM "CmsMedia" cm
+          WHERE cm."contentHash" = ${hashBytes}
+            OR cm."storageKey" IN (SELECT v."key" FROM (VALUES ${values}) AS v("key"))
+            OR EXISTS (
+              SELECT 1
+              FROM (VALUES ${values}) AS v("key")
+              WHERE jsonb_path_exists(
+                cm."derivatives",
+                '$[*].key ? (@ == $key)',
+                jsonb_build_object('key', v."key")
+              )
+            )
+        ) AS "referenced"
+      `;
+      return rows[0]?.referenced !== false;
+    } catch {
+      return true;
+    }
+  }
+
   async upload(input: CmsMediaUpload, audit: CmsAudit) {
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
     if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     validateUpload(input);
     const hash = createHash("sha256").update(input.bytes).digest();
     const hashBytes = Uint8Array.from(hash);
-    const existing = await this.db.cmsMedia.findFirst({
-      where: { contentHash: hashBytes, deletedAt: null },
+    const existing = await this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
+      return tx.cmsMedia.findFirst({
+        where: { contentHash: hashBytes, deletedAt: null },
+      });
     });
     if (existing) return { media: existing, reused: true };
 
     const storage = this.storage;
-    if (!storage) throw new CmsValidationError("R2 storage is required for uploads.");
+    if (!storage) throw new Error("R2 storage is required for uploads.");
 
     let stored;
     try {
       stored = await storeImageDerivatives(storage, input.bytes, "cms", undefined, {
         cleanup: async (keys) => {
           if (keys.length === 0) return;
-          let sharedReferenceCount = 1;
-          try {
-            sharedReferenceCount = await this.db.cmsMedia.count({
-              where: {
-                OR: [{ contentHash: hashBytes }, { storageKey: { in: [...keys] } }],
-              },
-            });
-          } catch {
-            sharedReferenceCount = 1;
-          }
-          if (sharedReferenceCount === 0) {
+          if (!(await this.hasSharedReference(hashBytes, keys))) {
             const cleanup = await Promise.allSettled(keys.map((key) => storage.delete(key)));
             const failures = cleanup
               .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -147,15 +171,7 @@ export class CmsMediaService {
       });
     } catch (error) {
       if (error instanceof CmsValidationError) throw error;
-      if (error instanceof TypeError || error instanceof RangeError) {
-        throw new CmsValidationError(error.message);
-      }
-      if (
-        error instanceof Error &&
-        /Unsupported|Invalid|SVG|EXIF|pixel|dimension|magic|corrupt|header|ispe/i.test(
-          error.message,
-        )
-      ) {
+      if (error instanceof MediaSourceValidationError) {
         throw new CmsValidationError(error.message);
       }
       throw error;
@@ -168,6 +184,7 @@ export class CmsMediaService {
     let failed = false;
     try {
       const media = await this.db.$transaction(async (tx) => {
+        await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
         const created = await tx.cmsMedia.create({
           data: {
             storageKey: primary.key,
@@ -188,7 +205,7 @@ export class CmsMediaService {
             action: "CMS_MEDIA_CREATED",
             targetType: "CmsMedia",
             targetId: created.id,
-            requestId: audit.requestId ?? null,
+            requestId: audit.requestId ?? randomUUID(),
             ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
             userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
             metadata: sanitizeAuditValue({
@@ -224,18 +241,9 @@ export class CmsMediaService {
         failed = true;
       }
       if (failed) {
-        let sharedReferenceCount = 1;
-        try {
-          sharedReferenceCount = await this.db.cmsMedia.count({
-            where: {
-              OR: [{ contentHash: hashBytes }, { storageKey: primary.key }],
-            },
-          });
-        } catch {
-          sharedReferenceCount = 1;
-        }
-        if (sharedReferenceCount === 0) {
-          const cleanup = await Promise.allSettled(stored.map((item) => storage.delete(item.key)));
+        const storedKeys = stored.map((item) => item.key);
+        if (!(await this.hasSharedReference(hashBytes, storedKeys))) {
+          const cleanup = await Promise.allSettled(storedKeys.map((key) => storage.delete(key)));
           if (cleanup.some((result) => result.status === "rejected")) {
             throw new AggregateError(
               [
@@ -256,6 +264,7 @@ export class CmsMediaService {
   async updateAltText(id: string, altText: string, audit: CmsAudit) {
     assertUuid(id, "mediaId");
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     if (
       !altText.trim() ||
       altText.trim() !== altText ||
@@ -266,6 +275,7 @@ export class CmsMediaService {
       throw new CmsValidationError("Invalid alt text.");
     }
     return this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
       const locked = await tx.$queryRaw<
         Array<{
           id: string;
@@ -282,6 +292,9 @@ export class CmsMediaService {
       `;
       const existing = locked[0];
       if (!existing) throw new CmsNotFoundError("Media not found.");
+      if (existing.altText === altText) {
+        return tx.cmsMedia.findUniqueOrThrow({ where: { id } });
+      }
       const updated = await tx.cmsMedia.update({ where: { id }, data: { altText } });
       await tx.adminActionLog.create({
         data: {
@@ -289,6 +302,7 @@ export class CmsMediaService {
           action: "CMS_MEDIA_UPDATED",
           targetType: "CmsMedia",
           targetId: id,
+          requestId: audit.requestId ?? randomUUID(),
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
           metadata: sanitizeAuditValue({
@@ -317,7 +331,9 @@ export class CmsMediaService {
   async archive(id: string, audit: CmsAudit) {
     assertUuid(id, "mediaId");
     assertUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) assertUuid(audit.requestId, "requestId");
     return this.db.$transaction(async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "content:write");
       const locked = await tx.$queryRaw<
         Array<{ id: string; mimeType: string; byteSize: number; now: Date }>
       >`
@@ -352,6 +368,7 @@ export class CmsMediaService {
           action: "CMS_MEDIA_ARCHIVED",
           targetType: "CmsMedia",
           targetId: id,
+          requestId: audit.requestId ?? randomUUID(),
           ipHash: audit.ipHash ? Uint8Array.from(audit.ipHash) : null,
           userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
           metadata: sanitizeAuditValue({

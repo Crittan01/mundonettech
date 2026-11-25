@@ -16,6 +16,7 @@ import type {
   ProductStatus,
 } from "./generated/client.js";
 import { Prisma } from "./generated/client.js";
+import { assertAdminActorInTransaction } from "./primitives.js";
 import {
   acquireOperationLocks,
   compareStrings,
@@ -63,7 +64,11 @@ const summaryInclude = {
     ],
   },
   media: {
-    where: { status: "READY" as const, deletedAt: null },
+    where: {
+      status: "READY" as const,
+      deletedAt: null,
+      OR: [{ variantId: null }, { variant: { status: "ACTIVE" as const, deletedAt: null } }],
+    },
     orderBy: [{ position: "asc" as const }, { id: "asc" as const }],
   },
 } satisfies Prisma.ProductInclude;
@@ -102,6 +107,7 @@ const detailInclude = {
                     },
                   },
                 },
+                orderBy: [{ variant: { sku: "asc" as const } }, { id: "asc" as const }],
               },
             },
           },
@@ -520,6 +526,18 @@ function variantAuditChanges(
   };
 }
 
+async function authorizeCatalogMutation(
+  tx: Prisma.TransactionClient,
+  audit: CatalogMutationAudit,
+): Promise<void> {
+  inputUuid(audit.actorAdminUserId, "actorAdminUserId");
+  if (audit.requestId !== undefined) inputUuid(audit.requestId, "requestId");
+  if (audit.ipHash.length !== 32 || (audit.userAgentHash && audit.userAgentHash.length !== 32)) {
+    throw new CatalogQueryError("Audit hashes must contain 32 bytes.");
+  }
+  await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "catalog:write");
+}
+
 async function writeCatalogAudit(
   tx: Prisma.TransactionClient,
   audit: CatalogMutationAudit,
@@ -528,16 +546,13 @@ async function writeCatalogAudit(
   targetId: string,
   metadata: Prisma.JsonObject,
 ): Promise<void> {
-  inputUuid(audit.actorAdminUserId, "actorAdminUserId");
-  if (audit.ipHash.length !== 32 || (audit.userAgentHash && audit.userAgentHash.length !== 32)) {
-    throw new CatalogQueryError("Audit hashes must contain 32 bytes.");
-  }
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,
       action,
       targetType,
       targetId,
+      requestId: audit.requestId ?? null,
       ipHash: Uint8Array.from(audit.ipHash),
       userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
       metadata: sanitizeAuditValue(metadata) as Prisma.JsonObject,
@@ -1147,11 +1162,23 @@ export class CatalogService {
     const records =
       ids.length === 0
         ? []
-        : await this.db.product.findMany({ where: { id: { in: ids } }, include: summaryInclude });
+        : await this.db.product.findMany({
+            where: {
+              id: { in: ids },
+              status: "ACTIVE",
+              deletedAt: null,
+              brand: { deletedAt: null },
+              category: { deletedAt: null },
+              variants: { some: { status: "ACTIVE", deletedAt: null } },
+            },
+            include: summaryInclude,
+          });
     const byId = new Map(records.map((record) => [record.id, record]));
     const ordered = ids
       .map((id) => byId.get(id))
-      .filter((record): record is SummaryRecord => record !== undefined);
+      .filter(
+        (record): record is SummaryRecord => record !== undefined && record.variants.length > 0,
+      );
     return {
       items: await this.summaries(ordered),
       total,
@@ -1319,8 +1346,14 @@ export class CatalogService {
       include: detailInclude,
     });
     if (!product || product.variants.length === 0) return null;
+    const bundleVariantIds = product.variants.flatMap((variant) =>
+      variant.bundleItems.flatMap((item) => item.bundle.items.map((bi) => bi.variantId)),
+    );
+    const availabilityVariantIds = [
+      ...new Set([...product.variants.map((variant) => variant.id), ...bundleVariantIds]),
+    ];
     const [availability, categoryBreadcrumbs] = await Promise.all([
-      this.availability(product.variants.map((variant) => variant.id)),
+      this.availability(availabilityVariantIds),
       this.breadcrumbsForPath(product.category.materializedPath),
     ]);
     const summary = this.summary(product, availability);
@@ -1347,6 +1380,7 @@ export class CatalogService {
         hexColor: link.optionValue.hexColor,
       })),
     }));
+    const maxSignedBigInt = 9_223_372_036_854_775_807n;
     const bundleMap = new Map<string, CatalogProductDetail["bundles"][number]>();
     for (const variant of product.variants) {
       for (const item of variant.bundleItems) {
@@ -1354,21 +1388,39 @@ export class CatalogService {
         if (bundle.status !== "ACTIVE" || bundle.deletedAt || bundle.items.length === 0) continue;
         const allItemsSellable = bundle.items.every(
           (bundleItem) =>
+            bundleItem.quantity >= 1 &&
             bundleItem.variant.status === "ACTIVE" &&
             bundleItem.variant.deletedAt === null &&
             bundleItem.variant.product.status === "ACTIVE" &&
             bundleItem.variant.product.deletedAt === null &&
             bundleItem.variant.product.brand.deletedAt === null &&
-            bundleItem.variant.product.category.deletedAt === null,
+            bundleItem.variant.product.category.deletedAt === null &&
+            (availability.get(bundleItem.variantId) ?? 0) >= bundleItem.quantity,
         );
         if (!allItemsSellable) continue;
+        const bundleAvailable = bundle.items.reduce((minimum, bundleItem) => {
+          const itemSets = Math.floor(
+            (availability.get(bundleItem.variantId) ?? 0) / bundleItem.quantity,
+          );
+          return Math.min(minimum, itemSets);
+        }, Number.MAX_SAFE_INTEGER);
+        if (bundleAvailable < 1) continue;
         const componentsTotal = bundle.items.reduce(
           (sum, bundleItem) => sum + bundleItem.variant.priceCents * BigInt(bundleItem.quantity),
           0n,
         );
+        if (componentsTotal > maxSignedBigInt) continue;
         const basePrice = bundle.priceCents ?? componentsTotal;
-        const effectivePrice =
-          basePrice > bundle.discountCents ? basePrice - bundle.discountCents : 0n;
+        if (
+          basePrice > maxSignedBigInt ||
+          bundle.discountCents > basePrice ||
+          basePrice - bundle.discountCents > componentsTotal
+        ) {
+          continue;
+        }
+        const effectivePrice = basePrice - bundle.discountCents;
+        const savingsCents =
+          componentsTotal > effectivePrice ? componentsTotal - effectivePrice : 0n;
         bundleMap.set(bundle.id, {
           id: bundle.id,
           slug: bundle.slug,
@@ -1377,6 +1429,8 @@ export class CatalogService {
           priceCents: bundle.priceCents?.toString() ?? null,
           discountCents: bundle.discountCents.toString(),
           effectivePriceCents: effectivePrice.toString(),
+          savingsCents: savingsCents.toString(),
+          available: bundleAvailable,
           items: bundle.items.map((bundleItem) => ({
             variantId: bundleItem.variantId,
             sku: bundleItem.variant.sku,
@@ -1387,6 +1441,9 @@ export class CatalogService {
         });
       }
     }
+    const orderedBundles = [...bundleMap.values()].sort((left, right) =>
+      left.slug.localeCompare(right.slug, "en"),
+    );
     return {
       ...summary,
       categoryBreadcrumbs: categoryBreadcrumbs.length
@@ -1416,7 +1473,7 @@ export class CatalogService {
         fit: entry.fit,
         notes: entry.notes,
       })),
-      bundles: [...bundleMap.values()],
+      bundles: orderedBundles,
     };
   }
 
@@ -1762,15 +1819,21 @@ export class CatalogService {
     tx: Prisma.TransactionClient,
     input: NormalizedBaseInput,
   ): Promise<void> {
-    const [brand, category, taxGroup] = await Promise.all([
-      tx.brand.findFirst({ where: { id: input.brandId, deletedAt: null }, select: { id: true } }),
-      tx.category.findFirst({
-        where: { id: input.categoryId, deletedAt: null },
-        select: { id: true },
-      }),
-      tx.taxGroup.findUnique({ where: { id: input.taxGroupId }, select: { id: true } }),
-    ]);
-    if (!brand || !category || !taxGroup) {
+    const brands = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Brand"
+      WHERE "id" = ${input.brandId}::uuid AND "deletedAt" IS NULL
+      FOR SHARE
+    `;
+    const categories = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "Category"
+      WHERE "id" = ${input.categoryId}::uuid AND "deletedAt" IS NULL
+      FOR SHARE
+    `;
+    const taxGroup = await tx.taxGroup.findUnique({
+      where: { id: input.taxGroupId },
+      select: { id: true },
+    });
+    if (!brands[0] || !categories[0] || !taxGroup) {
       throw new CatalogQueryError(
         "Brand, category, and tax group must exist and be active.",
         "INVALID_REFERENCE",
@@ -1799,6 +1862,7 @@ export class CatalogService {
     }
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        await authorizeCatalogMutation(tx, audit);
         await this.validateReferences(tx, product);
         const created = await tx.product.create({
           data: { ...product, variants: { create: this.variantData(variant) } },
@@ -1826,6 +1890,7 @@ export class CatalogService {
     const product = normalizeBaseInput(input);
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        await authorizeCatalogMutation(tx, audit);
         const existingRows = await tx.$queryRaw<ProductAuditRecord[]>`
           SELECT "id", "slug", "name", "shortDescription", "description", "brandId",
                  "categoryId", "taxGroupId", "status", "authenticity", "retractPolicy",
@@ -1881,6 +1946,7 @@ export class CatalogService {
     const variant = normalizeVariantInput(input);
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        await authorizeCatalogMutation(tx, audit);
         const productRows = await tx.$queryRaw<
           Array<{ id: string; slug: string; status: ProductStatus }>
         >`
@@ -1971,6 +2037,7 @@ export class CatalogService {
     const existingId = input.id ? inputUuid(input.id, "attributeValueId") : null;
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
+        await authorizeCatalogMutation(tx, audit);
         const productRows = await tx.$queryRaw<
           Array<{ id: string; slug: string; categoryId: string }>
         >`
@@ -2078,6 +2145,7 @@ export class CatalogService {
     inputUuid(productId, "productId");
     inputUuid(attributeValueId, "attributeValueId");
     return inInventoryTransaction(this.db, async (tx) => {
+      await authorizeCatalogMutation(tx, audit);
       const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
         SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;
@@ -2122,6 +2190,7 @@ export class CatalogService {
     }
     const notes = inputText(input.notes, "notes", 500);
     return inInventoryTransaction(this.db, async (tx) => {
+      await authorizeCatalogMutation(tx, audit);
       const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
         SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;
@@ -2187,6 +2256,7 @@ export class CatalogService {
     inputUuid(productId, "productId");
     inputUuid(compatibilityId, "compatibilityId");
     return inInventoryTransaction(this.db, async (tx) => {
+      await authorizeCatalogMutation(tx, audit);
       const productRows = await tx.$queryRaw<Array<{ id: string; slug: string }>>`
         SELECT "id", "slug" FROM "Product" WHERE "id" = ${productId}::uuid AND "deletedAt" IS NULL FOR UPDATE
       `;

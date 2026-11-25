@@ -213,7 +213,35 @@ describe("F1.2 — GLB and USDZ binary safety", () => {
       createGlb({ extras: { nested: { uri: "https://evil.example/ssrf" } } }),
       createGlb({ extensionsRequired: ["KHR_draco_mesh_compression"] }),
       createGlb({ extensionsRequired: ["EXT_meshopt_compression"] }),
+      createGlb({ extensionsUsed: ["KHR_draco_mesh_compression"] }),
+      createGlb({ extensionsUsed: ["EXT_meshopt_compression"] }),
       createGlb({ accessors: [{ bufferView: 99 }] }),
+      createGlb({ accessors: [{ bufferView: 0, byteOffset: -1 }] }),
+      createGlb({ accessors: [{ bufferView: 0, byteOffset: 4 }] }),
+      createGlb({ accessors: [null] }),
+      createGlb({
+        accessors: [
+          {
+            bufferView: 0,
+            sparse: { indices: { bufferView: 99 }, values: { bufferView: 0 } },
+          },
+        ],
+      }),
+      createGlb({
+        rawDocument: {
+          asset: { version: "2.0" },
+          buffers: [{ byteLength: 4 }],
+          bufferViews: [{ buffer: 0, byteLength: 4 }],
+          meshes: [{ primitives: [{ extensions: { KHR_draco_mesh_compression: {} } }] }],
+        },
+      }),
+      createGlb({
+        rawDocument: {
+          asset: { version: "2.0" },
+          buffers: [{ byteLength: 4 }],
+          bufferViews: [{ buffer: 0, byteLength: 4, extensions: { EXT_meshopt_compression: {} } }],
+        },
+      }),
       createGlb({ viewLength: 100 }),
       Buffer.from("not-glb"),
     ]) {
@@ -223,7 +251,7 @@ describe("F1.2 — GLB and USDZ binary safety", () => {
 
   it("accepts valid USDZ and blocks traversal, symlinks, spoofed textures, dotless files, and bombs", async () => {
     const valid = createUsdz([
-      { name: "model.usdc", data: Buffer.from("USDC-real-model-data") },
+      { name: "model.usdc", data: Buffer.from("PXR-USDC\0\0\0\0real-model-data") },
       { name: "textures/albedo.png", data: createPng(32, 32) },
     ]);
     const result = await validateUsdz(valid);
@@ -231,17 +259,37 @@ describe("F1.2 — GLB and USDZ binary safety", () => {
     assert.equal(result.entryCount, 2);
     assert.ok(result.uncompressedBytes > 0);
 
+    // Legitimate .usda root stage + AVIF texture larger than 64 KiB
+    const largeAvifHeader = createBmff(64, 64, "avif");
+    const mdatPayload = Buffer.alloc(70_000, 0xaa);
+    const mdatHeader = Buffer.alloc(8);
+    mdatHeader.writeUInt32BE(8 + mdatPayload.length, 0);
+    mdatHeader.write("mdat", 4, "ascii");
+    const largeAvif = Buffer.concat([largeAvifHeader, mdatHeader, mdatPayload]);
+    const validUsdaWithLargeAvif = createUsdz([
+      { name: "scene.usda", data: Buffer.from("#usda 1.0\n(\n)\n") },
+      { name: "textures/hero.avif", data: largeAvif },
+    ]);
+    const avifResult = await validateUsdz(validUsdaWithLargeAvif);
+    assert.equal(avifResult.kind, "usdz");
+
     for (const invalidArchive of [
       createUsdz([{ name: "../escape.png", data: createPng(16, 16) }]),
-      createUsdz([{ name: "C:model.usdc", data: Buffer.from("USDC-data") }]),
-      createUsdz([{ name: ".hidden.usdc", data: Buffer.from("USDC-data") }]),
-      createUsdz([{ name: "usdc", data: Buffer.from("USDC-dotless") }]),
+      createUsdz([{ name: "C:model.usdc", data: Buffer.from("PXR-USDC-data") }]),
+      createUsdz([{ name: ".hidden.usdc", data: Buffer.from("PXR-USDC-data") }]),
+      createUsdz([{ name: "usdc", data: Buffer.from("PXR-USDC-dotless") }]),
+      createUsdz([{ name: "model.usdc", data: Buffer.from("NOT-USD-MAGIC") }]),
+      createUsdz([{ name: "model.usda", data: Buffer.from("not-usda-header") }]),
       createUsdz([
-        { name: "texture.png", data: createPng(16, 16) },
-        { name: "model.usdc", data: Buffer.from("USDC-not-root") },
+        { name: "model.usdc", data: Buffer.from("PXR-USDC-model") },
+        { name: "evil.constructor", data: Buffer.from("prototype-lookup") },
       ]),
       createUsdz([
-        { name: "model.usdc", data: Buffer.from("USDC-model") },
+        { name: "texture.png", data: createPng(16, 16) },
+        { name: "model.usdc", data: Buffer.from("PXR-USDC-not-root") },
+      ]),
+      createUsdz([
+        { name: "model.usdc", data: Buffer.from("PXR-USDC-model") },
         { name: "spoofed.png", data: Buffer.from("<svg onload=alert(1)>") },
       ]),
       createUsdz([
@@ -252,14 +300,21 @@ describe("F1.2 — GLB and USDZ binary safety", () => {
         },
       ]),
       createUsdz([{ name: "payload.txt", data: Buffer.from("bad") }]),
+      createUsdz([
+        { name: "textures/", data: Buffer.alloc(0) },
+        { name: "model.usdc", data: Buffer.from("PXR-USDC-model") },
+      ]),
+      createUsdz([{ name: "nested/model.usdc", data: Buffer.from("PXR-USDC-model") }]),
+      createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-model"), flags: 0x40 }]),
+      createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-model"), flags: 0x2000 }]),
       createUsdz([{ name: "model.usdc", data: Buffer.alloc(1024 * 1024, 0), method: 8 }]),
-      createUsdz([{ name: "model.usdc", data: Buffer.from("actual-data"), uncompressedSize: 2 }]),
+      createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-data"), uncompressedSize: 2 }]),
       createUsdz([
         {
           name: "model.usdc",
-          data: Buffer.from("USDC-zero-comp"),
+          data: Buffer.from("PXR-USDC-zero-comp"),
           compressedSize: 0,
-          uncompressedSize: 14,
+          uncompressedSize: 18,
         },
       ]),
     ]) {
@@ -406,7 +461,7 @@ describe("F1.2 — R2 S3-compatible persistence and rollback", () => {
 
       const glb = await storeModel3d(client, createGlb(), "glb", "products/model");
       assert.equal(glb.contentType, "model/gltf-binary");
-      const usdz = createUsdz([{ name: "model.usdc", data: Buffer.from("USDC-model") }]);
+      const usdz = createUsdz([{ name: "model.usdc", data: Buffer.from("PXR-USDC-model") }]);
       const storedUsdz = await storeModel3d(client, usdz, "usdz", "products/model");
       assert.equal(storedUsdz.contentType, "model/vnd.usdz+zip");
     } finally {

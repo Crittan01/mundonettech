@@ -83,7 +83,7 @@ async function CachedLegalArticle({ document }: { document: LegalDocument }) {
         </ol>
       </nav>
       <div className="space-y-10">
-        {document.sections.map((section, index) => (
+        {document.sections.map((section) => (
           <section
             key={section.id}
             id={section.id}
@@ -91,7 +91,7 @@ async function CachedLegalArticle({ document }: { document: LegalDocument }) {
             className="scroll-mt-8"
           >
             <h2 id={`${section.id}-title`} className="text-2xl font-bold">
-              {index + 1}. {section.title}
+              {section.title}
             </h2>
             <div className="mt-4 space-y-4 leading-7">
               {section.paragraphs.map((paragraph, paragraphIndex) => (

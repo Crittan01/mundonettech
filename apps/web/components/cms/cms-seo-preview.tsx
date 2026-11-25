@@ -50,9 +50,9 @@ export function CmsSeoPreview({
       className="space-y-5 rounded-xl border border-border p-5"
     >
       <div>
-        <h3 id="cms-seo-preview-title" className="text-lg font-semibold">
+        <h2 id="cms-seo-preview-title" className="text-lg font-semibold">
           Vista previa SERP y OpenGraph
-        </h3>
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Representación orientativa. Cada buscador o red social puede ajustar el resultado final.
         </p>

@@ -5,6 +5,7 @@ import { after, before, describe, it } from "node:test";
 import pg from "pg";
 
 import {
+  AdminActorAuthorizationError,
   CachedUrlRedirectResolver,
   createDatabaseClient,
   UrlRedirectConflictError,
@@ -516,6 +517,46 @@ describe("A2 — URL redirect audit before/after and error branches", () => {
         },
       }),
       0,
+    );
+  });
+
+  it("revalidates content:write against an active actor and rolls back rejected writes", async () => {
+    const suspended = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `redirect-suspended-${randomUUID()}@example.test`,
+        displayName: "Suspended Redirect Admin",
+        role: "CMS_EDITOR",
+        status: "SUSPENDED",
+      },
+    });
+    const source = `/suspended-actor-${randomUUID()}`;
+    await assert.rejects(
+      service.create(
+        { fromPath: source, toPath: "/productos", statusCode: 308 },
+        {
+          actorAdminUserId: suspended.id,
+          ipHash: randomBytes(32),
+          userAgentHash: randomBytes(32),
+        },
+      ),
+      AdminActorAuthorizationError,
+    );
+    assert.equal(await db.urlRedirect.count({ where: { fromPath: source } }), 0);
+    assert.equal(await db.adminActionLog.count({ where: { actorAdminUserId: suspended.id } }), 0);
+
+    // No-op setActive branch MUST still enforce transactional RBAC and reject suspended actors
+    const activeRedirect = await service.create(
+      { fromPath: `/noop-rbac-${randomUUID()}`, toPath: "/productos", statusCode: 308 },
+      { ...audit, requestId: randomUUID() },
+    );
+    await assert.rejects(
+      service.setActive(activeRedirect.id, true, {
+        actorAdminUserId: suspended.id,
+        ipHash: randomBytes(32),
+        userAgentHash: randomBytes(32),
+      }),
+      AdminActorAuthorizationError,
     );
   });
 });

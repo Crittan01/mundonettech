@@ -1,5 +1,5 @@
 import { CmsMediaService, CmsNotFoundError, CmsValidationError } from "@mundonettech/cms";
-import { hasAdminPermission, maskEmail } from "@mundonettech/core";
+import { hasAdminPermission } from "@mundonettech/core";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -104,7 +104,7 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
                   <p className="mt-1 font-mono text-xs text-muted-foreground">ID: {media.id}</p>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {media.mimeType} · {media.byteSize} bytes · {derivativeCount} derivados ·{" "}
-                    {maskEmail(media.createdBy.email)}
+                    {media.createdBy.email}
                   </p>
                 </div>
                 {canWrite ? <CmsMediaEditForm mediaId={media.id} altText={media.altText} /> : null}

@@ -121,6 +121,8 @@ export interface CatalogProductDetail extends CatalogProductSummary {
     readonly priceCents: string | null;
     readonly discountCents: string;
     readonly effectivePriceCents: string;
+    readonly savingsCents: string;
+    readonly available: number;
     readonly items: Array<{
       readonly variantId: string;
       readonly sku: string;
@@ -293,4 +295,5 @@ export interface CatalogMutationAudit {
   readonly actorAdminUserId: string;
   readonly ipHash: Uint8Array;
   readonly userAgentHash: Uint8Array | null;
+  readonly requestId?: string;
 }

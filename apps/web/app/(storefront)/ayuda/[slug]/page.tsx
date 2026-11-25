@@ -28,6 +28,11 @@ export async function generateMetadata({ params }: PageProps<"/ayuda/[slug]">): 
       title: article.title,
       description: article.summary,
     },
+    twitter: {
+      card: "summary",
+      title: article.title,
+      description: article.summary,
+    },
   };
 }
 

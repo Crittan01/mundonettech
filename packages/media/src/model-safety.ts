@@ -8,9 +8,17 @@ import { inspectImageMagic } from "./image-safety.js";
 interface GltfDocument {
   asset?: { version?: unknown; minVersion?: unknown };
   extensionsRequired?: unknown;
+  extensionsUsed?: unknown;
   buffers?: Array<{ byteLength: number; uri?: string }>;
   bufferViews?: Array<{ buffer: number; byteOffset?: number; byteLength: number }>;
-  accessors?: Array<{ bufferView?: number; byteOffset?: number }>;
+  accessors?: Array<{
+    bufferView?: number;
+    byteOffset?: number;
+    sparse?: {
+      indices?: { bufferView?: number; byteOffset?: number };
+      values?: { bufferView?: number; byteOffset?: number };
+    };
+  }>;
   images?: Array<{ uri?: string; bufferView?: number; mimeType?: string }>;
   [key: string]: unknown;
 }
@@ -24,10 +32,10 @@ export interface ModelSafetyResult {
 
 const forbiddenGlbExtensions = new Set(["KHR_draco_mesh_compression", "EXT_meshopt_compression"]);
 
-function assertNoExternalUri(value: unknown, depth = 0): void {
+function assertSafeGltfTree(value: unknown, depth = 0): void {
   if (depth > 32) throw new Error("glTF JSON nesting depth exceeds the safe limit.");
   if (Array.isArray(value)) {
-    for (const item of value) assertNoExternalUri(item, depth + 1);
+    for (const item of value) assertSafeGltfTree(item, depth + 1);
     return;
   }
   if (typeof value === "object" && value !== null) {
@@ -35,7 +43,21 @@ function assertNoExternalUri(value: unknown, depth = 0): void {
       if (key === "uri" && child !== undefined) {
         throw new Error("External glTF resources are forbidden; embed all bytes in GLB.");
       }
-      assertNoExternalUri(child, depth + 1);
+      if (
+        key === "extensions" &&
+        typeof child === "object" &&
+        child !== null &&
+        !Array.isArray(child)
+      ) {
+        for (const extName of Object.keys(child)) {
+          if (forbiddenGlbExtensions.has(extName)) {
+            throw new Error(
+              `Unsupported glTF extension "${extName}"; self-contained GLB without external WASM decoders is required.`,
+            );
+          }
+        }
+      }
+      assertSafeGltfTree(child, depth + 1);
     }
   }
 }
@@ -97,20 +119,23 @@ export function validateGlb(input: Uint8Array): ModelSafetyResult {
     throw new Error("GLB requires a valid glTF 2.x asset descriptor.");
   }
 
-  if (document.extensionsRequired !== undefined) {
-    if (!Array.isArray(document.extensionsRequired)) {
-      throw new Error("Invalid glTF extensionsRequired field.");
+  for (const [field, extensions] of [
+    ["extensionsRequired", document.extensionsRequired],
+    ["extensionsUsed", document.extensionsUsed],
+  ] as const) {
+    if (extensions !== undefined && !Array.isArray(extensions)) {
+      throw new Error(`Invalid glTF ${field} field.`);
     }
-    for (const ext of document.extensionsRequired) {
+    for (const ext of extensions ?? []) {
       if (typeof ext !== "string" || forbiddenGlbExtensions.has(ext)) {
         throw new Error(
-          `Unsupported required glTF extension "${String(ext)}"; self-contained GLB without external WASM decoders is required.`,
+          `Unsupported glTF extension "${String(ext)}"; self-contained GLB without external WASM decoders is required.`,
         );
       }
     }
   }
 
-  assertNoExternalUri(document);
+  assertSafeGltfTree(document);
 
   for (const [field, collection] of [
     ["buffers", document.buffers],
@@ -141,8 +166,16 @@ export function validateGlb(input: Uint8Array): ModelSafetyResult {
 
   const views = document.bufferViews ?? [];
   for (const view of views) {
-    const target = buffers[view?.buffer ?? -1];
-    const start = view?.byteOffset ?? 0;
+    if (
+      typeof view !== "object" ||
+      view === null ||
+      !Number.isSafeInteger(view.buffer) ||
+      view.buffer < 0
+    ) {
+      throw new Error("GLB buffer view is out of bounds.");
+    }
+    const target = buffers[view.buffer];
+    const start = view.byteOffset ?? 0;
     if (
       !target ||
       !Number.isSafeInteger(start) ||
@@ -155,38 +188,77 @@ export function validateGlb(input: Uint8Array): ModelSafetyResult {
     }
   }
 
+  const assertBufferViewRef = (bufferView: unknown, byteOffset: unknown, required: boolean) => {
+    const offsetValue = byteOffset ?? 0;
+    if (!Number.isSafeInteger(offsetValue) || (offsetValue as number) < 0) {
+      throw new Error("GLB accessor references an invalid bufferView or byteOffset.");
+    }
+    if (bufferView === undefined) {
+      if (required) {
+        throw new Error("GLB accessor references an invalid bufferView or byteOffset.");
+      }
+      return;
+    }
+    if (!Number.isSafeInteger(bufferView) || (bufferView as number) < 0) {
+      throw new Error("GLB accessor references an invalid bufferView or byteOffset.");
+    }
+    const view = views[bufferView as number];
+    if (!view || (offsetValue as number) >= view.byteLength) {
+      throw new Error("GLB accessor references an invalid bufferView or byteOffset.");
+    }
+  };
+
   for (const accessor of document.accessors ?? []) {
-    if (
-      typeof accessor !== "object" ||
-      accessor === null ||
-      (accessor.bufferView !== undefined &&
-        (!Number.isSafeInteger(accessor.bufferView) || !views[accessor.bufferView]))
-    ) {
-      throw new Error("GLB accessor references an invalid bufferView.");
+    if (typeof accessor !== "object" || accessor === null || Array.isArray(accessor)) {
+      throw new Error("GLB accessor references an invalid bufferView or byteOffset.");
+    }
+    assertBufferViewRef(accessor.bufferView, accessor.byteOffset, false);
+    if (accessor.sparse !== undefined) {
+      if (
+        typeof accessor.sparse !== "object" ||
+        accessor.sparse === null ||
+        Array.isArray(accessor.sparse)
+      ) {
+        throw new Error("GLB sparse accessor is invalid.");
+      }
+      const indices = accessor.sparse.indices;
+      const values = accessor.sparse.values;
+      if (
+        typeof indices !== "object" ||
+        indices === null ||
+        typeof values !== "object" ||
+        values === null
+      ) {
+        throw new Error("GLB sparse accessor requires valid indices and values.");
+      }
+      assertBufferViewRef(indices.bufferView, indices.byteOffset, true);
+      assertBufferViewRef(values.bufferView, values.byteOffset, true);
     }
   }
 
-  const expectedGlbImageFormat: Record<string, "png" | "jpeg" | "webp"> = {
-    "image/png": "png",
-    "image/jpeg": "jpeg",
-    "image/webp": "webp",
-  };
+  const expectedGlbImageFormat = new Map<string, "png" | "jpeg" | "webp">([
+    ["image/png", "png"],
+    ["image/jpeg", "jpeg"],
+    ["image/webp", "webp"],
+  ]);
 
   for (const image of document.images ?? []) {
+    const expectedFormat =
+      typeof image?.mimeType === "string" ? expectedGlbImageFormat.get(image.mimeType) : undefined;
     if (
       typeof image !== "object" ||
       image === null ||
       image.bufferView === undefined ||
       !Number.isSafeInteger(image.bufferView) ||
       !views[image.bufferView] ||
-      !(image.mimeType && expectedGlbImageFormat[image.mimeType])
+      !expectedFormat
     ) {
       throw new Error("GLB images must use an embedded PNG/JPEG/WebP buffer view.");
     }
     const view = views[image.bufferView]!;
     const start = view.byteOffset ?? 0;
     const magic = inspectImageMagic(binary.subarray(start, start + view.byteLength));
-    if (magic.format !== expectedGlbImageFormat[image.mimeType]) {
+    if (magic.format !== expectedFormat) {
       throw new Error("GLB embedded image magic bytes do not match declared MIME type.");
     }
   }
@@ -269,13 +341,27 @@ function parseSafeUsdzPath(name: string): { isDirectory: boolean; extension: str
   return { isDirectory: false, extension: baseName.slice(dotIndex + 1).toLowerCase() };
 }
 
-const allowedTextureExtensions: Record<string, "png" | "jpeg" | "webp" | "avif"> = {
-  png: "png",
-  jpg: "jpeg",
-  jpeg: "jpeg",
-  webp: "webp",
-  avif: "avif",
-};
+const allowedTextureExtensions = new Map<string, "png" | "jpeg" | "webp" | "avif">([
+  ["png", "png"],
+  ["jpg", "jpeg"],
+  ["jpeg", "jpeg"],
+  ["webp", "webp"],
+  ["avif", "avif"],
+]);
+const maxUsdzTextureBytes = 20 * 1024 * 1024;
+
+function assertUsdStageMagic(extension: "usdc" | "usda", sample: Buffer): void {
+  if (extension === "usdc") {
+    if (sample.length < 8 || sample.subarray(0, 8).toString("ascii") !== "PXR-USDC") {
+      throw new Error("USDZ .usdc stage does not start with a valid PXR-USDC header.");
+    }
+    return;
+  }
+  const text = sample.toString("utf8").replace(/^\uFEFF/, "");
+  if (!text.startsWith("#usda")) {
+    throw new Error("USDZ .usda stage does not start with a valid #usda header.");
+  }
+}
 
 export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult> {
   const buffer = Buffer.from(input);
@@ -303,8 +389,11 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
       if (unixModeType === 0o120000) {
         throw new Error("Symbolic links inside USDZ archives are forbidden.");
       }
+      if (count === 1 && (isDirectory || !["usdc", "usda"].includes(extension ?? ""))) {
+        throw new Error("USDZ root stage must be the first archive entry.");
+      }
       if (
-        (entry.generalPurposeBitFlag & 1) !== 0 ||
+        (entry.generalPurposeBitFlag & 0x2041) !== 0 ||
         ![0, 8].includes(entry.compressionMethod) ||
         entry.compressedSize < 0 ||
         entry.uncompressedSize < 0 ||
@@ -320,23 +409,28 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
       if (!isDirectory) {
         fileCount += 1;
         const isUsdModel = extension === "usdc" || extension === "usda";
-        const expectedTextureFormat = extension ? allowedTextureExtensions[extension] : undefined;
-        if (fileCount === 1 && !isUsdModel) {
-          throw new Error("USDZ root entry must be a .usdc or .usda stage.");
+        const expectedTextureFormat = extension
+          ? allowedTextureExtensions.get(extension)
+          : undefined;
+        if (fileCount === 1 && (!isUsdModel || entry.fileName.includes("/"))) {
+          throw new Error("USDZ root entry must be a top-level .usdc or .usda stage.");
         }
         if (isUsdModel) {
           modelCount += 1;
-          if (entry.uncompressedSize < 4) {
+          if (entry.uncompressedSize < 5) {
             throw new Error("USDZ model payload is empty or truncated.");
           }
         } else if (!expectedTextureFormat) {
           throw new Error("USDZ allows only USD and PNG/JPEG/WebP/AVIF payload files.");
+        } else if (entry.uncompressedSize > maxUsdzTextureBytes) {
+          throw new Error("USDZ embedded texture exceeds the 20 MiB limit.");
         }
 
         total += entry.uncompressedSize;
         if (total > 100 * 1024 * 1024) throw new Error("USDZ uncompressed byte budget exceeded.");
 
-        const maxHeaderSampleBytes = 65_536;
+        const maxHeaderSampleBytes =
+          expectedTextureFormat === "avif" ? maxUsdzTextureBytes : 65_536;
         let actual = 0;
         const headerSample: Buffer[] = [];
         let sampledBytes = 0;
@@ -353,6 +447,7 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
               }
               if (
                 actual > entry.uncompressedSize ||
+                (expectedTextureFormat && actual > maxUsdzTextureBytes) ||
                 total - entry.uncompressedSize + actual > 100 * 1024 * 1024
               ) {
                 callback(new Error("USDZ entry exceeded its declared size."));
@@ -364,8 +459,11 @@ export async function validateUsdz(input: Uint8Array): Promise<ModelSafetyResult
         );
         if (actual !== entry.uncompressedSize) throw new Error("USDZ entry size mismatch.");
 
-        if (expectedTextureFormat) {
-          const magic = inspectImageMagic(Buffer.concat(headerSample));
+        const sampleBuffer = Buffer.concat(headerSample);
+        if (isUsdModel) {
+          assertUsdStageMagic(extension, sampleBuffer);
+        } else if (expectedTextureFormat) {
+          const magic = inspectImageMagic(sampleBuffer);
           if (magic.format !== expectedTextureFormat) {
             throw new Error("USDZ embedded texture magic bytes do not match file extension.");
           }

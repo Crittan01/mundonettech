@@ -42,6 +42,8 @@ test("CMS scheduler enforces bearer/RBAC and publishes scheduled pages and versi
   const readyBlockId = randomUUID();
   const readyVersionId = randomUUID();
   const emptyPageId = randomUUID();
+  const readySlug = `e2e-cms-${randomUUID()}`;
+  const emptySlug = `e2e-empty-${randomUUID()}`;
 
   try {
     await db.adminUser.deleteMany({ where: { id: schedulerActorId } });
@@ -79,7 +81,7 @@ test("CMS scheduler enforces bearer/RBAC and publishes scheduled pages and versi
     await db.cmsPage.create({
       data: {
         id: readyPageId,
-        slug: `e2e-cms-${randomUUID()}`,
+        slug: readySlug,
         title: "Campaña E2E",
         status: "SCHEDULED",
         scheduledFor: past,
@@ -109,12 +111,20 @@ test("CMS scheduler enforces bearer/RBAC and publishes scheduled pages and versi
     await db.cmsPage.create({
       data: {
         id: emptyPageId,
-        slug: `e2e-empty-${randomUUID()}`,
+        slug: emptySlug,
         title: "Vacía E2E",
         status: "SCHEDULED",
         scheduledFor: past,
       },
     });
+
+    const beforePublication = await page.request.get(`/pagina/${readySlug}`);
+    const beforeHtml = await beforePublication.text();
+    expect(beforeHtml).toContain("No encontramos esta página");
+    expect(beforeHtml).toMatch(/<meta name="robots" content="[^"]*noindex/);
+    expect(beforeHtml).not.toContain("Lanzamiento E2E");
+    const sitemapBefore = await page.request.get("/sitemap.xml");
+    expect(await sitemapBefore.text()).not.toContain(`/pagina/${readySlug}`);
 
     const published = await page.request.post("/api/jobs/cms-publish", {
       headers: { authorization: `Bearer ${schedulerSecret}` },
@@ -132,6 +142,19 @@ test("CMS scheduler enforces bearer/RBAC and publishes scheduled pages and versi
     const emptyAfter = await db.cmsPage.findUniqueOrThrow({ where: { id: emptyPageId } });
     expect(readyAfter.status).toBe("PUBLISHED");
     expect(emptyAfter.status).toBe("SCHEDULED");
+
+    const publicPage = await page.request.get(`/pagina/${readySlug}`);
+    expect(publicPage.status()).toBe(200);
+    expect(await publicPage.text()).toContain("Lanzamiento E2E");
+    const deferredPage = await page.request.get(`/pagina/${emptySlug}`);
+    const deferredHtml = await deferredPage.text();
+    expect(deferredHtml).toContain("No encontramos esta página");
+    expect(deferredHtml).toMatch(/<meta name="robots" content="[^"]*noindex/);
+    expect(deferredHtml).not.toContain("Vacía E2E");
+    const sitemapAfter = await page.request.get("/sitemap.xml");
+    const sitemapXml = await sitemapAfter.text();
+    expect(sitemapXml).toContain(`https://mundonettech.co/pagina/${readySlug}`);
+    expect(sitemapXml).not.toContain(`/pagina/${emptySlug}`);
 
     const auditCount = await db.adminActionLog.count({
       where: {

@@ -10,7 +10,10 @@ import {
   assertValidEan,
   assertValidGs1,
   buildCategoryPath,
+  buildSitemapIndex,
+  buildSitemapUrlSet,
   categoryDepth,
+  centsToDecimalString,
   isRedirectStatus,
   isValidEan,
   isValidGs1,
@@ -204,10 +207,35 @@ describe("F1.1 — typed attributes and exact COP cents", () => {
     expect(() => normalizeAttributeValue("JSON", { value: NaN })).toThrow();
   });
 
-  it("uses BigInt and rejects negative or inverted prices", () => {
+  it("uses BigInt and rejects negative, inverted, overflowing or non-BigInt prices", () => {
     expect(() => assertCatalogMoney(100_000n, 50_000n, 120_000n)).not.toThrow();
     expect(() => assertCatalogMoney(-1n, 0n)).toThrow();
     expect(() => assertCatalogMoney(100n, 0n, 99n)).toThrow();
+    expect(() => assertCatalogMoney(9_223_372_036_854_775_808n, 0n)).toThrow(RangeError);
+    expect(() => assertCatalogMoney(100 as unknown as bigint, 0n)).toThrow(TypeError);
+  });
+});
+
+describe("A4 — sitemap and monetary protocol boundaries", () => {
+  it("rejects non-finite priorities, invalid frequencies and duplicate canonical index URLs", () => {
+    expect(() =>
+      buildSitemapUrlSet([{ url: "https://tienda.example.co/producto", priority: Number.NaN }]),
+    ).toThrow(/finite/);
+    expect(() =>
+      buildSitemapUrlSet([
+        {
+          url: "https://tienda.example.co/producto",
+          changeFrequency: "sometimes" as never,
+        },
+      ]),
+    ).toThrow(/changeFrequency/);
+    const child = "https://tienda.example.co/sitemaps/0.xml";
+    expect(() => buildSitemapIndex([child, child])).toThrow(/Duplicate/);
+  });
+
+  it("rejects JSON-LD and feed money above signed INT8", () => {
+    expect(centsToDecimalString("9223372036854775807")).toBe("92233720368547758.07");
+    expect(() => centsToDecimalString("9223372036854775808")).toThrow(RangeError);
   });
 });
 

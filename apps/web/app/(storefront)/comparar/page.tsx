@@ -1,6 +1,8 @@
 import { formatCopCents } from "@mundonettech/core";
 import { CatalogNotFoundError, CatalogQueryError } from "@mundonettech/db";
+import type { Metadata } from "next";
 import Link from "next/link";
+import { Suspense } from "react";
 
 import { ProductCard } from "@/components/catalog/product-card";
 import { Button } from "@/components/ui/button";
@@ -10,9 +12,20 @@ import { compareCatalogProducts, searchCatalog } from "@/lib/catalog";
 import { authenticityLabels } from "@/lib/catalog-presenters";
 import { getPublicMediaOrigin } from "@/lib/env";
 
-export const metadata = {
+const description =
+  "Compara precio, disponibilidad y atributos técnicos de hasta cuatro productos.";
+
+export const metadata: Metadata = {
   title: "Comparador de productos",
-  description: "Compara precio, disponibilidad y atributos técnicos de hasta cuatro productos.",
+  description,
+  alternates: { canonical: "/comparar" },
+  openGraph: {
+    type: "website",
+    locale: "es_CO",
+    url: "/comparar",
+    title: "Comparador de productos",
+    description,
+  },
 };
 
 const retractLabels = {
@@ -20,7 +33,11 @@ const retractLabels = {
   LEGAL_EXCEPTION_REVIEW: "Revisión de excepción legal",
 } as const;
 
-export default async function ComparePage({ searchParams }: PageProps<"/comparar">) {
+async function CompareResults({
+  searchParams,
+}: {
+  readonly searchParams: PageProps<"/comparar">["searchParams"];
+}) {
   const params = await searchParams;
   const rawProductos = Array.isArray(params.productos)
     ? params.productos.join(",")
@@ -62,20 +79,13 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Comparador de productos</h1>
-          <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">
-            Selecciona hasta cuatro productos para contrastar sus especificaciones y disponibilidad
-            actual.
-          </p>
-        </div>
-        {comparison.products.length > 0 ? (
+      {comparison.products.length > 0 ? (
+        <div className="flex justify-end">
           <Button asChild variant="outline" size="sm">
             <Link href="/comparar">Limpiar comparación</Link>
           </Button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {error ? (
         <p role="alert" className="rounded-xl border border-destructive p-4 text-destructive">
           {error}
@@ -240,6 +250,7 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
             </p>
           </div>
           <form
+            key={`${candidateQuery}|${activeSlugs.join(",")}`}
             action="/comparar"
             className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-card p-4"
           >
@@ -268,6 +279,7 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
                   product={product}
                   mediaOrigin={mediaOrigin}
                   compareSlugs={activeSlugs}
+                  headingLevel={3}
                 />
               ))}
             </div>
@@ -278,6 +290,29 @@ export default async function ComparePage({ searchParams }: PageProps<"/comparar
           )}
         </section>
       ) : null}
+    </div>
+  );
+}
+
+export default function ComparePage({ searchParams }: PageProps<"/comparar">) {
+  return (
+    <div className="space-y-8">
+      <header>
+        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Comparador de productos</h1>
+        <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">
+          Selecciona hasta cuatro productos para contrastar sus especificaciones y disponibilidad
+          actual.
+        </p>
+      </header>
+      <Suspense
+        fallback={
+          <p role="status" className="min-h-[50vh] rounded-2xl border border-border bg-card p-6">
+            Cargando comparación y disponibilidad…
+          </p>
+        }
+      >
+        <CompareResults searchParams={searchParams} />
+      </Suspense>
     </div>
   );
 }

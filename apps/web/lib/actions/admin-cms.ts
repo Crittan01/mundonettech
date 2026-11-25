@@ -1,5 +1,7 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
   CmsConflictError,
   CmsMediaService,
@@ -49,6 +51,7 @@ async function authorize(
 function audit(session: AdminSession, request: RequestSecurityContext) {
   return {
     actorAdminUserId: session.profile.id,
+    requestId: randomUUID(),
     ipHash: request.ipHash,
     userAgentHash: request.userAgentHash,
   };
@@ -58,7 +61,10 @@ function errorMessage(error: unknown, values: Record<string, string>): ActionSta
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de guardar este cambio.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (
+    error instanceof AdminAuthorizationError ||
+    (error instanceof Error && error.name === "AdminActorAuthorizationError")
+  ) {
     return actionError("Tu sesión no está autorizada para esta operación.", values);
   }
   if (error instanceof CmsNotFoundError) {
@@ -243,13 +249,9 @@ export async function updateCmsPageAction(
   try {
     const { session, request } = await authorize("content:write");
     const id = z.uuid().parse(formString(formData, "pageId"));
-    const previous = await getDatabase().cmsPage.findFirst({
-      where: { id, deletedAt: null },
-      select: { slug: true },
-    });
     const page = await cmsService().updatePage(id, pageInput(formData), audit(session, request));
-    invalidateCms({ pageId: id, slugs: [previous?.slug, page.slug] });
-    if (formString(formData, "liveEdit") === "1" && previous?.slug !== page.slug) {
+    invalidateCms({ pageId: id, slugs: [page.previousSlug, page.slug] });
+    if (formString(formData, "liveEdit") === "1" && page.previousSlug !== page.slug) {
       liveEditSlug = page.slug;
     }
   } catch (error) {

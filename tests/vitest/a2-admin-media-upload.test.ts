@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+import { AdminActorAuthorizationError } from "../../packages/db/dist/index.js";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -381,6 +383,15 @@ describe("A2 — real multipart parsing, limits and safe responses", () => {
     expect(text).not.toContain("private key");
     expect(harness.storageDestroy).toHaveBeenCalledOnce();
   });
+
+  it("maps a transactionally revoked admin actor to forbidden without details", async () => {
+    harness.uploadImage.mockRejectedValue(new AdminActorAuthorizationError());
+    const response = await catalogPost(uploadRequest({ ...(await multipart(catalogForm())) }));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ ok: false, error: "forbidden" });
+    expect(harness.storageDestroy).toHaveBeenCalledOnce();
+    expect(harness.revalidateTag).not.toHaveBeenCalled();
+  });
 });
 
 describe("A2 — upload wiring and reduced Server Action body budget", () => {
@@ -412,6 +423,7 @@ describe("A2 — upload wiring and reduced Server Action body budget", () => {
       "catalog:cms-grid",
       "merchant-feed",
       "meta-catalog-feed",
+      "sitemap",
       "cms:media",
     ]) {
       expect(revalidation).toContain(`revalidateTag("${tag}", { expire: 0 })`);
@@ -427,5 +439,17 @@ describe("A2 — upload wiring and reduced Server Action body budget", () => {
     const postsale = readFileSync("apps/web/lib/actions/postsale.ts", "utf8");
     expect(postsale).toContain("z.string().max(4_000_000)");
     expect(4_000_000).toBeLessThan(5 * 1024 * 1024);
+  });
+
+  it("maps AdminActorAuthorizationError to 403 forbidden in CMS media upload", async () => {
+    harness.cmsUpload.mockRejectedValueOnce(new AdminActorAuthorizationError("Revoked CMS editor"));
+    const form = new FormData();
+    form.set("altText", "Banner editorial");
+    form.set("file", new File([new Uint8Array([1, 2, 3, 4])], "banner.png", { type: "image/png" }));
+    const payload = await multipart(form);
+    const response = await cmsPost(uploadRequest(payload));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ ok: false, error: "forbidden" });
+    expect(harness.revalidateTag).not.toHaveBeenCalled();
   });
 });

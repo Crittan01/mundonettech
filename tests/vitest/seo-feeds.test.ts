@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { variantFeedImage } from "../../apps/web/lib/catalog-presenters";
+import { parseCatalogParams } from "../../apps/web/lib/catalog-params";
+
 import {
   buildBreadcrumbJsonLd,
   buildFaqJsonLd,
@@ -9,7 +12,10 @@ import {
   buildSitemapIndex,
   buildSitemapUrlSet,
   centsToDecimalString,
+  isReservedRedirectSource,
+  isReservedRedirectTarget,
   isValidCommercialGtin,
+  normalizeRedirectPath,
   normalizeXmlText,
   partitionSitemapEntries,
   resolveCommercialGtin,
@@ -232,5 +238,109 @@ describe("F2.3 — Merchant XML and scalable sitemap", () => {
     expect(() =>
       buildSitemapUrlSet([{ url: "https://tienda.example.co", lastModified: "invalid" }]),
     ).toThrow(/lastModified/);
+  });
+});
+
+describe("A4 — Merchant variant media selection", () => {
+  const redMedia: Parameters<typeof variantFeedImage>[0][number] = {
+    id: "media-red",
+    variantId: "variant-red",
+    mediaType: "IMAGE",
+    storageKey: "catalog/product/red.webp",
+    altText: "Audífonos rojos",
+    width: 800,
+    height: 600,
+    focalX: null,
+    focalY: null,
+    frames: [],
+    posterKey: null,
+    usdzKey: null,
+  };
+
+  it("uses only variant or shared media, never another variant's image", () => {
+    const origin = "https://media.example.co";
+    expect(variantFeedImage([redMedia], "variant-black", origin)).toBeNull();
+    expect(variantFeedImage([redMedia], "variant-red", origin)).toBe(
+      "https://media.example.co/catalog/product/red.webp",
+    );
+
+    const sharedMedia = {
+      ...redMedia,
+      id: "media-shared",
+      variantId: null,
+      storageKey: "catalog/product/shared.webp",
+    };
+    expect(variantFeedImage([redMedia, sharedMedia], "variant-black", origin)).toBe(
+      "https://media.example.co/catalog/product/shared.webp",
+    );
+    expect(variantFeedImage([redMedia, sharedMedia], "variant-red", origin)).toBe(
+      "https://media.example.co/catalog/product/red.webp",
+    );
+    expect(variantFeedImage([redMedia, sharedMedia], "variant-red", null)).toBeNull();
+  });
+});
+
+describe("A4 — public catalog GET validation", () => {
+  it.each(["2abc", "1.5", "0", "-1", "10001", "01"])(
+    "rejects non-canonical page %s instead of partially parsing it",
+    (page) => {
+      const parsed = parseCatalogParams({ page });
+      expect(parsed.filters.page).toBe(1);
+      expect(parsed.error).toMatch(/página/);
+    },
+  );
+
+  it("accepts the protocol page boundary and rejects overlong searches", () => {
+    expect(parseCatalogParams({ page: "10000", orden: "newest" }).filters).toMatchObject({
+      page: 10_000,
+      sort: "newest",
+    });
+    const parsed = parseCatalogParams({ q: "x".repeat(101) });
+    expect(parsed.filters.q).toBeUndefined();
+    expect(parsed.error).toMatch(/100 caracteres/);
+
+    const repeated = parseCatalogParams({ precioMin: ["1000", "2000"] });
+    expect(repeated.error).toMatch(/repetido/);
+    expect(repeated.params.precioMin).toBeUndefined();
+  });
+
+  it("blocks percent-encoded redirect bypasses and handles whitespace-only optional Merchant fields", () => {
+    for (const encoded of [
+      "/%61dmin",
+      "/%61pi/health/live",
+      "/%65mail/baja/tok",
+      "/%5c%5cevil.com",
+      "/foo%3fbar=1",
+      "/foo%23frag",
+      "/%61",
+    ]) {
+      expect(() => normalizeRedirectPath(encoded)).toThrow();
+    }
+    expect(isReservedRedirectSource("/admin.rsc")).toBe(true);
+    expect(isReservedRedirectSource("/_not-found")).toBe(true);
+    expect(isReservedRedirectTarget("/admin.rsc")).toBe(true);
+    expect(isReservedRedirectTarget("/_not-found")).toBe(true);
+    expect(isReservedRedirectTarget("/referido/CODE")).toBe(true);
+
+    const xml = buildGoogleMerchantXml(
+      { title: "Tienda", link: "https://tienda.example.co", description: "Feed" },
+      [
+        {
+          id: "var-whitespace",
+          itemGroupId: "prod-whitespace",
+          title: "Cable USB-C",
+          description: "Cable certificado",
+          link: "https://tienda.example.co/producto/cable",
+          brand: "Anker",
+          priceCents: "3990000",
+          available: true,
+          mpn: "   ",
+          color: "   ",
+          size: "  ",
+        },
+      ],
+    );
+    expect(xml).toContain("<g:identifier_exists>no</g:identifier_exists>");
+    expect(xml).not.toContain("<g:mpn>");
   });
 });

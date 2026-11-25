@@ -1,6 +1,9 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
+  AdminActorAuthorizationError,
   CatalogConflictError,
   CatalogNotFoundError,
   CatalogQueryError,
@@ -88,6 +91,13 @@ const variantSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE"]),
 });
 
+function formBoolean(formData: FormData, key: string): boolean | null {
+  const value = formString(formData, key);
+  if (value === "" || value === "false") return false;
+  if (value === "on" || value === "true") return true;
+  return null;
+}
+
 function baseInput(formData: FormData): CatalogProductBaseInput | null {
   const parsed = baseSchema.safeParse({
     slug: formString(formData, "slug"),
@@ -104,16 +114,23 @@ function baseInput(formData: FormData): CatalogProductBaseInput | null {
     seoTitle: formString(formData, "seoTitle"),
     seoDescription: formString(formData, "seoDescription"),
   });
-  if (!parsed.success) return null;
-  const trackValue = formString(formData, "trackSerial");
+  const trackSerial = formBoolean(formData, "trackSerial");
+  if (!parsed.success || trackSerial === null) return null;
   return {
     ...parsed.data,
     warrantyMonths: Number(parsed.data.warrantyMonths),
-    trackSerial: trackValue === "on" || trackValue === "true",
+    trackSerial,
   };
 }
 
-function variantInput(formData: FormData): CatalogVariantInput | null {
+function variantInput(
+  formData: FormData,
+  statusField: "status" | "variantStatus" = "status",
+): CatalogVariantInput | null {
+  const rawStatus =
+    statusField === "variantStatus" && formData.has("variantStatus")
+      ? formString(formData, "variantStatus")
+      : formString(formData, "status");
   const parsed = variantSchema.safeParse({
     sku: formString(formData, "sku"),
     priceCents: formString(formData, "priceCents"),
@@ -126,10 +143,15 @@ function variantInput(formData: FormData): CatalogVariantInput | null {
     lengthMillimeters: formString(formData, "lengthMillimeters"),
     widthMillimeters: formString(formData, "widthMillimeters"),
     heightMillimeters: formString(formData, "heightMillimeters"),
-    status: formString(formData, "status"),
+    status: rawStatus,
   });
   const variantId = formString(formData, "variantId");
-  if (!parsed.success || (variantId && !z.string().uuid().safeParse(variantId).success)) {
+  const isDefault = formBoolean(formData, "isDefault");
+  if (
+    !parsed.success ||
+    isDefault === null ||
+    (variantId && !z.string().uuid().safeParse(variantId).success)
+  ) {
     return null;
   }
   return {
@@ -139,7 +161,7 @@ function variantInput(formData: FormData): CatalogVariantInput | null {
     lengthMillimeters: Number(parsed.data.lengthMillimeters),
     widthMillimeters: Number(parsed.data.widthMillimeters),
     heightMillimeters: Number(parsed.data.heightMillimeters),
-    isDefault: ["on", "true"].includes(formString(formData, "isDefault")),
+    isDefault,
   };
 }
 
@@ -154,6 +176,7 @@ const catalogSnapshotFields = new Set([
   "categoryId",
   "taxGroupId",
   "status",
+  "variantStatus",
   "authenticity",
   "retractPolicy",
   "warrantyMonths",
@@ -192,7 +215,7 @@ function mutationMessage(error: unknown, values: Record<string, string>): Action
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de guardar este cambio.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para modificar el catálogo.", values);
   }
   if (error instanceof CatalogConflictError) {
@@ -249,7 +272,12 @@ function mutationMessage(error: unknown, values: Record<string, string>): Action
           values,
         );
       case "INACTIVE_DEFAULT":
-        return actionError("Una variante inactiva no puede marcarse como principal.", values);
+        return actionError(
+          error.message.includes("initial variant")
+            ? "La variante inicial debe marcarse como principal."
+            : "Una variante inactiva no puede marcarse como principal.",
+          values,
+        );
       case "NO_ACTIVE_VARIANT":
         return actionError(
           "Un producto activo debe conservar al menos una variante activa.",
@@ -278,6 +306,9 @@ function invalidateCatalog(options: {
   updateTag("catalog:search");
   updateTag("catalog:compare");
   updateTag("catalog:cms-grid");
+  updateTag("merchant-feed");
+  updateTag("meta-catalog-feed");
+  updateTag("sitemap");
   if (options.slug) {
     updateTag(`catalog:product:${options.slug}`);
     if (options.includeReviews) updateTag(`reviews:${options.slug}`);
@@ -299,7 +330,7 @@ export async function createCatalogProductAction(
   try {
     const session = await getAdminSession({ permission: "catalog:write", requireRecentMfa: true });
     const product = baseInput(formData);
-    const variant = variantInput(formData);
+    const variant = variantInput(formData, "variantStatus");
     if (!product || !variant) {
       return actionError(
         "Completa correctamente los campos obligatorios del producto y su variante inicial.",
@@ -311,6 +342,7 @@ export async function createCatalogProductAction(
       { ...product, variant },
       {
         actorAdminUserId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
       },
@@ -548,7 +580,7 @@ function mediaMutationError(error: unknown, values: Record<string, string>): Act
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de modificar los medios.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para modificar el catálogo.", values);
   }
   if (error instanceof ProductMediaNotFoundError) {

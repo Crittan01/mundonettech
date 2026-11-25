@@ -95,8 +95,12 @@ export function ProductMediaAdmin({
                       {archived ? "Archivado" : statusLabels[item.status]}
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {variant ? `Variante ${variant.sku}` : "Todo el producto"} · Posición{" "}
-                      {item.position}
+                      {variant
+                        ? `Variante ${variant.sku}`
+                        : item.variantId
+                          ? "Variante archivada"
+                          : "Todo el producto"}{" "}
+                      · Posición {item.position}
                       {item.frameCount ? ` · ${item.frameCount} fotogramas` : ""}
                       {item.usdzKey ? " · Incluye USDZ para AR" : ""}
                     </p>
@@ -109,6 +113,7 @@ export function ProductMediaAdmin({
                   media={[item]}
                   origin={origin}
                   productName={`${productName}: ${item.altText}`}
+                  priorityFirstImage={false}
                 />
                 {canWrite && !archived ? (
                   <CatalogMediaEditForm

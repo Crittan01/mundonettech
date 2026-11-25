@@ -27,6 +27,11 @@ export const metadata: Metadata = {
     title: "Centro de ayuda",
     description: "Encuentra respuestas y canales reales de atención.",
   },
+  twitter: {
+    card: "summary",
+    title: "Centro de ayuda",
+    description: "Encuentra respuestas y canales reales de atención.",
+  },
 };
 
 function first(value: string | string[] | undefined): string | undefined {
@@ -198,7 +203,8 @@ export default function HelpCenterPage({ searchParams }: PageProps<"/ayuda">) {
   ]);
   return (
     <div className="space-y-12">
-      <JsonLd data={[breadcrumbs, buildFaqJsonLd(helpFaqs)]} />
+      <JsonLd data={breadcrumbs} />
+      <JsonLd data={buildFaqJsonLd(helpFaqs)} />
       <header className="max-w-3xl space-y-4">
         <p className="text-sm font-semibold text-primary">Centro de ayuda</p>
         <h1 className="text-4xl font-bold tracking-tight">¿Cómo podemos ayudarte?</h1>

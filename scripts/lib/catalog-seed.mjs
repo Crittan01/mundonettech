@@ -228,9 +228,12 @@ export async function seedCanonicalCatalogWithClient(db) {
             where: { categoryId: category.id, attributeId: definition.id },
           });
           if (!categoryAttribute) {
-            const position = await tx.categoryAttribute.count({
-              where: { categoryId: category.id },
-            });
+            const positionRows = await tx.$queryRaw`
+              SELECT (COALESCE(MAX("position"), -1) + 1)::int AS "nextPosition"
+              FROM "CategoryAttribute"
+              WHERE "categoryId" = ${category.id}::uuid
+            `;
+            const position = positionRows[0]?.nextPosition ?? 0;
             await tx.categoryAttribute.create({
               data: {
                 categoryId: category.id,

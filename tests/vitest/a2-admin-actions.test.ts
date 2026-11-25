@@ -43,6 +43,7 @@ const harness = vi.hoisted(() => {
     getAdminSession: vi.fn(),
     getRequestSecurityContext: vi.fn(),
     redirectCreate: vi.fn(),
+    catalogUpsertVariant: vi.fn(),
     cmsSetVisibility: vi.fn(),
     cmsScheduleVersion: vi.fn(),
     cartClear: vi.fn(),
@@ -110,7 +111,7 @@ vi.mock("@mundonettech/db", () => {
   class CatalogService {
     createProduct = vi.fn();
     updateProduct = vi.fn();
-    upsertVariant = vi.fn();
+    upsertVariant = harness.catalogUpsertVariant;
     upsertProductAttribute = vi.fn();
     removeProductAttribute = vi.fn();
     upsertProductCompatibility = vi.fn();
@@ -147,6 +148,7 @@ vi.mock("@mundonettech/db", () => {
     B2bError: harness.B2bError,
     CartNotFoundError: class extends harness.DomainError {},
     CatalogConflictError: class extends harness.DomainError {},
+    AdminActorAuthorizationError: class extends harness.DomainError {},
     CatalogNotFoundError: class extends harness.DomainError {},
     CatalogQueryError: class extends harness.DomainError {},
     PricingConflictError: class extends harness.DomainError {},
@@ -415,6 +417,48 @@ describe("A2 — negative validation and response redaction", () => {
     }
   });
 
+  it("rejects non-enumerated catalog booleans before request context or domain writes", async () => {
+    const valid = {
+      slug: "producto-booleano",
+      name: "Producto booleano",
+      shortDescription: "",
+      description: "",
+      brandId: randomUUID(),
+      categoryId: randomUUID(),
+      taxGroupId: randomUUID(),
+      status: "ACTIVE",
+      authenticity: "ORIGINAL",
+      retractPolicy: "STANDARD",
+      warrantyMonths: "12",
+      seoTitle: "",
+      seoDescription: "",
+      sku: "BOOL-001",
+      priceCents: "10000",
+      costCents: "5000",
+      compareAtPriceCents: "",
+      gtin: "",
+      ean: "",
+      mpn: "",
+      weightGrams: "100",
+      lengthMillimeters: "100",
+      widthMillimeters: "100",
+      heightMillimeters: "100",
+      trackSerial: "on",
+      isDefault: "on",
+    };
+    for (const invalid of [
+      { ...valid, trackSerial: "yes" },
+      { ...valid, isDefault: "yes" },
+    ]) {
+      const data = new FormData();
+      for (const [key, value] of Object.entries(invalid)) data.set(key, value);
+      const result = await createCatalogProductAction(idle, data);
+      expect(result.status).toBe("error");
+      expect(result.message).toContain("Completa correctamente");
+    }
+    expect(harness.getRequestSecurityContext).not.toHaveBeenCalled();
+  });
+
   it("rejects a non-enumerated redirect active flag without writing", async () => {
     const form = new FormData();
     form.set("fromPath", "/legacy");
@@ -476,6 +520,33 @@ describe("A2 — negative validation and response redaction", () => {
     expect(result.status).toBe("error");
     expect(result.message).toBe("La operación solicitada no es válida.");
     expect(harness.cartClear).not.toHaveBeenCalled();
+  });
+
+  it("rejects overflow-length monetary input before request context or catalog writes", async () => {
+    const form = new FormData();
+    form.set("productId", randomUUID());
+    form.set("variantId", randomUUID());
+    form.set("sku", "SKU-INT8");
+    form.set("priceCents", "19223372036854775807");
+    form.set("costCents", "1");
+    form.set("compareAtPriceCents", "");
+    form.set("gtin", "");
+    form.set("ean", "");
+    form.set("mpn", "");
+    form.set("weightGrams", "100");
+    form.set("lengthMillimeters", "100");
+    form.set("widthMillimeters", "100");
+    form.set("heightMillimeters", "100");
+    form.set("status", "ACTIVE");
+    form.set("isDefault", "true");
+
+    const result = await upsertCatalogVariantAction(idle, form);
+    expect(result).toMatchObject({
+      status: "error",
+      message: "Los datos de la variante no son válidos.",
+    });
+    expect(harness.getRequestSecurityContext).not.toHaveBeenCalled();
+    expect(harness.catalogUpsertVariant).not.toHaveBeenCalled();
   });
 
   it("does not reflect customer email or catalog cost in error state", async () => {
