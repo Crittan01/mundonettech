@@ -260,7 +260,7 @@ function ProductVariantPanel({
         </div>
       </dl>
 
-      <AddToCartForm key={selected.id} variantId={selected.id} available={selected.available} />
+      <AddToCartForm key={selected.sku} variantId={selected.id} available={selected.available} />
 
       <Link
         href={`/comparar?productos=${encodeURIComponent(productSlug)}`}

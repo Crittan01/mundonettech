@@ -20,6 +20,7 @@ let financeViewer: { id: string; authUserId: string; email: string };
 let audit: { actorAdminUserId: string; ipHash: Uint8Array<ArrayBuffer>; userAgentHash: null };
 let couponCode: string;
 let bundleId: string;
+let bundleName: string;
 let productSlug: string;
 
 function tokenHash(token: string): Uint8Array<ArrayBuffer> {
@@ -129,6 +130,18 @@ test.beforeAll(async () => {
     },
     select: { id: true },
   });
+  const leftoverTier3 = await db.wholesaleTier.findFirst({
+    where: {
+      scope: "PRODUCT",
+      product: { slug: productSlug },
+      minimumQuantity: 3,
+      deletedAt: null,
+    },
+    select: { id: true },
+  });
+  if (leftoverTier3) {
+    await pricing.archiveWholesaleTier(leftoverTier3.id, audit).catch(() => undefined);
+  }
   await pricing.upsertWholesaleTier(
     existingTier?.id ?? null,
     {
@@ -153,11 +166,13 @@ test.beforeAll(async () => {
     },
     audit,
   );
+  const bundleTag = randomUUID().slice(0, 8);
+  bundleName = `Paquete E2E Sony ${bundleTag}`;
   const createdBundle = await pricing.upsertBundle(
     null,
     {
       slug: `e2e-bundle-${randomUUID()}`,
-      name: "Paquete E2E Sony",
+      name: bundleName,
       description: "Dos unidades con descuento verificado.",
       status: "ACTIVE",
       priceCents: "280000000",
@@ -170,7 +185,12 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  if (db) await db.$disconnect();
+  if (db) {
+    if (bundleId && audit) {
+      await new PricingService(db).archiveBundle(bundleId, audit).catch(() => undefined);
+    }
+    await db.$disconnect();
+  }
 });
 
 test("PDP, wholesale, coupon, quantities and stock work through real Server Actions", async ({
@@ -226,7 +246,9 @@ test("PDP, wholesale, coupon, quantities and stock work through real Server Acti
 test("bundle CTA persists every component and exact bundle discount", async ({ page }) => {
   await authenticateAdmin(page);
   await page.goto(`/admin/precios/bundles/${bundleId}`);
-  await page.getByLabel("Componentes: SKU | cantidad, uno por línea").fill(`${sku}|2`);
+  const itemsField = page.getByLabel("Componentes: SKU | cantidad, uno por línea");
+  await expect(itemsField).toBeVisible();
+  await expect(itemsField).toHaveValue(`${sku} | 2`);
   await page.getByRole("button", { name: "Guardar bundle" }).click();
   await expect(page.getByText(/Bundle actualizado;/)).toBeVisible();
   await page.context().clearCookies();
@@ -240,7 +262,7 @@ test("bundle CTA persists every component and exact bundle discount", async ({ p
     await route.continue().catch(() => undefined);
   });
   await page.goto(`/producto/${productSlug}`, { waitUntil: "domcontentloaded" });
-  const bundle = page.locator("article").filter({ hasText: "Paquete E2E Sony" });
+  const bundle = page.locator("article").filter({ hasText: bundleName });
   await expect(bundle).toBeVisible();
   const addButton = bundle.getByRole("button", { name: "Añadir paquete" });
   await expect(addButton).toBeDisabled();
@@ -249,7 +271,7 @@ test("bundle CTA persists every component and exact bundle discount", async ({ p
   await addButton.click();
   await expect(page.getByText(/Paquete añadido con todos sus componentes/)).toBeVisible();
   await page.goto("/carrito");
-  await expect(page.getByText("Paquete E2E Sony").first()).toBeVisible();
+  await expect(page.getByText(bundleName).first()).toBeVisible();
   const snapshot = await currentBrowserCart(page);
   expect(snapshot.items).toHaveLength(1);
   expect(snapshot.items[0]?.quantity).toBe(2);
