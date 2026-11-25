@@ -12,6 +12,7 @@ import { loadTypeScriptModule } from "./route-loader.js";
 
 const credentialId = "8a089e6d-5691-4d34-9d52-2f12e36b12aa";
 const svixEventId = "msg_unit_replay_123";
+let webhookOccurredAt = new Date("2026-11-24T12:00:00.000Z");
 
 interface EmailRecord {
   readonly id: string;
@@ -102,6 +103,7 @@ function uniqueError(target: unknown): Error {
 }
 
 function createModule(db: unknown) {
+  webhookOccurredAt = new Date("2026-11-24T12:00:00.000Z");
   const loadedModule = loadTypeScriptModule<{
     readonly EmailService: new (
       database: unknown,
@@ -145,7 +147,7 @@ function createModule(db: unknown) {
           svixEventId,
           eventType: "email.delivered",
           providerMessageId: "provider-message-id",
-          occurredAt: new Date("2026-11-24T12:00:00.000Z"),
+          occurredAt: webhookOccurredAt,
           payloadHashInput: input.body,
         }),
       },
@@ -201,7 +203,7 @@ function createHarness(
     emailEvent: { findUnique: vi.fn(async () => email), update },
     emailWebhookEvent: { create },
     $executeRaw: vi.fn(),
-    $queryRaw: vi.fn(async () => [{ id: email.id }]),
+    $queryRaw: vi.fn(async () => [email]),
   };
   const db = {
     emailWebhookEvent: { findUnique },
@@ -242,6 +244,22 @@ describe("A2 Svix payload-bound replay and unique conflicts", () => {
     expect(current.create).toHaveBeenCalledOnce();
     expect(current.update).toHaveBeenCalledOnce();
     expect(current.email).toEqual(before);
+  });
+
+  it("preserves the first delivery timestamp when an older event repeats the current status", async () => {
+    const current = createHarness();
+    current.email.status = "DELIVERED";
+    current.email.statusRank = 30;
+    current.email.deliveredAt = new Date("2026-11-24T12:00:00.000Z");
+    webhookOccurredAt = new Date("2026-11-24T11:30:00.000Z");
+    await expect(current.service.processWebhook(request("older-delivery"))).resolves.toEqual({
+      eventId: "email-event-id",
+      status: "DELIVERED",
+      replayed: false,
+    });
+    expect(current.create).toHaveBeenCalledOnce();
+    expect(current.update).not.toHaveBeenCalled();
+    expect(current.email.deliveredAt).toEqual(new Date("2026-11-24T12:00:00.000Z"));
   });
 
   it("recovers a same-body insertion race for array and named unique targets", async () => {
@@ -316,7 +334,7 @@ describe("A2 Svix payload-bound replay and unique conflicts", () => {
       emailEvent: { findUnique: vi.fn(async () => email), update },
       emailWebhookEvent: { create },
       $executeRaw: vi.fn(),
-      $queryRaw: vi.fn(async () => [{ id: email.id }]),
+      $queryRaw: vi.fn(async () => [email]),
     };
     const db = {
       emailWebhookEvent: { findUnique },

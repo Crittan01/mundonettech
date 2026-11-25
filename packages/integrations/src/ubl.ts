@@ -64,9 +64,9 @@ function validateDocument(input: InvoiceDocumentInput | CreditNoteDocumentInput)
   let tax = 0n;
   for (const line of input.lines) {
     if (
-      !Number.isInteger(line.quantity) ||
+      !Number.isSafeInteger(line.quantity) ||
       line.quantity < 1 ||
-      !Number.isInteger(line.taxRateBps) ||
+      !Number.isSafeInteger(line.taxRateBps) ||
       line.taxRateBps < 0 ||
       line.taxRateBps > 10_000
     ) {
@@ -93,52 +93,148 @@ function validateDocument(input: InvoiceDocumentInput | CreditNoteDocumentInput)
     throw new InvoiceValidationError("Fiscal document total does not balance.");
 }
 
+function resolutionDate(value: string): string {
+  if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(value)) {
+    throw new InvoiceValidationError("DIAN resolution dates must use YYYY-MM-DD.");
+  }
+  const parsed = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new InvoiceValidationError("DIAN resolution dates must be valid calendar dates.");
+  }
+  return value;
+}
+
+function invoiceControl(input: InvoiceDocumentInput): string {
+  const resolution = input.resolution;
+  if (!resolution || typeof resolution !== "object") {
+    throw new InvoiceValidationError("DIAN invoice resolution is required.");
+  }
+  const validFrom = resolutionDate(resolution.validFrom);
+  const validTo = resolutionDate(resolution.validTo);
+  const prefix = xml(resolution.prefix, 20);
+  const suffix = input.fullNumber.startsWith(resolution.prefix)
+    ? input.fullNumber.slice(resolution.prefix.length)
+    : "";
+  const number = Number(suffix);
+  if (
+    validTo < validFrom ||
+    !Number.isSafeInteger(resolution.rangeStart) ||
+    !Number.isSafeInteger(resolution.rangeEnd) ||
+    resolution.rangeStart < 1 ||
+    resolution.rangeEnd < resolution.rangeStart ||
+    !/^[0-9]+$/.test(suffix) ||
+    !Number.isSafeInteger(number) ||
+    number < resolution.rangeStart ||
+    number > resolution.rangeEnd ||
+    dianTimestamp(input.issueDate).date < validFrom ||
+    dianTimestamp(input.issueDate).date > validTo
+  ) {
+    throw new InvoiceValidationError(
+      "Invoice number or issue date is outside its DIAN resolution.",
+    );
+  }
+  return `<sts:DianExtensions><sts:InvoiceControl><cbc:InvoiceAuthorization>${xml(resolution.authorizationNumber, 40)}</cbc:InvoiceAuthorization><sts:AuthorizationPeriod><cbc:StartDate>${validFrom}</cbc:StartDate><cbc:EndDate>${validTo}</cbc:EndDate></sts:AuthorizationPeriod><sts:AuthorizedInvoice><cbc:Prefix>${prefix}</cbc:Prefix><cbc:From>${resolution.rangeStart}</cbc:From><cbc:To>${resolution.rangeEnd}</cbc:To></sts:AuthorizedInvoice></sts:InvoiceControl></sts:DianExtensions>`;
+}
+
+type TaxCategory = NonNullable<FiscalLine["taxCategory"]>;
+
+function fiscalLines(input: readonly FiscalLine[], shippingCents: bigint): readonly FiscalLine[] {
+  return input.length === 0 && shippingCents > 0n
+    ? [
+        {
+          sku: "FLETE",
+          title: "Flete",
+          quantity: 1,
+          unitPriceCents: shippingCents,
+          discountCents: 0n,
+          lineTotalCents: shippingCents,
+          taxCents: 0n,
+          taxRateBps: 0,
+          taxCategory: "EXCLUDED",
+        },
+      ]
+    : input;
+}
+
+function percent(rateBps: number): string {
+  const rate = BigInt(rateBps);
+  return `${rate / 100n}.${(rate % 100n).toString().padStart(2, "0")}`;
+}
+
+function taxCategory(line: Pick<FiscalLine, "taxCategory" | "taxRateBps">): string {
+  const category = line.taxCategory ?? "STANDARD";
+  const code = { STANDARD: "S", EXEMPT: "E", EXCLUDED: "O" }[category];
+  if (!code) throw new InvoiceValidationError("Fiscal tax category is invalid.");
+  return `<cac:TaxCategory><cbc:ID>${code}</cbc:ID><cbc:Percent>${percent(line.taxRateBps)}</cbc:Percent><cac:TaxScheme><cbc:ID>01</cbc:ID><cbc:Name>IVA</cbc:Name></cac:TaxScheme></cac:TaxCategory>`;
+}
+
 function lines(input: readonly FiscalLine[], shippingCents = 0n): string {
-  const records: readonly FiscalLine[] =
-    input.length === 0 && shippingCents > 0n
-      ? [
-          {
-            sku: "FLETE",
-            title: "Flete",
-            quantity: 1,
-            unitPriceCents: shippingCents,
-            discountCents: 0n,
-            lineTotalCents: shippingCents,
-            taxCents: 0n,
-            taxRateBps: 0,
-          },
-        ]
-      : input;
-  return records
+  return fiscalLines(input, shippingCents)
     .map((line, index) => {
-      const rate = BigInt(line.taxRateBps);
-      const percent = `${rate / 100n}.${(rate % 100n).toString().padStart(2, "0")}`;
       const discount =
         line.discountCents > 0n
           ? `<cac:AllowanceCharge><cbc:ChargeIndicator>false</cbc:ChargeIndicator><cbc:AllowanceChargeReasonCode>1</cbc:AllowanceChargeReasonCode><cbc:AllowanceChargeReason>Descuento comercial</cbc:AllowanceChargeReason><cbc:Amount currencyID="COP">${money(line.discountCents, "discountCents")}</cbc:Amount></cac:AllowanceCharge>`
           : "";
-      return `<cac:InvoiceLine><cbc:ID>${index + 1}</cbc:ID><cbc:InvoicedQuantity unitCode="EA">${line.quantity}</cbc:InvoicedQuantity><cbc:LineExtensionAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:LineExtensionAmount>${discount}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:TaxableAmount><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount><cac:TaxCategory><cbc:Percent>${percent}</cbc:Percent><cac:TaxScheme><cbc:ID>01</cbc:ID><cbc:Name>IVA</cbc:Name></cac:TaxScheme></cac:TaxCategory></cac:TaxSubtotal></cac:TaxTotal><cac:Item><cbc:Description>${xml(line.title, 200)}</cbc:Description><cac:SellersItemIdentification><cbc:ID>${xml(line.sku, 64)}</cbc:ID></cac:SellersItemIdentification></cac:Item><cac:Price><cbc:PriceAmount currencyID="COP">${money(line.unitPriceCents, "unitPriceCents")}</cbc:PriceAmount><cbc:BaseQuantity unitCode="EA">${line.quantity}</cbc:BaseQuantity></cac:Price></cac:InvoiceLine>`;
+      return `<cac:InvoiceLine><cbc:ID>${index + 1}</cbc:ID><cbc:InvoicedQuantity unitCode="EA">${line.quantity}</cbc:InvoicedQuantity><cbc:LineExtensionAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:LineExtensionAmount>${discount}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:TaxableAmount><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount>${taxCategory(line)}</cac:TaxSubtotal></cac:TaxTotal><cac:Item><cbc:Description>${xml(line.title, 200)}</cbc:Description><cac:SellersItemIdentification><cbc:ID>${xml(line.sku, 64)}</cbc:ID></cac:SellersItemIdentification></cac:Item><cac:Price><cbc:PriceAmount currencyID="COP">${money(line.unitPriceCents, "unitPriceCents")}</cbc:PriceAmount><cbc:BaseQuantity unitCode="EA">1</cbc:BaseQuantity></cac:Price></cac:InvoiceLine>`;
     })
     .join("");
 }
 
+function taxSubtotals(input: InvoiceDocumentInput | CreditNoteDocumentInput): string {
+  const groups = new Map<
+    string,
+    { category: TaxCategory; rateBps: number; taxableCents: bigint; taxCents: bigint }
+  >();
+  for (const line of fiscalLines(input.lines, input.shippingCents)) {
+    const category = line.taxCategory ?? "STANDARD";
+    const key = `${category}:${line.taxRateBps}`;
+    const group = groups.get(key) ?? {
+      category,
+      rateBps: line.taxRateBps,
+      taxableCents: 0n,
+      taxCents: 0n,
+    };
+    group.taxableCents += line.lineTotalCents;
+    group.taxCents += line.taxCents;
+    groups.set(key, group);
+  }
+  let taxableCents = 0n;
+  let taxCents = 0n;
+  const subtotals = [...groups.values()]
+    .sort((left, right) =>
+      left.category === right.category
+        ? left.rateBps - right.rateBps
+        : left.category.localeCompare(right.category),
+    )
+    .map((group) => {
+      taxableCents += group.taxableCents;
+      taxCents += group.taxCents;
+      return `<cac:TaxSubtotal><cbc:TaxableAmount currencyID="COP">${money(group.taxableCents, "groupTaxableCents")}</cbc:TaxableAmount><cbc:TaxAmount currencyID="COP">${money(group.taxCents, "groupTaxCents")}</cbc:TaxAmount>${taxCategory({ taxCategory: group.category, taxRateBps: group.rateBps })}</cac:TaxSubtotal>`;
+    })
+    .join("");
+  const expectedTaxable = usesShippingLine(input)
+    ? input.shippingCents
+    : input.subtotalCents - input.discountCents;
+  if (taxableCents !== expectedTaxable || taxCents !== input.taxCents) {
+    throw new InvoiceValidationError("Grouped fiscal taxes do not balance the document.");
+  }
+  return subtotals;
+}
+
 function totals(input: InvoiceDocumentInput | CreditNoteDocumentInput): string {
-  const discount =
-    input.discountCents > 0n
-      ? `<cac:AllowanceCharge><cbc:ChargeIndicator>false</cbc:ChargeIndicator><cbc:AllowanceChargeReasonCode>1</cbc:AllowanceChargeReasonCode><cbc:AllowanceChargeReason>Descuentos del documento</cbc:AllowanceChargeReason><cbc:Amount currencyID="COP">${money(input.discountCents, "discountCents")}</cbc:Amount></cac:AllowanceCharge>`
-      : "";
   const shipping =
-    input.shippingCents > 0n
+    input.shippingCents > 0n && !usesShippingLine(input)
       ? `<cac:AllowanceCharge><cbc:ChargeIndicator>true</cbc:ChargeIndicator><cbc:AllowanceChargeReasonCode>1</cbc:AllowanceChargeReasonCode><cbc:AllowanceChargeReason>Flete</cbc:AllowanceChargeReason><cbc:Amount currencyID="COP">${money(input.shippingCents, "shippingCents")}</cbc:Amount></cac:AllowanceCharge>`
       : "";
-  return `${discount}${shipping}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(input.taxCents, "taxCents")}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="COP">${money(input.subtotalCents - input.discountCents, "taxableBaseCents")}</cbc:TaxableAmount><cbc:TaxAmount currencyID="COP">${money(input.taxCents, "taxCents")}</cbc:TaxAmount><cac:TaxCategory><cac:TaxScheme><cbc:ID>01</cbc:ID><cbc:Name>IVA</cbc:Name></cac:TaxScheme></cac:TaxCategory></cac:TaxSubtotal></cac:TaxTotal><cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">${money(usesShippingLine(input) ? input.shippingCents : input.subtotalCents - input.discountCents, "lineExtensionCents")}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">${money(input.subtotalCents - input.discountCents + input.shippingCents, "taxExclusiveCents")}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">${money(input.totalCents, "totalCents")}</cbc:TaxInclusiveAmount><cbc:PayableAmount currencyID="COP">${money(input.totalCents, "totalCents")}</cbc:PayableAmount></cac:LegalMonetaryTotal>`;
+  return `${shipping}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(input.taxCents, "taxCents")}</cbc:TaxAmount>${taxSubtotals(input)}</cac:TaxTotal><cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">${money(usesShippingLine(input) ? input.shippingCents : input.subtotalCents - input.discountCents, "lineExtensionCents")}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">${money(input.subtotalCents - input.discountCents + input.shippingCents, "taxExclusiveCents")}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">${money(input.totalCents, "totalCents")}</cbc:TaxInclusiveAmount><cbc:PayableAmount currencyID="COP">${money(input.totalCents, "totalCents")}</cbc:PayableAmount></cac:LegalMonetaryTotal>`;
 }
 
 export function buildInvoiceUbl(input: InvoiceDocumentInput, production: boolean): string {
   validateDocument(input);
   const timestamp = dianTimestamp(input.issueDate);
+  const control = invoiceControl(input);
   const invoiceLines = lines(input.lines, input.shippingCents);
-  return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"><ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions><cbc:UBLVersionID>UBL 2.1</cbc:UBLVersionID><cbc:CustomizationID>DIAN 2.1</cbc:CustomizationID><cbc:ProfileID>DIAN 2.1: Factura electrónica de venta</cbc:ProfileID><cbc:ProfileExecutionID>${production ? "1" : "2"}</cbc:ProfileExecutionID><cbc:ID>${xml(input.fullNumber, 40)}</cbc:ID><cbc:UUID schemeID="${production ? "1" : "2"}" schemeName="CUFE">${xml(input.cufe, 96)}</cbc:UUID><cbc:IssueDate>${timestamp.date}</cbc:IssueDate><cbc:IssueTime>${timestamp.time}</cbc:IssueTime><cbc:InvoiceTypeCode>01</cbc:InvoiceTypeCode><cbc:DocumentCurrencyCode>COP</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>${usesShippingLine(input) ? 1 : input.lines.length}</cbc:LineCountNumeric>${party(input.issuer, true)}${party(input.buyer, false)}${totals(input)}${invoiceLines}</Invoice>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2" xmlns:sts="http://www.dian.gov.co/facturaelectronica/Structures-2-1"><ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent>${control}</ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions><cbc:UBLVersionID>UBL 2.1</cbc:UBLVersionID><cbc:CustomizationID>DIAN 2.1</cbc:CustomizationID><cbc:ProfileID>DIAN 2.1: Factura electrónica de venta</cbc:ProfileID><cbc:ProfileExecutionID>${production ? "1" : "2"}</cbc:ProfileExecutionID><cbc:ID>${xml(input.fullNumber, 40)}</cbc:ID><cbc:UUID schemeID="${production ? "1" : "2"}" schemeName="CUFE">${xml(input.cufe, 96)}</cbc:UUID><cbc:IssueDate>${timestamp.date}</cbc:IssueDate><cbc:IssueTime>${timestamp.time}</cbc:IssueTime><cbc:InvoiceTypeCode>01</cbc:InvoiceTypeCode><cbc:DocumentCurrencyCode>COP</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>${usesShippingLine(input) ? 1 : input.lines.length}</cbc:LineCountNumeric>${party(input.issuer, true)}${party(input.buyer, false)}${totals(input)}${invoiceLines}</Invoice>`;
 }
 
 export function buildCreditNoteUbl(input: CreditNoteDocumentInput, production: boolean): string {

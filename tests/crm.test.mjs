@@ -555,6 +555,7 @@ describe("CRM 360 production behavior", () => {
         orderStatus: "PENDING",
         paymentStatus: "UNPAID",
         fulfillmentStatus: "UNFULFILLED",
+        fulfillmentMethod: "CLICK_COLLECT",
         taxRegime: "NO_RESPONSABLE_IVA",
       },
     });

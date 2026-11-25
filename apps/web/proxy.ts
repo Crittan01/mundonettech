@@ -86,30 +86,31 @@ function loginRedirect(request: NextRequest, destination: string, reason: string
 
 function isPrivateNoStorePath(pathname: string): boolean {
   return (
+    hasPathPrefix(pathname, "/api") ||
     hasProtectedPathPrefix(pathname, "/admin") ||
     hasProtectedPathPrefix(pathname, "/mi-cuenta") ||
-    hasPathPrefix(pathname, "/pedido") ||
-    hasPathPrefix(pathname, "/recibo") ||
-    hasPathPrefix(pathname, "/pagar") ||
-    hasPathPrefix(pathname, "/propuesta") ||
-    hasPathPrefix(pathname, "/carrito") ||
-    hasPathPrefix(pathname, "/checkout") ||
-    hasPathPrefix(pathname, "/ingresar") ||
-    hasPathPrefix(pathname, "/registro") ||
-    hasPathPrefix(pathname, "/recuperar") ||
-    hasPathPrefix(pathname, "/verificar-correo")
+    hasProtectedPathPrefix(pathname, "/pedido") ||
+    hasProtectedPathPrefix(pathname, "/recibo") ||
+    hasProtectedPathPrefix(pathname, "/pagar") ||
+    hasProtectedPathPrefix(pathname, "/propuesta") ||
+    hasProtectedPathPrefix(pathname, "/carrito") ||
+    hasProtectedPathPrefix(pathname, "/checkout") ||
+    hasProtectedPathPrefix(pathname, "/ingresar") ||
+    hasProtectedPathPrefix(pathname, "/registro") ||
+    hasProtectedPathPrefix(pathname, "/recuperar") ||
+    hasProtectedPathPrefix(pathname, "/verificar-correo")
   );
 }
 
 function isCapabilityTokenPath(pathname: string): boolean {
   return (
     pathname === "/api/channels/mercado-libre/oauth/callback" ||
-    hasPathPrefix(pathname, "/recibo") ||
-    hasPathPrefix(pathname, "/api/recibos") ||
-    hasPathPrefix(pathname, "/pagar") ||
-    hasPathPrefix(pathname, "/propuesta") ||
-    hasPathPrefix(pathname, "/pedido") ||
-    hasPathPrefix(pathname, "/email/baja")
+    hasProtectedPathPrefix(pathname, "/recibo") ||
+    hasProtectedPathPrefix(pathname, "/api/recibos") ||
+    hasProtectedPathPrefix(pathname, "/pagar") ||
+    hasProtectedPathPrefix(pathname, "/propuesta") ||
+    hasProtectedPathPrefix(pathname, "/pedido") ||
+    hasProtectedPathPrefix(pathname, "/email/baja")
   );
 }
 
@@ -210,8 +211,8 @@ export async function proxy(request: NextRequest) {
             ...options,
             httpOnly: true,
             secure: isProduction,
-            sameSite: options?.sameSite ?? "lax",
-            path: options?.path ?? "/",
+            sameSite: "lax",
+            path: "/",
           });
         }
       },

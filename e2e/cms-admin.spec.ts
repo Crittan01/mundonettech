@@ -30,7 +30,7 @@ test("CMS scheduler enforces bearer/RBAC and publishes scheduled pages and versi
 }) => {
   const missing = await page.request.post("/api/jobs/cms-publish");
   expect(missing.status()).toBe(401);
-  expect(missing.headers()["cache-control"]).toBe("no-store");
+  expect(missing.headers()["cache-control"]).toContain("no-store");
 
   const invalid = await page.request.post("/api/jobs/cms-publish", {
     headers: { authorization: "Bearer invalid-secret" },
@@ -130,7 +130,7 @@ test("CMS scheduler enforces bearer/RBAC and publishes scheduled pages and versi
       headers: { authorization: `Bearer ${schedulerSecret}` },
     });
     expect(published.status()).toBe(200);
-    expect(published.headers()["cache-control"]).toBe("no-store");
+    expect(published.headers()["cache-control"]).toContain("no-store");
     const payload = (await published.json()) as {
       versions: number;
       pages: number;

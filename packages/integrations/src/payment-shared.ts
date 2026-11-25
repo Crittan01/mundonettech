@@ -3,6 +3,8 @@ import { timingSafeEqual } from "node:crypto";
 import { maxSignedBigInt } from "@mundonettech/core";
 import {
   acquireOperationLocks,
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
   compareStrings,
   fulfillStock,
   GrowthService,
@@ -29,7 +31,6 @@ import {
 export type PaymentTransaction = Prisma.TransactionClient;
 
 const keyPattern = /^[A-Za-z0-9._:-]{3,128}$/;
-const financialRoles = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "FINANCE_ANALYST"]);
 
 export function assertPaymentUuid(value: string, field: string): string {
   if (typeof value !== "string" || !uuidPattern.test(value)) {
@@ -112,12 +113,12 @@ export async function assertFinancialActor(
   tx: PaymentTransaction,
   actorAdminUserId: string,
 ): Promise<{ id: string; authUserId: string; email: string; role: string }> {
-  const actor = await tx.adminUser.findFirst({
-    where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-    select: { id: true, authUserId: true, email: true, role: true },
-  });
-  if (!actor || !financialRoles.has(actor.role)) throw new PaymentAuthorizationError();
-  return actor;
+  try {
+    return await assertAdminActorInTransaction(tx, actorAdminUserId, "payments:write");
+  } catch (error) {
+    if (error instanceof AdminActorAuthorizationError) throw new PaymentAuthorizationError();
+    throw error;
+  }
 }
 
 export async function writePaymentAudit(
@@ -162,6 +163,32 @@ export async function writePaymentOutbox(
     create: options,
     update: {},
   });
+}
+
+export async function assertCodDistributionMutable(
+  tx: PaymentTransaction,
+  orderId: string,
+): Promise<void> {
+  assertPaymentUuid(orderId, "orderId");
+  const [fulfillmentStarted, shipmentStarted, packageStarted] = await Promise.all([
+    tx.orderFulfillment.findFirst({
+      where: { orderId, status: { notIn: ["PENDING", "CANCELLED"] } },
+      select: { id: true },
+    }),
+    tx.shipment.findFirst({
+      where: { orderId, status: { notIn: ["PENDING", "CANCELLED"] } },
+      select: { id: true },
+    }),
+    tx.shipmentPackage.findFirst({
+      where: { shipment: { orderId, status: { not: "CANCELLED" } } },
+      select: { id: true },
+    }),
+  ]);
+  if (fulfillmentStarted || shipmentStarted || packageStarted) {
+    throw new PaymentConflictError(
+      "Cash on delivery cannot change after pick, pack or label processing starts.",
+    );
+  }
 }
 
 export async function lockPaymentOrder(tx: PaymentTransaction, orderId: string): Promise<Order> {
@@ -293,6 +320,8 @@ export async function appendStoreCreditEntry(
       "INSUFFICIENT_CREDIT",
     );
   }
+  assertPaymentMoney(available, "availableCents", true);
+  assertPaymentMoney(held, "heldCents", true);
   const updated = await tx.storeCreditAccount.update({
     where: { id: account.id },
     data: { availableCents: available, heldCents: held, version: { increment: 1 } },

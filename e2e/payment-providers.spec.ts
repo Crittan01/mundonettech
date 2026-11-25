@@ -106,11 +106,22 @@ function signedWebhook(attempt: { reference: string; amountCents: bigint }, exte
     status: "APPROVED",
     status_message: "Aprobada en E2E",
   };
-  const properties = ["transaction.id", "transaction.status", "transaction.amount_in_cents"];
+  const properties = [
+    "transaction.id",
+    "transaction.status",
+    "transaction.amount_in_cents",
+    "transaction.reference",
+    "transaction.currency",
+  ];
+  const signedValues = [
+    externalId,
+    "APPROVED",
+    transaction.amount_in_cents,
+    attempt.reference,
+    "COP",
+  ];
   const checksum = createHash("sha256")
-    .update(
-      `${externalId}APPROVED${transaction.amount_in_cents}${timestamp}${credentials.eventsSecret}`,
-    )
+    .update(`${signedValues.join("")}${timestamp}${credentials.eventsSecret}`)
     .digest("hex");
   return {
     checksum,
@@ -226,7 +237,7 @@ test("Wompi checkout reaches hosted payment and signed HTTP webhook settles once
     headers: { "content-type": "application/json", "x-event-checksum": webhook.checksum },
   });
   expect(response.status()).toBe(200);
-  expect(response.headers()["cache-control"]).toBe("no-store");
+  expect(response.headers()["cache-control"]).toContain("no-store");
   expect((await response.json()).status).toBe("PROCESSED");
   const replay = await page.request.post(`/api/webhooks/wompi?credentialId=${credentialId}`, {
     data: webhook.body,

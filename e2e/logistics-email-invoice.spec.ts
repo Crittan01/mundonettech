@@ -1,11 +1,18 @@
 import AxeBuilder from "@axe-core/playwright";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 
 import { expect, test, type Page } from "@playwright/test";
 
 import { createTimeoutToken } from "../packages/core/dist/index.js";
 import { createDatabaseClient } from "../packages/db/dist/index.js";
-import { EmailService } from "../packages/integrations/dist/index.js";
+import {
+  DianInvoiceProvider,
+  EmailService,
+  parseDianCredentials,
+} from "../packages/integrations/dist/index.js";
+import { createXmlDsigSigner, signFiscalDocument } from "../tests/helpers/xml-dsig-fixtures.mjs";
 import {
   createSupabaseFixtureSession,
   encodeSupabaseFixtureCookie,
@@ -16,6 +23,7 @@ const databaseUrl =
 const runSuffix = randomUUID().slice(0, 8).toUpperCase();
 const resendAccount = `Resend E2E ${runSuffix}`;
 const zoneCode = `E2E-${runSuffix}`;
+const dianSigner = createXmlDsigSigner("E2E DIAN Signer");
 let db: ReturnType<typeof createDatabaseClient>;
 let admin: { id: string; authUserId: string; email: string };
 
@@ -178,6 +186,10 @@ test("operational vault, communications and fiscal views stay accessible with MF
   ).toBeVisible();
   await page.goto("/admin/facturacion");
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Facturación electrónica DIAN");
+  const fiscalAxe = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  expect(fiscalAxe.violations).toEqual([]);
 
   const unsubscribeSecret = Buffer.from("unsubscribe-secret-e2e-with-32bytes").toString("base64");
   const svixSecret = "whsec_c2VjcmV0LWV2ZW50b3Mtd2l0aC0zMi1ieXRlcw";
@@ -240,6 +252,121 @@ test("operational vault, communications and fiscal views stay accessible with MF
     `/api/recibos/token-invalido/documentos/invoice/${randomUUID()}`,
   );
   expect(badDocResponse.status()).toBe(404);
+});
+
+test("DIAN wizard encrypts the trust anchor and accepts only cryptographically valid XML", async ({
+  page,
+}) => {
+  const accountName = `DIAN E2E ${runSuffix}`;
+  const values = {
+    bearerToken: "e2e-secure-provider-token",
+    providerUrl: "https://fiscal.example.test",
+    issuerNit: "9010000001",
+    issuerDv: "1",
+    issuerLegalName: "Emisor E2E",
+    issuerEmail: "fiscal@example.test",
+    issuerAddress: "Carrera 7 # 71-21",
+    issuerDepartmentCode: "11",
+    issuerDepartmentName: "Bogotá, D.C.",
+    issuerMunicipalityCode: "11001",
+    issuerMunicipalityName: "Bogotá, D.C.",
+    issuerPostalCode: "110231",
+    issuerPhoneE164: "+573001234567",
+    softwareId: "software-e2e-1234",
+    softwarePin: "software-secret-pin",
+    signatureTrustAnchorPem: dianSigner.certificate,
+    invoicePrefix: "FE",
+    invoiceResolutionNumber: "18760000001",
+    invoiceResolutionStart: 1,
+    invoiceResolutionEnd: 1000,
+    invoiceResolutionDate: "2026-01-01",
+    invoiceResolutionValidFrom: "2026-01-01",
+    invoiceResolutionValidTo: "2027-12-31",
+    creditNotePrefix: "NC",
+  };
+  await authenticateAdmin(page);
+  await page.goto("/admin/integraciones");
+  const region = page.getByRole("region", {
+    name: "Conectar logística, correo, facturación, Gemini o Meta",
+  });
+  await region.getByLabel("Proveedor", { exact: true }).selectOption("dian");
+  await region.getByLabel("Nombre operativo de la integración").fill(accountName);
+  const fields: readonly (readonly [string, string])[] = [
+    ["Bearer del proveedor DIAN", values.bearerToken],
+    ["URL base del proveedor autorizado", values.providerUrl],
+    ["NIT del emisor", values.issuerNit],
+    ["Dígito de verificación", values.issuerDv],
+    ["Razón social", values.issuerLegalName],
+    ["Correo tributario", values.issuerEmail],
+    ["Teléfono E.164", values.issuerPhoneE164],
+    ["Dirección registrada", values.issuerAddress],
+    ["Código DANE de departamento", values.issuerDepartmentCode],
+    ["Nombre de departamento", values.issuerDepartmentName],
+    ["Código DANE de municipio", values.issuerMunicipalityCode],
+    ["Nombre de municipio", values.issuerMunicipalityName],
+    ["Código postal", values.issuerPostalCode],
+    ["ID de software DIAN", values.softwareId],
+    ["PIN de software", values.softwarePin],
+    ["Certificado X.509 del firmante (PEM; obligatorio en PRD)", values.signatureTrustAnchorPem],
+    ["Prefijo autorizado de factura", values.invoicePrefix],
+    ["Número de resolución", values.invoiceResolutionNumber],
+    ["Inicio del rango autorizado", String(values.invoiceResolutionStart)],
+    ["Fin del rango autorizado", String(values.invoiceResolutionEnd)],
+    ["Fecha de resolución", values.invoiceResolutionDate],
+    ["Vigencia desde", values.invoiceResolutionValidFrom],
+    ["Vigencia hasta", values.invoiceResolutionValidTo],
+    ["Prefijo de nota crédito", values.creditNotePrefix],
+  ];
+  for (const [label, value] of fields) {
+    await region.getByLabel(label, { exact: true }).fill(value);
+  }
+  await region.getByRole("button", { name: "Cifrar y guardar credencial" }).click();
+  await expect(page.getByText(/Credencial cifrada y registrada en LOCAL/)).toBeVisible();
+  const credential = await db.integrationCredential.findFirstOrThrow({
+    where: { provider: "dian", accountName },
+  });
+  expect(credential.ciphertext).not.toEqual(Buffer.from(dianSigner.certificate));
+  expect(JSON.stringify(credential)).not.toContain(dianSigner.certificate);
+  await expect(page.locator("body")).not.toContainText(dianSigner.certificate);
+
+  const fiscal = signFiscalDocument({
+    number: "FE1",
+    scheme: "CUFE",
+    privateKey: dianSigner.privateKey,
+    certificate: dianSigner.certificate,
+  });
+  let signedXml = fiscal.xml;
+  const provider = new DianInvoiceProvider(
+    parseDianCredentials(new TextEncoder().encode(JSON.stringify(values)), "LOCAL"),
+    {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            status: "ACCEPTED",
+            providerDocumentId: "e2e-dian-document",
+            documentHash: fiscal.hash,
+            signedXml,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    },
+  );
+  const transmission = {
+    documentId: randomUUID(),
+    idempotencyKey: `fiscal:${randomUUID()}`,
+    documentType: "INVOICE" as const,
+    documentNumber: fiscal.number,
+    documentHash: fiscal.hash,
+    unsignedXml: "<Invoice/>",
+  };
+  await expect(provider.transmit(transmission)).resolves.toEqual({
+    providerDocumentId: "e2e-dian-document",
+    signedXml: fiscal.xml,
+  });
+  signedXml = signedXml.replace("</ds:SignatureValue>", "A</ds:SignatureValue>");
+  await expect(provider.transmit(transmission)).rejects.toMatchObject({
+    code: "INVALID_RESPONSE",
+  });
 });
 
 test("Flex checkout and local fulfillment work end to end", async ({ page }) => {
@@ -324,4 +451,263 @@ test("Flex checkout and local fulfillment work end to end", async ({ page }) => 
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
     .analyze();
   expect(axe.violations).toEqual([]);
+});
+
+test("Aveonline multi-package UI reconciles timeout without blind reissue", async ({ page }) => {
+  test.setTimeout(180_000);
+  const createOperations: { reference: string; cashCents: bigint; cashOnDelivery: boolean }[] = [];
+  const lookupReferences: string[] = [];
+  const token = `e2e-aveonline-${"x".repeat(48)}`;
+  let firstRequestKey = "";
+  const server = createServer(async (request, response) => {
+    const send = (status: number, body: unknown) => {
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify(body));
+    };
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) chunks.push(Buffer.from(chunk));
+      const operation = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+        tipo?: string;
+        dsreferencia?: string;
+        valorrecaudo?: string;
+        contraentrega?: number;
+      };
+      if (operation.tipo === "auth") {
+        send(200, { status: "ok", token, cuentas: [] });
+        return;
+      }
+      if (operation.tipo === "generarGuia2") {
+        if (
+          typeof operation.dsreferencia !== "string" ||
+          typeof operation.valorrecaudo !== "string" ||
+          !/^[0-9]+\.[0-9]{2}$/.test(operation.valorrecaudo)
+        ) {
+          send(400, { status: "error", message: "Invalid fixture operation" });
+          return;
+        }
+        createOperations.push({
+          reference: operation.dsreferencia,
+          cashCents: BigInt(operation.valorrecaudo.replace(".", "")),
+          cashOnDelivery: operation.contraentrega === 1,
+        });
+        if (createOperations.length === 1) {
+          firstRequestKey = operation.dsreferencia;
+          request.socket.destroy();
+          return;
+        }
+        send(200, {
+          status: "ok",
+          resultado: {
+            guia: {
+              codigo: "0",
+              numguia: "E2E-SECOND",
+              transportadora: "SERVIENTREGA",
+              dsreferencia: operation.dsreferencia,
+            },
+          },
+        });
+        return;
+      }
+      if (operation.tipo === "consultarGuia") {
+        if (typeof operation.dsreferencia !== "string") {
+          send(400, { status: "error", message: "Missing request key" });
+          return;
+        }
+        lookupReferences.push(operation.dsreferencia);
+        if (operation.dsreferencia !== firstRequestKey) {
+          send(404, { status: "error", message: "Not found" });
+          return;
+        }
+        send(200, {
+          status: "ok",
+          resultado: {
+            guia: {
+              codigo: "0",
+              numguia: "E2E-RECONCILED",
+              transportadora: "SERVIENTREGA",
+              dsreferencia: firstRequestKey,
+              rutaguia: "https://app.aveonline.co/guia/E2E-RECONCILED",
+            },
+          },
+        });
+        return;
+      }
+      send(400, { status: "error", message: "Unsupported fixture operation" });
+    } catch {
+      send(500, { status: "error", message: "Fixture failure" });
+    }
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address() as AddressInfo;
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    await authenticateAdmin(page);
+    await page.goto("/admin/integraciones");
+    const credentialRegion = page.getByRole("region", {
+      name: "Conectar logística, correo, facturación, Gemini o Meta",
+    });
+    await credentialRegion
+      .getByLabel("Nombre operativo de la integración")
+      .fill(`Aveonline E2E ${runSuffix}`);
+    await credentialRegion.getByLabel("Usuario Aveonline").fill("fixture-user");
+    await credentialRegion.getByLabel("Contraseña Aveonline").fill("fixture-password");
+    await credentialRegion.getByLabel("ID de empresa").fill("6077");
+    await credentialRegion.getByLabel("Código de empresa").fill("company-code");
+    await credentialRegion.getByLabel("NIT o documento del remitente").fill("9010000001");
+    await credentialRegion.getByLabel("Razón social del remitente").fill("Operador logístico E2E");
+    await credentialRegion
+      .getByLabel("Correo operativo del remitente")
+      .fill("logistica@example.test");
+    await credentialRegion.getByLabel("ID de agente").fill("2600");
+    await credentialRegion.getByLabel("ID de transportador").fill("29");
+    await credentialRegion.getByLabel("URL de autenticación").fill(`${origin}/auth`);
+    await credentialRegion.getByLabel("URL de generación de guías").fill(`${origin}/labels`);
+    await credentialRegion
+      .getByLabel(/URL de conciliación/)
+      .fill(`${origin}/lookup?dsreferencia={requestKey}`);
+    await credentialRegion.getByRole("button", { name: "Cifrar y guardar credencial" }).click();
+    await expect(page.getByText(/Credencial cifrada y registrada en LOCAL/)).toBeVisible();
+
+    await db.stockLocation.updateMany({
+      where: { type: "LOCAL_MAIN", deletedAt: null },
+      data: {
+        addressLine1: "Calle 93 # 13-24",
+        departmentCode: "11",
+        municipalityCode: "11001",
+        phoneE164: "+573001234567",
+      },
+    });
+
+    await page.context().clearCookies();
+    const email = `aveonline-${randomUUID()}@example.test`;
+    await page.goto("/producto/sony-wh-1000xm5");
+    await page.getByLabel("Cantidad", { exact: true }).fill("2");
+    await page.getByRole("button", { name: "Añadir al carrito" }).click();
+    await expect(page.getByText(/Producto añadido/)).toBeVisible();
+    await page.goto("/checkout");
+    await page.getByLabel("Correo electrónico").fill(email);
+    await page.getByLabel("Nombres", { exact: true }).fill("Laura");
+    await page.getByLabel("Apellidos", { exact: true }).fill("Rodríguez");
+    await page.getByLabel("Persona que recibe").fill("Laura Rodríguez");
+    await page.getByLabel("Teléfono", { exact: true }).fill("3001234567");
+    await page.getByLabel("Número de documento").fill("1020304050");
+    await page.getByLabel("Departamento", { exact: true }).selectOption("11");
+    await page.getByLabel("Municipio o territorio").selectOption("11001");
+    await page.getByLabel("Dirección", { exact: true }).fill("Carrera 7 # 71-21");
+    await page.getByRole("button", { name: "Continuar al paso 2" }).click();
+    await page.getByLabel(/Envío a domicilio/).check();
+    await page.getByRole("button", { name: "Continuar al paso 3" }).click();
+    await page.getByLabel(/Pago contraentrega/).check();
+    await page.getByLabel(/Acepto los términos/).check();
+    await page.getByLabel(/Autorizo el tratamiento/).check();
+    await page.getByRole("button", { name: "Registrar pedido e iniciar pago" }).click();
+    await expect(page).toHaveURL(/\/recibo\//);
+    const order = await db.order.findFirstOrThrow({
+      where: { emailSnapshot: email },
+      include: { shipments: true },
+    });
+    expect(order.fulfillmentMethod).toBe("HOME_DELIVERY");
+
+    await authenticateAdmin(page);
+    await page.goto("/admin/logistica");
+    const shipmentCard = page.locator("li").filter({ hasText: order.orderNumber });
+    await shipmentCard.getByRole("button", { name: "Iniciar alistamiento" }).click();
+    await shipmentCard.getByRole("button", { name: "Añadir bulto" }).click();
+    const firstDraft = shipmentCard.getByRole("group", { name: "Bulto 1", exact: true });
+    const secondDraft = shipmentCard.getByRole("group", { name: "Bulto 2", exact: true });
+    for (const [index, draft] of [firstDraft, secondDraft].entries()) {
+      await draft.getByLabel("Peso (g)").fill(String(800 + index * 100));
+      await draft.getByLabel("Largo (mm)").fill("300");
+      await draft.getByLabel("Ancho (mm)").fill("200");
+      await draft.getByLabel("Alto (mm)").fill("100");
+      await draft.getByLabel(/máximo 2/).fill("1");
+    }
+    await shipmentCard.getByRole("button", { name: "Sellar bultos y cuadrar contenido" }).click();
+    await expect(shipmentCard.getByRole("button", { name: "Solicitar guía" })).toHaveCount(2);
+
+    const firstPackage = shipmentCard.locator("li").filter({ hasText: /^Bulto 1 ·/ });
+    const secondPackage = shipmentCard.locator("li").filter({ hasText: /^Bulto 2 ·/ });
+    await firstPackage.getByRole("button", { name: "Solicitar guía" }).click();
+    await expect(firstPackage).toContainText("Por conciliar");
+    await expect(firstPackage).toContainText("NETWORK_UNCERTAIN");
+    await expect(
+      firstPackage.getByRole("button", { name: "Conciliar con proveedor" }),
+    ).toBeVisible();
+    await expect(secondPackage).toContainText("Sellado");
+    expect(createOperations).toHaveLength(1);
+    expect(lookupReferences).toHaveLength(0);
+
+    const reconciliationResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/admin/logistica",
+    );
+    await firstPackage.getByRole("button", { name: "Conciliar con proveedor" }).click();
+    const actionResponse = await reconciliationResponse;
+    expect(actionResponse.status()).toBe(200);
+    const actionPayload = Buffer.from(
+      (await actionResponse.body()).toString("utf8"),
+      "latin1",
+    ).toString("utf8");
+    expect(actionPayload).toContain('"status":"success"');
+    expect(actionPayload).toContain("Guía conciliada sin duplicar cobro.");
+    await expect(page.getByText("Guía conciliada sin duplicar cobro.")).toBeVisible();
+    await expect(firstPackage).toContainText("Con guía");
+    await expect(firstPackage).toContainText("E2E-RECONCILED");
+    expect(createOperations).toHaveLength(1);
+    expect(lookupReferences).toEqual([firstRequestKey]);
+
+    await secondPackage.getByRole("button", { name: "Solicitar guía" }).click();
+    await expect(secondPackage).toContainText("Con guía");
+    await expect(secondPackage).toContainText("E2E-SECOND");
+    expect(createOperations).toHaveLength(2);
+    expect(lookupReferences).toHaveLength(1);
+    expect(new Set(createOperations.map((operation) => operation.reference)).size).toBe(2);
+    expect(createOperations.every((operation) => operation.cashOnDelivery)).toBe(true);
+    expect(createOperations.reduce((sum, operation) => sum + operation.cashCents, 0n)).toBe(
+      order.totalCents,
+    );
+
+    const packages = await db.shipmentPackage.findMany({
+      where: { shipmentId: order.shipments[0]!.id },
+      orderBy: { packageNumber: "asc" },
+    });
+    expect(packages.map((record) => record.status)).toEqual(["LABELLED", "LABELLED"]);
+    expect(packages.map((record) => record.requestKey)).toEqual(
+      createOperations.map((operation) => operation.reference),
+    );
+    expect(packages.every((record) => record.requestStartedAt === null)).toBe(true);
+    expect(packages.every((record) => record.lastError === null)).toBe(true);
+    expect(new Set(packages.map((record) => record.trackingCode)).size).toBe(2);
+    await expect
+      .poll(
+        async () =>
+          (
+            await db.orderFulfillment.findFirstOrThrow({
+              where: { shipmentId: order.shipments[0]!.id },
+            })
+          ).status,
+      )
+      .toBe("LABELLED");
+    expect(
+      await db.shipmentEvent.count({
+        where: { shipmentId: order.shipments[0]!.id, type: "LABEL_GENERATED" },
+      }),
+    ).toBe(2);
+
+    const axe = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .analyze();
+    expect(axe.violations).toEqual([]);
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    });
+  }
 });

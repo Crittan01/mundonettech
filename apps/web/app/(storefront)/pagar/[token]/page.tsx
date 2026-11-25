@@ -54,7 +54,10 @@ export default async function AssistedPaymentPage({ params }: PageProps<"/pagar/
             Esta venta asistida está asociada a una cuenta registrada. Ingresa con tu correo antes
             de llevarla a tu carrito.
           </p>
-          <Link href="/ingresar" className="inline-flex font-medium text-primary hover:underline">
+          <Link
+            href={`/ingresar?next=${encodeURIComponent(`/pagar/${token}`)}`}
+            className="inline-flex font-medium text-primary hover:underline"
+          >
             Iniciar sesión
           </Link>
         </section>
@@ -134,17 +137,6 @@ export default async function AssistedPaymentPage({ params }: PageProps<"/pagar/
             Algún producto, paquete o cantidad ya no está disponible. No puedes aceptar esta
             versión; solicita un enlace nuevo.
           </p>
-        </section>
-      ) : requiresCustomerSignIn ? (
-        <section role="alert" className="space-y-3 rounded-xl border border-border bg-card p-5">
-          <h2 className="font-semibold">Inicia sesión para aceptar esta venta</h2>
-          <p className="text-sm text-muted-foreground">
-            Esta venta asistida está asociada a una cuenta registrada. Ingresa con tu correo antes
-            de llevarla a tu carrito.
-          </p>
-          <Link href="/ingresar" className="inline-flex font-medium text-primary hover:underline">
-            Iniciar sesión
-          </Link>
         </section>
       ) : (
         <ClaimAssistedCartForm token={token} disabled={cart.items.length === 0} />

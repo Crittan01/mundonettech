@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import { IntegrationEnvironment } from "../../../packages/db/dist/index.js";
 import {
   EmailConflictError,
   EmailNotFoundError,
@@ -53,6 +54,12 @@ interface IdempotencyRecord {
 
 interface SaveService {
   saveTemplate(input: TemplateInput, context: typeof audit): Promise<string>;
+  processWebhook(options: {
+    readonly body: string;
+    readonly id: string;
+    readonly timestamp: string;
+    readonly signature: string;
+  }): Promise<unknown>;
 }
 
 function input(idempotencyKey: string, subject = "Aviso de {{storeName}}"): TemplateInput {
@@ -67,17 +74,32 @@ function input(idempotencyKey: string, subject = "Aviso de {{storeName}}"): Temp
   };
 }
 
-function createService(db: unknown): SaveService {
+const parseEmailCredentialsMock = vi.fn();
+
+function createService(
+  db: unknown,
+  settings: {
+    readonly environment?: IntegrationEnvironment;
+    readonly vault?: unknown;
+  } = {},
+): SaveService {
   const loadedModule = loadTypeScriptModule<{
     readonly EmailService: new (
       database: unknown,
-      options: { readonly vault: unknown; readonly publicSiteUrl: string },
+      options: {
+        readonly vault: unknown;
+        readonly publicSiteUrl: string;
+        readonly environment?: IntegrationEnvironment;
+      },
     ) => SaveService;
   }>(
     fileURLToPath(new URL("../../../packages/integrations/src/email-service.ts", import.meta.url)),
     {
       "@mundonettech/core": { normalizeEmail: (value: string) => value },
-      "@mundonettech/db": (db as { __dbMocks?: unknown }).__dbMocks,
+      "@mundonettech/db": {
+        IntegrationEnvironment,
+        ...((db as { __dbMocks?: Record<string, unknown> }).__dbMocks ?? {}),
+      },
       "./email-templates.js": {
         defaultEmailTemplate: vi.fn(),
         renderEmailTemplate: vi.fn(),
@@ -102,13 +124,17 @@ function createService(db: unknown): SaveService {
         integrationDigest,
         publicHttpsUrl: (value: string) => value,
       },
-      "./resend.js": { parseEmailCredentials: vi.fn(), ResendEmailProvider: class {} },
+      "./resend.js": {
+        parseEmailCredentials: parseEmailCredentialsMock,
+        ResendEmailProvider: class {},
+      },
       "./svix.js": { verifySvixWebhook: vi.fn() },
     },
   );
   return new loadedModule.EmailService(db, {
-    vault: {},
+    vault: settings.vault ?? {},
     publicSiteUrl: "https://shop.example.test",
+    environment: settings.environment ?? IntegrationEnvironment.LOCAL,
   });
 }
 
@@ -316,5 +342,41 @@ describe("A2 email template persistent idempotency and serialized versions", () 
     expect(current.templates).toHaveLength(0);
     expect(current.logs).toHaveLength(0);
     expect(current.operations).toHaveLength(0);
+  });
+
+  it("forwards the configured environment when revealing Resend credentials", async () => {
+    parseEmailCredentialsMock.mockReset();
+    const sentinel = new EmailValidationError("stop after credential parsing");
+    parseEmailCredentialsMock.mockImplementationOnce(() => {
+      throw sentinel;
+    });
+    const plaintext = new Uint8Array([1, 2, 3]);
+    const reveal = vi.fn(async () => plaintext);
+    const service = createService(
+      {},
+      {
+        environment: IntegrationEnvironment.STG,
+        vault: {
+          list: vi.fn(async () => ({
+            items: [{ id: actorId, provider: "resend", revokedAt: null }],
+          })),
+          reveal,
+        },
+      },
+    );
+    await expect(
+      service.processWebhook({
+        body: "{}",
+        id: "msg_environment",
+        timestamp: "1764000000",
+        signature: "v1,unit",
+      }),
+    ).rejects.toMatchObject({
+      name: "EmailValidationError",
+      message: "No Resend credential accepted the webhook.",
+    });
+    expect(reveal).toHaveBeenCalledWith(actorId);
+    expect(parseEmailCredentialsMock).toHaveBeenCalledWith(plaintext, IntegrationEnvironment.STG);
+    expect(plaintext).toEqual(new Uint8Array(3));
   });
 });

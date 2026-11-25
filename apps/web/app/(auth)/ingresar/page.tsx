@@ -3,6 +3,7 @@ import Link from "next/link";
 import { AuthShell } from "@/components/auth/auth-shell";
 import { CustomerLoginForm } from "@/components/auth/customer-auth-forms";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
+import { normalizeInternalNextPath } from "@/lib/security/customer-auth-request";
 
 export const metadata = { title: "Iniciar sesión" };
 
@@ -22,6 +23,7 @@ function reasonMessage(reason: string | undefined): string | null {
 export default async function CustomerLoginPage({ searchParams }: PageProps<"/ingresar">) {
   const [security, params] = await Promise.all([getAuthPageSecurity(), searchParams]);
   const notice = reasonMessage(typeof params.reason === "string" ? params.reason : undefined);
+  const next = normalizeInternalNextPath(typeof params.next === "string" ? params.next : undefined);
   return (
     <AuthShell
       title="Inicia sesión"
@@ -46,7 +48,7 @@ export default async function CustomerLoginPage({ searchParams }: PageProps<"/in
           {notice}
         </p>
       ) : null}
-      <CustomerLoginForm {...security} />
+      <CustomerLoginForm {...security} next={next} />
     </AuthShell>
   );
 }

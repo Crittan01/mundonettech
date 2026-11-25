@@ -120,6 +120,8 @@ export class CodReconciliationService {
           0n,
         );
         const receivedCents = items.reduce((sum, item) => sum + item.remittedCents, 0n);
+        assertPaymentMoney(expectedCents, "expectedCents", true);
+        assertPaymentMoney(receivedCents, "receivedCents", true);
         const batch = await tx.remittanceBatch.create({
           data: {
             carrier,

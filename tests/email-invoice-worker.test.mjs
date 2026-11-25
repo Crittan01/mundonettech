@@ -94,6 +94,7 @@ let invoiceCalls;
 let findCalls;
 let uncertain;
 let transientEmail;
+let emailSendWait;
 
 function hash() {
   return Uint8Array.from(randomBytes(32));
@@ -181,12 +182,18 @@ before(async () => {
   findCalls = 0;
   uncertain = false;
   transientEmail = false;
+  emailSendWait = null;
   email = new EmailService(db, {
     vault: vault.forSystemProvider("resend"),
     publicSiteUrl: "https://example.test",
+    environment: "LOCAL",
     providerFactory: () => ({
       async send(input) {
         emailCalls += 1;
+        if (emailSendWait) {
+          emailSendWait.started();
+          await emailSendWait.wait;
+        }
         if (transientEmail)
           throw new (await import("../packages/integrations/dist/index.js")).EmailProviderError(
             "Temporary test failure",
@@ -304,6 +311,89 @@ describe("F3.4 persistent email, monotonic Svix and RFC 8058 suppression", () =>
     const afterRecord = await db.emailEvent.findUniqueOrThrow({ where: { id: queued.id } });
     assert.equal(afterRecord.idempotencyKey, before.idempotencyKey);
     assert.equal(afterRecord.htmlBodySnapshot, before.htmlBodySnapshot);
+  });
+
+  it("requires an exact variable replay for an existing email idempotency key", async () => {
+    const input = {
+      credentialId: resendCredentialId,
+      templateKey: "order.paid",
+      topic: "orders",
+      recipientEmail: `replay-${randomUUID()}@example.test`,
+      idempotencyKey: `test-replay-${randomUUID()}`,
+      variables: {
+        orderNumber: "RLS-2026-REPLAY",
+        storeName: "Tienda de pruebas",
+        receiptUrl: "https://example.test/recibo/token",
+      },
+    };
+    const queued = await email.queue(input);
+    assert.equal((await email.queue(input)).id, queued.id);
+    await assert.rejects(
+      email.queue({
+        ...input,
+        variables: { ...input.variables, storeName: "Contenido diferente" },
+      }),
+      (error) => error.code === "IDEMPOTENCY_CONFLICT",
+    );
+    await assert.rejects(
+      email.queue({
+        ...input,
+        variables: { ...input.variables, unexpected: "no debe aceptarse" },
+      }),
+      (error) => error.code === "IDEMPOTENCY_CONFLICT",
+    );
+    const missingVariable = Object.fromEntries(
+      Object.entries(input.variables).filter(([name]) => name !== "receiptUrl"),
+    );
+    await assert.rejects(
+      email.queue({ ...input, variables: missingVariable }),
+      (error) => error.code === "IDEMPOTENCY_CONFLICT",
+    );
+  });
+
+  it("rejects a provider completion after the email lease expires and retries with the same key", async () => {
+    const queued = await email.queue({
+      credentialId: resendCredentialId,
+      templateKey: "order.paid",
+      topic: "orders",
+      recipientEmail: `lease-${randomUUID()}@example.test`,
+      idempotencyKey: `test-lease-${randomUUID()}`,
+      variables: {
+        orderNumber: "RLS-2026-LEASE",
+        storeName: "Tienda de pruebas",
+        receiptUrl: "https://example.test/recibo/token",
+      },
+    });
+    const beforeCalls = emailCalls;
+    let releaseSend;
+    let markStarted;
+    const started = new Promise((resolve) => {
+      markStarted = resolve;
+    });
+    emailSendWait = {
+      wait: new Promise((resolve) => {
+        releaseSend = resolve;
+      }),
+      started: () => markStarted(),
+    };
+    const pending = email.send(queued.id);
+    await started;
+    await sql.query(
+      `UPDATE "EmailEvent" SET "nextAttemptAt" = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE "id" = $1`,
+      [queued.id],
+    );
+    releaseSend();
+    await assert.rejects(pending, (error) => error.code === "PROVIDER_UNCERTAIN");
+    emailSendWait = null;
+    const stale = await db.emailEvent.findUniqueOrThrow({ where: { id: queued.id } });
+    assert.equal(stale.status, "SENDING");
+    assert.equal(stale.providerMessageId, null);
+    const sent = await email.send(queued.id);
+    assert.equal(sent.status, "SENT");
+    assert.equal(emailCalls, beforeCalls + 2);
+    const retried = await db.emailEvent.findUniqueOrThrow({ where: { id: queued.id } });
+    assert.equal(retried.idempotencyKey, stale.idempotencyKey);
+    assert.equal(retried.htmlBodySnapshot, stale.htmlBodySnapshot);
   });
 });
 
@@ -553,5 +643,84 @@ describe("F3.4 domain worker over the real outbox", () => {
       where: { idempotencyKey: `domain:refund.completed:${nonFiscalRefundId}` },
     });
     assert.equal(refundEmail.status, "SENT");
+  });
+
+  it("applies bounded backoff and dead-letters a poison event without PII", async () => {
+    const shipping = new ShippingService(db, {
+      vault: vault.forSystemProvider("aveonline"),
+      environment: "LOCAL",
+      providerFactory: () => {
+        throw new ShippingProviderError(
+          "Shipping is not expected in this test",
+          "NETWORK_UNCERTAIN",
+        );
+      },
+    });
+    const options = {
+      shipping,
+      email,
+      invoice,
+      vault: vault.forSystemProvider("resend"),
+      publicSiteUrl: "https://example.test",
+      storeName: "Tienda de pruebas",
+      receiptTokenForSubmission: () => "x".repeat(43),
+    };
+    const retryEvent = await db.domainOutbox.create({
+      data: {
+        eventType: "email.requested.v1",
+        aggregateType: "EmailEvent",
+        aggregateId: randomUUID(),
+        deduplicationKey: `worker-retry-${randomUUID()}`,
+        payload: { emailEventId: randomUUID() },
+      },
+    });
+    const retryWorker = new DomainEventWorker(db, {
+      ...options,
+      workerId: "worker:backoff",
+      maximumAttempts: 2,
+    });
+    assert.deepEqual(await retryWorker.runBatch(1), {
+      claimed: 1,
+      completed: 0,
+      retries: 1,
+      failed: 0,
+    });
+    const retryRecord = await db.domainOutbox.findUniqueOrThrow({
+      where: { id: retryEvent.id },
+    });
+    assert.equal(retryRecord.failedAt, null);
+    assert.equal(retryRecord.claimedBy, null);
+    assert.ok(retryRecord.availableAt > new Date());
+    assert.equal(retryRecord.lastError, "EmailNotFoundError");
+    assert.equal(JSON.stringify(retryRecord).includes("@"), false);
+
+    const deadEvent = await db.domainOutbox.create({
+      data: {
+        eventType: "email.requested.v1",
+        aggregateType: "EmailEvent",
+        aggregateId: randomUUID(),
+        deduplicationKey: `worker-dead-${randomUUID()}`,
+        payload: { emailEventId: randomUUID() },
+      },
+    });
+    const deadWorker = new DomainEventWorker(db, {
+      ...options,
+      workerId: "worker:dead-letter",
+      maximumAttempts: 1,
+    });
+    assert.deepEqual(await deadWorker.runBatch(1), {
+      claimed: 1,
+      completed: 0,
+      retries: 0,
+      failed: 1,
+    });
+    const deadRecord = await db.domainOutbox.findUniqueOrThrow({
+      where: { id: deadEvent.id },
+    });
+    assert.ok(deadRecord.failedAt);
+    assert.equal(deadRecord.claimedBy, null);
+    assert.equal(deadRecord.lastError, "EmailNotFoundError");
+    assert.equal(JSON.stringify(deadRecord).includes("@"), false);
+    assert.equal((await deadWorker.runBatch(1)).claimed, 0);
   });
 });

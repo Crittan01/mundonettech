@@ -1,3 +1,4 @@
+import { Children, isValidElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { formatCopCents } from "../../packages/core/dist/index.js";
@@ -6,27 +7,57 @@ import { expectMethodAllowlist, expectNoStoreNoIndex } from "./test-helpers";
 
 const mocks = vi.hoisted(() => ({
   creditNoteFindFirst: vi.fn(),
+  credentialList: vi.fn(),
+  creditGet: vi.fn(),
+  getDatabaseClock: vi.fn(),
   getReceiptByToken: vi.fn(),
   hashCartToken: vi.fn((token: string) => {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new TypeError("invalid token");
     return Uint8Array.from([1, 2, 3]);
   }),
   invoiceFindFirst: vi.fn(),
+  listOrderPayments: vi.fn(),
+  optionalCustomerId: vi.fn(),
+  orderFindUnique: vi.fn(),
+  paymentAttemptFindMany: vi.fn(),
 }));
 
+vi.mock("server-only", () => ({}));
+vi.mock("@/components/orders/receipt-payment-panel", () => ({
+  ReceiptPaymentPanel: () => null,
+}));
+vi.mock("@/lib/cart", () => ({ optionalCustomerId: mocks.optionalCustomerId }));
 vi.mock("@/lib/cart-token", () => ({ hashCartToken: mocks.hashCartToken }));
 vi.mock("@/lib/checkout", () => ({
   orderService: () => ({ getReceiptByToken: mocks.getReceiptByToken }),
 }));
+vi.mock("@/lib/database-clock", () => ({ getDatabaseClock: mocks.getDatabaseClock }));
 vi.mock("@/lib/db", () => ({
   getDatabase: () => ({
     creditNote: { findFirst: mocks.creditNoteFindFirst },
+    order: { findUnique: mocks.orderFindUnique },
+    paymentAttempt: { findMany: mocks.paymentAttemptFindMany },
     taxInvoice: { findFirst: mocks.invoiceFindFirst },
   }),
+}));
+vi.mock("@/lib/integrations", () => ({
+  getBankTransferInstructions: () => null,
+  getIntegrationCredentialVault: () => ({
+    forSystemProvider: () => ({ list: mocks.credentialList }),
+  }),
+  paymentService: () => ({ listOrderPayments: mocks.listOrderPayments }),
+  storeCreditService: () => ({ get: mocks.creditGet }),
+}));
+vi.mock("@/lib/payment-identities", () => ({
+  documentIdentityHash: () => new Uint8Array(32),
+  emailIdentityHash: () => new Uint8Array(32),
+  phoneIdentityHash: () => new Uint8Array(32),
 }));
 
 import * as documentRoute from "../../apps/web/app/api/recibos/[token]/documentos/[kind]/[id]/route";
 import * as downloadRoute from "../../apps/web/app/api/recibos/[token]/descargar/route";
+import ReceiptPage from "../../apps/web/app/(storefront)/recibo/[token]/page";
+import { ReceiptPaymentPanel } from "../../apps/web/components/orders/receipt-payment-panel";
 
 const token = "A".repeat(43);
 const documentId = "12345678-1234-4123-8123-123456789abc";
@@ -110,6 +141,13 @@ function documentRequest(kind = "invoice", id = documentId, value = token): Prom
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.credentialList.mockResolvedValue({ items: [] });
+  mocks.creditGet.mockResolvedValue(null);
+  mocks.getDatabaseClock.mockResolvedValue(new Date("2026-02-01T12:00:00.000Z"));
+  mocks.listOrderPayments.mockResolvedValue([]);
+  mocks.optionalCustomerId.mockResolvedValue(null);
+  mocks.orderFindUnique.mockResolvedValue({ customerId: null });
+  mocks.paymentAttemptFindMany.mockResolvedValue([]);
   mocks.getReceiptByToken.mockResolvedValue(structuredClone(receipt));
   mocks.invoiceFindFirst.mockResolvedValue({
     fullNumber: "FAC-2026-1",
@@ -120,6 +158,33 @@ beforeEach(() => {
     signedXml: "<CreditNote><ID>NC-2026-1</ID></CreditNote>",
   });
 });
+
+interface PaymentPanelProps {
+  readonly allowNewPayment: boolean;
+  readonly uncommittedCents: string;
+  readonly resumableWompiAttemptId: string | null;
+}
+
+function findPaymentPanelProps(node: ReactNode): PaymentPanelProps | null {
+  if (!isValidElement(node)) return null;
+  if (node.type === ReceiptPaymentPanel) return node.props as PaymentPanelProps;
+  const children = (node.props as { children?: ReactNode }).children;
+  for (const child of Children.toArray(children)) {
+    const found = findPaymentPanelProps(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function receiptPaymentProps(): Promise<PaymentPanelProps> {
+  const page = await ReceiptPage({
+    params: Promise.resolve({ token }),
+    searchParams: Promise.resolve({}),
+  });
+  const props = findPaymentPanelProps(page);
+  if (!props) throw new Error("Receipt payment panel was not rendered.");
+  return props;
+}
 
 describe("receipt text download", () => {
   it("uses the hashed capability token and emits a no-store attachment", async () => {
@@ -256,5 +321,42 @@ describe("receipt fiscal XML downloads", () => {
     expect(mocks.hashCartToken).not.toHaveBeenCalled();
     expect(mocks.getReceiptByToken).not.toHaveBeenCalled();
     expect(mocks.invoiceFindFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("receipt payment clock", () => {
+  it("uses PostgreSQL time instead of a skewed Node clock for commitments and Wompi resume", async () => {
+    mocks.invoiceFindFirst.mockResolvedValue(null);
+    const attempt = {
+      id: "wompi-attempt-id",
+      provider: "WOMPI",
+      status: "REQUIRES_ACTION",
+      amountCents: 1000n,
+      expiresAt: new Date("2026-01-15T12:00:00.000Z"),
+      transactions: [],
+    };
+    mocks.paymentAttemptFindMany.mockResolvedValue([attempt]);
+    mocks.listOrderPayments.mockResolvedValue([attempt]);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+      mocks.getDatabaseClock.mockResolvedValue(new Date("2026-02-01T12:00:00.000Z"));
+      await expect(receiptPaymentProps()).resolves.toMatchObject({
+        allowNewPayment: true,
+        uncommittedCents: "1000",
+        resumableWompiAttemptId: null,
+      });
+
+      vi.setSystemTime(new Date("2026-03-01T12:00:00.000Z"));
+      mocks.getDatabaseClock.mockResolvedValue(new Date("2026-01-01T12:00:00.000Z"));
+      await expect(receiptPaymentProps()).resolves.toMatchObject({
+        allowNewPayment: false,
+        uncommittedCents: "0",
+        resumableWompiAttemptId: attempt.id,
+      });
+      expect(mocks.getDatabaseClock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

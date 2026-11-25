@@ -121,61 +121,51 @@ export function calculateOrderTaxes(
     assertRate(line.catalogRateBps, "catalogRateBps");
     const unitValueCents = roundDivHalfUp(line.netCents, BigInt(line.quantity));
 
-    let rule: OrderTaxRule;
-    let appliedRateBps = 0;
-    if (context.regime === "NO_RESPONSABLE_IVA") {
-      rule = "NOT_RESPONSABLE";
-    } else {
-      switch (line.treatment) {
-        case "STANDARD":
-          if (
-            line.catalogRateBps === 0 ||
-            line.uvtLimit !== null ||
-            line.aboveUvtRateBps !== null
-          ) {
-            throw new TypeError("Standard tax groups require a positive rate and no UVT rule.");
-          }
-          rule = "STANDARD";
-          appliedRateBps = line.catalogRateBps;
-          break;
-        case "EXEMPT":
-        case "EXCLUDED":
-          if (
-            line.catalogRateBps !== 0 ||
-            line.uvtLimit !== null ||
-            line.aboveUvtRateBps !== null
-          ) {
-            throw new TypeError("Zero-rated tax groups cannot carry rates or UVT thresholds.");
-          }
-          rule = line.treatment;
-          break;
-        case "UVT_THRESHOLD_EXCLUDED": {
-          if (
-            line.catalogRateBps !== 0 ||
-            !Number.isInteger(line.uvtLimit) ||
-            line.uvtLimit === null ||
-            line.uvtLimit <= 0 ||
-            line.uvtLimit > 1_000_000
-          ) {
-            throw new TypeError("UVT tax groups require a positive threshold and zero base rate.");
-          }
-          const aboveRate = assertRate(line.aboveUvtRateBps ?? -1, "aboveUvtRateBps");
-          if (aboveRate === 0)
-            throw new TypeError("The rate above a UVT threshold must be positive.");
-          const thresholdCents = BigInt(line.uvtLimit) * context.uvtValueCents;
-          assertMoney(thresholdCents, "uvtThresholdCents", true);
-          if (unitValueCents <= thresholdCents) {
-            rule = "UVT_EXCLUDED_WITHIN_LIMIT";
-          } else {
-            rule = "UVT_STANDARD_ABOVE_LIMIT";
-            appliedRateBps = aboveRate;
-          }
-          break;
+    let responsibleRule: OrderTaxRule;
+    let responsibleRateBps = 0;
+    switch (line.treatment) {
+      case "STANDARD":
+        if (line.catalogRateBps === 0 || line.uvtLimit !== null || line.aboveUvtRateBps !== null) {
+          throw new TypeError("Standard tax groups require a positive rate and no UVT rule.");
         }
-        default:
-          throw new TypeError("Unknown catalog tax treatment.");
+        responsibleRule = "STANDARD";
+        responsibleRateBps = line.catalogRateBps;
+        break;
+      case "EXEMPT":
+      case "EXCLUDED":
+        if (line.catalogRateBps !== 0 || line.uvtLimit !== null || line.aboveUvtRateBps !== null) {
+          throw new TypeError("Zero-rated tax groups cannot carry rates or UVT thresholds.");
+        }
+        responsibleRule = line.treatment;
+        break;
+      case "UVT_THRESHOLD_EXCLUDED": {
+        if (
+          line.catalogRateBps !== 0 ||
+          !Number.isInteger(line.uvtLimit) ||
+          line.uvtLimit === null ||
+          line.uvtLimit <= 0 ||
+          line.uvtLimit > 1_000_000
+        ) {
+          throw new TypeError("UVT tax groups require a positive threshold and zero base rate.");
+        }
+        const aboveRate = assertRate(line.aboveUvtRateBps ?? -1, "aboveUvtRateBps");
+        if (aboveRate === 0)
+          throw new TypeError("The rate above a UVT threshold must be positive.");
+        const thresholdCents = BigInt(line.uvtLimit) * context.uvtValueCents;
+        assertMoney(thresholdCents, "uvtThresholdCents", true);
+        if (unitValueCents <= thresholdCents) {
+          responsibleRule = "UVT_EXCLUDED_WITHIN_LIMIT";
+        } else {
+          responsibleRule = "UVT_STANDARD_ABOVE_LIMIT";
+          responsibleRateBps = aboveRate;
+        }
+        break;
       }
+      default:
+        throw new TypeError("Unknown catalog tax treatment.");
     }
+    const rule = context.regime === "NO_RESPONSABLE_IVA" ? "NOT_RESPONSABLE" : responsibleRule;
+    const appliedRateBps = context.regime === "NO_RESPONSABLE_IVA" ? 0 : responsibleRateBps;
 
     const lineTax = roundMulDiv(line.netCents, BigInt(appliedRateBps), 10_000n);
     assertMoney(lineTax, "taxCents");

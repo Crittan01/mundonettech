@@ -264,7 +264,9 @@ export async function reconcileLabelAction(
     return actionSuccess(
       result.status === "LABELLED"
         ? "Guía conciliada sin duplicar cobro."
-        : "El proveedor confirmó que no existe la guía; el bulto puede solicitarse de nuevo.",
+        : result.status === "SEALED"
+          ? "El proveedor confirmó que no existe la guía; el bulto puede solicitarse de nuevo."
+          : `Resultado ${result.status}: el intento cambió durante la conciliación; recarga antes de continuar.`,
     );
   } catch (error) {
     return failure(error, values);

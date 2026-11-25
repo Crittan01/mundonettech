@@ -84,6 +84,20 @@ function errorCode(error: unknown): string {
   return error instanceof EmailProviderError ? error.code : "PROVIDER_FAILURE";
 }
 
+function assertSendLease(current: EmailEvent, claimed: EmailEvent, now: Date): void {
+  if (
+    !current.nextAttemptAt ||
+    !claimed.nextAttemptAt ||
+    current.nextAttemptAt.getTime() !== claimed.nextAttemptAt.getTime() ||
+    current.nextAttemptAt <= now
+  ) {
+    throw new EmailConflictError(
+      "Email claim expired before its provider outcome could be recorded.",
+      "PROVIDER_UNCERTAIN",
+    );
+  }
+}
+
 function matchesPayloadHash(stored: Uint8Array, incoming: Uint8Array): boolean {
   const left = Buffer.from(stored);
   const right = Buffer.from(incoming);
@@ -127,13 +141,14 @@ export class EmailService {
     this.options = {
       ...options,
       publicSiteUrl: publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl").replace(/\/$/, ""),
+      environment: options.environment ?? "PRD",
     };
   }
 
   private async credentials(credentialId: string): Promise<EmailCredentials> {
     const plaintext = await this.options.vault.reveal(credentialId);
     try {
-      return parseEmailCredentials(plaintext);
+      return parseEmailCredentials(plaintext, this.options.environment);
     } finally {
       plaintext.fill(0);
     }
@@ -305,6 +320,18 @@ export class EmailService {
         existing.htmlBodySnapshot === rendered.htmlBody &&
         existing.textBodySnapshot === rendered.textBody;
     }
+    const storedVariables = existing.variablesSnapshot as Record<string, unknown>;
+    const inputVariableNames = Object.keys(params.input.variables).sort();
+    const storedVariableNames = Object.keys(storedVariables)
+      .filter((name) => name !== "unsubscribeUrl")
+      .sort();
+    const sameVariables =
+      inputVariableNames.length === storedVariableNames.length &&
+      inputVariableNames.every(
+        (name, index) =>
+          name === storedVariableNames[index] &&
+          storedVariables[name] === params.input.variables[name],
+      );
     const same =
       existing.templateKey === params.key &&
       existing.topic === params.topic &&
@@ -315,9 +342,7 @@ export class EmailService {
       (existing.abandonedCartId ?? null) === (params.input.abandonedCartId ?? null) &&
       (existing.lifecycleMessageId ?? null) === (params.input.lifecycleMessageId ?? null) &&
       sameSnapshot &&
-      Object.entries(params.input.variables).every(
-        ([name, value]) => (existing.variablesSnapshot as Record<string, unknown>)[name] === value,
-      );
+      sameVariables;
     if (!same)
       throw new EmailConflictError(
         "Email idempotency key was already used for another message.",
@@ -741,6 +766,7 @@ export class EmailService {
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
+      assertSendLease(locked, claimed, now);
       const updated = await tx.emailEvent.update({
         where: { id: claimed.id },
         data: {
@@ -886,6 +912,7 @@ export class EmailService {
         }
         const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
         const now = nowRows[0]!.now;
+        assertSendLease(current, claimed, now);
         const saved = await tx.emailEvent.update({
           where: { id: emailEventId },
           data: {
@@ -926,6 +953,7 @@ export class EmailService {
           }
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
+          assertSendLease(current, claimed, now);
           const delay = Math.min(15 * 60_000, 5_000 * 2 ** Math.min(claimedAttemptCount, 8));
           const nextAttemptAt = new Date(now.getTime() + delay);
           const saved = await tx.emailEvent.update({
@@ -958,6 +986,7 @@ export class EmailService {
         }
         const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
         const now = nowRows[0]!.now;
+        assertSendLease(current, claimed, now);
         const saved = await tx.emailEvent.update({
           where: { id: emailEventId },
           data: {
@@ -1157,7 +1186,11 @@ export class EmailService {
         }[event.eventType] as EmailEventStatus | undefined;
         if (!targetStatus) return { eventId: email.id, status: email.status, replayed: false };
         const rank = statusRank(targetStatus);
-        if (email.statusRank > rank || finalStatuses.has(email.status))
+        if (
+          email.statusRank > rank ||
+          email.status === targetStatus ||
+          finalStatuses.has(email.status)
+        )
           return { eventId: email.id, status: email.status, replayed: false };
         await tx.emailEvent.update({
           where: { id: email.id },

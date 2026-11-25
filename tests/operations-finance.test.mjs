@@ -283,8 +283,8 @@ describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => 
     await sql.query(
       `INSERT INTO "Order" (
         "id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus",
-        "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt"
-      ) VALUES ($1, $2, $3, 'CONFIRMED', 'PARTIALLY_PAID', 'UNFULFILLED', 50000, 0, 0, 50000, 100000, CURRENT_TIMESTAMP)`,
+        "fulfillmentMethod", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt"
+      ) VALUES ($1, $2, $3, 'CONFIRMED', 'PARTIALLY_PAID', 'UNFULFILLED', 'CLICK_COLLECT', 50000, 0, 0, 50000, 100000, CURRENT_TIMESTAMP)`,
       [partialOrderId, `FIN-${suffix}`, catalog.customerId],
     );
     await sql.query(

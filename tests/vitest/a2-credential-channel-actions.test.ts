@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
+import { createXmlDsigSigner } from "../helpers/xml-dsig-fixtures.mjs";
 import { describe, expect, it, vi } from "vitest";
 
 import * as integrations from "../../packages/integrations/dist/index.js";
@@ -24,6 +25,7 @@ const userAgentHash = createHash("sha256").update("a2-user-agent").digest();
 const clientSecret = "a2-client-secret-must-not-leak-123456";
 const privateKey = "prv_test_A2PRIVATEKEYMUSTNOTLEAK123456";
 const originEmail = "operador-privado@example.test";
+const dianSigner = createXmlDsigSigner("DIAN Credential Action Signer");
 
 class AdminAuthorizationError extends Error {
   constructor(
@@ -361,6 +363,7 @@ function operationalValues(provider: string): Record<string, string> {
     issuerPhoneE164: "+573001234567",
     softwareId: "software-1234",
     softwarePin: "software-secret-pin",
+    signatureTrustAnchorPem: dianSigner.certificate,
     invoicePrefix: "FE",
     invoiceResolutionNumber: "18760000001",
     invoiceResolutionStart: "1",
@@ -378,7 +381,12 @@ describe("A2 — operational credential closed contracts", () => {
     async (provider) => {
       const base = baseMocks();
       let plaintext: Uint8Array | undefined;
+      let sealedPayload: Record<string, unknown> | undefined;
       const create = vi.fn(async (options: VaultWriteOptions) => {
+        sealedPayload = JSON.parse(new TextDecoder().decode(options.plaintext)) as Record<
+          string,
+          unknown
+        >;
         plaintext = options.plaintext;
         return { accountName: options.accountName };
       });
@@ -404,6 +412,10 @@ describe("A2 — operational credential closed contracts", () => {
         }),
       );
       expect(plaintext?.every((value) => value === 0)).toBe(true);
+      if (provider === "dian") {
+        expect(sealedPayload?.signatureTrustAnchorPem).toBe(dianSigner.certificate);
+        expect(JSON.stringify(state)).not.toContain(dianSigner.certificate);
+      }
     },
   );
 
@@ -477,6 +489,59 @@ describe("A2 — operational credential closed contracts", () => {
         audit: expect.objectContaining({ ipHash, userAgentHash }),
       }),
     );
+    expect(plaintext?.every((value) => value === 0)).toBe(true);
+  });
+
+  it("requires a DIAN trust anchor in PRD and rejects invalid PEM without logging it", async () => {
+    for (const signatureTrustAnchorPem of ["", "not-a-certificate"]) {
+      const base = baseMocks();
+      base.getIntegrationEnvironment.mockReturnValue("PRD");
+      const create = vi.fn();
+      base.mocks["@/lib/integrations"] = {
+        getIntegrationEnvironment: base.getIntegrationEnvironment,
+        getIntegrationCredentialVault: vi.fn(() => ({ create })),
+      };
+      const actions = loadActionModule<Record<string, FormAction>>(
+        "admin-operational-credentials",
+        base.mocks,
+      );
+      const state = await actions.createOperationalCredentialAction!(
+        previous,
+        form({ ...operationalValues("dian"), signatureTrustAnchorPem }),
+      );
+      expect(state.status).toBe("error");
+      expect(state.values).toEqual({ provider: "dian" });
+      expect(JSON.stringify(state)).not.toContain(dianSigner.certificate);
+      expect(create).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps legacy LOCAL credentials without an anchor and zeroizes their sealed payload", async () => {
+    const base = baseMocks();
+    let sealedPayload: Record<string, unknown> | undefined;
+    let plaintext: Uint8Array | undefined;
+    const create = vi.fn(async (options: VaultWriteOptions) => {
+      sealedPayload = JSON.parse(new TextDecoder().decode(options.plaintext)) as Record<
+        string,
+        unknown
+      >;
+      plaintext = options.plaintext;
+      return { accountName: options.accountName };
+    });
+    base.mocks["@/lib/integrations"] = {
+      getIntegrationEnvironment: base.getIntegrationEnvironment,
+      getIntegrationCredentialVault: vi.fn(() => ({ create })),
+    };
+    const actions = loadActionModule<Record<string, FormAction>>(
+      "admin-operational-credentials",
+      base.mocks,
+    );
+    const state = await actions.createOperationalCredentialAction!(
+      previous,
+      form({ ...operationalValues("dian"), signatureTrustAnchorPem: "" }),
+    );
+    expect(state.status).toBe("success");
+    expect(sealedPayload?.signatureTrustAnchorPem).toBeNull();
     expect(plaintext?.every((value) => value === 0)).toBe(true);
   });
 

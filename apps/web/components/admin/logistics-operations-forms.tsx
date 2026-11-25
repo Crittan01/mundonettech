@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,7 @@ import {
   saveDeliveryZoneAction,
   startPickingAction,
 } from "@/lib/actions/admin-logistics";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 export function StartPickingForm({ shipmentId }: { shipmentId: string }) {
   const [state, action, pending] = useActionState(startPickingAction, initialActionState);
@@ -194,6 +194,33 @@ export function PackShipmentForm({
   );
 }
 
+function labelOperationButtonLabel(pending: boolean, reconcile: boolean): string {
+  return pending ? "Procesando…" : reconcile ? "Conciliar con proveedor" : "Solicitar guía";
+}
+
+function publishLabelOperationMessage(
+  container: ParentNode,
+  packageId: string,
+  state: ActionState,
+  documentRef: Document = document,
+): void {
+  const selector = `output[data-label-operation-message="${packageId}"]`;
+  const existing = container.querySelector<HTMLOutputElement>(selector);
+  if (state.status === "idle" || !state.message) {
+    existing?.remove();
+    return;
+  }
+  const message = existing ?? documentRef.createElement("output");
+  message.dataset.labelOperationMessage = packageId;
+  message.className =
+    state.status === "error" ? "text-sm text-destructive" : "text-sm text-foreground";
+  message.setAttribute("role", state.status === "error" ? "alert" : "status");
+  message.setAttribute("aria-live", state.status === "error" ? "assertive" : "polite");
+  message.setAttribute("aria-atomic", "true");
+  message.textContent = state.message;
+  if (!existing) container.append(message);
+}
+
 export function LabelOperationForm({
   packageId,
   reconcile = false,
@@ -201,17 +228,28 @@ export function LabelOperationForm({
   packageId: string;
   reconcile?: boolean;
 }) {
+  const formRef = useRef<HTMLFormElement>(null);
+  const operation = reconcile ? reconcileLabelAction : processLabelAction;
   const [state, action, pending] = useActionState(
-    reconcile ? reconcileLabelAction : processLabelAction,
+    async (previous: ActionState, formData: FormData) => {
+      const container = formRef.current?.parentElement;
+      if (container) publishLabelOperationMessage(container, packageId, initialActionState);
+      const result = await operation(previous, formData);
+      if (container) publishLabelOperationMessage(container, packageId, result);
+      return result;
+    },
     initialActionState,
   );
+  useEffect(() => {
+    const container = formRef.current?.parentElement;
+    if (container) publishLabelOperationMessage(container, packageId, state);
+  }, [packageId, state]);
   return (
-    <form action={action} className="space-y-2">
+    <form ref={formRef} action={action} className="space-y-2">
       <input type="hidden" name="packageId" value={packageId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
-        {pending ? "Procesando…" : reconcile ? "Conciliar con proveedor" : "Solicitar guía"}
+        {labelOperationButtonLabel(pending, reconcile)}
       </Button>
-      <FormMessage state={state} />
     </form>
   );
 }

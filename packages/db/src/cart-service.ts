@@ -28,7 +28,11 @@ import {
   inInventoryTransaction,
   isSellableVariant,
 } from "./inventory-shared.js";
-import { databaseNow } from "./primitives.js";
+import {
+  assertAdminActorInTransaction,
+  databaseNow,
+  isAdminSelfDealingCustomer,
+} from "./primitives.js";
 import type { PricingMutationAudit } from "./pricing-types.js";
 import type { CartReference, CartSnapshot } from "./cart-types.js";
 import { assertProposalIntegrity } from "./b2b-shared.js";
@@ -280,14 +284,7 @@ function cartAuditChanges(before: CartWithItems, after: CartWithItems): Prisma.J
   };
 }
 
-async function writeCartAudit(
-  tx: Prisma.TransactionClient,
-  audit: PricingMutationAudit | undefined,
-  action: string,
-  cartId: string,
-  metadata: Prisma.JsonObject = {},
-): Promise<void> {
-  if (!audit) return;
+async function authorizeCartMutation(tx: Prisma.TransactionClient, audit: PricingMutationAudit) {
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
   if (
     audit.ipHash.length !== 32 ||
@@ -295,6 +292,18 @@ async function writeCartAudit(
   ) {
     throw new CartValidationError("Audit hashes must contain 32 bytes.");
   }
+  return assertAdminActorInTransaction(tx, audit.actorAdminUserId, "sales:write");
+}
+
+async function writeCartAudit(
+  tx: Prisma.TransactionClient,
+  audit: PricingMutationAudit | undefined,
+  action: string,
+  cartId: string,
+  metadata: Prisma.JsonObject = {},
+  options: { readonly selfDealing?: boolean } = {},
+): Promise<void> {
+  if (!audit) return;
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,
@@ -303,6 +312,8 @@ async function writeCartAudit(
       targetId: cartId,
       ipHash: Uint8Array.from(audit.ipHash),
       userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
+      requestId: audit.requestId ?? null,
+      ...(options.selfDealing ? { selfDealing: true } : {}),
       metadata: redactedAuditMetadata(metadata),
     },
   });
@@ -458,7 +469,11 @@ function bundleDefinition(
   };
 }
 
-async function storedSnapshot(tx: Prisma.TransactionClient, cartId: string): Promise<CartSnapshot> {
+async function storedSnapshot(
+  tx: Prisma.TransactionClient,
+  cartId: string,
+  now: Date,
+): Promise<CartSnapshot> {
   const cart = await loadCart(tx, cartId);
   const [availability, bundles] = await Promise.all([
     availabilityFor(
@@ -528,7 +543,9 @@ async function storedSnapshot(tx: Prisma.TransactionClient, cartId: string): Pro
     totalUnits: cart.items.reduce((sum, item) => sum + item.quantity, 0),
     issues,
     canContinue:
-      cart.status === "ACTIVE" && !issues.some((issue) => blockingIssueCodes.has(issue.code)),
+      cart.status === "ACTIVE" &&
+      cart.expiresAt > now &&
+      !issues.some((issue) => blockingIssueCodes.has(issue.code)),
     expiresAt: cart.expiresAt.toISOString(),
     assistedExpiresAt: cart.assistedExpiresAt?.toISOString() ?? null,
     revalidatedAt: (cart.priceRevalidatedAt ?? cart.updatedAt).toISOString(),
@@ -626,7 +643,7 @@ async function revalidateB2bCart(
       priceRevalidatedAt: now,
     },
   });
-  return storedSnapshot(tx, cart.id);
+  return storedSnapshot(tx, cart.id, now);
 }
 
 export class CartService {
@@ -803,7 +820,7 @@ export class CartService {
         where: { id: cart.id },
         data: { pricingIssues: serializeIssues(issues), priceRevalidatedAt: now },
       });
-      return storedSnapshot(tx, cart.id);
+      return storedSnapshot(tx, cart.id, now);
     }
 
     if (cart.coupon) {
@@ -816,6 +833,9 @@ export class CartService {
         pricing.eligibleCouponSubtotalCents === 0n
       ) {
         issues.push({ code: "COUPON_INVALID" });
+        await releaseCoupon(tx, cart.id, now, cart.coupon.id);
+        await tx.cart.update({ where: { id: cart.id }, data: { couponId: null } });
+        cart = { ...cart, coupon: null };
       }
     }
     const priceChanged =
@@ -856,7 +876,7 @@ export class CartService {
         priceRevalidatedAt: now,
       },
     });
-    const snapshot = await storedSnapshot(tx, cart.id);
+    const snapshot = await storedSnapshot(tx, cart.id, now);
     return {
       ...snapshot,
       items: snapshot.items.map((line) => ({
@@ -875,6 +895,7 @@ export class CartService {
     strict = true,
   ): Promise<CartSnapshot> {
     return inInventoryTransaction(this.db, async (tx) => {
+      const actor = audit ? await authorizeCartMutation(tx, audit) : null;
       const { cart, now } = await lockCart(tx, reference);
       assertActiveCart(cart, now);
       assertAdminMutable(cart, audit);
@@ -885,7 +906,12 @@ export class CartService {
       const snapshot = await this.revalidateLocked(tx, cart.id, now);
       if (strict) assertStrictMutation(snapshot);
       const after = await loadCart(tx, cart.id);
-      await writeCartAudit(tx, audit, action, cart.id, cartAuditChanges(cart, after));
+      const selfDealing = actor
+        ? await isAdminSelfDealingCustomer(tx, actor, { customerId: cart.customerId })
+        : false;
+      await writeCartAudit(tx, audit, action, cart.id, cartAuditChanges(cart, after), {
+        selfDealing,
+      });
       return snapshot;
     });
   }
@@ -943,7 +969,8 @@ export class CartService {
     assertUuid(cartId, "cartId");
     return inInventoryTransaction(this.db, async (tx) => {
       const { cart, now } = await lockCart(tx, { cartId });
-      if (cart.status !== "ACTIVE" || cart.expiresAt <= now) return storedSnapshot(tx, cart.id);
+      if (cart.status !== "ACTIVE" || cart.expiresAt <= now)
+        return storedSnapshot(tx, cart.id, now);
       return this.revalidateLocked(tx, cart.id, now);
     });
   }
@@ -1247,6 +1274,7 @@ export class CartService {
       throw new CouponError("INVALID_CODE", "Coupon code format is invalid.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
+      const actor = audit ? await authorizeCartMutation(tx, audit) : null;
       const peekedCoupon = await tx.coupon.findFirst({
         where: { code, deletedAt: null },
         select: { id: true },
@@ -1310,11 +1338,22 @@ export class CartService {
       if (snapshot.issues.some((issue) => issue.code === "COUPON_INVALID")) {
         throw new CouponError("NO_ELIGIBLE_ITEMS", "Cart has no items eligible for this coupon.");
       }
+      assertStrictMutation(snapshot);
       const after = await loadCart(tx, cart.id);
-      await writeCartAudit(tx, audit, "CART_COUPON_APPLIED", cart.id, {
-        ...cartAuditChanges(cart, after),
-        appliedCouponId: coupon.id,
-      });
+      const selfDealing = actor
+        ? await isAdminSelfDealingCustomer(tx, actor, { customerId: cart.customerId })
+        : false;
+      await writeCartAudit(
+        tx,
+        audit,
+        "CART_COUPON_APPLIED",
+        cart.id,
+        {
+          ...cartAuditChanges(cart, after),
+          appliedCouponId: coupon.id,
+        },
+        { selfDealing },
+      );
       return snapshot;
     });
   }
@@ -1345,16 +1384,15 @@ export class CartService {
     const accessTokenHash = assertTokenHash(input.accessTokenHash, "accessTokenHash");
     const expiresAt = validateExpiration(input.expiresAt, "expiresAt");
     assertUuid(input.assistedByAdminUserId, "assistedByAdminUserId");
+    if (input.assistedByAdminUserId !== input.audit.actorAdminUserId) {
+      throw new CartValidationError("Assisted sale administrator must match the audited actor.");
+    }
     if (input.customerId) assertUuid(input.customerId, "customerId");
     return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await authorizeCartMutation(tx, input.audit);
       const now = await databaseNow(tx);
       if (expiresAt <= now)
         throw new CartValidationError("Assisted cart expiration must be in the future.");
-      const admin = await tx.adminUser.findFirst({
-        where: { id: input.assistedByAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { id: true },
-      });
-      if (!admin) throw new CartValidationError("Assisted sale administrator is not active.");
       if (input.customerId) {
         const customer = await tx.customer.findFirst({
           where: { id: input.customerId, deletedAt: null, status: { not: "ANONYMIZED" } },
@@ -1366,7 +1404,7 @@ export class CartService {
         data: {
           accessTokenHash,
           kind: "ASSISTED",
-          assistedByAdminUserId: input.assistedByAdminUserId,
+          assistedByAdminUserId: actor.id,
           assistedExpiresAt: expiresAt,
           expiresAt,
           customerId: input.customerId ?? null,
@@ -1375,11 +1413,21 @@ export class CartService {
       });
       const snapshot = await this.revalidateLocked(tx, cart.id, now);
       const after = await loadCart(tx, cart.id);
-      await writeCartAudit(tx, input.audit, "ASSISTED_CART_CREATED", cart.id, {
-        before: null,
-        after: cartAuditState(after),
-        assistedByAdminUserId: input.assistedByAdminUserId,
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: cart.customerId,
       });
+      await writeCartAudit(
+        tx,
+        input.audit,
+        "ASSISTED_CART_CREATED",
+        cart.id,
+        {
+          before: null,
+          after: cartAuditState(after),
+          assistedByAdminUserId: actor.id,
+        },
+        { selfDealing },
+      );
       return snapshot;
     });
   }
@@ -1446,6 +1494,7 @@ export class CartService {
     const assistedTokenHash = assertTokenHash(input.assistedTokenHash, "assistedTokenHash");
     const expiresAt = validateExpiration(input.expiresAt, "expiresAt");
     return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await authorizeCartMutation(tx, input.audit);
       const { cart, now } = await lockCart(tx, { cartId: input.cartId });
       assertActiveCart(cart, now);
       if (cart.kind !== "ASSISTED" || cart.assistedClaimedAt)
@@ -1459,12 +1508,22 @@ export class CartService {
         where: { id: cart.id },
         data: { assistedTokenHash, assistedExpiresAt: expiresAt, expiresAt },
       });
-      const result = await storedSnapshot(tx, cart.id);
+      const result = await storedSnapshot(tx, cart.id, now);
       const after = await loadCart(tx, cart.id);
-      await writeCartAudit(tx, input.audit, "ASSISTED_PAYMENT_LINK_ISSUED", cart.id, {
-        ...cartAuditChanges(cart, after),
-        rotated: cart.assistedTokenHash !== null,
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: cart.customerId,
       });
+      await writeCartAudit(
+        tx,
+        input.audit,
+        "ASSISTED_PAYMENT_LINK_ISSUED",
+        cart.id,
+        {
+          ...cartAuditChanges(cart, after),
+          rotated: cart.assistedTokenHash !== null,
+        },
+        { selfDealing },
+      );
       return result;
     });
   }
@@ -1588,6 +1647,7 @@ export class CartService {
   async cancelAssistedCart(cartId: string, audit: PricingMutationAudit): Promise<CartSnapshot> {
     assertUuid(cartId, "cartId");
     return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await authorizeCartMutation(tx, audit);
       const { cart, now } = await lockCart(tx, { cartId });
       if (cart.kind !== "ASSISTED" || cart.status !== "ACTIVE" || cart.assistedClaimedAt) {
         throw new CartStateError("Only unclaimed active assisted carts can be cancelled.");
@@ -1597,14 +1657,18 @@ export class CartService {
         where: { id: cart.id },
         data: { status: "CANCELLED", couponId: null, assistedTokenHash: null },
       });
-      const result = await storedSnapshot(tx, cart.id);
+      const result = await storedSnapshot(tx, cart.id, now);
       const after = await loadCart(tx, cart.id);
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: cart.customerId,
+      });
       await writeCartAudit(
         tx,
         audit,
         "ASSISTED_CART_CANCELLED",
         cart.id,
         cartAuditChanges(cart, after),
+        { selfDealing },
       );
       return result;
     });

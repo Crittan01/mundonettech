@@ -199,7 +199,8 @@ export async function transitionOrderRefundAction(
       ? new OrderRefundService(getDatabase()).reject(input)
       : new OrderRefundService(getDatabase()).cancel(input));
     revalidateOperations(result.orderId);
-    return actionSuccess(`Reembolso ${result.status.toLowerCase()} y transición auditada.`);
+    const statusLabel = result.status === "REJECTED" ? "rechazado" : "cancelado";
+    return actionSuccess(`Reembolso ${statusLabel}; la transición quedó auditada.`);
   } catch (error) {
     return failure(error, values);
   }

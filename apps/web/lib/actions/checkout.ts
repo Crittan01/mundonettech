@@ -8,12 +8,7 @@ import {
   type CheckoutFulfillmentInput,
   type LocalDeliveryQuoteSnapshot,
 } from "@mundonettech/db";
-import {
-  PaymentConflictError,
-  PaymentNotFoundError,
-  PaymentProviderError,
-  PaymentValidationError,
-} from "@mundonettech/integrations";
+import { PaymentValidationError } from "@mundonettech/integrations";
 import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -22,7 +17,11 @@ import { actionError, formSnapshot, formString, type ActionState } from "@/lib/a
 import { clearCartAccessToken, optionalCustomerId } from "@/lib/cart";
 import { orderService, readCheckoutCartReference, receiptTokenForSubmission } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
-import { optionalTrimmedText as optionalText, phoneInputPattern } from "@/lib/form-validation";
+import {
+  normalizePhoneE164 as sharedNormalizePhoneE164,
+  optionalTrimmedText as optionalText,
+  phoneInputPattern,
+} from "@/lib/form-validation";
 import {
   blockedIdentityService,
   getBankTransferInstructions,
@@ -51,7 +50,20 @@ const submissionSchema = z
     givenName: z.string().trim().min(2).max(100),
     familyName: z.string().trim().min(2).max(100),
     recipientName: z.string().trim().min(2).max(200),
-    phoneE164: z.string().trim().min(8).max(24).regex(phoneInputPattern),
+    phoneE164: z
+      .string()
+      .trim()
+      .min(8)
+      .max(24)
+      .regex(phoneInputPattern)
+      .transform((value) => {
+        if (typeof sharedNormalizePhoneE164 === "function") {
+          return sharedNormalizePhoneE164(value);
+        }
+        const compact = value.replace(/[\s()-]/g, "");
+        const colombian = /^(?:\+57)?([36][0-9]{9})$/.exec(compact);
+        return colombian?.[1] ? `+57${colombian[1]}` : compact;
+      }),
     buyerDocumentType: z.union([
       z.enum(["11", "12", "13", "21", "22", "31", "41", "42", "50", "91"]),
       z.literal(""),
@@ -327,19 +339,10 @@ export async function confirmCheckoutAction(
         input.paymentMethod === "WOMPI" && payment.checkoutUrl
           ? payment.checkoutUrl
           : `/recibo/${receiptToken}?confirmado=1`;
-    } catch (paymentError) {
-      if (
-        paymentError instanceof PaymentConflictError ||
-        paymentError instanceof PaymentNotFoundError ||
-        paymentError instanceof PaymentProviderError ||
-        paymentError instanceof PaymentValidationError
-      ) {
-        await clearCartAccessToken();
-        revalidatePath("/carrito");
-        receiptUrl = `/recibo/${receiptToken}?confirmado=1&pago=pendiente`;
-      } else {
-        throw paymentError;
-      }
+    } catch {
+      await clearCartAccessToken();
+      revalidatePath("/carrito");
+      receiptUrl = `/recibo/${receiptToken}?confirmado=1&pago=pendiente`;
     }
   } catch (error) {
     return actionError(checkoutMutationMessage(error), values);

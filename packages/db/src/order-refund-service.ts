@@ -455,6 +455,11 @@ export class OrderRefundService {
     const { actorAdminUserId, ipHash, userAgentHash, requestId } = validatedAudit(input.audit);
     const note = input.note === undefined ? undefined : optionalNote(input.note);
     return inInventoryTransaction(db, async (tx) => {
+      const actor = await verifyRefundActor(
+        tx,
+        actorAdminUserId,
+        "The administrator is not authorized to manage refunds.",
+      );
       const peek = await tx.orderRefund.findUnique({
         where: { id: input.refundId },
         select: { orderId: true },
@@ -475,11 +480,6 @@ export class OrderRefundService {
         lockedOrder = orderRows[0] ?? null;
         if (!lockedOrder) throw new RefundNotFoundError();
       }
-      const actor = await verifyRefundActor(
-        tx,
-        actorAdminUserId,
-        "The administrator is not authorized to manage refunds.",
-      );
       const rows = await tx.$queryRaw<
         OrderRefund[]
       >`SELECT * FROM "OrderRefund" WHERE "id" = ${input.refundId}::uuid FOR UPDATE`;

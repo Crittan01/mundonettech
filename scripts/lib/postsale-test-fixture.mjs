@@ -27,8 +27,8 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
   const orderNumber = `POST-${randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase()}`;
   const deliveredAt = new Date();
   await client.query(
-    `INSERT INTO "Order" ("id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus", "taxRegime", "emailSnapshot", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt")
-     VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'FULFILLED', 'NO_RESPONSABLE_IVA', 'rls-postsale@example.test', 200000, 0, 0, 0, 200000, CURRENT_TIMESTAMP)`,
+    `INSERT INTO "Order" ("id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod", "taxRegime", "emailSnapshot", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt")
+     VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'FULFILLED', 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', 'rls-postsale@example.test', '13', '1020304050', 200000, 0, 0, 0, 200000, CURRENT_TIMESTAMP)`,
     [orderId, orderNumber, catalog.customerId],
   );
   await client.query(

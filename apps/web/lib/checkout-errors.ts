@@ -56,5 +56,5 @@ export function checkoutMutationMessage(error: unknown): string {
   if (error instanceof ReceiptBalanceError) {
     return "La validación aritmética impidió emitir el comprobante. La operación quedó bloqueada para revisión y no se confirmó parcialmente.";
   }
-  return "No pudimos confirmar el pedido. La operación no quedó aplicada parcialmente; inténtalo de nuevo con los mismos datos.";
+  return "No pudimos verificar el resultado de la confirmación. Recarga el checkout y reintenta con el mismo envío y sin cambiar los datos para recuperar la orden si ya quedó registrada.";
 }

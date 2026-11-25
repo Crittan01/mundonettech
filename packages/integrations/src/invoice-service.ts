@@ -100,11 +100,31 @@ function buildClaimToken(workerId: string): string {
   return `${workerId.slice(0, 83)}:${randomUUID()}`;
 }
 
-function taxRate(item: { taxLines: readonly { appliedRateBps: number }[] }): number {
-  const rates = new Set(item.taxLines.map((line) => line.appliedRateBps));
-  if (rates.size !== 1)
-    throw new InvoiceValidationError("Every fiscal item must have exactly one sealed IVA rate.");
-  return item.taxLines[0]!.appliedRateBps;
+function taxIdentity(item: {
+  taxLines: readonly { appliedRateBps: number; treatment: string; rule: string }[];
+}): { taxRateBps: number; taxCategory: "STANDARD" | "EXEMPT" | "EXCLUDED" } {
+  const identities = new Set(
+    item.taxLines.map((line) => `${line.treatment}:${line.appliedRateBps}`),
+  );
+  if (identities.size !== 1)
+    throw new InvoiceValidationError(
+      "Every fiscal item must have exactly one sealed tax category and rate.",
+    );
+  const line = item.taxLines[0]!;
+  if (line.treatment === "UVT_THRESHOLD_EXCLUDED" && line.rule === "UVT_STANDARD_ABOVE_LIMIT") {
+    return { taxRateBps: line.appliedRateBps, taxCategory: "STANDARD" };
+  }
+  const categories: Record<string, "STANDARD" | "EXEMPT" | "EXCLUDED"> = {
+    STANDARD: "STANDARD",
+    EXEMPT: "EXEMPT",
+    EXCLUDED: "EXCLUDED",
+    UVT_THRESHOLD_EXCLUDED: "EXCLUDED",
+  };
+  const taxCategory = categories[line.treatment];
+  if (!taxCategory) {
+    throw new InvoiceValidationError("The sealed tax category is not supported.");
+  }
+  return { taxRateBps: line.appliedRateBps, taxCategory };
 }
 
 export class InvoiceService {
@@ -247,10 +267,18 @@ export class InvoiceService {
         };
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"dian-invoice:" + selectedCredential + ":" + credentials.invoicePrefix}, 0))`;
       const latest = await tx.taxInvoice.aggregate({
-        where: { credentialId: selectedCredential, prefix: credentials.invoicePrefix },
+        where: {
+          credentialId: selectedCredential,
+          prefix: credentials.invoicePrefix,
+          number: {
+            gte: credentials.invoiceResolutionStart,
+            lte: credentials.invoiceResolutionEnd,
+          },
+        },
         _max: { number: true },
       });
-      const number = Math.max(credentials.invoiceResolutionStart, (latest._max.number ?? 0) + 1);
+      const number =
+        latest._max.number === null ? credentials.invoiceResolutionStart : latest._max.number + 1;
       if (number > credentials.invoiceResolutionEnd)
         throw new InvoiceConflictError("DIAN invoice resolution is exhausted.", "NOT_READY");
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
@@ -274,7 +302,7 @@ export class InvoiceService {
         discountCents: item.discountCents,
         lineTotalCents: item.lineTotalCents,
         taxCents: item.taxCents,
-        taxRateBps: taxRate(item),
+        ...taxIdentity(item),
       }));
       const cufe = calculateCufe({
         fullNumber,
@@ -287,12 +315,21 @@ export class InvoiceService {
         buyerDocumentNumber: customer.documentNumber,
         buyerDocumentType: customer.documentType,
         softwarePin: credentials.softwarePin,
+        production: this.options.environment === IntegrationEnvironment.PRD,
       });
       const unsignedXml = buildInvoiceUbl(
         {
           fullNumber,
           issueDate,
           cufe,
+          resolution: {
+            authorizationNumber: credentials.invoiceResolutionNumber,
+            prefix: credentials.invoicePrefix,
+            rangeStart: credentials.invoiceResolutionStart,
+            rangeEnd: credentials.invoiceResolutionEnd,
+            validFrom: credentials.invoiceResolutionValidFrom,
+            validTo: credentials.invoiceResolutionValidTo,
+          },
           issuer: issuer(credentials),
           buyer: customer,
           lines,
@@ -423,7 +460,7 @@ export class InvoiceService {
         discountCents: item.orderItem.unitPriceCents * BigInt(item.quantity) - item.subtotalCents,
         lineTotalCents: item.subtotalCents,
         taxCents: item.taxCents,
-        taxRateBps: taxRate(item.orderItem),
+        ...taxIdentity(item.orderItem),
       }));
       const subtotalCents = lines.reduce(
         (sum, line) => sum + line.unitPriceCents * BigInt(line.quantity),
@@ -441,6 +478,7 @@ export class InvoiceService {
         buyerDocumentNumber: customer.documentNumber,
         buyerDocumentType: customer.documentType,
         softwarePin: credentials.softwarePin,
+        production: this.options.environment === IntegrationEnvironment.PRD,
       });
       const reasonCode = { RETRACT: 1, WARRANTY: 5, ADJUSTMENT: 4, CUSTOMER_SUPPORT: 5 }[
         lockedRefund.reason
@@ -507,13 +545,20 @@ export class InvoiceService {
   private async acceptInvoice(
     invoiceId: string,
     result: FiscalTransmissionResult,
+    claimToken: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
-        Array<{ id: string; fullNumber: string; status: string }>
-      >`SELECT "id", "fullNumber", "status" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
+        Array<{
+          id: string;
+          fullNumber: string;
+          status: string;
+          claimedBy: string | null;
+          claimExpiresAt: Date | null;
+        }>
+      >`SELECT "id", "fullNumber", "status", "claimedBy", "claimExpiresAt" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
       const current = rows[0];
       if (!current) throw new InvoiceNotFoundError();
       if (current.status === "ACCEPTED")
@@ -525,6 +570,18 @@ export class InvoiceService {
         };
       if (!["TRANSMITTING", "UNCERTAIN"].includes(current.status))
         throw new InvoiceConflictError("Only a transmitting or uncertain invoice can be accepted.");
+      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = nowRows[0]!.now;
+      if (
+        current.claimedBy !== claimToken ||
+        !current.claimExpiresAt ||
+        current.claimExpiresAt <= now
+      ) {
+        throw new InvoiceConflictError(
+          "Invoice claim ownership expired before acceptance could be recorded.",
+          "PROVIDER_UNCERTAIN",
+        );
+      }
       await tx.taxInvoice.update({
         where: { id: invoiceId },
         data: {
@@ -532,7 +589,7 @@ export class InvoiceService {
           signedXml: result.signedXml,
           documentHash: signedDocumentHash(result.signedXml),
           providerDocumentId: result.providerDocumentId,
-          acceptedAt: new Date(),
+          acceptedAt: now,
           claimedBy: null,
           claimExpiresAt: null,
           failureCode: null,
@@ -581,8 +638,9 @@ export class InvoiceService {
           fullNumber: string;
           status: string;
           claimedBy: string | null;
+          claimActive: boolean;
         }>
-      >`SELECT "id", "orderId", "fullNumber", "status", "claimedBy" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
+      >`SELECT "id", "orderId", "fullNumber", "status", "claimedBy", ("claimExpiresAt" > CURRENT_TIMESTAMP) AS "claimActive" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
       const current = locked[0];
       if (!current) throw new InvoiceNotFoundError();
       if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
@@ -593,7 +651,11 @@ export class InvoiceService {
           replayed: true,
         };
       }
-      if (current.status !== "TRANSMITTING" || current.claimedBy !== claimToken) {
+      if (
+        current.status !== "TRANSMITTING" ||
+        current.claimedBy !== claimToken ||
+        !current.claimActive
+      ) {
         throw new InvoiceConflictError(
           "Invoice claim ownership changed before failure could be recorded.",
         );
@@ -655,8 +717,9 @@ export class InvoiceService {
           fullNumber: string;
           status: string;
           claimedBy: string | null;
+          claimActive: boolean;
         }>
-      >`SELECT "id", "orderId", "fullNumber", "status", "claimedBy" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
+      >`SELECT "id", "orderId", "fullNumber", "status", "claimedBy", ("claimExpiresAt" > CURRENT_TIMESTAMP) AS "claimActive" FROM "TaxInvoice" WHERE "id" = ${invoiceId}::uuid FOR UPDATE`;
       const current = locked[0];
       if (!current) throw new InvoiceNotFoundError();
       if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
@@ -667,7 +730,11 @@ export class InvoiceService {
           replayed: true,
         };
       }
-      if (current.status !== "UNCERTAIN" || current.claimedBy !== claimToken) {
+      if (
+        current.status !== "UNCERTAIN" ||
+        current.claimedBy !== claimToken ||
+        !current.claimActive
+      ) {
         throw new InvoiceConflictError(
           "Invoice claim ownership changed before uncertain release could be recorded.",
         );
@@ -760,8 +827,8 @@ export class InvoiceService {
       const credentials = await this.credentials(claimed.credentialId);
       const provider = this.provider(credentials);
       if (current.status === "UNCERTAIN") {
-        const found = await provider.find(current.cufe);
-        if (found) return this.acceptInvoice(invoiceId, found, audit);
+        const found = await provider.find(current.cufe, current.fullNumber, "INVOICE");
+        if (found) return this.acceptInvoice(invoiceId, found, claimToken, audit);
         current = await this.db.$transaction(async (tx) => {
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
@@ -816,7 +883,7 @@ export class InvoiceService {
         documentHash: current.cufe,
         unsignedXml: current.unsignedXml,
       });
-      return await this.acceptInvoice(invoiceId, result, audit);
+      return await this.acceptInvoice(invoiceId, result, claimToken, audit);
     } catch (error) {
       if (error instanceof InvoiceConflictError) throw error;
       if (error instanceof InvoiceProviderError) {
@@ -845,13 +912,20 @@ export class InvoiceService {
   private async acceptCreditNote(
     creditNoteId: string,
     result: FiscalTransmissionResult,
+    claimToken: string,
     audit?: InvoiceAuditContext,
   ): Promise<FiscalOperationResult> {
     return this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
       const rows = await tx.$queryRaw<
-        Array<{ id: string; fullNumber: string; status: string }>
-      >`SELECT "id", "fullNumber", "status" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
+        Array<{
+          id: string;
+          fullNumber: string;
+          status: string;
+          claimedBy: string | null;
+          claimExpiresAt: Date | null;
+        }>
+      >`SELECT "id", "fullNumber", "status", "claimedBy", "claimExpiresAt" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
       const current = rows[0];
       if (!current) throw new InvoiceNotFoundError();
       if (current.status === "ACCEPTED")
@@ -865,6 +939,18 @@ export class InvoiceService {
         throw new InvoiceConflictError(
           "Only a transmitting or uncertain credit note can be accepted.",
         );
+      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+      const now = nowRows[0]!.now;
+      if (
+        current.claimedBy !== claimToken ||
+        !current.claimExpiresAt ||
+        current.claimExpiresAt <= now
+      ) {
+        throw new InvoiceConflictError(
+          "Credit note claim ownership expired before acceptance could be recorded.",
+          "PROVIDER_UNCERTAIN",
+        );
+      }
       const note = await tx.creditNote.update({
         where: { id: creditNoteId },
         data: {
@@ -872,7 +958,7 @@ export class InvoiceService {
           signedXml: result.signedXml,
           documentHash: signedDocumentHash(result.signedXml),
           providerDocumentId: result.providerDocumentId,
-          acceptedAt: new Date(),
+          acceptedAt: now,
           claimedBy: null,
           claimExpiresAt: null,
           failureCode: null,
@@ -923,8 +1009,9 @@ export class InvoiceService {
           fullNumber: string;
           status: string;
           claimedBy: string | null;
+          claimActive: boolean;
         }>
-      >`SELECT "id", "invoiceId", "refundId", "fullNumber", "status", "claimedBy" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
+      >`SELECT "id", "invoiceId", "refundId", "fullNumber", "status", "claimedBy", ("claimExpiresAt" > CURRENT_TIMESTAMP) AS "claimActive" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
       const current = locked[0];
       if (!current) throw new InvoiceNotFoundError();
       if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
@@ -935,7 +1022,11 @@ export class InvoiceService {
           replayed: true,
         };
       }
-      if (current.status !== "TRANSMITTING" || current.claimedBy !== claimToken) {
+      if (
+        current.status !== "TRANSMITTING" ||
+        current.claimedBy !== claimToken ||
+        !current.claimActive
+      ) {
         throw new InvoiceConflictError(
           "Credit note claim ownership changed before failure could be recorded.",
         );
@@ -995,8 +1086,9 @@ export class InvoiceService {
           fullNumber: string;
           status: string;
           claimedBy: string | null;
+          claimActive: boolean;
         }>
-      >`SELECT "id", "invoiceId", "refundId", "fullNumber", "status", "claimedBy" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
+      >`SELECT "id", "invoiceId", "refundId", "fullNumber", "status", "claimedBy", ("claimExpiresAt" > CURRENT_TIMESTAMP) AS "claimActive" FROM "CreditNote" WHERE "id" = ${creditNoteId}::uuid FOR UPDATE`;
       const current = locked[0];
       if (!current) throw new InvoiceNotFoundError();
       if (["ACCEPTED", "REJECTED", "CANCELLED"].includes(current.status)) {
@@ -1007,7 +1099,11 @@ export class InvoiceService {
           replayed: true,
         };
       }
-      if (current.status !== "UNCERTAIN" || current.claimedBy !== claimToken) {
+      if (
+        current.status !== "UNCERTAIN" ||
+        current.claimedBy !== claimToken ||
+        !current.claimActive
+      ) {
         throw new InvoiceConflictError(
           "Credit note claim ownership changed before uncertain release could be recorded.",
         );
@@ -1097,8 +1193,8 @@ export class InvoiceService {
       const credentials = await this.credentials(claimed.credentialId);
       const provider = this.provider(credentials);
       if (current.status === "UNCERTAIN") {
-        const found = await provider.find(current.cude);
-        if (found) return this.acceptCreditNote(creditNoteId, found, audit);
+        const found = await provider.find(current.cude, current.fullNumber, "CREDIT_NOTE");
+        if (found) return this.acceptCreditNote(creditNoteId, found, claimToken, audit);
         current = await this.db.$transaction(async (tx) => {
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
@@ -1155,7 +1251,7 @@ export class InvoiceService {
         documentHash: current.cude,
         unsignedXml: current.unsignedXml,
       });
-      return await this.acceptCreditNote(creditNoteId, result, audit);
+      return await this.acceptCreditNote(creditNoteId, result, claimToken, audit);
     } catch (error) {
       if (error instanceof InvoiceConflictError) throw error;
       if (error instanceof InvoiceProviderError) {

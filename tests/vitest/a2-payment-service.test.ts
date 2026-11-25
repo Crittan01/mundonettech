@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { CodReconciliationService } from "../../packages/integrations/src/cod-reconciliation-service";
 import { PaymentService } from "../../packages/integrations/src/payment-service";
 import { PaymentValidationError } from "../../packages/integrations/src/payment-types";
 
@@ -13,7 +14,13 @@ const hashes = {
   DOCUMENT: new Uint8Array(32).fill(3),
 };
 
-function harness(document: string | null, blocked = false) {
+type DistributionState = "open" | "fulfillment" | "shipment" | "package";
+
+function harness(
+  document: string | null,
+  blocked = false,
+  distribution: DistributionState = "open",
+) {
   const order = {
     id: orderId,
     orderStatus: "CONFIRMED",
@@ -40,6 +47,15 @@ function harness(document: string | null, blocked = false) {
     },
     blockedIdentity: { findFirst: blockedIdentityFindFirst },
     codReconciliation: { create: vi.fn(async () => ({})) },
+    orderFulfillment: {
+      findFirst: vi.fn(async () => (distribution === "fulfillment" ? { id: randomUUID() } : null)),
+    },
+    shipment: {
+      findFirst: vi.fn(async () => (distribution === "shipment" ? { id: randomUUID() } : null)),
+    },
+    shipmentPackage: {
+      findFirst: vi.fn(async () => (distribution === "package" ? { id: randomUUID() } : null)),
+    },
     order: { update: vi.fn() },
   };
   tx.$queryRaw
@@ -96,5 +112,88 @@ describe("A2 — invariante COD en PaymentService", () => {
 
     expect(attempt).toMatchObject({ provider: "COD", status: "PENDING" });
     expect(paymentAttemptCreate).toHaveBeenCalledOnce();
+  });
+
+  it("rechaza claves de identidad fuera del contrato cerrado", async () => {
+    const { service, paymentAttemptCreate } = harness("abc");
+
+    await expect(
+      service.start(input({ ...hashes, UNKNOWN: new Uint8Array(32) } as never)),
+    ).rejects.toThrow(PaymentValidationError);
+    expect(paymentAttemptCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("A5 — distribución COD sellada al iniciar fulfillments", () => {
+  it.each([
+    ["un fulfillment PICKING", "fulfillment"],
+    ["un envío READY", "shipment"],
+    ["un bulto persistido", "package"],
+  ] as const)("rechaza un nuevo intento con %s", async (_label, distribution) => {
+    const { service, paymentAttemptCreate, blockedIdentityFindFirst } = harness(
+      "abc",
+      false,
+      distribution,
+    );
+
+    await expect(service.start(input(hashes))).rejects.toMatchObject({
+      name: "PaymentConflictError",
+      code: "INVALID_STATE",
+    });
+    expect(paymentAttemptCreate).not.toHaveBeenCalled();
+    expect(blockedIdentityFindFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("A5 — agregados COD acotados por BIGINT", () => {
+  it("rechaza una remesa cuyo esperado excede INT8 antes de persistir el lote", async () => {
+    const actorId = randomUUID();
+    const now = new Date("2026-11-25T12:00:00.000Z");
+    const attempts = [randomUUID(), randomUUID()].map((id) => ({
+      id,
+      orderId: randomUUID(),
+      amountCents: 9_223_372_036_854_775_807n,
+    }));
+    const create = vi.fn();
+    const tx = {
+      $executeRaw: vi.fn(async () => 0),
+      $queryRaw: vi
+        .fn()
+        .mockResolvedValueOnce([
+          {
+            id: actorId,
+            authUserId: randomUUID(),
+            email: "finance@example.test",
+            role: "SUPERADMIN",
+          },
+        ])
+        .mockResolvedValueOnce([{ now }]),
+      paymentAttempt: { findMany: vi.fn(async () => attempts) },
+      remittanceBatch: { findUnique: vi.fn(async () => null), create },
+    };
+    const db = {
+      ...tx,
+      $transaction: async (callback: (transaction: typeof tx) => Promise<unknown>) => callback(tx),
+    };
+    const service = new CodReconciliationService(db as never);
+
+    await expect(
+      service.reconcile({
+        carrier: "Transportadora",
+        reference: `REM-${randomUUID()}`,
+        items: attempts.map((attempt) => ({
+          paymentAttemptId: attempt.id,
+          collectedCents: 1n,
+          remittedCents: 1n,
+          carrierReference: `GUIA-${attempt.id}`,
+        })),
+        audit: {
+          actorAdminUserId: actorId,
+          ipHash: new Uint8Array(32).fill(1),
+          userAgentHash: new Uint8Array(32).fill(2),
+        },
+      }),
+    ).rejects.toThrow(PaymentValidationError);
+    expect(create).not.toHaveBeenCalled();
   });
 });

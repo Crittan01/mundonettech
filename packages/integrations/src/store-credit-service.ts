@@ -76,8 +76,8 @@ export class StoreCreditService {
     });
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
-        await acquireOperationLocks(tx, [`store-credit:${input.customerId}`]);
         const actor = await assertFinancialActor(tx, input.audit.actorAdminUserId);
+        await acquireOperationLocks(tx, [`store-credit:${input.customerId}`]);
         const existing = await tx.storeCreditEntry.findUnique({ where: { operationKey } });
         if (existing) {
           const account = await tx.storeCreditAccount.findUniqueOrThrow({
@@ -152,8 +152,8 @@ export class StoreCreditService {
     assertPaymentUuid(customerId, "customerId");
     if (typeof active !== "boolean") throw new PaymentConflictError("active must be boolean.");
     return inInventoryTransaction(this.db, async (tx) => {
-      await acquireOperationLocks(tx, [`store-credit:${customerId}`]);
       await assertFinancialActor(tx, audit.actorAdminUserId);
+      await acquireOperationLocks(tx, [`store-credit:${customerId}`]);
       const account = await tx.storeCreditAccount.findUnique({
         where: { customerId_currency: { customerId, currency: "COP" } },
       });

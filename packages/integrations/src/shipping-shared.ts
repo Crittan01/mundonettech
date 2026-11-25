@@ -1,6 +1,6 @@
+import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
 import {
   Prisma,
-  type AdminUser,
   type Order,
   type OrderFulfillment,
   type Shipment,
@@ -17,12 +17,6 @@ import {
 } from "./shipping-types.js";
 
 export type ShippingTransaction = Prisma.TransactionClient;
-const fulfillmentRoles = new Set([
-  "SUPERADMIN",
-  "OPERATIONS_MANAGER",
-  "STORE_MANAGER",
-  "FULFILLMENT",
-]);
 
 export function shippingWorkerId(value: string): string {
   return assertIntegrationKey(value, "workerId");
@@ -48,11 +42,16 @@ export async function assertFulfillmentActor(
   tx: ShippingTransaction,
   actorAdminUserId: string,
 ): Promise<void> {
-  const actor = (await tx.adminUser.findFirst({
-    where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-    select: { role: true },
-  })) as Pick<AdminUser, "role"> | null;
-  if (!actor || !fulfillmentRoles.has(actor.role)) throw new ShippingAuthorizationError();
+  assertIntegrationUuid(actorAdminUserId, "actorAdminUserId");
+  const rows = await tx.$queryRaw<Array<{ role: string }>>`
+    SELECT "role"::text AS "role" FROM "AdminUser"
+    WHERE "id" = ${actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
+    FOR SHARE
+  `;
+  const role = rows[0]?.role;
+  if (!role || !isAdminRole(role) || !hasAdminPermission(role, "fulfillment:write")) {
+    throw new ShippingAuthorizationError();
+  }
 }
 
 export async function writeShippingAudit(
@@ -149,7 +148,7 @@ export async function assertPaidOrder(
   if (order.orderStatus === "CANCELLED")
     throw new ShippingConflictError("Cancelled orders cannot enter fulfillment.");
   if (["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentStatus)) return;
-  if (order.paymentStatus === "UNPAID") {
+  if (["UNPAID", "PARTIALLY_PAID"].includes(order.paymentStatus)) {
     const openCod = await db.paymentAttempt.count({
       where: { orderId: order.id, provider: "COD", status: { in: ["PENDING", "PROCESSING"] } },
     });

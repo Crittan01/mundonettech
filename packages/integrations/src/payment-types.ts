@@ -126,6 +126,7 @@ export interface WompiTransactionEvent {
   readonly eventKey: string;
   readonly payloadHash: Uint8Array<ArrayBuffer>;
   readonly supported: boolean;
+  readonly routingSigned?: boolean;
   readonly occurredAt: Date;
   readonly transaction: {
     readonly id: string;

@@ -403,6 +403,49 @@ test("assisted admin emits a one-time link and the customer accepts it exactly o
   await expect(page.getByRole("heading", { level: 1 })).toContainText("No encontramos esta página");
 });
 
+test("account-bound assisted sale preserves its token through the login return path", async ({
+  page,
+}) => {
+  const customer = await db.customer.create({
+    data: {
+      authUserId: randomUUID(),
+      email: `assisted-login-${randomUUID()}@example.test`,
+      status: "ACTIVE",
+    },
+  });
+  const cart = await cartService.createAssistedCart({
+    accessTokenHash: Uint8Array.from(randomBytes(32)),
+    expiresAt: new Date(Date.now() + 3_600_000),
+    assistedByAdminUserId: admin.id,
+    customerId: customer.id,
+    audit,
+  });
+  await cartService.addVariant(
+    { cartId: cart.id },
+    (await db.productVariant.findFirstOrThrow({ where: { sku, deletedAt: null } })).id,
+    1,
+    audit,
+  );
+  const paymentToken = randomBytes(32).toString("base64url");
+  await cartService.issueAssistedToken({
+    cartId: cart.id,
+    assistedTokenHash: tokenHash(paymentToken),
+    expiresAt: new Date(Date.now() + 3_600_000),
+    audit,
+  });
+  const next = `/pagar/${paymentToken}`;
+
+  await page.goto(next);
+  const loginLink = page.getByRole("link", { name: "Iniciar sesión", exact: true });
+  await expect(loginLink).toHaveAttribute("href", `/ingresar?next=${encodeURIComponent(next)}`);
+  await loginLink.click();
+  await expect(page).toHaveURL(`/ingresar?next=${encodeURIComponent(next)}`);
+  await expect(page.locator('input[name="next"]')).toHaveValue(next);
+
+  await page.goto("/ingresar?next=https%3A%2F%2Fevil.example%2Frobo");
+  await expect(page.locator('input[name="next"]')).toHaveCount(0);
+});
+
 test("new transactional routes reject anonymous admins and invalid payment tokens", async ({
   page,
 }) => {

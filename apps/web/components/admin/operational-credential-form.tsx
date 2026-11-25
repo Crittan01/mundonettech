@@ -21,6 +21,7 @@ type Field = {
   readonly defaultValue?: string;
   readonly type?: "email" | "number" | "date" | "url";
   readonly section?: string;
+  readonly multiline?: boolean;
 };
 
 const fields: Record<Provider, readonly Field[]> = {
@@ -103,6 +104,13 @@ const fields: Record<Provider, readonly Field[]> = {
     { name: "issuerPostalCode", label: "Código postal" },
     { section: "Software y resolución", name: "softwareId", label: "ID de software DIAN" },
     { name: "softwarePin", label: "PIN de software", secret: true },
+    {
+      section: "Firma XML-DSig",
+      name: "signatureTrustAnchorPem",
+      label: "Certificado X.509 del firmante (PEM; obligatorio en PRD)",
+      multiline: true,
+      optional: true,
+    },
     { name: "invoicePrefix", label: "Prefijo autorizado de factura" },
     { name: "invoiceResolutionNumber", label: "Número de resolución" },
     { name: "invoiceResolutionStart", label: "Inicio del rango autorizado", type: "number" },
@@ -179,6 +187,11 @@ export function OperationalCredentialForm({
       {currentFields.map((field, index) => {
         const heading = field.section && field.section !== currentFields[index - 1]?.section;
         const id = `${provider}-${field.name}-${credential?.id ?? "new"}`;
+        const required =
+          field.name === "signatureTrustAnchorPem"
+            ? environment === "PRD"
+            : !field.optional && field.name !== "replyTo";
+        const defaultValue = field.secret ? "" : (values?.[field.name] ?? field.defaultValue ?? "");
         return (
           <div key={`${provider}-${field.name}`}>
             {heading ? (
@@ -186,18 +199,30 @@ export function OperationalCredentialForm({
             ) : null}
             <div className="mt-3 space-y-2">
               <Label htmlFor={id}>{field.label}</Label>
-              <Input
-                id={id}
-                name={field.name}
-                type={field.secret ? "password" : (field.type ?? "text")}
-                autoComplete={field.secret ? "new-password" : "off"}
-                spellCheck={false}
-                defaultValue={
-                  field.secret ? "" : (values?.[field.name] ?? field.defaultValue ?? "")
-                }
-                min={field.type === "number" ? 1 : undefined}
-                required={!field.optional && field.name !== "replyTo"}
-              />
+              {field.multiline ? (
+                <textarea
+                  id={id}
+                  name={field.name}
+                  rows={8}
+                  maxLength={200_000}
+                  autoComplete="off"
+                  spellCheck={false}
+                  defaultValue={defaultValue}
+                  required={required}
+                  className="min-h-32 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm"
+                />
+              ) : (
+                <Input
+                  id={id}
+                  name={field.name}
+                  type={field.secret ? "password" : (field.type ?? "text")}
+                  autoComplete={field.secret ? "new-password" : "off"}
+                  spellCheck={false}
+                  defaultValue={defaultValue}
+                  min={field.type === "number" ? 1 : undefined}
+                  required={required}
+                />
+              )}
             </div>
           </div>
         );

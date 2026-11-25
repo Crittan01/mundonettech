@@ -18,8 +18,10 @@ import {
   GrowthService,
   InventoryConflictError,
   LifecycleService,
+  LocalDeliveryService,
   OrderLifecycleService,
   OrderService,
+  OrderValidationError,
   PaymentProvider,
   PostSaleAdminService,
   PostSaleError,
@@ -121,6 +123,52 @@ async function conversion(cart, email = `buyer-${randomUUID()}@example.test`) {
   };
 }
 
+const flexPoint = { latitudeE6: 46_000_000, longitudeE6: -74_100_000 };
+
+function flexOrderService(database = db) {
+  return new OrderService(database, { ...defaults, localDeliveryEnabled: true });
+}
+
+async function createFlexZone() {
+  return db.localDeliveryZone.create({
+    data: {
+      code: `A3-FLEX-${randomUUID().slice(0, 8).toUpperCase()}`,
+      name: "Zona Flex de concurrencia A3",
+      municipalityCodes: ["11001"],
+      polygon: [
+        { latitudeE6: 45_000_000, longitudeE6: -74_200_000 },
+        { latitudeE6: 45_000_000, longitudeE6: -74_000_000 },
+        { latitudeE6: 47_000_000, longitudeE6: -74_000_000 },
+        { latitudeE6: 47_000_000, longitudeE6: -74_200_000 },
+      ],
+      baseFeeCents: 500_000n,
+      cutoffMinutes: 720,
+      deliveryPromiseMinutes: 120,
+      createdByAdminUserId: adminId,
+      updatedByAdminUserId: adminId,
+    },
+  });
+}
+
+async function flexConversion(cart, zone, service = flexOrderService()) {
+  const input = await conversion(cart);
+  const quotes = await service.localDeliveryQuotes(
+    { cartId: cart.id },
+    { municipalityCode: "11001", point: flexPoint },
+  );
+  assert.equal(quotes.length, 1);
+  input.fulfillment = {
+    method: "LOCAL_DELIVERY",
+    departmentCode: "11",
+    municipalityCode: "11001",
+    addressLine1: "Carrera 7 # 71-21",
+    zoneId: zone.id,
+    point: flexPoint,
+  };
+  input.expectedReviewFingerprint = quotes[0].reviewFingerprint;
+  return input;
+}
+
 async function createCoupon(prefix = "RACE") {
   const id = randomUUID();
   const code = `${prefix}-${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`;
@@ -179,6 +227,20 @@ async function waitForAdvisoryWaiters(minimum = 1) {
     await delay(25);
   }
   throw new Error(`Expected at least ${minimum} advisory-lock waiters.`);
+}
+
+async function waitForRowLockWaiters(minimum = 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const result = await sql.query(
+      `SELECT count(*)::int AS count
+       FROM pg_stat_activity
+       WHERE datname = current_database() AND pid <> pg_backend_pid()
+         AND wait_event_type = 'Lock' AND wait_event IN ('relation', 'transactionid')`,
+    );
+    if (result.rows[0].count >= minimum) return;
+    await delay(25);
+  }
+  throw new Error(`Expected at least ${minimum} row-lock waiters.`);
 }
 
 async function beginCouponSwitch(cart, fromCoupon, toCoupon) {
@@ -814,6 +876,132 @@ describe("A3 — canonical cart and coupon lock hierarchy", () => {
     } finally {
       await blocker.query("ROLLBACK").catch(() => undefined);
       await blocker.end();
+    }
+  });
+});
+
+describe("A3 — Flex archive and checkout lock ordering", () => {
+  it("rejects checkout without side effects when zone archival commits before its share lock", async () => {
+    const zone = await createFlexZone();
+    const cart = await makeCart();
+    const service = flexOrderService();
+    const input = await flexConversion(cart, zone, service);
+    const committedBefore = await committedTotal();
+    const blocker = new pg.Client({ connectionString: harness.databaseUrl });
+    await blocker.connect();
+    await blocker.query("BEGIN");
+    await blocker.query(
+      `UPDATE "LocalDeliveryZone"
+       SET "active" = false, "deletedAt" = CURRENT_TIMESTAMP, "updatedByAdminUserId" = $2
+       WHERE "id" = $1 AND "deletedAt" IS NULL`,
+      [zone.id, adminId],
+    );
+    let checkingOut;
+    try {
+      checkingOut = service.checkout(input);
+      await waitForRowLockWaiters();
+      await blocker.query("COMMIT");
+      const outcomes = await Promise.allSettled([checkingOut]);
+      assertNoRetryableFailure(outcomes);
+      assert.equal(outcomes[0].status, "rejected");
+      assert.ok(outcomes[0].reason instanceof OrderValidationError);
+      assert.match(outcomes[0].reason.message, /no longer available/);
+      assert.equal(await db.order.count({ where: { cartId: cart.id } }), 0);
+      assert.equal(await db.shipment.count({ where: { localDeliveryZoneId: zone.id } }), 0);
+      assert.equal(
+        await db.idempotencyKey.count({ where: { keyHash: input.idempotency.keyHash } }),
+        0,
+      );
+      assert.equal(await committedTotal(), committedBefore);
+      assert.ok(
+        (await db.localDeliveryZone.findUniqueOrThrow({ where: { id: zone.id } })).deletedAt,
+      );
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+      if (checkingOut) await Promise.allSettled([checkingOut]);
+    }
+  });
+
+  it("holds the zone share lock through shipment creation and blocks a racing archive", async () => {
+    const zone = await createFlexZone();
+    const cart = await makeCart();
+    const input = await flexConversion(cart, zone);
+    let zoneLockedResolve;
+    let releaseZoneResolve;
+    const zoneLocked = new Promise((resolve) => {
+      zoneLockedResolve = resolve;
+    });
+    const releaseZone = new Promise((resolve) => {
+      releaseZoneResolve = resolve;
+    });
+    let paused = false;
+    const pausedDatabase = new Proxy(db, {
+      get(target, property) {
+        if (property !== "$transaction") return Reflect.get(target, property, target);
+        return (callback, options) =>
+          target.$transaction(async (tx) => {
+            const instrumented = new Proxy(tx, {
+              get(txTarget, txProperty) {
+                if (txProperty !== "$queryRaw") {
+                  return Reflect.get(txTarget, txProperty, txTarget);
+                }
+                return async (strings, ...values) => {
+                  const result = await txTarget.$queryRaw(strings, ...values);
+                  const query = Array.isArray(strings) ? strings.join(" ") : "";
+                  if (
+                    !paused &&
+                    query.includes('FROM "LocalDeliveryZone"') &&
+                    query.includes("FOR SHARE")
+                  ) {
+                    paused = true;
+                    zoneLockedResolve();
+                    await releaseZone;
+                  }
+                  return result;
+                };
+              },
+            });
+            return callback(instrumented);
+          }, options);
+      },
+    });
+    const pausedOrders = flexOrderService(pausedDatabase);
+    const checkingOut = pausedOrders.checkout(input);
+    let archiving;
+    try {
+      await zoneLocked;
+      archiving = new LocalDeliveryService(db).archive(zone.id, zone.updatedAt, audit);
+      await waitForRowLockWaiters();
+      releaseZoneResolve();
+      const outcomes = await Promise.allSettled([checkingOut, archiving]);
+      assertNoRetryableFailure(outcomes);
+      assert.equal(outcomes[0].status, "fulfilled");
+      assert.equal(outcomes[1].status, "rejected");
+      assert.match(outcomes[1].reason.message, /open shipments/i);
+      const orderId = outcomes[0].value.orderId;
+      const order = await db.order.findUniqueOrThrow({
+        where: { id: orderId },
+        include: { shipments: true },
+      });
+      assert.equal(order.orderStatus, "CONFIRMED");
+      assert.equal(order.shipments.length, 1);
+      assert.equal(order.shipments[0].localDeliveryZoneId, zone.id);
+      assert.equal(order.shipments[0].status, "PENDING");
+      const persistedZone = await db.localDeliveryZone.findUniqueOrThrow({
+        where: { id: zone.id },
+      });
+      assert.equal(persistedZone.active, true);
+      assert.equal(persistedZone.deletedAt, null);
+      assert.equal(
+        await db.adminActionLog.count({
+          where: { action: "LOCAL_DELIVERY_ZONE_ARCHIVED", targetId: zone.id },
+        }),
+        0,
+      );
+    } finally {
+      releaseZoneResolve();
+      await Promise.allSettled([checkingOut, ...(archiving ? [archiving] : [])]);
     }
   });
 });

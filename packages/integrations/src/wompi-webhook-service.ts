@@ -126,6 +126,16 @@ export class WompiWebhookService {
       ...(options.headerChecksum !== undefined ? { headerChecksum: options.headerChecksum } : {}),
       ...(options.now ? { now: options.now } : {}),
     });
+    if (event.supported && event.transaction && event.routingSigned === false) {
+      const existing = await this.db.paymentWebhookEvent.findUnique({
+        where: { provider_eventKey: { provider: PaymentProvider.WOMPI, eventKey: event.eventKey } },
+        select: { status: true },
+      });
+      if (!existing || !["PROCESSED", "IGNORED"].includes(existing.status)) {
+        const transaction = await resolution.provider.getTransaction(event.transaction.id);
+        return this.apply({ ...event, transaction }, resolution);
+      }
+    }
     return this.apply(event, resolution);
   }
 
@@ -248,12 +258,13 @@ export class WompiWebhookService {
         select: { status: true },
       });
       if (existing?.status === "PROCESSED" || existing?.status === "IGNORED") return;
-      const attempt = event.transaction
-        ? await tx.paymentAttempt.findUnique({
-            where: { reference: event.transaction.reference },
-            select: { id: true },
-          })
-        : null;
+      const attempt =
+        event.transaction && event.routingSigned !== false
+          ? await tx.paymentAttempt.findUnique({
+              where: { reference: event.transaction.reference },
+              select: { id: true },
+            })
+          : null;
       await tx.paymentWebhookEvent.upsert({
         where: { provider_eventKey: key },
         create: {
@@ -355,7 +366,7 @@ export class WompiWebhookService {
           webhook = await tx.paymentWebhookEvent.create({
             data: {
               provider: PaymentProvider.WOMPI,
-              attemptId: referenceAttempt?.id ?? null,
+              attemptId: event.routingSigned === false ? null : (referenceAttempt?.id ?? null),
               eventKey: event.eventKey,
               payloadHash: event.payloadHash,
               transactionExternalId: transaction.id,

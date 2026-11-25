@@ -2,7 +2,7 @@ import "server-only";
 
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 
-import { normalizeEmail } from "@mundonettech/core";
+import { normalizeEmail, normalizeRedirectPath } from "@mundonettech/core";
 import { cookies } from "next/headers";
 
 import { getSessionHmacSecret } from "@/lib/env";
@@ -12,11 +12,39 @@ export type CustomerAuthRequestPurpose = "signup" | "login" | "recovery";
 export interface CustomerAuthRequest {
   readonly purpose: CustomerAuthRequestPurpose;
   readonly email: string;
+  readonly next?: string;
 }
 
 const purposes: readonly CustomerAuthRequestPurpose[] = ["signup", "login", "recovery"];
 const lifetimeSeconds = 10 * 60;
-const maximumCookieLength = 1024;
+const maximumCookieLength = 2048;
+const maximumNextLength = 512;
+
+export function normalizeInternalNextPath(value: string | null | undefined): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (
+    typeof value !== "string" ||
+    value.length > maximumNextLength ||
+    value.trim() !== value ||
+    !value.startsWith("/") ||
+    value.startsWith("//") ||
+    /[\u0000-\u001f\u007f\\#]/u.test(value)
+  ) {
+    return null;
+  }
+  const queryIndex = value.indexOf("?");
+  const pathname = queryIndex === -1 ? value : value.slice(0, queryIndex);
+  try {
+    const decoded = decodeURIComponent(value);
+    if (/[\u0000-\u001f\u007f\\]/u.test(decoded)) return null;
+    const normalizedPath = normalizeRedirectPath(pathname);
+    const url = new URL(value, "https://customer-auth.invalid");
+    if (url.origin !== "https://customer-auth.invalid" || url.hash) return null;
+    return `${normalizedPath}${url.search}`;
+  } catch {
+    return null;
+  }
+}
 
 function encryptionKey(): Uint8Array {
   return createHmac("sha256", getSessionHmacSecret())
@@ -34,10 +62,22 @@ function assertPurpose(value: string): asserts value is CustomerAuthRequestPurpo
   }
 }
 
-function seal(purpose: CustomerAuthRequestPurpose, email: string, now: Date): string {
+function seal(
+  purpose: CustomerAuthRequestPurpose,
+  email: string,
+  next: string | null,
+  now: Date,
+): string {
   const issuedAt = Math.floor(now.getTime() / 1000);
   const plaintext = Buffer.from(
-    JSON.stringify({ v: 1, purpose, email, iat: issuedAt, exp: issuedAt + lifetimeSeconds }),
+    JSON.stringify({
+      v: 1,
+      purpose,
+      email,
+      ...(next ? { next } : {}),
+      iat: issuedAt,
+      exp: issuedAt + lifetimeSeconds,
+    }),
     "utf8",
   );
   const nonce = randomBytes(12);
@@ -94,7 +134,13 @@ function open(
     ) {
       return null;
     }
-    return { purpose, email: parsed.email };
+    let next: string | null = null;
+    if (parsed.next !== undefined) {
+      if (typeof parsed.next !== "string") return null;
+      next = normalizeInternalNextPath(parsed.next);
+      if (next === null || next !== parsed.next) return null;
+    }
+    return { purpose, email: parsed.email, ...(next ? { next } : {}) };
   } catch {
     return null;
   }
@@ -103,12 +149,15 @@ function open(
 export async function establishCustomerAuthRequest(
   purpose: CustomerAuthRequestPurpose,
   email: string,
+  next?: string,
 ): Promise<void> {
   assertPurpose(purpose);
   const normalized = normalizeEmail(email);
+  const normalizedNext = normalizeInternalNextPath(next);
+  if (next && normalizedNext === null) throw new TypeError("Invalid customer auth return path.");
   const now = new Date();
   const store = await cookies();
-  store.set(customerAuthRequestCookie, seal(purpose, normalized, now), {
+  store.set(customerAuthRequestCookie, seal(purpose, normalized, normalizedNext, now), {
     ...sessionCookieOptions,
     maxAge: lifetimeSeconds,
     expires: new Date(now.getTime() + lifetimeSeconds * 1000),

@@ -1,6 +1,6 @@
 "use server";
 
-import { CartService } from "@mundonettech/db";
+import { CartNotFoundError, CartService } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -83,6 +83,12 @@ export async function addCartBundleAction(
   );
 }
 
+async function requiredCartReference() {
+  const reference = await existingCartReference();
+  if (!reference) throw new CartNotFoundError("Active cart not found.");
+  return reference;
+}
+
 export async function updateCartQuantityAction(
   _previous: ActionState,
   formData: FormData,
@@ -100,11 +106,10 @@ export async function updateCartQuantityAction(
       quantity: formString(formData, "quantity"),
     });
   if (!parsed.success) return actionError("Ingresa una cantidad entera válida.", values);
-  const reference = await existingCartReference();
-  if (!reference) return actionError("Tu carrito está vacío.", values);
   return perform(
     values,
     async () => {
+      const reference = await requiredCartReference();
       if (parsed.data.bundleId) {
         await service().setBundleQuantity(reference, parsed.data.bundleId, parsed.data.quantity);
       } else {
@@ -121,12 +126,10 @@ export async function removeCartItemAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   const parsed = uuidSchema.safeParse(formString(formData, "itemId"));
-  const reference = await existingCartReference();
-  if (!parsed.success || !reference)
-    return actionError("La línea del carrito no es válida.", values);
+  if (!parsed.success) return actionError("La línea del carrito no es válida.", values);
   return perform(
     values,
-    async () => service().removeItem(reference, parsed.data),
+    async () => service().removeItem(await requiredCartReference(), parsed.data),
     "Producto o paquete eliminado.",
   );
 }
@@ -136,11 +139,9 @@ export async function clearCartAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
-  const reference = await existingCartReference();
-  if (!reference) return actionError("Tu carrito ya está vacío.", values);
   return perform(
     values,
-    async () => service().clear(reference),
+    async () => service().clear(await requiredCartReference()),
     "Carrito vaciado y reserva de cupón liberada.",
   );
 }
@@ -151,11 +152,9 @@ export async function applyCartCouponAction(
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
   const code = formString(formData, "code");
-  const reference = await existingCartReference();
-  if (!reference) return actionError("Añade productos antes de aplicar un cupón.", values);
   return perform(
     values,
-    async () => service().applyCoupon(reference, code),
+    async () => service().applyCoupon(await requiredCartReference(), code),
     "Cupón aplicado y descuento distribuido exactamente por línea.",
   );
 }
@@ -165,11 +164,9 @@ export async function removeCartCouponAction(
   formData: FormData,
 ): Promise<ActionState> {
   const values = formSnapshot(formData);
-  const reference = await existingCartReference();
-  if (!reference) return actionError("No hay un cupón que retirar.", values);
   return perform(
     values,
-    async () => service().removeCoupon(reference),
+    async () => service().removeCoupon(await requiredCartReference()),
     "Cupón retirado y su reserva liberada.",
   );
 }

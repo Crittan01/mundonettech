@@ -198,7 +198,7 @@ export function CheckoutForm({
 
   return (
     <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <form ref={checkoutForm} action={action} className="space-y-6" noValidate>
+      <form ref={checkoutForm} action={action} className="space-y-6" noValidate aria-busy={pending}>
         <input type="hidden" name="submissionId" value={submissionId} />
         <input type="hidden" name="reviewFingerprint" value={reviewFingerprint} />
         <input
@@ -629,6 +629,7 @@ export function CheckoutForm({
                     >
                       <input
                         type="radio"
+                        name="localDeliveryZoneOption"
                         checked={selectedZoneId === quote.zoneId}
                         onChange={() => setFlexZoneId(quote.zoneId)}
                         className="mt-1 size-4 accent-primary"

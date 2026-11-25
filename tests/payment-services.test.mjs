@@ -28,6 +28,7 @@ import {
   PaymentValidationError,
   PaymentRefundService,
   PaymentService,
+  ShippingService,
   StoreCreditService,
   WompiWebhookService,
   createCredentialKeyRing,
@@ -182,6 +183,62 @@ async function makeOrder(
   return result.orderId;
 }
 
+async function makeShippingGateway() {
+  const credential = await vault.create({
+    provider: "aveonline",
+    accountName: `cod-race-${randomUUID()}`,
+    plaintext: new TextEncoder().encode(
+      JSON.stringify({
+        username: "cod-race-user",
+        password: "cod-race-password",
+        companyId: "123",
+        companyCode: "COD-RACE",
+        companyDocument: "900123456",
+        originLegalName: "Origen COD",
+        originEmail: "origin@example.test",
+        agentId: "1",
+        carrierId: "1",
+        authUrl: "http://127.0.0.1:54427/auth",
+        labelsUrl: "http://127.0.0.1:54427/labels",
+        lookupUrl: "http://127.0.0.1:54427/labels?dsreferencia={requestKey}",
+      }),
+    ),
+    actorAdminUserId: adminId,
+  });
+  await db.stockLocation.update({
+    where: { id: inventory.locationId },
+    data: {
+      addressLine1: "Carrera 7 # 71-21",
+      departmentCode: "11",
+      municipalityCode: "11001",
+      phoneE164: "+573001234567",
+    },
+  });
+  const scopedVault = vault.forSystemProvider("aveonline");
+  return new ShippingService(db, {
+    vault: {
+      list: async () => ({
+        items: [{ id: credential.id, provider: "aveonline", revokedAt: null }],
+      }),
+      reveal: (id) => scopedVault.reveal(id),
+    },
+    environment: "LOCAL",
+    providerFactory: () => ({
+      async createLabel() {
+        return {
+          providerReference: `GUIDE-${credential.id}`,
+          trackingCode: `GUIDE-${credential.id}`,
+          carrier: "SERVIENTREGA",
+          labelUrl: null,
+        };
+      },
+      async findLabel() {
+        return null;
+      },
+    }),
+  });
+}
+
 async function requestFullRefund(orderId) {
   const orderItems = await db.orderItem.findMany({ where: { orderId } });
   const service = new OrderRefundService(db);
@@ -197,7 +254,13 @@ async function requestFullRefund(orderId) {
   return requested.id;
 }
 
-function wompiEvent(attempt, status, occurredAt = new Date(), externalId = null) {
+function wompiEvent(
+  attempt,
+  status,
+  occurredAt = new Date(),
+  externalId = null,
+  signRouting = true,
+) {
   const transaction = {
     id: externalId ?? `trx-${randomUUID()}`,
     amount_in_cents: Number(attempt.amountCents),
@@ -207,7 +270,12 @@ function wompiEvent(attempt, status, occurredAt = new Date(), externalId = null)
     status_message: status,
   };
   const data = { transaction };
-  const properties = ["transaction.id", "transaction.status", "transaction.amount_in_cents"];
+  const properties = [
+    "transaction.id",
+    "transaction.status",
+    "transaction.amount_in_cents",
+    ...(signRouting ? ["transaction.reference", "transaction.currency"] : []),
+  ];
   const timestamp = Math.floor(occurredAt.getTime() / 1000);
   const checksum = createHash("sha256")
     .update(
@@ -254,12 +322,12 @@ before(
         status: "ACTIVE",
       },
     });
-    const extraUnits = Array.from({ length: 20 }, (_, index) => ({
+    const extraUnits = Array.from({ length: 40 }, (_, index) => ({
       id: randomUUID(),
       serial: `EXTRA-PAY-${randomUUID().slice(0, 8).toUpperCase()}-${index + 1}`,
     }));
     await sql.query(
-      `UPDATE "StockLevel" SET "onHand" = "onHand" + 20 WHERE "locationId" = $1 AND "variantId" = $2`,
+      `UPDATE "StockLevel" SET "onHand" = "onHand" + 40 WHERE "locationId" = $1 AND "variantId" = $2`,
       [inventory.locationId, catalog.variantId],
     );
     for (const unit of extraUnits) {
@@ -419,6 +487,211 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     assert.equal(replay.status, "RECONCILED");
   });
 
+  it("allows partial COD before fulfillment but rejects a new attempt after label processing wins the race", async () => {
+    const orderId = await makeOrder();
+    const firstInput = {
+      orderId,
+      provider: PaymentProvider.COD,
+      environment: "LOCAL",
+      idempotencyKey: `cod-partial-before-picking:${randomUUID()}`,
+      amountCents: 60000n,
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
+    };
+    const first = await payments.start(firstInput);
+    assert.equal(first.status, "PENDING");
+    assert.equal(first.amountCents, "60000");
+    const shipping = await makeShippingGateway();
+    const shipment = await db.shipment.findFirstOrThrow({ where: { orderId } });
+    const blocker = await openAdvisoryBarrier([`order-payment:${orderId}`]);
+    let competing;
+    let packed;
+    try {
+      competing = payments.start({
+        orderId,
+        provider: PaymentProvider.COD,
+        environment: "LOCAL",
+        idempotencyKey: `cod-after-picking:${randomUUID()}`,
+        amountCents: 40000n,
+        identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
+      });
+      await waitForAdvisoryWaiters(1);
+      await shipping.startPicking(shipment.id, audit);
+      const shipmentItem = await db.shipmentItem.findFirstOrThrow({
+        where: { shipmentId: shipment.id },
+      });
+      packed = await shipping.pack(
+        shipment.id,
+        [
+          {
+            weightGrams: 800,
+            lengthMillimeters: 300,
+            widthMillimeters: 200,
+            heightMillimeters: 100,
+            items: [{ shipmentItemId: shipmentItem.id, quantity: 1 }],
+          },
+        ],
+        audit,
+      );
+      const labelled = await shipping.processLabel(packed.packageIds[0], "worker:cod-race");
+      await blocker.query("COMMIT");
+      await assert.rejects(
+        competing,
+        (error) => error instanceof PaymentConflictError && error.code === "INVALID_STATE",
+      );
+      const packageAfter = await db.shipmentPackage.findUniqueOrThrow({
+        where: { id: packed.packageIds[0] },
+      });
+      assert.equal(
+        labelled.status,
+        "LABELLED",
+        JSON.stringify({ result: labelled, lastError: packageAfter.lastError }),
+      );
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+    assert.equal(await db.paymentAttempt.count({ where: { orderId } }), 1);
+    assert.equal(
+      (await db.orderFulfillment.findUniqueOrThrow({ where: { shipmentId: shipment.id } })).status,
+      "LABELLED",
+    );
+    assert.equal(
+      (await db.shipmentPackage.findUniqueOrThrow({ where: { id: packed.packageIds[0] } })).status,
+      "LABELLED",
+    );
+    const replay = await payments.start(firstInput);
+    assert.equal(replay.id, first.id);
+    assert.equal(replay.replayed, true);
+    await cod.reconcile({
+      carrier: "Transportadora CO",
+      reference: `REM-${randomUUID()}`,
+      items: [
+        {
+          paymentAttemptId: first.id,
+          collectedCents: 60000n,
+          remittedCents: 60000n,
+          carrierReference: `GUIA-${randomUUID()}`,
+        },
+      ],
+      audit,
+    });
+    const bank = await payments.start({
+      orderId,
+      provider: PaymentProvider.BANK_TRANSFER,
+      environment: "LOCAL",
+      idempotencyKey: `bank-after-picking:${randomUUID()}`,
+    });
+    await payments.confirmBankTransfer({
+      paymentAttemptId: bank.id,
+      externalReference: `BANK-${randomUUID()}`,
+      audit,
+    });
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "PAID",
+    );
+  });
+
+  it("blocks open COD cancellation after labelling while preserving terminal cancellation replay", async () => {
+    const orderId = await makeOrder();
+    const cancelledAttempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.COD,
+      environment: "LOCAL",
+      idempotencyKey: `cod-cancel-before-picking:${randomUUID()}`,
+      amountCents: 20000n,
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
+    });
+    const terminal = await refunds.void(cancelledAttempt.id, audit);
+    assert.equal(terminal.status, "CANCELLED");
+    const openAttempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.COD,
+      environment: "LOCAL",
+      idempotencyKey: `cod-open-before-picking:${randomUUID()}`,
+      amountCents: 60000n,
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
+    });
+    const shipping = await makeShippingGateway();
+    const shipment = await db.shipment.findFirstOrThrow({ where: { orderId } });
+    const blocker = await openAdvisoryBarrier([`order-payment:${orderId}`]);
+    let competing;
+    let packed;
+    try {
+      competing = refunds.void(openAttempt.id, audit);
+      await waitForAdvisoryWaiters(1);
+      await shipping.startPicking(shipment.id, audit);
+      const shipmentItem = await db.shipmentItem.findFirstOrThrow({
+        where: { shipmentId: shipment.id },
+      });
+      packed = await shipping.pack(
+        shipment.id,
+        [
+          {
+            weightGrams: 800,
+            lengthMillimeters: 300,
+            widthMillimeters: 200,
+            heightMillimeters: 100,
+            items: [{ shipmentItemId: shipmentItem.id, quantity: 1 }],
+          },
+        ],
+        audit,
+      );
+      const labelled = await shipping.processLabel(packed.packageIds[0], "worker:cod-void-race");
+      await blocker.query("COMMIT");
+      await assert.rejects(
+        competing,
+        (error) => error instanceof PaymentConflictError && error.code === "INVALID_STATE",
+      );
+      assert.equal(labelled.status, "LABELLED");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      await blocker.end();
+    }
+    assert.equal(
+      (await db.paymentAttempt.findUniqueOrThrow({ where: { id: openAttempt.id } })).status,
+      "PENDING",
+    );
+    assert.equal(
+      (
+        await db.codReconciliation.findUniqueOrThrow({
+          where: { paymentAttemptId: openAttempt.id },
+        })
+      ).status,
+      "PENDING_COLLECTION",
+    );
+    const replay = await refunds.void(cancelledAttempt.id, audit);
+    assert.deepEqual(replay, terminal);
+    await cod.reconcile({
+      carrier: "Transportadora CO",
+      reference: `REM-${randomUUID()}`,
+      items: [
+        {
+          paymentAttemptId: openAttempt.id,
+          collectedCents: 60000n,
+          remittedCents: 60000n,
+          carrierReference: `GUIA-${randomUUID()}`,
+        },
+      ],
+      audit,
+    });
+    const bank = await payments.start({
+      orderId,
+      provider: PaymentProvider.BANK_TRANSFER,
+      environment: "LOCAL",
+      idempotencyKey: `bank-after-void-blocked:${randomUUID()}`,
+    });
+    await payments.confirmBankTransfer({
+      paymentAttemptId: bank.id,
+      externalReference: `BANK-${randomUUID()}`,
+      audit,
+    });
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "PAID",
+    );
+  });
+
   it("confirms a bank transfer once and completes a manual refund with evidence", async () => {
     const orderId = await makeOrder();
     const attempt = await payments.start({
@@ -451,9 +724,10 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     const refundId = await requestFullRefund(orderId);
     const processing = await refunds.refund(refundId, audit);
     assert.equal(processing.pendingTransactionIds.length, 1);
+    const externalId = `REVERSO-${randomUUID()}`;
     await refunds.completeManualTransaction({
       transactionId: processing.pendingTransactionIds[0],
-      externalId: `REVERSO-${randomUUID()}`,
+      externalId,
       audit,
     });
     assert.equal(
@@ -463,6 +737,23 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     assert.equal(
       (await db.orderRefund.findUniqueOrThrow({ where: { id: refundId } })).status,
       "COMPLETED",
+    );
+    const suspended = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `suspended-finance-${randomUUID()}@example.test`,
+        displayName: "Finanzas suspendido",
+        role: "FINANCE_ANALYST",
+        status: "SUSPENDED",
+      },
+    });
+    await assert.rejects(
+      refunds.completeManualTransaction({
+        transactionId: processing.pendingTransactionIds[0],
+        externalId,
+        audit: { ...audit, actorAdminUserId: suspended.id },
+      }),
+      (error) => error?.name === "PaymentAuthorizationError",
     );
   });
 
@@ -584,6 +875,61 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     assert.equal(JSON.stringify(outbox).includes(customer.email), false);
   });
 
+  it("rejects store-credit overflow without changing its append-only balance", async () => {
+    const customer = await makeCustomer();
+    await credits.adjust({
+      customerId: customer.id,
+      type: "GRANT",
+      amountCents: 9_223_372_036_854_775_807n,
+      operationKey: `credit:${randomUUID()}`,
+      reason: "Abono en el límite INT8",
+      audit,
+    });
+    await assert.rejects(
+      credits.adjust({
+        customerId: customer.id,
+        type: "GRANT",
+        amountCents: 1n,
+        operationKey: `credit:${randomUUID()}`,
+        reason: "Overflow rechazado",
+        audit,
+      }),
+      PaymentValidationError,
+    );
+    assert.equal((await credits.get(customer.id)).availableCents, "9223372036854775807");
+    assert.equal(
+      await db.storeCreditEntry.count({ where: { account: { customerId: customer.id } } }),
+      1,
+    );
+  });
+
+  it("cancels an uncaptured COD attempt idempotently without creating a void transaction", async () => {
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.COD,
+      environment: "LOCAL",
+      idempotencyKey: `cod:${randomUUID()}`,
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
+    });
+    const first = await refunds.void(attempt.id, audit);
+    const replay = await refunds.void(attempt.id, audit);
+    assert.equal(first.status, "CANCELLED");
+    assert.deepEqual(replay, first);
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: attempt.id } }), 0);
+    assert.equal(
+      (await db.codReconciliation.findUniqueOrThrow({ where: { paymentAttemptId: attempt.id } }))
+        .status,
+      "CANCELLED",
+    );
+    assert.equal(
+      await db.adminActionLog.count({
+        where: { targetId: attempt.id, action: "PAYMENT_ATTEMPT_CANCELLED" },
+      }),
+      1,
+    );
+  });
+
   it("captures Wompi through a signed idempotent webhook and refunds through V2", async () => {
     const orderId = await makeOrder();
     const attempt = await payments.start({
@@ -643,6 +989,226 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     assert.equal(
       (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
       "REFUNDED",
+    );
+  });
+
+  it("rejects a validly signed capture whose unsigned reference was rerouted", async () => {
+    const paidOrderId = await makeOrder();
+    const paidAttempt = await payments.start({
+      orderId: paidOrderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-routing-source:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved = wompiEvent(paidAttempt, "APPROVED");
+    await webhooks.process({ body: approved.body, environment: "LOCAL" });
+    const targetOrderId = await makeOrder();
+    const targetAttempt = await payments.start({
+      orderId: targetOrderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-routing-target:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const tampered = JSON.parse(approved.body);
+    tampered.data.transaction.reference = targetAttempt.reference;
+
+    await assert.rejects(
+      webhooks.process({ body: JSON.stringify(tampered), environment: "LOCAL" }),
+      PaymentValidationError,
+    );
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: targetOrderId } })).paymentStatus,
+      "UNPAID",
+    );
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: targetAttempt.id } }), 0);
+    assert.equal(
+      await db.paymentTransaction.count({
+        where: { attemptId: paidAttempt.id, kind: "CAPTURE", status: "SUCCEEDED" },
+      }),
+      1,
+    );
+  });
+
+  it("revalidates legacy unsigned routing with one bounded API lookup and no replay lookup", async () => {
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-legacy-routing-source:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const otherOrderId = await makeOrder();
+    const otherAttempt = await payments.start({
+      orderId: otherOrderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-legacy-routing-target:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const legacy = wompiEvent(attempt, "APPROVED", new Date(), null, false);
+    const tampered = JSON.parse(legacy.body);
+    tampered.data.transaction.reference = otherAttempt.reference;
+    let calls = 0;
+    const gateway = new WompiWebhookService(db, {
+      vault,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: legacy.externalId,
+              reference: attempt.reference,
+              status: "APPROVED",
+              amount_in_cents: Number(attempt.amountCents),
+              currency: "COP",
+              status_message: "Aprobada",
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    const body = JSON.stringify(tampered);
+    const first = await gateway.process({ body, environment: "LOCAL" });
+    assert.equal(first.status, "PROCESSED");
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "PAID",
+    );
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: otherOrderId } })).paymentStatus,
+      "UNPAID",
+    );
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: otherAttempt.id } }), 0);
+    const replay = await gateway.process({ body, environment: "LOCAL" });
+    assert.equal(replay.replayed, true);
+    assert.equal(calls, 1);
+  });
+
+  it("requeries FAILED legacy evidence and never applies its unsigned reference", async () => {
+    const sourceOrderId = await makeOrder();
+    const sourceAttempt = await payments.start({
+      orderId: sourceOrderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-legacy-failed-source:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const targetOrderId = await makeOrder();
+    const targetAttempt = await payments.start({
+      orderId: targetOrderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-legacy-failed-target:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const legacy = wompiEvent(sourceAttempt, "APPROVED", new Date(), null, false);
+    const tampered = JSON.parse(legacy.body);
+    tampered.data.transaction.reference = targetAttempt.reference;
+    const body = JSON.stringify(tampered);
+    let calls = 0;
+    const gateway = new WompiWebhookService(db, {
+      vault,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({
+            data: {
+              id: legacy.externalId,
+              reference: sourceAttempt.reference,
+              status: "APPROVED",
+              amount_in_cents: calls === 1 ? 1 : Number(sourceAttempt.amountCents),
+              currency: "COP",
+              status_message: "Aprobada",
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+
+    await assert.rejects(gateway.process({ body, environment: "LOCAL" }), PaymentValidationError);
+    const failed = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: {
+        provider_eventKey: { provider: PaymentProvider.WOMPI, eventKey: legacy.eventKey },
+      },
+    });
+    assert.equal(failed.status, "FAILED");
+    assert.equal(failed.attemptId, null);
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: sourceAttempt.id } }), 0);
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: targetAttempt.id } }), 0);
+
+    const replay = await gateway.process({ body, environment: "LOCAL" });
+    assert.equal(replay.status, "PROCESSED");
+    assert.equal(replay.attemptId, sourceAttempt.id);
+    assert.equal(calls, 2);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: sourceOrderId } })).paymentStatus,
+      "PAID",
+    );
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: targetOrderId } })).paymentStatus,
+      "UNPAID",
+    );
+    assert.equal(await db.paymentTransaction.count({ where: { attemptId: targetAttempt.id } }), 0);
+    const processed = await db.paymentWebhookEvent.findUniqueOrThrow({
+      where: { id: failed.id },
+    });
+    assert.equal(processed.status, "PROCESSED");
+    assert.equal(processed.attemptId, sourceAttempt.id);
+  });
+
+  it("keeps a transient Wompi refund uncertain and blocks a blind second HTTP submission", async () => {
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-refund-uncertain:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const approved = wompiEvent(attempt, "APPROVED");
+    await webhooks.process({ body: approved.body, environment: "LOCAL" });
+    const refundId = await requestFullRefund(orderId);
+    let calls = 0;
+    const gateway = new PaymentRefundService(db, {
+      vault,
+      fetchImpl: async () => {
+        calls += 1;
+        return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
+      },
+    });
+
+    await assert.rejects(
+      gateway.refund(refundId, audit),
+      (error) => error instanceof PaymentProviderError && error.code === "NETWORK_UNCERTAIN",
+    );
+    const pending = await db.paymentTransaction.findFirstOrThrow({
+      where: { refundId, kind: "REFUND" },
+    });
+    assert.equal(pending.status, "PROCESSING");
+    await assert.rejects(
+      gateway.refund(refundId, audit),
+      (error) => error instanceof PaymentConflictError && error.code === "PROVIDER_UNCERTAIN",
+    );
+    assert.equal(calls, 1);
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "PAID",
+    );
+    assert.equal(
+      (await db.orderRefund.findUniqueOrThrow({ where: { id: refundId } })).status,
+      "PROCESSING",
     );
   });
 
@@ -1128,6 +1694,18 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
     assert.equal(competitors.filter((result) => result.status === "fulfilled").length, 1);
     assert.equal(competitors.filter((result) => result.status === "rejected").length, 1);
     assert.equal((await credits.get(creditCustomer.id)).availableCents, "0");
+    const creditEntries = await db.storeCreditEntry.findMany({
+      where: { account: { customerId: creditCustomer.id } },
+      orderBy: { sequence: "asc" },
+    });
+    assert.deepEqual(
+      creditEntries.map((entry) => entry.sequence),
+      [1, 2, 3],
+    );
+    assert.deepEqual(
+      creditEntries.map((entry) => entry.type),
+      ["GRANT", "HOLD", "CAPTURE"],
+    );
     await db.order.update({
       where: { id: firstOrder },
       data: { reservationExpiresAt: new Date(Date.now() - 1_000) },

@@ -6,7 +6,7 @@ import {
   normalizePromotionSlug,
   normalizeSku,
 } from "@mundonettech/core";
-import { CartNotFoundError, CartService } from "@mundonettech/db";
+import { AdminActorAuthorizationError, CartNotFoundError, CartService } from "@mundonettech/db";
 import { storeConfig } from "@mundonettech/config/store";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -76,7 +76,7 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de modificar la venta asistida.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para gestionar ventas asistidas.", values);
   }
   return actionError(cartMutationMessage(error), values);
@@ -249,6 +249,7 @@ export async function issueAssistedLinkAction(
     ) {
       return actionError("Revisa el carrito y una vigencia entera entre 1 y 720 horas.", values);
     }
+    const base = absolutePublicUrl((process.env.SITE_URL ?? storeConfig.url).trim());
     const generated = createCartToken();
     await new CartService(getDatabase()).issueAssistedToken({
       cartId,
@@ -256,7 +257,6 @@ export async function issueAssistedLinkAction(
       expiresAt: expiration(hours.data),
       audit,
     });
-    const base = absolutePublicUrl((process.env.SITE_URL ?? storeConfig.url).trim());
     const paymentUrl = new URL(`/pagar/${generated.token}`, base).toString();
     revalidatePath(`/admin/venta-asistida/${cartId}`);
     return {

@@ -201,7 +201,7 @@ async function runWorker(page: Page, metaEventId: string, expected: string) {
     headers: { authorization: `Bearer ${workerSecret}` },
   });
   expect(response.status()).toBe(200);
-  expect(response.headers()["cache-control"]).toBe("no-store");
+  expect(response.headers()["cache-control"]).toContain("no-store");
   await expect
     .poll(
       async () => (await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } })).status,
@@ -326,9 +326,9 @@ test("Meta credential, catalog feed and Purchase dispatch work through the stand
   const feed = await page.request.get("/api/feeds/meta-catalog");
   expect(feed.status()).toBe(200);
   expect(feed.headers()["content-type"]).toContain("text/csv");
-  expect(feed.headers()["x-robots-tag"]).toBe("noindex");
+  expect(feed.headers()["x-robots-tag"]).toContain("noindex, nofollow, noarchive");
   expect(feed.headers()["x-content-type-options"]).toBe("nosniff");
-  expect(feed.headers()["cache-control"]).toBe("no-store");
+  expect(feed.headers()["cache-control"]).toContain("no-store");
   const csv = await feed.text();
   expect(csv).toContain("id,title,description,availability,condition,price,link,image_link");
   expect(csv).toContain(scenario.catalog.variantId);

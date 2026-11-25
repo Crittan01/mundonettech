@@ -14,6 +14,7 @@ import {
 import {
   clearCustomerAuthRequest,
   establishCustomerAuthRequest,
+  normalizeInternalNextPath,
   readCustomerAuthRequest,
 } from "@/lib/security/customer-auth-request";
 import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
@@ -125,9 +126,17 @@ export async function requestCustomerOtpAction(
   formData: FormData,
 ): Promise<ActionState> {
   const parsed = z
-    .object({ email: emailSchema, turnstileToken: z.string().max(2048) })
+    .object({
+      email: emailSchema,
+      turnstileToken: z.string().max(2048),
+      next: z.string().max(512).optional(),
+    })
     .safeParse(Object.fromEntries(formData));
   if (!parsed.success) return emailFieldError();
+  const next = normalizeInternalNextPath(parsed.data.next);
+  if (parsed.data.next && next === null) {
+    return actionError("El destino de regreso no es válido.");
+  }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_login");
   if (captchaError) return captchaError;
   const email = normalizeEmail(parsed.data.email);
@@ -135,7 +144,8 @@ export async function requestCustomerOtpAction(
     const supabase = await createSupabaseServerClient();
     await supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
   }
-  await establishCustomerAuthRequest("login", email);
+  if (next) await establishCustomerAuthRequest("login", email, next);
+  else await establishCustomerAuthRequest("login", email);
   return actionSuccess(genericRequestMessage);
 }
 
@@ -193,7 +203,8 @@ export async function verifyCustomerOtpAction(
     await supabase.auth.signOut();
     return actionError("No pudimos activar tu cuenta. Inténtalo de nuevo o contacta soporte.");
   }
-  redirect((await consumeReferralPath()) ?? "/mi-cuenta");
+  const referralPath = await consumeReferralPath();
+  redirect(request.next ?? referralPath ?? "/mi-cuenta");
 }
 
 export async function resetCustomerPasswordAction(
@@ -257,7 +268,9 @@ export async function cancelCustomerAuthRequestAction(): Promise<void> {
       ? "/registro"
       : request?.purpose === "recovery"
         ? "/recuperar"
-        : "/ingresar",
+        : request?.next
+          ? `/ingresar?next=${encodeURIComponent(request.next)}`
+          : "/ingresar",
   );
 }
 

@@ -195,11 +195,12 @@ export class DomainEventWorker {
     };
     if (options.shipmentId) {
       const shipment = order.shipments.find((candidate) => candidate.id === options.shipmentId);
-      if (!shipment?.trackingCode)
+      if (!shipment) throw new EmailValidationError("Shipment does not belong to the order.");
+      if (options.templateKey === "shipment.shipped" && !shipment.trackingCode)
         throw new EmailValidationError(
           "Shipment tracking code is unavailable for its notification.",
         );
-      variables.trackingCode = shipment.trackingCode;
+      variables.trackingCode = shipment.trackingCode ?? "";
     }
     if (options.document) {
       variables.documentNumber = options.document.fullNumber;

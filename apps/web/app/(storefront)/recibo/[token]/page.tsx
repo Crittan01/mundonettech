@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { optionalCustomerId } from "@/lib/cart";
 import { hashCartToken } from "@/lib/cart-token";
 import { orderService } from "@/lib/checkout";
+import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import {
   getBankTransferInstructions,
@@ -95,7 +96,7 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
   ]
     .filter(Boolean)
     .join(" · ");
-  const [attempts, rawAttempts, order, acceptedInvoice, customerId, credentials] =
+  const [attempts, rawAttempts, order, acceptedInvoice, customerId, credentials, now] =
     await Promise.all([
       paymentService().listOrderPayments(receipt.orderId),
       getDatabase().paymentAttempt.findMany({
@@ -128,12 +129,12 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
       }),
       optionalCustomerId(),
       getIntegrationCredentialVault().forSystemProvider("wompi").list({ limit: 100 }),
+      getDatabaseClock(getDatabase()),
     ]);
   const credit =
     customerId && order?.customerId === customerId
       ? await storeCreditService().get(customerId)
       : null;
-  const now = new Date();
   const capturedCents = rawAttempts
     .filter((attempt) => attempt.status === "SUCCEEDED")
     .reduce((sum, attempt) => sum + attempt.amountCents, 0n);

@@ -125,7 +125,11 @@ function guideRecord(root: Record<string, unknown>): Record<string, unknown> | n
   return recordValue(data?.guia) ?? recordValue(root.guia);
 }
 
-function parseGuide(root: Record<string, unknown>, requestKey: string): ShippingLabelResult | null {
+function parseGuide(
+  root: Record<string, unknown>,
+  requestKey: string,
+  requireRequestReference = false,
+): ShippingLabelResult | null {
   const status = root.status;
   if (status === "error") {
     const message =
@@ -141,7 +145,10 @@ function parseGuide(root: Record<string, unknown>, requestKey: string): Shipping
   const guide = guideRecord(root);
   if (!guide)
     throw new ShippingProviderError("Aveonline omitted the generated guide.", "INVALID_RESPONSE");
-  if (guide.dsreferencia !== undefined && guide.dsreferencia !== requestKey) {
+  if (
+    (requireRequestReference && guide.dsreferencia !== requestKey) ||
+    (guide.dsreferencia !== undefined && guide.dsreferencia !== requestKey)
+  ) {
     throw new ShippingProviderError(
       "Aveonline returned a guide for another request.",
       "INVALID_RESPONSE",
@@ -386,7 +393,7 @@ export class AveonlineShippingProvider implements ShippingProvider {
           "Aveonline rejected the reconciliation request.",
           "HTTP_ERROR",
         );
-      return parseGuide(parseHttpJson(response.body), requestKey);
+      return parseGuide(parseHttpJson(response.body), requestKey, true);
     } catch (error) {
       if (error instanceof ShippingProviderError) throw error;
       if (error instanceof IntegrationTransportError)

@@ -14,6 +14,7 @@ import type { IntegrationCredentialVault } from "./credential-vault.js";
 import { OfflinePaymentProvider, StoreCreditPaymentProvider } from "./local-payment-providers.js";
 import {
   appendStoreCreditEntry,
+  assertCodDistributionMutable,
   assertFinancialActor,
   assertPaymentUuid,
   databaseNow,
@@ -367,10 +368,10 @@ export class PaymentRefundService {
         select: { orderId: true },
       });
       if (!peek) throw new PaymentNotFoundError("Order refund not found.");
+      await assertFinancialActor(tx, audit.actorAdminUserId);
       await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
       await lockPaymentOrder(tx, peek.orderId);
       const refund = await this.lockRefund(tx, refundId);
-      await assertFinancialActor(tx, audit.actorAdminUserId);
       if (refund.status === "COMPLETED") {
         return tx.paymentTransaction.findMany({ where: { refundId }, include: { attempt: true } });
       }
@@ -506,6 +507,7 @@ export class PaymentRefundService {
             "Store credit compensations cannot be reconciled manually.",
           );
         }
+        await assertFinancialActor(tx, options.audit.actorAdminUserId);
         await acquireOperationLocks(tx, [`order-payment:${peek.attempt.orderId}`]);
         await lockPaymentOrder(tx, peek.attempt.orderId);
         const lockedRows = await tx.$queryRaw<
@@ -532,7 +534,6 @@ export class PaymentRefundService {
             "Only pending or uncertain compensations can be reconciled manually.",
           );
         }
-        await assertFinancialActor(tx, options.audit.actorAdminUserId);
         const now = await databaseNow(tx);
         await tx.paymentTransaction.update({
           where: { id: transaction.id },
@@ -590,10 +591,10 @@ export class PaymentRefundService {
         select: { orderId: true },
       });
       if (!peek) throw new PaymentNotFoundError("Payment attempt not found.");
+      await assertFinancialActor(tx, audit.actorAdminUserId);
       await acquireOperationLocks(tx, [`order-payment:${peek.orderId}`]);
       await lockPaymentOrder(tx, peek.orderId);
       const attempt = await lockPaymentAttempt(tx, paymentAttemptId);
-      await assertFinancialActor(tx, audit.actorAdminUserId);
       if (attempt.provider === PaymentProvider.STORE_CREDIT) {
         throw new PaymentConflictError(
           "Captured store credit must be reversed with an order refund.",
@@ -627,6 +628,12 @@ export class PaymentRefundService {
           return { attempt, transaction: retried, captureExternalId: capture.externalId };
         }
         return { attempt, transaction: existing };
+      }
+      if (!capture && attempt.status === "CANCELLED") {
+        return { attempt, transaction: null };
+      }
+      if (!capture && attempt.provider === PaymentProvider.COD) {
+        await assertCodDistributionMutable(tx, attempt.orderId);
       }
       if (!capture) {
         if (

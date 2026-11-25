@@ -53,6 +53,27 @@ export interface LabelProcessResult {
   readonly replayed: boolean;
 }
 
+interface ShippingRequestFence {
+  readonly claimedBy: string;
+  readonly requestStartedAt: Date | null;
+  readonly requestHash: Uint8Array;
+}
+
+function matchesRequestFence(
+  record: {
+    readonly claimedBy: string | null;
+    readonly requestStartedAt: Date | null;
+    readonly requestHash: Uint8Array;
+  },
+  fence: ShippingRequestFence,
+): boolean {
+  return (
+    record.claimedBy === fence.claimedBy &&
+    (record.requestStartedAt?.getTime() ?? null) === (fence.requestStartedAt?.getTime() ?? null) &&
+    Buffer.from(record.requestHash).equals(fence.requestHash)
+  );
+}
+
 function roundDiv(value: bigint, divisor: bigint): bigint {
   if (divisor <= 0n) throw new ShippingValidationError("Declared value divisor must be positive.");
   return (value + divisor / 2n) / divisor;
@@ -453,10 +474,107 @@ export class ShippingService {
   private async credentials(credentialId: string) {
     const plaintext = await this.options.vault.reveal(credentialId);
     try {
-      return parseAveonlineCredentials(plaintext);
+      return parseAveonlineCredentials(plaintext, this.options.environment);
     } finally {
       plaintext.fill(0);
     }
+  }
+
+  private async cashOnDeliveryCents(
+    packageId: string,
+    orderId: string,
+    attempts: readonly { amountCents: bigint }[],
+  ): Promise<bigint> {
+    const openCash = attempts.reduce((sum, attempt) => sum + attempt.amountCents, 0n);
+    if (openCash === 0n) return 0n;
+    const order = await this.db.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { totalCents: true },
+    });
+    if (openCash < 0n || order.totalCents <= 0n || openCash > order.totalCents) {
+      throw new ShippingValidationError("Open cash on delivery exceeds the sealed order balance.");
+    }
+    const shipments = await this.db.shipment.findMany({
+      where: { orderId, status: { not: "CANCELLED" } },
+      include: {
+        items: {
+          include: { orderItem: true },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        },
+        packages: { orderBy: [{ packageNumber: "asc" }, { id: "asc" }] },
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    const declarationProgress = new Map<string, { quantity: number; value: bigint }>();
+    const shipmentTotals = new Map<string, bigint>();
+    const shipmentCollections = new Map<string, bigint>();
+    let expectedOrderTotal = 0n;
+    let allocatedShipmentCash = 0n;
+    for (const shipment of shipments) {
+      let merchandiseCents = 0n;
+      for (const item of shipment.items) {
+        const previous = declarationProgress.get(item.orderItemId) ?? { quantity: 0, value: 0n };
+        const quantity = previous.quantity + item.quantity;
+        const itemTotal = item.orderItem.lineTotalCents + item.orderItem.taxCents;
+        const declared =
+          item.declaredValueCents ??
+          roundDiv(itemTotal * BigInt(quantity), BigInt(item.orderItem.quantity)) - previous.value;
+        declarationProgress.set(item.orderItemId, {
+          quantity,
+          value: previous.value + declared,
+        });
+        merchandiseCents += declared;
+      }
+      const shipmentTotal = merchandiseCents + shipment.shippingCents;
+      expectedOrderTotal += shipmentTotal;
+      shipmentTotals.set(shipment.id, shipmentTotal);
+      const cumulativeCash = roundDiv(openCash * expectedOrderTotal, order.totalCents);
+      shipmentCollections.set(shipment.id, cumulativeCash - allocatedShipmentCash);
+      allocatedShipmentCash = cumulativeCash;
+    }
+    const current = shipments.find((shipment) =>
+      shipment.packages.some((record) => record.id === packageId),
+    );
+    const currentTotal = current ? shipmentTotals.get(current.id) : undefined;
+    const currentCash = current ? shipmentCollections.get(current.id) : undefined;
+    if (
+      !current ||
+      currentTotal === undefined ||
+      currentCash === undefined ||
+      expectedOrderTotal !== order.totalCents ||
+      allocatedShipmentCash !== openCash
+    ) {
+      throw new ShippingValidationError(
+        "Sealed shipment values do not balance the cash-on-delivery order.",
+      );
+    }
+    const packages = current.packages.filter((record) => record.status !== "CANCELLED");
+    const packagedTotal = packages.reduce(
+      (sum, record, index) =>
+        sum + record.declaredValueCents + (index === 0 ? current.shippingCents : 0n),
+      0n,
+    );
+    if (packagedTotal !== currentTotal) {
+      throw new ShippingValidationError(
+        "Package values do not cover the shipment cash-on-delivery balance.",
+      );
+    }
+    let cumulativePackageBase = 0n;
+    let allocatedPackageCash = 0n;
+    let packageCash: bigint | undefined;
+    for (const [index, record] of packages.entries()) {
+      cumulativePackageBase +=
+        record.declaredValueCents + (index === 0 ? current.shippingCents : 0n);
+      const cumulativeCash =
+        currentTotal === 0n ? 0n : roundDiv(currentCash * cumulativePackageBase, currentTotal);
+      const allocated = cumulativeCash - allocatedPackageCash;
+      allocatedPackageCash = cumulativeCash;
+      if (record.id === packageId) packageCash = allocated;
+    }
+    if (packageCash === undefined || allocatedPackageCash !== currentCash) {
+      throw new ShippingValidationError("Package cash-on-delivery allocation is incomplete.");
+    }
+    return packageCash;
   }
 
   private async labelRequest(
@@ -538,9 +656,10 @@ export class ShippingService {
       lengthMillimeters: record.lengthMillimeters,
       widthMillimeters: record.widthMillimeters,
       heightMillimeters: record.heightMillimeters,
-      cashOnDeliveryCents: order.paymentAttempts.reduce(
-        (sum, attempt) => sum + attempt.amountCents,
-        0n,
+      cashOnDeliveryCents: await this.cashOnDeliveryCents(
+        record.id,
+        order.id,
+        order.paymentAttempts,
       ),
       contents: record.items.map((item) => ({
         sku: item.shipmentItem.orderItem.skuSnapshot,
@@ -556,15 +675,17 @@ export class ShippingService {
     packageId: string,
     result: ShippingLabelResult,
     workerId: string,
-    requestStartedAt: Date | null,
+    fence: ShippingRequestFence | null,
     audit?: ShippingAuditContext,
   ): Promise<LabelProcessResult> {
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipmentPackage.findUnique({
       where: { id: packageId },
       select: { shipmentId: true, shipment: { select: { orderId: true } } },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
     return this.db.$transaction(async (tx) => {
+      await this.assertHumanActor(tx, audit, true);
       const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
         orderId: identity.shipment.orderId,
         shipmentId: identity.shipmentId,
@@ -584,14 +705,14 @@ export class ShippingService {
       }
       if (!["CLAIMED", "RECONCILING"].includes(record.status))
         throw new ShippingConflictError("Only a claimed package can accept a provider label.");
-      if (requestStartedAt) {
-        if (
-          record.claimedBy !== workerId ||
-          record.requestStartedAt?.getTime() !== requestStartedAt.getTime()
-        ) {
-          throw new ShippingConflictError(
-            "Package label claim ownership changed before persistence.",
-          );
+      if (fence) {
+        if (!matchesRequestFence(record, fence)) {
+          return {
+            packageId,
+            status: record.status,
+            trackingCode: record.trackingCode,
+            replayed: true,
+          };
         }
       } else if (record.status !== "RECONCILING") {
         throw new ShippingConflictError("Only reconciliation can persist a label without a claim.");
@@ -673,17 +794,19 @@ export class ShippingService {
   private async failLabel(
     packageId: string,
     workerId: string,
-    requestStartedAt: Date,
+    fence: ShippingRequestFence,
     uncertain: boolean,
     code: string,
     audit?: ShippingAuditContext,
   ): Promise<LabelProcessResult> {
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipmentPackage.findUnique({
       where: { id: packageId },
       select: { shipmentId: true, shipment: { select: { orderId: true } } },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
     return this.db.$transaction(async (tx) => {
+      await this.assertHumanActor(tx, audit, true);
       const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
         orderId: identity.shipment.orderId,
         shipmentId: identity.shipmentId,
@@ -698,15 +821,16 @@ export class ShippingService {
           replayed: true,
         };
       }
-      if (
-        fulfillment.status === "CANCELLED" ||
-        shipment.status === "CANCELLED" ||
-        record.claimedBy !== workerId ||
-        record.requestStartedAt?.getTime() !== requestStartedAt.getTime()
-      ) {
-        throw new ShippingConflictError(
-          "Package label claim ownership changed before failure update.",
-        );
+      if (fulfillment.status === "CANCELLED" || shipment.status === "CANCELLED") {
+        throw new ShippingConflictError("A cancelled shipment cannot update a provider failure.");
+      }
+      if (!matchesRequestFence(record, fence)) {
+        return {
+          packageId,
+          status: record.status,
+          trackingCode: record.trackingCode,
+          replayed: true,
+        };
       }
       const status: ShipmentPackageStatus = uncertain ? "RECONCILING" : "SEALED";
       await tx.shipmentPackage.update({
@@ -871,6 +995,7 @@ export class ShippingService {
     if (claim.outcome === "UNCERTAIN")
       return { packageId, status: "RECONCILING", trackingCode: null, replayed: false };
     const started = await this.db.$transaction(async (tx) => {
+      await this.assertHumanActor(tx, audit, true);
       const { record } = await lockShippingHierarchy(tx, {
         orderId: claim.identity.shipment.orderId,
         shipmentId: claim.identity.shipmentId,
@@ -887,6 +1012,7 @@ export class ShippingService {
           claimedAt: claim.claimedAt,
           claimExpiresAt: { gt: now },
           requestStartedAt: null,
+          requestHash: claim.record.requestHash,
         },
         data: { requestStartedAt: now },
       });
@@ -900,6 +1026,11 @@ export class ShippingService {
         replayed: true,
       };
     }
+    const fence = {
+      claimedBy: workerId,
+      requestStartedAt: started.requestStartedAt,
+      requestHash: started.record.requestHash,
+    };
     let result: ShippingLabelResult;
     try {
       const { request, provider } = await this.labelRequest(packageId);
@@ -914,9 +1045,9 @@ export class ShippingService {
           : error instanceof ShippingValidationError
             ? error.message
             : "PROVIDER_FAILURE";
-      return this.failLabel(packageId, workerId, started.requestStartedAt, uncertain, code, audit);
+      return this.failLabel(packageId, workerId, fence, uncertain, code, audit);
     }
-    return this.persistLabel(packageId, result, workerId, started.requestStartedAt, audit);
+    return this.persistLabel(packageId, result, workerId, fence, audit);
   }
 
   async reconcileLabel(
@@ -926,6 +1057,7 @@ export class ShippingService {
   ): Promise<LabelProcessResult> {
     assertIntegrationUuid(packageId, "packageId");
     const workerId = shippingWorkerId(workerIdInput);
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipmentPackage.findUnique({
       where: { id: packageId },
       select: { shipmentId: true, shipment: { select: { orderId: true } } },
@@ -967,9 +1099,17 @@ export class ShippingService {
         replayed: true,
       };
     }
+    if (!current.record.claimedBy) {
+      throw new ShippingConflictError("The uncertain package has no persistent claim owner.");
+    }
+    const fence = {
+      claimedBy: current.record.claimedBy,
+      requestStartedAt: current.record.requestStartedAt,
+      requestHash: current.record.requestHash,
+    };
     const { provider } = await this.labelRequest(packageId);
     const result = await provider.findLabel(current.record.requestKey);
-    if (result) return this.persistLabel(packageId, result, workerId, null, audit);
+    if (result) return this.persistLabel(packageId, result, workerId, fence, audit);
     return this.db.$transaction(async (tx) => {
       if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
       const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
@@ -978,11 +1118,7 @@ export class ShippingService {
         packageId,
       });
       if (!record) throw new ShippingNotFoundError("Shipment package not found.");
-      if (
-        record.status !== "RECONCILING" ||
-        record.requestStartedAt?.getTime() !== current.record.requestStartedAt?.getTime() ||
-        record.claimedBy !== current.record.claimedBy
-      ) {
+      if (record.status !== "RECONCILING" || !matchesRequestFence(record, fence)) {
         return {
           packageId,
           status: record.status,
