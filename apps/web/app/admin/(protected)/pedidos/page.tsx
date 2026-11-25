@@ -19,6 +19,26 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
+const orderStatusLabels: Record<string, string> = {
+  PENDING: "Pendiente",
+  CONFIRMED: "Confirmado",
+  CANCELLED: "Cancelado",
+  COMPLETED: "Completado",
+};
+const paymentStatusLabels: Record<string, string> = {
+  UNPAID: "Sin pago",
+  PARTIALLY_PAID: "Pago parcial",
+  PAID: "Pagado",
+  PARTIALLY_REFUNDED: "Reembolso parcial",
+  REFUNDED: "Reembolsado",
+  FAILED: "Fallido",
+};
+const fulfillmentStatusLabels: Record<string, string> = {
+  UNFULFILLED: "Sin despachar",
+  PARTIALLY_FULFILLED: "Despacho parcial",
+  FULFILLED: "Despachado",
+  CANCELLED: "Cancelado",
+};
 
 const querySchema = z.object({
   q: z.string().trim().max(64).optional(),
@@ -199,9 +219,15 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
                     <span className="block text-xs text-muted-foreground">{order.email}</span>
                   </td>
                   <td className="p-3">{dateFormatter.format(new Date(order.createdAt))}</td>
-                  <td className="p-3">{order.orderStatus}</td>
-                  <td className="p-3">{order.paymentStatus}</td>
-                  <td className="p-3">{order.fulfillmentStatus}</td>
+                  <td className="p-3">
+                    {orderStatusLabels[order.orderStatus] ?? order.orderStatus}
+                  </td>
+                  <td className="p-3">
+                    {paymentStatusLabels[order.paymentStatus] ?? order.paymentStatus}
+                  </td>
+                  <td className="p-3">
+                    {fulfillmentStatusLabels[order.fulfillmentStatus] ?? order.fulfillmentStatus}
+                  </td>
                   <td className="p-3 font-semibold">{formatCopCents(order.totalCents)}</td>
                 </tr>
               ))}

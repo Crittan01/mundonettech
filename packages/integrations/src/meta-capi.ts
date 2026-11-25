@@ -146,7 +146,11 @@ function sha256Hex(value: Uint8Array, field: string): string {
   return Buffer.from(hash32(value, field)).toString("hex");
 }
 
-function purchaseBody(input: MetaCapiPurchaseInput, testEventCode: string | null): string {
+function purchaseBody(
+  input: MetaCapiPurchaseInput,
+  testEventCode: string | null,
+  allowLoopback = false,
+): string {
   if (!uuidPattern.test(input.orderId)) {
     throw new MetaCapiError("INVALID_INPUT", "Meta purchase orderId must be a UUID.");
   }
@@ -181,7 +185,7 @@ function purchaseBody(input: MetaCapiPurchaseInput, testEventCode: string | null
   const phone = input.phoneHash ? sha256Hex(input.phoneHash, "phoneHash") : null;
   const userData = `{"external_id":[${JSON.stringify(externalId)}]${email ? `,"em":[${JSON.stringify(email)}]` : ""}${phone ? `,"ph":[${JSON.stringify(phone)}]` : ""}}`;
   const customData = `{"currency":"COP","value":${centsToDecimal(input.valueCents)},"contents":[${contents.join(",")}],"content_ids":[${[...ids].map((id) => JSON.stringify(id)).join(",")}],"content_type":"product","num_items":${itemCount},"order_id":${JSON.stringify(input.orderId)}}`;
-  const event = `{"event_name":"Purchase","event_time":${Math.floor(input.eventTime.getTime() / 1000)},"event_id":${JSON.stringify(`purchase:${input.orderId}`)},"event_source_url":${JSON.stringify(publicHttpsUrl(input.eventSourceUrl, "eventSourceUrl"))},"action_source":"website","user_data":${userData},"custom_data":${customData}}`;
+  const event = `{"event_name":"Purchase","event_time":${Math.floor(input.eventTime.getTime() / 1000)},"event_id":${JSON.stringify(`purchase:${input.orderId}`)},"event_source_url":${JSON.stringify(publicHttpsUrl(input.eventSourceUrl, "eventSourceUrl", { allowLoopback }))},"action_source":"website","user_data":${userData},"custom_data":${customData}}`;
   return `{"data":[${event}]${testEventCode ? `,"test_event_code":${JSON.stringify(testEventCode)}` : ""}}`;
 }
 
@@ -196,7 +200,11 @@ export function buildMetaCapiPurchaseRequest(options: {
     ...(options.apiUrl !== undefined ? { apiUrl: options.apiUrl } : {}),
     ...(options.allowLoopback !== undefined ? { allowLoopback: options.allowLoopback } : {}),
   });
-  const body = purchaseBody(options.purchase, options.testEventCode);
+  const body = purchaseBody(
+    options.purchase,
+    options.testEventCode,
+    options.allowLoopback === true,
+  );
   return {
     requestUrl,
     body,

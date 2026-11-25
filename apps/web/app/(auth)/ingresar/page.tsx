@@ -5,7 +5,10 @@ import { CustomerLoginForm } from "@/components/auth/customer-auth-forms";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
 import { normalizeInternalNextPath } from "@/lib/security/customer-auth-request";
 
-export const metadata = { title: "Iniciar sesión" };
+export const metadata = {
+  title: "Iniciar sesión",
+  robots: { index: false, follow: false },
+};
 
 function reasonMessage(reason: string | undefined): string | null {
   if (reason === "timeout") {

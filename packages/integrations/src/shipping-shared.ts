@@ -1,5 +1,8 @@
-import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
+import { randomUUID } from "node:crypto";
+
 import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
   Prisma,
   type Order,
   type OrderFulfillment,
@@ -7,7 +10,12 @@ import {
   type ShipmentPackage,
 } from "@mundonettech/db";
 
-import { assertIntegrationKey, assertIntegrationUuid, hash32 } from "./integration-utils.js";
+import {
+  assertIntegrationKey,
+  assertIntegrationUuid,
+  databaseTimestamp,
+  hash32,
+} from "./integration-utils.js";
 import {
   ShippingAuthorizationError,
   ShippingConflictError,
@@ -34,23 +42,20 @@ function shippingAudit(audit: ShippingAuditContext): {
     actorAdminUserId: audit.actorAdminUserId,
     ipHash: hash32(audit.ipHash, "ipHash"),
     userAgentHash: audit.userAgentHash ? hash32(audit.userAgentHash, "userAgentHash") : null,
-    requestId: audit.requestId ?? null,
+    requestId: audit.requestId ?? randomUUID(),
   };
 }
 
 export async function assertFulfillmentActor(
   tx: ShippingTransaction,
   actorAdminUserId: string,
-): Promise<void> {
+): Promise<{ id: string; authUserId: string; email: string; role: string }> {
   assertIntegrationUuid(actorAdminUserId, "actorAdminUserId");
-  const rows = await tx.$queryRaw<Array<{ role: string }>>`
-    SELECT "role"::text AS "role" FROM "AdminUser"
-    WHERE "id" = ${actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
-    FOR SHARE
-  `;
-  const role = rows[0]?.role;
-  if (!role || !isAdminRole(role) || !hasAdminPermission(role, "fulfillment:write")) {
-    throw new ShippingAuthorizationError();
+  try {
+    return await assertAdminActorInTransaction(tx, actorAdminUserId, "fulfillment:write");
+  } catch (error) {
+    if (error instanceof AdminActorAuthorizationError) throw new ShippingAuthorizationError();
+    throw error;
   }
 }
 
@@ -62,12 +67,14 @@ export async function writeShippingAudit(
     targetId: string;
     audit: ShippingAuditContext;
     metadata?: Prisma.InputJsonObject;
+    selfDealing?: boolean;
   },
 ): Promise<void> {
   const audit = shippingAudit(options.audit);
   await tx.adminActionLog.create({
     data: {
       actorAdminUserId: audit.actorAdminUserId,
+      ...(options.selfDealing ? { selfDealing: true } : {}),
       action: options.action,
       targetType: options.targetType,
       targetId: options.targetId,
@@ -145,14 +152,53 @@ export async function assertPaidOrder(
   db: Prisma.TransactionClient | import("@mundonettech/db").PrismaClient,
   order: Order,
 ): Promise<void> {
-  if (order.orderStatus === "CANCELLED")
-    throw new ShippingConflictError("Cancelled orders cannot enter fulfillment.");
+  if (!["CONFIRMED", "COMPLETED"].includes(order.orderStatus))
+    throw new ShippingConflictError("Only confirmed orders can enter fulfillment.");
   if (["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentStatus)) return;
   if (["UNPAID", "PARTIALLY_PAID"].includes(order.paymentStatus)) {
-    const openCod = await db.paymentAttempt.count({
-      where: { orderId: order.id, provider: "COD", status: { in: ["PENDING", "PROCESSING"] } },
-    });
-    if (openCod > 0) return;
+    const now = await databaseTimestamp(db);
+    const [startedFulfillment, startedShipment, attempts] = await Promise.all([
+      db.orderFulfillment.findFirst({
+        where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
+        select: { id: true },
+      }),
+      db.shipment.findFirst({
+        where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
+        select: { id: true },
+      }),
+      db.paymentAttempt.findMany({
+        where: { orderId: order.id },
+        select: {
+          provider: true,
+          status: true,
+          amountCents: true,
+          expiresAt: true,
+          transactions: {
+            where: { status: "SUCCEEDED" },
+            select: { kind: true, amountCents: true },
+          },
+        },
+      }),
+    ]);
+    const alreadySealed = Boolean(startedFulfillment || startedShipment);
+    let capturedNetCents = 0n;
+    let openCodCents = 0n;
+    for (const attempt of attempts) {
+      for (const txItem of attempt.transactions) {
+        if (txItem.kind === "CAPTURE") capturedNetCents += txItem.amountCents;
+        else if (txItem.kind === "VOID" || txItem.kind === "REFUND") {
+          capturedNetCents -= txItem.amountCents;
+        }
+      }
+      if (
+        attempt.provider === "COD" &&
+        ["PENDING", "PROCESSING"].includes(attempt.status) &&
+        (alreadySealed || attempt.expiresAt === null || attempt.expiresAt.getTime() > now.getTime())
+      ) {
+        openCodCents += attempt.amountCents;
+      }
+    }
+    if (openCodCents > 0n && capturedNetCents + openCodCents <= order.totalCents) return;
   }
   throw new ShippingConflictError(
     "Only paid orders or open cash-on-delivery orders can enter fulfillment.",

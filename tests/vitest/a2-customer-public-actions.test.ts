@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { optionalTrimmedText, phoneInputPattern } from "../../apps/web/lib/form-validation";
+import {
+  normalizePhoneE164,
+  optionalTrimmedText,
+  phoneInputPattern,
+} from "../../apps/web/lib/form-validation";
 
 import * as core from "../../packages/core/dist/index.js";
 import * as db from "../../packages/db/dist/index.js";
@@ -138,7 +142,7 @@ const moduleMocks: Record<string, unknown> = {
   },
   "@/lib/checkout": { orderService: () => ({ checkout: mocks.checkout }) },
   "@/lib/checkout-errors": { checkoutMutationMessage: () => "No pudimos confirmar." },
-  "@/lib/form-validation": { optionalTrimmedText, phoneInputPattern },
+  "@/lib/form-validation": { normalizePhoneE164, optionalTrimmedText, phoneInputPattern },
   "@/lib/legal": {
     getConfiguredLegalDocument: (slug: string) => ({ slug, version: "2026-01", content: "legal" }),
   },

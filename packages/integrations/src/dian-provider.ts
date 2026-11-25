@@ -18,6 +18,7 @@ interface ExpectedDocument {
   readonly documentHash: string;
   readonly documentNumber?: string | undefined;
   readonly documentType?: "INVOICE" | "CREDIT_NOTE" | undefined;
+  readonly unsignedXml?: string | undefined;
 }
 
 interface XmlAttribute {
@@ -59,12 +60,19 @@ interface XmlProcessingInstruction {
 
 type XmlNode = XmlElement | XmlText | XmlComment | XmlProcessingInstruction;
 
+const cacNamespace = "urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2";
 const cbcNamespace = "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2";
+const invoiceNamespace = "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2";
+const creditNoteNamespace = "urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2";
 const dsigNamespace = "http://www.w3.org/2000/09/xmldsig#";
 const c14nAlgorithm = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
 const exclusiveC14nAlgorithm = "http://www.w3.org/2001/10/xml-exc-c14n#";
 const envelopedTransform = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
 const xmlNamespace = "http://www.w3.org/XML/1998/namespace";
+const xmlnsNamespace = "http://www.w3.org/2000/xmlns/";
+const singlePemCertificatePattern =
+  /^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/]{1,76}\r?\n)*[A-Za-z0-9+/=]{1,76}\r?\n-----END CERTIFICATE-----$/;
+const ncNamePattern = /^[A-Za-z_][A-Za-z0-9._-]*$/;
 
 function invalidDocument(): InvoiceProviderError {
   return new InvoiceProviderError(
@@ -87,19 +95,20 @@ function qualifiedName(value: string): { name: string; prefix: string; localName
     : { name: value, prefix: value.slice(0, colon), localName: value.slice(colon + 1) };
 }
 
+const xmlEntities = new Map<string, string>([
+  ["amp", "&"],
+  ["lt", "<"],
+  ["gt", ">"],
+  ["quot", '"'],
+  ["apos", "'"],
+]);
+
 function decodeXml(value: string): string {
-  const entities: Record<string, string> = {
-    amp: "&",
-    lt: "<",
-    gt: ">",
-    quot: '"',
-    apos: "'",
-  };
   return value.replace(
     /&(?:#x([0-9A-Fa-f]+)|#([0-9]+)|([A-Za-z]+));/g,
     (_match, hex: string | undefined, decimal: string | undefined, name: string | undefined) => {
       if (name) {
-        const entity = entities[name];
+        const entity = xmlEntities.get(name);
         if (!entity) throw invalidDocument();
         return entity;
       }
@@ -118,11 +127,15 @@ function decodeXml(value: string): string {
   );
 }
 
+function assertValidXmlControlChars(value: string): void {
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) throw invalidDocument();
+}
+
 function assertValidXmlText(value: string): void {
   if (/&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#x[0-9A-Fa-f]+);)/.test(value)) {
     throw invalidDocument();
   }
-  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) throw invalidDocument();
+  assertValidXmlControlChars(value);
 }
 
 function tagEnd(source: string, start: number): number {
@@ -145,7 +158,8 @@ function parseAttributes(source: string): { name: string; value: string }[] {
   let offset = 0;
   while (offset < source.length) {
     const whitespace = /^\s+/.exec(source.slice(offset));
-    if (whitespace) offset += whitespace[0].length;
+    if (!whitespace) throw invalidDocument();
+    offset += whitespace[0].length;
     if (offset >= source.length) break;
     const match =
       /^([A-Za-z_][A-Za-z0-9._-]*(?::[A-Za-z_][A-Za-z0-9._-]*)?)\s*=\s*(?:"([^"]*)"|'([^']*)')/.exec(
@@ -153,8 +167,10 @@ function parseAttributes(source: string): { name: string; value: string }[] {
       );
     if (!match) throw invalidDocument();
     const rawValue = match[2] ?? match[3] ?? "";
+    if (rawValue.includes("<")) throw invalidDocument();
     assertValidXmlText(rawValue);
-    attributes.push({ name: match[1]!, value: decodeXml(rawValue) });
+    const normalizedWhitespace = rawValue.replace(/[\t\n\r]/g, " ");
+    attributes.push({ name: match[1]!, value: decodeXml(normalizedWhitespace) });
     offset += match[0].length;
   }
   return attributes;
@@ -169,8 +185,12 @@ function parseXml(source: string): XmlElement {
   while (offset < input.length) {
     if (input.startsWith("<!--", offset)) {
       const end = input.indexOf("-->", offset + 4);
-      if (end === -1 || input.slice(offset + 4, end).includes("--")) throw invalidDocument();
-      const comment: XmlComment = { type: "comment", value: input.slice(offset + 4, end) };
+      const commentValue = end === -1 ? "" : input.slice(offset + 4, end);
+      if (end === -1 || commentValue.includes("--") || commentValue.endsWith("-")) {
+        throw invalidDocument();
+      }
+      assertValidXmlControlChars(commentValue);
+      const comment: XmlComment = { type: "comment", value: commentValue };
       if (stack.length > 0) stack.at(-1)!.children.push(comment);
       offset = end + 3;
       continue;
@@ -180,7 +200,7 @@ function parseXml(source: string): XmlElement {
       const end = input.indexOf("]]>", offset + 9);
       if (end === -1) throw invalidDocument();
       const value = input.slice(offset + 9, end);
-      assertValidXmlText(value);
+      assertValidXmlControlChars(value);
       stack.at(-1)!.children.push({ type: "text", value });
       offset = end + 3;
       continue;
@@ -189,10 +209,10 @@ function parseXml(source: string): XmlElement {
       const end = input.indexOf("?>", offset + 2);
       if (end === -1) throw invalidDocument();
       const body = input.slice(offset + 2, end);
-      const targetMatch = /^\s*([A-Za-z_][A-Za-z0-9._:-]*)(?:\s+([\s\S]*))?$/.exec(body);
+      const targetMatch = /^([A-Za-z_][A-Za-z0-9._:-]*)(?:\s+([\s\S]*))?$/.exec(body);
       if (!targetMatch) throw invalidDocument();
       const target = targetMatch[1]!;
-      if (target.toLowerCase() !== "xml" || offset !== 0 || roots.length > 0 || stack.length > 0) {
+      if (target !== "xml" || offset !== 0 || roots.length > 0 || stack.length > 0) {
         throw invalidDocument();
       }
       offset = end + 2;
@@ -231,14 +251,14 @@ function parseXml(source: string): XmlElement {
       for (const attribute of rawAttributes) {
         if (
           (attribute.name === "xmlns" || attribute.name.startsWith("xmlns:")) &&
-          attribute.value === xmlNamespace
+          (attribute.value === xmlNamespace || attribute.value === xmlnsNamespace)
         ) {
           throw invalidDocument();
         }
         if (attribute.name === "xmlns") declarations.set("", attribute.value);
         if (attribute.name.startsWith("xmlns:")) {
           const prefix = attribute.name.slice(6);
-          qualifiedName(prefix);
+          if (!ncNamePattern.test(prefix) || prefix === "xmlns") throw invalidDocument();
           if (!attribute.value) throw invalidDocument();
           declarations.set(prefix, attribute.value);
         }
@@ -251,7 +271,7 @@ function parseXml(source: string): XmlElement {
       const namespaceUri = parsedName.prefix
         ? context.get(parsedName.prefix)
         : (context.get("") ?? "");
-      if (namespaceUri === undefined || namespaceUri === "http://www.w3.org/2000/xmlns/") {
+      if (namespaceUri === undefined || namespaceUri === xmlnsNamespace) {
         throw invalidDocument();
       }
       const attributes: XmlAttribute[] = [];
@@ -260,7 +280,11 @@ function parseXml(source: string): XmlElement {
         if (raw.name === "xmlns" || raw.name.startsWith("xmlns:")) continue;
         const name = qualifiedName(raw.name);
         const attributeNamespace = name.prefix ? context.get(name.prefix) : "";
-        if (attributeNamespace === undefined || attributeNamespace === xmlNamespace) {
+        if (
+          attributeNamespace === undefined ||
+          attributeNamespace === xmlNamespace ||
+          attributeNamespace === xmlnsNamespace
+        ) {
           throw invalidDocument();
         }
         const expandedName = `${attributeNamespace}|${name.localName}`;
@@ -335,7 +359,7 @@ function canonicalize(
     for (const [prefix, uri] of node.namespaceDeclarations) current.set(prefix, uri);
     const used = new Set<string>();
     if (algorithm === exclusiveC14nAlgorithm) {
-      used.add(node.prefix || (node.namespaceUri ? "" : "__no_default__"));
+      used.add(node.prefix);
       for (const attribute of node.attributes) {
         if (attribute.prefix) used.add(attribute.prefix);
       }
@@ -344,6 +368,7 @@ function canonicalize(
     for (const [prefix, uri] of current) {
       if (prefix === "xml") continue;
       if (algorithm === exclusiveC14nAlgorithm && !used.has(prefix)) continue;
+      if (prefix === "" && uri === "" && (outputNamespaces.get("") ?? "") === "") continue;
       if (outputNamespaces.get(prefix) === uri) continue;
       declarations.push({ prefix, uri });
     }
@@ -438,20 +463,62 @@ function base64(value: string): Buffer {
   return decoded;
 }
 
+function elementChildren(element: XmlElement): XmlElement[] {
+  return element.children.filter((child): child is XmlElement => child.type === "element");
+}
+
+function assertOnlyElementChildren(
+  element: XmlElement,
+  allowed: readonly (readonly [string, string])[],
+): void {
+  const allowedKeys = new Set(
+    allowed.map(([localName, namespaceUri]) => `${namespaceUri}|${localName}`),
+  );
+  for (const child of elementChildren(element)) {
+    if (!allowedKeys.has(`${child.namespaceUri}|${child.localName}`)) {
+      throw invalidDocument();
+    }
+  }
+}
+
+function assertNoElementChildren(element: XmlElement): void {
+  if (elementChildren(element).length !== 0) throw invalidDocument();
+}
+
 function trustAnchor(pem: string | null): X509Certificate {
   if (!pem) {
     throw invalidCredential("A DIAN signature trust anchor is required to accept signed XML.");
   }
+  const trimmed = pem.trim();
+  if (
+    trimmed.length < 500 ||
+    trimmed.length > 16_384 ||
+    !singlePemCertificatePattern.test(trimmed)
+  ) {
+    throw invalidCredential("The DIAN signature trust anchor is not a valid X.509 certificate.");
+  }
   let certificate: X509Certificate;
   try {
-    certificate = new X509Certificate(pem);
+    certificate = new X509Certificate(trimmed);
   } catch {
     throw invalidCredential("The DIAN signature trust anchor is not a valid X.509 certificate.");
   }
   const now = Date.now();
+  const validFrom = Date.parse(certificate.validFrom);
+  const validTo = Date.parse(certificate.validTo);
+  const keyUsageAllowed =
+    !certificate.keyUsage ||
+    certificate.keyUsage.some((usage) =>
+      /digital\s*signature|non[- ]?repudiation|content\s*commitment|1\.3\.6\.1\.5\.5\.7\.3|2\.5\.29\.15/i.test(
+        usage,
+      ),
+    );
   if (
-    Date.parse(certificate.validFrom) > now ||
-    Date.parse(certificate.validTo) < now ||
+    !Number.isFinite(validFrom) ||
+    !Number.isFinite(validTo) ||
+    validFrom > now ||
+    validTo < now ||
+    !keyUsageAllowed ||
     certificate.publicKey.asymmetricKeyType !== "rsa" ||
     (certificate.publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048
   ) {
@@ -462,25 +529,26 @@ function trustAnchor(pem: string | null): X509Certificate {
   return certificate;
 }
 
+const digestAlgorithms = new Map<string, "sha256" | "sha384" | "sha512">([
+  ["http://www.w3.org/2001/04/xmlenc#sha256", "sha256"],
+  ["http://www.w3.org/2001/04/xmldsig-more#sha384", "sha384"],
+  ["http://www.w3.org/2001/04/xmlenc#sha512", "sha512"],
+]);
+
 function digestAlgorithm(uri: string): "sha256" | "sha384" | "sha512" {
-  const algorithms = {
-    "http://www.w3.org/2001/04/xmlenc#sha256": "sha256",
-    "http://www.w3.org/2001/04/xmldsig-more#sha384": "sha384",
-    "http://www.w3.org/2001/04/xmlenc#sha512": "sha512",
-  } as const;
-  const algorithm = algorithms[uri as keyof typeof algorithms];
+  const algorithm = digestAlgorithms.get(uri);
   if (!algorithm) throw invalidDocument();
   return algorithm;
 }
 
+const signatureAlgorithms = new Map<string, "RSA-SHA256" | "RSA-SHA384" | "RSA-SHA512">([
+  ["http://www.w3.org/2001/04/xmldsig-more#rsa-sha256", "RSA-SHA256"],
+  ["http://www.w3.org/2001/04/xmldsig-more#rsa-sha384", "RSA-SHA384"],
+  ["http://www.w3.org/2001/04/xmldsig-more#rsa-sha512", "RSA-SHA512"],
+]);
+
 function signatureAlgorithm(uri: string): "RSA-SHA256" | "RSA-SHA384" | "RSA-SHA512" {
-  const algorithms = {
-    "http://www.w3.org/2000/09/xmldsig#rsa-sha1": undefined,
-    "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256": "RSA-SHA256",
-    "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384": "RSA-SHA384",
-    "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512": "RSA-SHA512",
-  } as const;
-  const algorithm = algorithms[uri as keyof typeof algorithms];
+  const algorithm = signatureAlgorithms.get(uri);
   if (!algorithm) throw invalidDocument();
   return algorithm;
 }
@@ -490,36 +558,59 @@ function verifyXmlDsig(
   signature: XmlElement,
   certificate: X509Certificate,
 ): void {
+  assertOnlyElementChildren(signature, [
+    ["SignedInfo", dsigNamespace],
+    ["SignatureValue", dsigNamespace],
+    ["KeyInfo", dsigNamespace],
+  ]);
   const signedInfo = one(children(signature, "SignedInfo", dsigNamespace));
   const signatureValue = one(children(signature, "SignatureValue", dsigNamespace));
   const keyInfo = one(children(signature, "KeyInfo", dsigNamespace));
+  assertNoElementChildren(signatureValue);
+  assertOnlyElementChildren(keyInfo, [["X509Data", dsigNamespace]]);
   const x509Data = one(children(keyInfo, "X509Data", dsigNamespace));
-  const embeddedCertificate = base64(
-    text(one(children(x509Data, "X509Certificate", dsigNamespace))),
-  );
+  assertOnlyElementChildren(x509Data, [["X509Certificate", dsigNamespace]]);
+  const x509CertElement = one(children(x509Data, "X509Certificate", dsigNamespace));
+  assertNoElementChildren(x509CertElement);
+  const embeddedCertificate = base64(text(x509CertElement));
   if (
     embeddedCertificate.length !== certificate.raw.length ||
     !timingSafeEqual(embeddedCertificate, certificate.raw)
   ) {
     throw invalidDocument();
   }
+  assertOnlyElementChildren(signedInfo, [
+    ["CanonicalizationMethod", dsigNamespace],
+    ["SignatureMethod", dsigNamespace],
+    ["Reference", dsigNamespace],
+  ]);
   const canonicalization = one(children(signedInfo, "CanonicalizationMethod", dsigNamespace));
+  assertNoElementChildren(canonicalization);
   const canonicalizationAlgorithm = attribute(canonicalization, "Algorithm");
   if (![c14nAlgorithm, exclusiveC14nAlgorithm].includes(canonicalizationAlgorithm)) {
     throw invalidDocument();
   }
-  const signatureMethod = signatureAlgorithm(
-    attribute(one(children(signedInfo, "SignatureMethod", dsigNamespace)), "Algorithm"),
-  );
+  const signatureMethodElement = one(children(signedInfo, "SignatureMethod", dsigNamespace));
+  assertNoElementChildren(signatureMethodElement);
+  const signatureMethod = signatureAlgorithm(attribute(signatureMethodElement, "Algorithm"));
   const reference = one(children(signedInfo, "Reference", dsigNamespace));
   if (attribute(reference, "URI") !== "") throw invalidDocument();
+  assertOnlyElementChildren(reference, [
+    ["Transforms", dsigNamespace],
+    ["DigestMethod", dsigNamespace],
+    ["DigestValue", dsigNamespace],
+  ]);
   const transforms = one(children(reference, "Transforms", dsigNamespace));
+  assertOnlyElementChildren(transforms, [["Transform", dsigNamespace]]);
   const transform = one(children(transforms, "Transform", dsigNamespace));
+  assertNoElementChildren(transform);
   if (attribute(transform, "Algorithm") !== envelopedTransform) throw invalidDocument();
-  const digestMethod = digestAlgorithm(
-    attribute(one(children(reference, "DigestMethod", dsigNamespace)), "Algorithm"),
-  );
-  const expectedDigest = base64(text(one(children(reference, "DigestValue", dsigNamespace))));
+  const digestMethodElement = one(children(reference, "DigestMethod", dsigNamespace));
+  assertNoElementChildren(digestMethodElement);
+  const digestMethod = digestAlgorithm(attribute(digestMethodElement, "Algorithm"));
+  const digestValueElement = one(children(reference, "DigestValue", dsigNamespace));
+  assertNoElementChildren(digestValueElement);
+  const expectedDigest = base64(text(digestValueElement));
   const signatureBytes = base64(text(signatureValue));
   if (!signatureBytes.length || !expectedDigest.length) throw invalidDocument();
 
@@ -549,6 +640,115 @@ function verifyXmlDsig(
   }
 }
 
+function optionalDirectText(
+  element: XmlElement,
+  localName: string,
+  namespaceUri: string,
+): string | null {
+  const matches = children(element, localName, namespaceUri);
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) throw invalidDocument();
+  return text(matches[0]!);
+}
+
+function assertSignedPayloadParity(signedRoot: XmlElement, unsignedXml: string): void {
+  let unsignedRoot: XmlElement;
+  try {
+    unsignedRoot = parseXml(unsignedXml);
+  } catch {
+    return;
+  }
+  if (unsignedRoot.localName !== signedRoot.localName) return;
+  const expectedProfile = optionalDirectText(unsignedRoot, "ProfileExecutionID", cbcNamespace);
+  if (expectedProfile !== null) {
+    if (optionalDirectText(signedRoot, "ProfileExecutionID", cbcNamespace) !== expectedProfile) {
+      throw invalidDocument();
+    }
+    const unsignedUuid = children(unsignedRoot, "UUID", cbcNamespace)[0];
+    const signedUuid = children(signedRoot, "UUID", cbcNamespace)[0];
+    if (unsignedUuid && signedUuid) {
+      const expectedSchemeId = unsignedUuid.attributes.find(
+        (attr) => attr.localName === "schemeID" && attr.namespaceUri === "",
+      )?.value;
+      if (expectedSchemeId && attribute(signedUuid, "schemeID") !== expectedSchemeId) {
+        throw invalidDocument();
+      }
+    }
+  }
+  const unsignedSupplier = children(unsignedRoot, "AccountingSupplierParty", cacNamespace)[0];
+  if (unsignedSupplier) {
+    const signedSupplier = one(children(signedRoot, "AccountingSupplierParty", cacNamespace));
+    const expectedNit = text(
+      one(
+        children(
+          one(
+            children(
+              one(children(unsignedSupplier, "Party", cacNamespace)),
+              "PartyIdentification",
+              cacNamespace,
+            ),
+          ),
+          "ID",
+          cbcNamespace,
+        ),
+      ),
+    );
+    const actualNit = text(
+      one(
+        children(
+          one(
+            children(
+              one(children(signedSupplier, "Party", cacNamespace)),
+              "PartyIdentification",
+              cacNamespace,
+            ),
+          ),
+          "ID",
+          cbcNamespace,
+        ),
+      ),
+    );
+    if (actualNit !== expectedNit) throw invalidDocument();
+  }
+  const unsignedMonetary = children(unsignedRoot, "LegalMonetaryTotal", cacNamespace)[0];
+  if (unsignedMonetary) {
+    const signedMonetary = one(children(signedRoot, "LegalMonetaryTotal", cacNamespace));
+    const expectedPayable = text(one(children(unsignedMonetary, "PayableAmount", cbcNamespace)));
+    const actualPayable = text(one(children(signedMonetary, "PayableAmount", cbcNamespace)));
+    if (actualPayable !== expectedPayable) throw invalidDocument();
+  }
+  const unsignedTax = children(unsignedRoot, "TaxTotal", cacNamespace)[0];
+  if (unsignedTax) {
+    const signedTax = one(children(signedRoot, "TaxTotal", cacNamespace));
+    const expectedTax = text(one(children(unsignedTax, "TaxAmount", cbcNamespace)));
+    const actualTax = text(one(children(signedTax, "TaxAmount", cbcNamespace)));
+    if (actualTax !== expectedTax) throw invalidDocument();
+  }
+  const unsignedBillingRef = children(unsignedRoot, "BillingReference", cacNamespace)[0];
+  if (unsignedBillingRef) {
+    const signedBillingRef = one(children(signedRoot, "BillingReference", cacNamespace));
+    const expectedRefUuid = text(
+      one(
+        children(
+          one(children(unsignedBillingRef, "InvoiceDocumentReference", cacNamespace)),
+          "UUID",
+          cbcNamespace,
+        ),
+      ),
+    );
+    const actualRefUuid = text(
+      one(
+        children(
+          one(children(signedBillingRef, "InvoiceDocumentReference", cacNamespace)),
+          "UUID",
+          cbcNamespace,
+        ),
+      ),
+    );
+    if (actualRefUuid !== expectedRefUuid) throw invalidDocument();
+  }
+}
+
 function assertSignedIdentity(
   signedXml: string,
   expected: ExpectedDocument,
@@ -559,12 +759,12 @@ function assertSignedIdentity(
     ? {
         INVOICE: {
           name: "Invoice",
-          namespace: "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2",
+          namespace: invoiceNamespace,
           scheme: "CUFE",
         },
         CREDIT_NOTE: {
           name: "CreditNote",
-          namespace: "urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2",
+          namespace: creditNoteNamespace,
           scheme: "CUDE",
         },
       }[expected.documentType]
@@ -573,7 +773,11 @@ function assertSignedIdentity(
     (expectedRoot &&
       (document.localName !== expectedRoot.name ||
         document.namespaceUri !== expectedRoot.namespace)) ||
-    (!expectedRoot && !["Invoice", "CreditNote"].includes(document.localName))
+    (!expectedRoot &&
+      !(
+        (document.localName === "Invoice" && document.namespaceUri === invoiceNamespace) ||
+        (document.localName === "CreditNote" && document.namespaceUri === creditNoteNamespace)
+      ))
   ) {
     throw invalidDocument();
   }
@@ -592,6 +796,9 @@ function assertSignedIdentity(
     (element) => element.localName === "Signature" && element.namespaceUri === dsigNamespace,
   );
   verifyXmlDsig(document, one(signatures), trustAnchor(trustAnchorPem));
+  if (expected.unsignedXml) {
+    assertSignedPayloadParity(document, expected.unsignedXml);
+  }
 }
 
 function parseResult(

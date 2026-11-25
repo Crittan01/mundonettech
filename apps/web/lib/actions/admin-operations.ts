@@ -24,11 +24,11 @@ import { getDatabase } from "@/lib/db";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
-const snapshotFields = new Set(["reason", "includeShipping"]);
+const snapshotFields = new Set(["reason", "includeShipping", "note"]);
 function safeSnapshot(formData: FormData): Record<string, string> {
   return Object.fromEntries(
     Object.entries(formSnapshot(formData)).filter(
-      ([key, value]) => snapshotFields.has(key) && value.length <= 256,
+      ([key, value]) => snapshotFields.has(key) && value.length <= 500,
     ),
   );
 }

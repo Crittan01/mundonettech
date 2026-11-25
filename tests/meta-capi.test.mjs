@@ -533,6 +533,7 @@ describe("F6.4 — order payment domain-worker chaining", () => {
       email: new EmailService(db, {
         vault: vault.forSystemProvider("resend"),
         publicSiteUrl: "http://127.0.0.1:4110",
+        environment: IntegrationEnvironment.LOCAL,
       }),
       invoice: new InvoiceService(db, {
         vault: vault.forSystemProvider("dian"),
@@ -540,6 +541,7 @@ describe("F6.4 — order payment domain-worker chaining", () => {
       }),
       vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "http://127.0.0.1:4110",
+      allowLoopback: true,
       storeName: "Tienda de pruebas",
       receiptTokenForSubmission: () => randomBytes(32).toString("base64url"),
       metaCapi: service,

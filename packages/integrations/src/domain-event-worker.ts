@@ -13,11 +13,17 @@ import {
 import { EmailService } from "./email-service.js";
 import {
   InvoiceConflictError,
+  InvoiceNotFoundError,
   InvoiceProviderError,
   InvoiceValidationError,
 } from "./invoice-types.js";
 import { InvoiceService } from "./invoice-service.js";
-import { assertIntegrationKey, publicHttpsUrl, recordValue } from "./integration-utils.js";
+import {
+  assertIntegrationKey,
+  databaseTimestamp,
+  publicHttpsUrl,
+  recordValue,
+} from "./integration-utils.js";
 import {
   ShippingConflictError,
   ShippingProviderError,
@@ -30,12 +36,18 @@ import { MetaCapiServiceError } from "./meta-capi-service.js";
 
 const supportedEvents = [
   "cart.abandoned.v1",
+  "cart.expired.v1",
   "lifecycle.enrollment.started.v1",
   "lifecycle.message.dispatch.v1",
   "order.confirmed.v1",
+  "order.cancelled.v1",
   "order.payment.paid.v1",
+  "order.payment.partial-expired-review-required.v1",
+  "order.receipt.emission_blocked.v1",
+  "order.receipt.integrity_failed.v1",
   "payment.late-review-required.v1",
   "meta.capi.dispatch.v1",
+  "order.refund.requested.v1",
   "order.refund.completed.v1",
   "shipping.fulfillment.created.v1",
   "shipping.label.requested.v1",
@@ -84,6 +96,7 @@ export interface DomainEventWorkerOptions {
     }>;
   };
   readonly publicSiteUrl: string;
+  readonly allowLoopback?: boolean;
   readonly storeName: string;
   readonly receiptTokenForSubmission: (reference: string) => string;
   readonly metaCapi?: MetaCapiService;
@@ -106,7 +119,9 @@ export class DomainEventWorker {
     private readonly db: import("@mundonettech/db").PrismaClient,
     private readonly options: DomainEventWorkerOptions,
   ) {
-    this.publicSiteUrl = publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl").replace(/\/$/, "");
+    this.publicSiteUrl = publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl", {
+      allowLoopback: options.allowLoopback === true,
+    }).replace(/\/$/, "");
     this.maximumAttempts = options.maximumAttempts ?? 10;
     assertIntegrationKey(options.workerId, "workerId");
     if (
@@ -181,6 +196,7 @@ export class DomainEventWorker {
       where: { id: options.orderId },
       include: { shipments: true },
     });
+    if (order?.anonymizedAt) return;
     if (!order?.emailSnapshot)
       throw new EmailValidationError("Order has no recipient email snapshot.");
     const receiptUrl = await this.receiptUrl(order.id);
@@ -430,7 +446,8 @@ export class DomainEventWorker {
         },
       },
     });
-    if (refund?.order.taxRegime === "RESPONSABLE_IVA" || refund?.order.taxInvoice !== null) {
+    if (!refund) throw new InvoiceNotFoundError("Order refund not found.");
+    if (refund.order.taxRegime === "RESPONSABLE_IVA" || refund.order.taxInvoice !== null) {
       await this.options.invoice.prepareCreditNote(refundId);
     }
   }
@@ -505,6 +522,23 @@ export class DomainEventWorker {
         });
         return;
       }
+      case "order.payment.partial-expired-review-required.v1":
+        await new OperationsService(this.db).openPartialPaymentReview({
+          orderId: this.id(event, "orderId"),
+        });
+        return;
+      case "order.receipt.emission_blocked.v1":
+        await new OperationsService(this.db).openOrderReceiptAlert({
+          orderId: this.id(event, "orderId"),
+          kind: "emission_blocked",
+        });
+        return;
+      case "order.receipt.integrity_failed.v1":
+        await new OperationsService(this.db).openOrderReceiptAlert({
+          orderId: this.id(event, "orderId"),
+          kind: "integrity_failed",
+        });
+        return;
       case "meta.capi.dispatch.v1": {
         if (!this.options.metaCapi) {
           throw new MetaCapiServiceError("VALIDATION", "Meta CAPI worker is not configured.");
@@ -646,6 +680,9 @@ export class DomainEventWorker {
         await this.options.eraseAuthUser(this.id(event, "authUserId"));
         return;
       }
+      case "cart.expired.v1":
+      case "order.cancelled.v1":
+      case "order.refund.requested.v1":
       case "shipping.fulfillment.created.v1":
       case "shipping.label.generated.v1":
       case "invoice.rejected.v1":
@@ -742,14 +779,42 @@ export class DomainEventWorker {
                   this.errorText(error),
                 );
               }
+            } else if (event.eventType === "email.requested.v1") {
+              const payload = recordValue(event.payload);
+              const emailEventId = payload?.emailEventId;
+              const messageId = payload?.lifecycleMessageId;
+              if (typeof emailEventId === "string" && typeof messageId === "string") {
+                const failureCode = this.errorText(error);
+                await this.db.emailEvent.updateMany({
+                  where: { id: emailEventId, status: { in: ["QUEUED", "SENDING"] } },
+                  data: {
+                    status: "FAILED",
+                    statusRank: 70,
+                    finalAt: new Date(),
+                    nextAttemptAt: null,
+                    lastError: failureCode,
+                  },
+                });
+                await new LifecycleService(this.db).markEmailFailed(
+                  messageId,
+                  emailEventId,
+                  failureCode,
+                );
+              }
             }
             failed += 1;
           }
         } else {
-          const availableAt =
+          const requestedAt =
             error instanceof RetryableDomainEventError
               ? error.availableAt
               : this.retryAt(event.attempts);
+          const pgNow = await databaseTimestamp(this.db);
+          const minAvailableMs = pgNow.getTime() + 5_000;
+          const maxAvailableMs = pgNow.getTime() + 23 * 3_600_000;
+          const availableAt = new Date(
+            Math.min(maxAvailableMs, Math.max(minAvailableMs, requestedAt.getTime())),
+          );
           const retriedNow = await retryDomainOutbox(this.db, {
             id: event.id,
             workerId: this.options.workerId,

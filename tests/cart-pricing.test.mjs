@@ -1232,4 +1232,40 @@ describe("A2 — pricing operational audit before/after and rollback", () => {
       assert.equal(await db.adminActionLog.count({ where: { actorAdminUserId: actor.id } }), 0);
     }
   });
+
+  it("populates audit requestId by default, renews coupon reservations on assisted links, and detaches expired reservations", async () => {
+    const cart = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: adminId,
+      audit,
+    });
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1, audit);
+    const coupon = await activePercentCoupon();
+    await service.applyCoupon({ cartId: cart.id }, coupon.code, audit);
+    const extendedExpiry = new Date(Date.now() + 36 * 3_600_000);
+    await service.issueAssistedToken({
+      cartId: cart.id,
+      assistedTokenHash: hash(),
+      expiresAt: extendedExpiry,
+      audit,
+    });
+    const renewedUsage = await db.couponUsage.findFirstOrThrow({
+      where: { cartId: cart.id, status: "RESERVED" },
+    });
+    assert.ok(renewedUsage.expiresAt.getTime() >= extendedExpiry.getTime() - 1000);
+    const logs = await db.adminActionLog.findMany({
+      where: { targetType: "Cart", targetId: cart.id },
+      select: { requestId: true },
+    });
+    assert.ok(logs.length > 0 && logs.every((entry) => typeof entry.requestId === "string"));
+
+    await db.couponUsage.update({
+      where: { id: renewedUsage.id },
+      data: { status: "RELEASED", releasedAt: new Date() },
+    });
+    const revalidated = await service.getById(cart.id);
+    assert.equal(revalidated.coupon, null);
+    assert.ok(revalidated.issues.some((issue) => issue.code === "COUPON_INVALID"));
+  });
 });

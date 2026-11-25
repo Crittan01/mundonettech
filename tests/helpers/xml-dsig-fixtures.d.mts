@@ -15,7 +15,9 @@ export function signFiscalDocument(options: {
   readonly root?: "Invoice" | "CreditNote";
   readonly number?: string;
   readonly scheme?: "CUFE" | "CUDE";
+  readonly schemeId?: "1" | "2";
   readonly hash?: string;
+  readonly extraChildren?: string;
   readonly nestedIdentity?: boolean;
   readonly schemeOnRoot?: boolean;
   readonly exclusiveC14n?: boolean;

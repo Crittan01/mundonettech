@@ -105,6 +105,8 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
         "La operación ya existe o cambió en otra sesión. Recarga antes de continuar.",
       SERIAL_ASSIGNMENT_INCOMPLETE:
         "Selecciona seriales vendidos de este pedido, bodega y variante hasta cubrir exactamente cada cantidad.",
+      SIBLING_CLAIM_ACTIVE:
+        "Otro bulto de este envío tiene una solicitud o conciliación activa. Concilia o termina ese bulto antes de continuar.",
       INVALID_STATE: "El estado logístico cambió. Recarga y revisa la operación.",
     } as const;
     return actionError(
@@ -331,7 +333,9 @@ export async function dispatchShipmentAction(
     );
     revalidateLogistics();
     return actionSuccess(
-      "Seriales asignados y despacho confirmado con eventos y notificación encolados.",
+      serialUnitIds?.length
+        ? "Seriales asignados y despacho confirmado con eventos y notificación encolados."
+        : "Despacho confirmado con eventos y notificación encolados.",
     );
   } catch (error) {
     return failure(error, values);

@@ -18,7 +18,7 @@ import { clearCartAccessToken, optionalCustomerId } from "@/lib/cart";
 import { orderService, readCheckoutCartReference, receiptTokenForSubmission } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
 import {
-  normalizePhoneE164 as sharedNormalizePhoneE164,
+  normalizePhoneE164,
   optionalTrimmedText as optionalText,
   phoneInputPattern,
 } from "@/lib/form-validation";
@@ -56,13 +56,13 @@ const submissionSchema = z
       .min(8)
       .max(24)
       .regex(phoneInputPattern)
-      .transform((value) => {
-        if (typeof sharedNormalizePhoneE164 === "function") {
-          return sharedNormalizePhoneE164(value);
+      .transform((value, ctx) => {
+        try {
+          return normalizePhoneE164(value);
+        } catch {
+          ctx.addIssue({ code: "custom", message: "Teléfono inválido." });
+          return z.NEVER;
         }
-        const compact = value.replace(/[\s()-]/g, "");
-        const colombian = /^(?:\+57)?([36][0-9]{9})$/.exec(compact);
-        return colombian?.[1] ? `+57${colombian[1]}` : compact;
       }),
     buyerDocumentType: z.union([
       z.enum(["11", "12", "13", "21", "22", "31", "41", "42", "50", "91"]),
@@ -96,8 +96,10 @@ const submissionSchema = z
     } else if (!value.clickCollectLocationId) {
       context.addIssue({ code: "custom", message: "Selecciona una sede de recogida disponible." });
     }
+    const documentRequired =
+      value.fulfillmentMethod !== "CLICK_COLLECT" || value.buyerTaxRegime !== "";
     if (
-      (value.fulfillmentMethod !== "CLICK_COLLECT" || value.buyerTaxRegime !== "") &&
+      (documentRequired || value.buyerDocumentNumber !== "") &&
       (!value.buyerDocumentType || !/^[A-Za-z0-9.-]{3,30}$/.test(value.buyerDocumentNumber))
     ) {
       context.addIssue({
@@ -105,14 +107,23 @@ const submissionSchema = z
         message: "El tipo y número de documento son obligatorios.",
       });
     }
-    if (
-      value.fulfillmentMethod === "LOCAL_DELIVERY" &&
-      (!value.localDeliveryZoneId || !value.deliveryLatitude || !value.deliveryLongitude)
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "Selecciona una zona Flex y coordenadas válidas antes de confirmar.",
-      });
+    if (value.fulfillmentMethod === "LOCAL_DELIVERY") {
+      if (!value.localDeliveryZoneId || !value.deliveryLatitude || !value.deliveryLongitude) {
+        context.addIssue({
+          code: "custom",
+          message: "Selecciona una zona Flex y coordenadas válidas antes de confirmar.",
+        });
+      } else {
+        try {
+          coordinateE6(value.deliveryLatitude, "deliveryLatitude", -90_000_000, 90_000_000);
+          coordinateE6(value.deliveryLongitude, "deliveryLongitude", -180_000_000, 180_000_000);
+        } catch {
+          context.addIssue({
+            code: "custom",
+            message: "Las coordenadas de entrega Flex no son válidas.",
+          });
+        }
+      }
     }
   });
 
@@ -286,7 +297,12 @@ export async function confirmCheckoutAction(
         familyName: input.familyName,
         recipientName: input.recipientName,
         phoneE164: input.phoneE164,
-        buyerDocumentType: input.buyerDocumentType,
+        buyerDocumentType:
+          input.fulfillmentMethod === "CLICK_COLLECT" &&
+          input.buyerDocumentNumber === "" &&
+          input.buyerTaxRegime === ""
+            ? ""
+            : input.buyerDocumentType,
         buyerDocumentNumber: input.buyerDocumentNumber,
         buyerTaxRegime: input.buyerTaxRegime || null,
         termsVersion: terms.version,

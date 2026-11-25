@@ -1,3 +1,4 @@
+import { DeliveryValidationError } from "@mundonettech/core";
 import {
   CartNotFoundError,
   CheckoutAuthenticationRequiredError,
@@ -5,6 +6,8 @@ import {
   CheckoutCouponError,
   CheckoutReviewRequiredError,
   CheckoutStockError,
+  LocalDeliveryConflictError,
+  LocalDeliveryValidationError,
   OrderValidationError,
   ReceiptBalanceError,
 } from "@mundonettech/db";
@@ -32,7 +35,7 @@ export function checkoutMutationMessage(error: unknown): string {
   ) {
     return "No pudimos validar el método de pago seleccionado. Revisa tu selección o elige otro medio de pago.";
   }
-  if (error instanceof CheckoutReviewRequiredError) {
+  if (error instanceof CheckoutReviewRequiredError || error instanceof LocalDeliveryConflictError) {
     return "Los precios, impuestos o condiciones de entrega cambiaron. Recarga el checkout y revisa nuevamente antes de confirmar.";
   }
   if (error instanceof CheckoutAuthenticationRequiredError) {
@@ -50,7 +53,11 @@ export function checkoutMutationMessage(error: unknown): string {
   if (error instanceof CartNotFoundError) {
     return "El carrito ya no está disponible. Recarga la página antes de continuar.";
   }
-  if (error instanceof OrderValidationError) {
+  if (
+    error instanceof OrderValidationError ||
+    error instanceof LocalDeliveryValidationError ||
+    error instanceof DeliveryValidationError
+  ) {
     return "Revisa los datos de contacto, dirección, municipio, sede y aceptaciones. La orden no fue creada.";
   }
   if (error instanceof ReceiptBalanceError) {

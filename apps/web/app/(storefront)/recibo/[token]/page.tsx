@@ -96,41 +96,65 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
   ]
     .filter(Boolean)
     .join(" · ");
-  const [attempts, rawAttempts, order, acceptedInvoice, customerId, credentials, now] =
-    await Promise.all([
-      paymentService().listOrderPayments(receipt.orderId),
-      getDatabase().paymentAttempt.findMany({
-        where: { orderId: receipt.orderId },
-        select: {
-          id: true,
-          provider: true,
-          status: true,
-          amountCents: true,
-          expiresAt: true,
-          transactions: { where: { kind: "CAPTURE" }, select: { id: true } },
+  const [
+    attempts,
+    rawAttempts,
+    order,
+    acceptedInvoice,
+    customerId,
+    credentials,
+    now,
+    fulfillmentStarted,
+    shipmentStarted,
+    packageStarted,
+  ] = await Promise.all([
+    paymentService().listOrderPayments(receipt.orderId),
+    getDatabase().paymentAttempt.findMany({
+      where: { orderId: receipt.orderId },
+      select: {
+        id: true,
+        provider: true,
+        status: true,
+        amountCents: true,
+        expiresAt: true,
+        codReconciliation: { select: { status: true } },
+        transactions: { where: { kind: "CAPTURE" }, select: { id: true } },
+      },
+    }),
+    getDatabase().order.findUnique({
+      where: { id: receipt.orderId },
+      select: { customerId: true },
+    }),
+    getDatabase().taxInvoice.findFirst({
+      where: { orderId: receipt.orderId, status: "ACCEPTED" },
+      select: {
+        id: true,
+        fullNumber: true,
+        cufe: true,
+        creditNotes: {
+          where: { status: "ACCEPTED" },
+          select: { id: true, fullNumber: true, cude: true },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         },
-      }),
-      getDatabase().order.findUnique({
-        where: { id: receipt.orderId },
-        select: { customerId: true },
-      }),
-      getDatabase().taxInvoice.findFirst({
-        where: { orderId: receipt.orderId, status: "ACCEPTED" },
-        select: {
-          id: true,
-          fullNumber: true,
-          cufe: true,
-          creditNotes: {
-            where: { status: "ACCEPTED" },
-            select: { id: true, fullNumber: true, cude: true },
-            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-          },
-        },
-      }),
-      optionalCustomerId(),
-      getIntegrationCredentialVault().forSystemProvider("wompi").list({ limit: 100 }),
-      getDatabaseClock(getDatabase()),
-    ]);
+      },
+    }),
+    optionalCustomerId(),
+    getIntegrationCredentialVault().forSystemProvider("wompi").list({ limit: 100 }),
+    getDatabaseClock(getDatabase()),
+    getDatabase().orderFulfillment.findFirst({
+      where: { orderId: receipt.orderId, status: { notIn: ["PENDING", "CANCELLED"] } },
+      select: { id: true },
+    }),
+    getDatabase().shipment.findFirst({
+      where: { orderId: receipt.orderId, status: { notIn: ["PENDING", "CANCELLED"] } },
+      select: { id: true },
+    }),
+    getDatabase().shipmentPackage.findFirst({
+      where: { shipment: { orderId: receipt.orderId, status: { not: "CANCELLED" } } },
+      select: { id: true },
+    }),
+  ]);
+  const codSealed = Boolean(fulfillmentStarted || shipmentStarted || packageStarted);
   const credit =
     customerId && order?.customerId === customerId
       ? await storeCreditService().get(customerId)
@@ -143,8 +167,12 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
       if (!["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"].includes(attempt.status)) {
         return false;
       }
+      const codUntouched =
+        !attempt.codReconciliation || attempt.codReconciliation.status === "PENDING_COLLECTION";
       const expiredUntouched =
         ["REQUIRES_ACTION", "PENDING"].includes(attempt.status) &&
+        !(attempt.provider === "COD" && codSealed) &&
+        codUntouched &&
         attempt.expiresAt !== null &&
         attempt.expiresAt.getTime() <= now.getTime() &&
         attempt.transactions.length === 0;

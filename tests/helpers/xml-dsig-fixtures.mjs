@@ -56,15 +56,17 @@ export function signFiscalDocument(options) {
     root === "Invoice"
       ? "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
       : "urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2";
-  const cacNamespace = options.nestedIdentity
-    ? ' xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"'
-    : "";
+  const cacNamespace =
+    options.nestedIdentity || options.extraChildren
+      ? ' xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"'
+      : "";
   const namespaceText = `xmlns="${rootNamespace}"${cacNamespace} xmlns:cbc="${cbcNamespace}" xmlns:ds="${dsigNamespace}"`;
   const subsetNamespaces = options.exclusiveC14n ? `xmlns:ds="${dsigNamespace}"` : namespaceText;
   const canonicalizationAlgorithm = options.exclusiveC14n
     ? "http://www.w3.org/2001/10/xml-exc-c14n#"
     : "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
-  const identity = `<cbc:ID>${number}</cbc:ID><cbc:UUID${options.schemeOnRoot ? "" : ` schemeName="${scheme}"`}>${hash}</cbc:UUID>`;
+  const schemeIdAttr = options.schemeId ? ` schemeID="${options.schemeId}"` : "";
+  const identity = `<cbc:ID>${number}</cbc:ID><cbc:UUID${schemeIdAttr}${options.schemeOnRoot ? "" : ` schemeName="${scheme}"`}>${hash}</cbc:UUID>${options.extraChildren ?? ""}`;
   const rootAttributes = `${namespaceText}${options.schemeOnRoot ? ` schemeName="${scheme}"` : ""}`;
   const documentWithoutSignature = `<${root} ${rootAttributes}>${options.nestedIdentity ? `<cac:Wrapper>${identity}</cac:Wrapper>` : identity}</${root}>`;
   const digest = createHash("sha256").update(documentWithoutSignature, "utf8").digest("base64");

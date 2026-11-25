@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  consumeAdminOperationRateLimit,
+  isAdminSelfDealingCustomer,
+  OperationRateLimitError,
+} from "@mundonettech/db";
+
 import { getDatabase } from "@/lib/db";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
@@ -45,21 +51,46 @@ export async function GET(
       return new Response(null, { status: 404, headers: baseHeaders });
     }
     const db = getDatabase();
+    const context = await getRequestSecurityContext();
+    await consumeAdminOperationRateLimit(db, {
+      operation: "admin.invoices.document.download",
+      actorAdminUserId: session.profile.id,
+      ipHash: context.ipHash,
+      limit: 60,
+      windowSeconds: 60,
+    });
     const document =
       kind === "invoice"
         ? await db.taxInvoice.findFirst({
             where: { id, status: "ACCEPTED" },
-            select: { fullNumber: true, signedXml: true },
+            select: {
+              fullNumber: true,
+              signedXml: true,
+              order: { select: { customerId: true, emailSnapshot: true } },
+            },
           })
         : await db.creditNote.findFirst({
             where: { id, status: "ACCEPTED" },
-            select: { fullNumber: true, signedXml: true },
+            select: {
+              fullNumber: true,
+              signedXml: true,
+              invoice: { select: { order: { select: { customerId: true, emailSnapshot: true } } } },
+            },
           });
     if (!document?.signedXml) return new Response(null, { status: 404, headers: baseHeaders });
-    const context = await getRequestSecurityContext();
+    const targetOrder = "order" in document ? document.order : document.invoice.order;
+    const selfDealing = await isAdminSelfDealingCustomer(
+      db,
+      {
+        authUserId: session.profile.authUserId,
+        email: session.profile.email,
+      },
+      { customerId: targetOrder.customerId, email: targetOrder.emailSnapshot },
+    );
     await db.adminActionLog.create({
       data: {
         actorAdminUserId: session.profile.id,
+        ...(selfDealing ? { selfDealing: true } : {}),
         action: "TAX_DOCUMENT_XML_DOWNLOADED",
         targetType: kind === "invoice" ? "TaxInvoice" : "CreditNote",
         targetId: id,
@@ -78,7 +109,16 @@ export async function GET(
         "Content-Disposition": `attachment; filename="${safeFilename}.xml"`,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof OperationRateLimitError) {
+      return Response.json(
+        { error: "Too many document download requests." },
+        {
+          status: 429,
+          headers: { ...baseHeaders, "Retry-After": String(error.retryAfterSeconds) },
+        },
+      );
+    }
     return Response.json(
       { error: "Document download failed." },
       { status: 500, headers: baseHeaders },

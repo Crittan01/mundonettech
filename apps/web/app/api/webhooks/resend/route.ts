@@ -1,4 +1,8 @@
-import { EmailConflictError, EmailValidationError } from "@mundonettech/integrations";
+import {
+  EmailConflictError,
+  EmailProviderError,
+  EmailValidationError,
+} from "@mundonettech/integrations";
 
 import { emailService } from "@/lib/integrations";
 
@@ -89,6 +93,12 @@ export async function POST(request: Request) {
       return Response.json(
         { error: "Webhook conflicts with a previously processed event." },
         { status: 409, headers },
+      );
+    }
+    if (error instanceof EmailProviderError && error.code === "NETWORK_UNCERTAIN") {
+      return Response.json(
+        { error: "Temporary delivery synchronization conflict. Retry webhook." },
+        { status: 503, headers },
       );
     }
     if (error instanceof EmailValidationError || error instanceof SyntaxError) {

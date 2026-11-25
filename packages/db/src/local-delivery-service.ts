@@ -314,6 +314,16 @@ export class LocalDeliveryService {
         audit.actorAdminUserId,
         "Administrator is not authorized to archive delivery zones.",
       );
+      const locked = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "LocalDeliveryZone"
+        WHERE "id" = ${id}::uuid AND "deletedAt" IS NULL
+        FOR UPDATE
+      `;
+      if (!locked[0]) {
+        throw new LocalDeliveryConflictError(
+          "The zone changed concurrently or is already archived.",
+        );
+      }
       const openShipment = await tx.shipment.findFirst({
         where: { localDeliveryZoneId: id, status: { in: ["PENDING", "READY", "SHIPPED"] } },
         select: { id: true },

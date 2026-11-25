@@ -10,7 +10,7 @@ import { b2bService, hashProposalToken, receiptTokenForProposal, sha256 } from "
 import { orderService } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
 import {
-  normalizePhoneE164 as sharedNormalizePhoneE164,
+  normalizePhoneE164,
   optionalTrimmedText as optionalText,
   phoneInputPattern,
 } from "@/lib/form-validation";
@@ -35,13 +35,13 @@ const leadSchema = z.object({
     .min(8)
     .max(24)
     .regex(phoneInputPattern)
-    .transform((value) => {
-      if (typeof sharedNormalizePhoneE164 === "function") {
-        return sharedNormalizePhoneE164(value);
+    .transform((value, ctx) => {
+      try {
+        return normalizePhoneE164(value);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "Teléfono inválido." });
+        return z.NEVER;
       }
-      const compact = value.replace(/[\s()-]/g, "");
-      const colombian = /^(?:\+57)?([36][0-9]{9})$/.exec(compact);
-      return colombian?.[1] ? `+57${colombian[1]}` : compact;
     }),
   requirements: z.string().trim().min(10).max(5000),
   dataProcessingAccepted: z.literal("true"),

@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { normalizeEmail, normalizeRedirectPath } from "../../packages/core/dist/index.js";
+import {
+  isReservedRedirectTarget,
+  normalizeEmail,
+  normalizeRedirectPath,
+} from "../../packages/core/dist/index.js";
 import { loadWebModule } from "./a2-action-loader";
 
 type Purpose = "signup" | "login" | "recovery";
@@ -31,7 +35,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-11-24T12:00:00.000Z"));
   authRequest = loadWebModule<AuthRequestModule>("lib/security/customer-auth-request.ts", {
     "server-only": {},
-    "@mundonettech/core": { normalizeEmail, normalizeRedirectPath },
+    "@mundonettech/core": { isReservedRedirectTarget, normalizeEmail, normalizeRedirectPath },
     "next/headers": { cookies: async () => ({ set: cookieSet, get: cookieGet }) },
     "@/lib/env": { getSessionHmacSecret: () => secret },
     "@/lib/security/session-policy": {
@@ -104,6 +108,14 @@ describe("A2 — cookie cifrada de solicitud OTP", () => {
       "/pagar/%",
       " /pagar/token",
       "/pagar/token ",
+      "/referido/codigo",
+      "/api/salud",
+      "/admin/pedidos",
+      "/email/baja/token",
+      "/ingresar",
+      "/registro",
+      "/recuperar",
+      "/verificar-correo",
       `/${"a".repeat(513)}`,
     ]) {
       expect(authRequest.normalizeInternalNextPath(value), value).toBeNull();

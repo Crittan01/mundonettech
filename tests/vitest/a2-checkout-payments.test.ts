@@ -72,6 +72,7 @@ const moduleMocks: Record<string, unknown> = {
   "next/cache": { revalidatePath: mocks.revalidatePath, updateTag: mocks.updateTag },
   "next/navigation": { redirect: mocks.redirect },
   "@/lib/action-state": { actionError, formSnapshot, formString },
+  "@/lib/database-clock": { getDatabaseClock: async () => new Date() },
   "@/lib/cart": {
     clearCartAccessToken: mocks.clearCartAccessToken,
     optionalCustomerId: mocks.optionalCustomerId,
@@ -90,8 +91,11 @@ const moduleMocks: Record<string, unknown> = {
   "@/lib/db": {
     getDatabase: () => ({
       order: { findUnique: mocks.orderFindUnique },
+      orderFulfillment: { findFirst: vi.fn(async () => null) },
       paymentAttempt: { findMany: mocks.attemptFindMany, findFirst: mocks.attemptFindFirst },
       paymentTransaction: { findFirst: mocks.transactionFindFirst },
+      shipment: { findFirst: vi.fn(async () => null) },
+      shipmentPackage: { findFirst: vi.fn(async () => null) },
     }),
   },
   "@/lib/env": { getSecurityEventPepper: () => new Uint8Array(32).fill(9) },
@@ -454,6 +458,16 @@ describe("A2 — pagos desde comprobante y titularidad", () => {
 
     expect(result.status).toBe("error");
     expect(JSON.stringify(result)).not.toContain("secret provider payload");
+  });
+
+  it("mantiene phoneInputPattern y normalizePhoneE164 alineados en números locales de 10 dígitos", () => {
+    expect(phoneInputPattern.test("3001234567")).toBe(true);
+    expect(phoneInputPattern.test("+573001234567")).toBe(true);
+    expect(phoneInputPattern.test("300123456")).toBe(false);
+    expect(phoneInputPattern.test("30012345678")).toBe(false);
+    expect(normalizePhoneE164("3001234567")).toBe("+573001234567");
+    expect(() => normalizePhoneE164("300123456")).toThrow();
+    expect(() => normalizePhoneE164("30012345678")).toThrow();
   });
 });
 

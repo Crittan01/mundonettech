@@ -2,7 +2,11 @@ import "server-only";
 
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
 
-import { normalizeEmail, normalizeRedirectPath } from "@mundonettech/core";
+import {
+  isReservedRedirectTarget,
+  normalizeEmail,
+  normalizeRedirectPath,
+} from "@mundonettech/core";
 import { cookies } from "next/headers";
 
 import { getSessionHmacSecret } from "@/lib/env";
@@ -19,6 +23,8 @@ const purposes: readonly CustomerAuthRequestPurpose[] = ["signup", "login", "rec
 const lifetimeSeconds = 10 * 60;
 const maximumCookieLength = 2048;
 const maximumNextLength = 512;
+
+const authSelfPaths = ["/ingresar", "/registro", "/recuperar", "/verificar-correo"] as const;
 
 export function normalizeInternalNextPath(value: string | null | undefined): string | null {
   if (value === null || value === undefined || value === "") return null;
@@ -38,6 +44,14 @@ export function normalizeInternalNextPath(value: string | null | undefined): str
     const decoded = decodeURIComponent(value);
     if (/[\u0000-\u001f\u007f\\]/u.test(decoded)) return null;
     const normalizedPath = normalizeRedirectPath(pathname);
+    if (
+      isReservedRedirectTarget(normalizedPath) ||
+      authSelfPaths.some(
+        (prefix) => normalizedPath === prefix || normalizedPath.startsWith(`${prefix}/`),
+      )
+    ) {
+      return null;
+    }
     const url = new URL(value, "https://customer-auth.invalid");
     if (url.origin !== "https://customer-auth.invalid" || url.hash) return null;
     return `${normalizedPath}${url.search}`;

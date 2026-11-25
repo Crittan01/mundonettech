@@ -60,23 +60,38 @@ export class BlockedIdentityService {
       return await inInventoryTransaction(this.db, async (tx) => {
         await assertFinancialActor(tx, options.audit.actorAdminUserId);
         const now = await databaseNow(tx);
-        if (options.expiresAt && options.expiresAt.getTime() <= now.getTime()) {
+        if (
+          options.expiresAt !== undefined &&
+          (Number.isNaN(options.expiresAt.getTime()) ||
+            options.expiresAt.getTime() <= now.getTime())
+        ) {
           throw new PaymentConflictError("A blocked identity expiration must be in the future.");
         }
         const existing = await tx.blockedIdentity.findFirst({
           where: { kind: options.kind, identityHash, active: true },
         });
         if (existing) {
-          if (
-            existing.reason !== reason ||
-            existing.expiresAt?.getTime() !== options.expiresAt?.getTime()
-          ) {
-            throw new PaymentConflictError(
-              "An active block already exists for this identity.",
-              "DUPLICATE_REFERENCE",
-            );
+          if (existing.expiresAt !== null && existing.expiresAt.getTime() <= now.getTime()) {
+            await tx.blockedIdentity.update({
+              where: { id: existing.id },
+              data: {
+                active: false,
+                unblockedAt: now,
+                unblockedByAdminUserId: options.audit.actorAdminUserId,
+              },
+            });
+          } else {
+            if (
+              existing.reason !== reason ||
+              existing.expiresAt?.getTime() !== options.expiresAt?.getTime()
+            ) {
+              throw new PaymentConflictError(
+                "An active block already exists for this identity.",
+                "DUPLICATE_REFERENCE",
+              );
+            }
+            return descriptor(existing);
           }
-          return descriptor(existing);
         }
         const created = await tx.blockedIdentity.create({
           data: {

@@ -633,4 +633,85 @@ describe("A5 Aveonline credential environment isolation", () => {
       (error) => error instanceof ShippingProviderError && error.code === "INVALID_CREDENTIAL",
     );
   });
+
+  it("fulfills stock idempotently on COD startPicking so serialized COD orders can dispatch before remittance", async () => {
+    const orders = new OrderService(db, {
+      taxRegime: "NO_RESPONSABLE_IVA",
+      currency: "COP",
+      timeZone: "America/Bogota",
+      orderNumberPrefix: "MNT",
+      orderNumberPadding: 4,
+      uvtValueCents: 5_237_400n,
+      uvtYear: 2026,
+      standardShippingCents: 1n,
+      deliveryPromiseDays: 30,
+      reservationMinutes: 120,
+      clickAndCollectEnabled: false,
+      localDeliveryEnabled: false,
+    });
+    const carts = new CartService(db);
+    const payments = new PaymentService(db, {
+      vault: {
+        async list() {
+          return { items: [] };
+        },
+        async reveal() {
+          throw new Error("Unused");
+        },
+      },
+      environment: "LOCAL",
+    });
+    const codCart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(24),
+    });
+    await carts.addVariant({ cartId: codCart.id }, catalog.variantId, 1);
+    const preview = await orders.preview({ cartId: codCart.id });
+    const stockBefore = await db.stockLevel.findFirstOrThrow({
+      where: { variantId: catalog.variantId, locationId: catalog.locationId },
+    });
+    const order = await orders.checkout({
+      cart: { cartId: codCart.id },
+      contact: contact(`cod-pick-fulfill-${randomUUID()}@example.test`),
+      fulfillment: {
+        method: "HOME_DELIVERY",
+        departmentCode: "11",
+        municipalityCode: "11001",
+        addressLine1: "Carrera 7 # 71-21",
+      },
+      idempotency: {
+        keyHash: hash(),
+        subjectHash: hash(),
+        requestHash: hash(),
+        expiresAt: future(1),
+      },
+      receiptAccessTokenHash: hash(),
+      receiptDeliveryReference: randomUUID(),
+      expectedReviewFingerprint: preview.homeDelivery.reviewFingerprint,
+    });
+    await payments.start({
+      orderId: order.orderId,
+      provider: PaymentProvider.COD,
+      environment: "LOCAL",
+      idempotencyKey: `cod-pick-${randomUUID()}`,
+      identityHashes: { EMAIL: hash(), PHONE: hash(), DOCUMENT: hash() },
+    });
+    await shipping.ensureFulfillments(order.orderId);
+    const shipment = await db.shipment.findFirstOrThrow({
+      where: { orderId: order.orderId },
+      include: { items: true },
+    });
+    await shipping.startPicking(shipment.id, audit);
+    const stockAfterPick = await db.stockLevel.findFirstOrThrow({
+      where: { variantId: catalog.variantId, locationId: catalog.locationId },
+    });
+    assert.equal(stockAfterPick.onHand, stockBefore.onHand - 1);
+    assert.equal(stockAfterPick.committed, stockBefore.committed);
+    assert.equal(
+      await db.inventoryLedger.count({
+        where: { orderId: order.orderId, entryType: "FULFILLMENT" },
+      }),
+      1,
+    );
+  });
 });

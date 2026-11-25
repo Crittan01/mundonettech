@@ -248,7 +248,11 @@ export class WompiWebhookService {
     );
   }
 
-  private async recordFailure(event: WompiTransactionEvent, error: unknown): Promise<void> {
+  private async recordFailure(
+    event: WompiTransactionEvent,
+    error: unknown,
+    resolution?: WompiResolution,
+  ): Promise<void> {
     const errorCode = externalErrorCode(error);
     await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`wompi-webhook:${PaymentProvider.WOMPI}:${event.eventKey}`]);
@@ -260,8 +264,16 @@ export class WompiWebhookService {
       if (existing?.status === "PROCESSED" || existing?.status === "IGNORED") return;
       const attempt =
         event.transaction && event.routingSigned !== false
-          ? await tx.paymentAttempt.findUnique({
-              where: { reference: event.transaction.reference },
+          ? await tx.paymentAttempt.findFirst({
+              where: {
+                reference: event.transaction.reference,
+                ...(resolution
+                  ? {
+                      credentialId: resolution.credential.id,
+                      environment: resolution.credential.environment,
+                    }
+                  : {}),
+              },
               select: { id: true },
             })
           : null;
@@ -408,13 +420,24 @@ export class WompiWebhookService {
           return { eventKey: event.eventKey, status, attemptId: attempt.id, replayed: false };
         };
         const incomingTerminal =
-          transaction.status === "APPROVED" || transaction.status === "VOIDED";
+          transaction.status === "APPROVED" ||
+          transaction.status === "VOIDED" ||
+          transaction.status === "DECLINED" ||
+          transaction.status === "ERROR";
         const attemptIsNonTerminal = !["SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"].includes(
           attempt.status,
         );
+        const allowsPostCaptureVoid =
+          transaction.status === "VOIDED" &&
+          attempt.status === "SUCCEEDED" &&
+          (await tx.paymentTransaction.findFirst({
+            where: { attemptId: attempt.id, kind: "VOID", status: "SUCCEEDED" },
+            select: { id: true },
+          })) === null;
         if (
           attempt.providerOccurredAt &&
           attempt.providerOccurredAt > effectiveOccurredAt &&
+          !allowsPostCaptureVoid &&
           !(incomingTerminal && (attemptIsNonTerminal || attempt.providerStatus === "PENDING"))
         ) {
           return finish("IGNORED", "STALE_EVENT");
@@ -660,7 +683,8 @@ export class WompiWebhookService {
         return finish("PROCESSED");
       });
     } catch (error) {
-      if (!(error instanceof WompiWebhookReplayError)) await this.recordFailure(event, error);
+      if (!(error instanceof WompiWebhookReplayError))
+        await this.recordFailure(event, error, resolution);
       throw error;
     }
   }

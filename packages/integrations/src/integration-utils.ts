@@ -117,10 +117,16 @@ export function centsToDecimal(value: bigint): string {
 
 function isPrivateOrLocalHostname(hostname: string): boolean {
   const lower = hostname.toLowerCase();
-  const bare = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
+  const unwrapped = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
+  const bare = unwrapped.replace(/\.+$/, "");
   if (
+    !bare ||
     bare === "localhost" ||
     bare.endsWith(".localhost") ||
+    bare.endsWith(".local") ||
+    bare.endsWith(".internal") ||
+    bare.endsWith(".lan") ||
+    bare.endsWith(".home.arpa") ||
     bare === "::1" ||
     bare === "::" ||
     bare === "0.0.0.0"
@@ -131,11 +137,17 @@ function isPrivateOrLocalHostname(hostname: string): boolean {
   if (ipv4) {
     const a = Number(ipv4[1]);
     const b = Number(ipv4[2]);
+    const c = Number(ipv4[3]);
     if (a === 0 || a === 10 || a === 127) return true;
     if (a === 169 && b === 254) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
+    if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    if (a === 198 && b === 51 && c === 100) return true;
+    if (a === 203 && b === 0 && c === 113) return true;
     if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a >= 224) return true;
     return false;
   }
   if (bare.includes(":")) {
@@ -146,11 +158,22 @@ function isPrivateOrLocalHostname(hostname: string): boolean {
       bare.startsWith("fe9") ||
       bare.startsWith("fea") ||
       bare.startsWith("feb") ||
-      bare.startsWith("::ffff:")
+      bare.startsWith("fec") ||
+      bare.startsWith("fed") ||
+      bare.startsWith("fee") ||
+      bare.startsWith("fef") ||
+      bare.startsWith("ff") ||
+      bare.startsWith("100::") ||
+      bare.startsWith("64:ff9b:") ||
+      bare.startsWith("::ffff:") ||
+      /^::[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(bare) ||
+      /^0+:/.test(bare)
     ) {
       return true;
     }
+    return false;
   }
+  if (!bare.includes(".")) return true;
   return false;
 }
 
@@ -162,7 +185,7 @@ export function publicHttpsUrl(
 ): string {
   const maximumPathLength =
     typeof options === "number" ? options : (options.maximumPathLength ?? 2048);
-  const allowLoopback = typeof options === "number" ? true : (options.allowLoopback ?? true);
+  const allowLoopback = typeof options === "number" ? false : (options.allowLoopback ?? false);
   if (typeof value !== "string" || value.length > maximumPathLength)
     throw new TypeError(`${field} must be a valid URL.`);
   let url: URL;
@@ -174,7 +197,7 @@ export function publicHttpsUrl(
   const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname.toLowerCase());
   const protocolOk =
     url.protocol === "https:" || (allowLoopback && url.protocol === "http:" && loopback);
-  const hostBlocked = !allowLoopback && isPrivateOrLocalHostname(url.hostname);
+  const hostBlocked = isPrivateOrLocalHostname(url.hostname) && !(allowLoopback && loopback);
   if (!protocolOk || hostBlocked || url.username || url.password || url.hash) {
     throw new TypeError(
       `${field} requires a public HTTPS URL${allowLoopback ? " (or loopback in LOCAL)" : ""} with no credentials or fragment.`,

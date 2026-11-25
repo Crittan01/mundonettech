@@ -1,6 +1,7 @@
 import {
   ChannelOrderError,
   EmailConflictError,
+  EmailProviderError,
   EmailValidationError,
   MercadoLibreCatalogError,
   PaymentConflictError,
@@ -41,7 +42,11 @@ function createResendRoute() {
   });
   const emailService = vi.fn(() => ({ processWebhook }));
   const route = loadRoute("webhooks/resend", {
-    "@mundonettech/integrations": { EmailConflictError, EmailValidationError },
+    "@mundonettech/integrations": {
+      EmailConflictError,
+      EmailProviderError,
+      EmailValidationError,
+    },
     "@/lib/integrations": { emailService },
   });
   return { route, processWebhook, emailService };

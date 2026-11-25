@@ -1,7 +1,14 @@
 import { randomUUID } from "node:crypto";
 
 import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
-import { IntegrationEnvironment, Prisma, type PrismaClient } from "@mundonettech/db";
+import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
+  IntegrationEnvironment,
+  isAdminSelfDealingCustomer,
+  Prisma,
+  type PrismaClient,
+} from "@mundonettech/db";
 
 import { calculateCude, calculateCufe, dianTimestamp, parseDianCredentials } from "./dian.js";
 import { DianInvoiceProvider, signedDocumentHash } from "./dian-provider.js";
@@ -100,27 +107,31 @@ function buildClaimToken(workerId: string): string {
   return `${workerId.slice(0, 83)}:${randomUUID()}`;
 }
 
+const fiscalTaxCategories = new Map<string, "STANDARD" | "EXEMPT" | "EXCLUDED">([
+  ["STANDARD", "STANDARD"],
+  ["EXEMPT", "EXEMPT"],
+  ["EXCLUDED", "EXCLUDED"],
+  ["UVT_THRESHOLD_EXCLUDED", "EXCLUDED"],
+]);
+
 function taxIdentity(item: {
   taxLines: readonly { appliedRateBps: number; treatment: string; rule: string }[];
 }): { taxRateBps: number; taxCategory: "STANDARD" | "EXEMPT" | "EXCLUDED" } {
   const identities = new Set(
-    item.taxLines.map((line) => `${line.treatment}:${line.appliedRateBps}`),
+    item.taxLines.map((line) => `${line.treatment}:${line.rule}:${line.appliedRateBps}`),
   );
   if (identities.size !== 1)
     throw new InvoiceValidationError(
       "Every fiscal item must have exactly one sealed tax category and rate.",
     );
   const line = item.taxLines[0]!;
+  if (line.rule === "NOT_RESPONSABLE") {
+    throw new InvoiceValidationError("Non-VAT-responsible tax lines cannot be invoiced.");
+  }
   if (line.treatment === "UVT_THRESHOLD_EXCLUDED" && line.rule === "UVT_STANDARD_ABOVE_LIMIT") {
     return { taxRateBps: line.appliedRateBps, taxCategory: "STANDARD" };
   }
-  const categories: Record<string, "STANDARD" | "EXEMPT" | "EXCLUDED"> = {
-    STANDARD: "STANDARD",
-    EXEMPT: "EXEMPT",
-    EXCLUDED: "EXCLUDED",
-    UVT_THRESHOLD_EXCLUDED: "EXCLUDED",
-  };
-  const taxCategory = categories[line.treatment];
+  const taxCategory = fiscalTaxCategories.get(line.treatment);
   if (!taxCategory) {
     throw new InvoiceValidationError("The sealed tax category is not supported.");
   }
@@ -150,27 +161,33 @@ export class InvoiceService {
     db: PrismaClient | Prisma.TransactionClient,
     audit: InvoiceAuditContext,
     lock = false,
-  ): Promise<void> {
+  ): Promise<{ id: string; authUserId: string; email: string; role: string }> {
     assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
     if (audit.requestId !== undefined) assertIntegrationUuid(audit.requestId, "requestId");
-    let role: string | undefined;
     if (lock) {
-      const rows = await db.$queryRaw<Array<{ role: string }>>`
-        SELECT "role"::text AS "role" FROM "AdminUser"
-        WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
-        FOR SHARE
-      `;
-      role = rows[0]?.role;
-    } else {
-      const actor = await db.adminUser.findFirst({
-        where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { role: true },
-      });
-      role = actor?.role;
+      try {
+        return await assertAdminActorInTransaction(
+          db as Prisma.TransactionClient,
+          audit.actorAdminUserId,
+          "invoices:write",
+        );
+      } catch (error) {
+        if (error instanceof AdminActorAuthorizationError) {
+          throw new InvoiceValidationError(
+            "Administrator is not authorized for fiscal operations.",
+          );
+        }
+        throw error;
+      }
     }
-    if (!role || !isAdminRole(role) || !hasAdminPermission(role, "invoices:write")) {
+    const actor = await db.adminUser.findFirst({
+      where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+      select: { id: true, authUserId: true, email: true, role: true },
+    });
+    if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, "invoices:write")) {
       throw new InvoiceValidationError("Administrator is not authorized for fiscal operations.");
     }
+    return actor;
   }
 
   private async assertHumanActor(audit?: InvoiceAuditContext): Promise<void> {
@@ -183,20 +200,35 @@ export class InvoiceService {
       action: string;
       targetType: "TaxInvoice" | "CreditNote";
       targetId: string;
+      orderId?: string | undefined;
       audit?: InvoiceAuditContext | undefined;
       metadata?: Prisma.InputJsonObject;
     },
   ): Promise<void> {
     if (!options.audit) return;
     const audit = options.audit;
-    await this.assertActor(tx, audit);
+    const actor = await this.assertActor(tx, audit, true);
+    let selfDealing = false;
+    if (options.orderId) {
+      const order = await tx.order.findUnique({
+        where: { id: options.orderId },
+        select: { customerId: true, emailSnapshot: true },
+      });
+      if (order) {
+        selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
+      }
+    }
     await tx.adminActionLog.create({
       data: {
         actorAdminUserId: audit.actorAdminUserId,
+        ...(selfDealing ? { selfDealing: true } : {}),
         action: options.action,
         targetType: options.targetType,
         targetId: options.targetId,
-        requestId: audit.requestId ?? null,
+        requestId: audit.requestId ?? randomUUID(),
         ipHash: hash32(audit.ipHash, "ipHash"),
         userAgentHash: audit.userAgentHash ? hash32(audit.userAgentHash, "userAgentHash") : null,
         metadata: options.metadata ?? {},
@@ -228,8 +260,6 @@ export class InvoiceService {
     await this.assertHumanActor(audit);
     assertIntegrationUuid(orderId, "orderId");
     if (credentialId !== undefined) assertIntegrationUuid(credentialId, "credentialId");
-    const selectedCredential = await this.selectCredential(credentialId);
-    const credentials = await this.credentials(selectedCredential);
     const existing = await this.db.taxInvoice.findUnique({ where: { orderId } });
     if (existing)
       return {
@@ -238,6 +268,8 @@ export class InvoiceService {
         fullNumber: existing.fullNumber,
         replayed: true,
       };
+    const selectedCredential = await this.selectCredential(credentialId);
+    const credentials = await this.credentials(selectedCredential);
     return this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
       const orders = await tx.$queryRaw<
@@ -250,7 +282,7 @@ export class InvoiceService {
       });
       if (
         order.taxRegime !== "RESPONSABLE_IVA" ||
-        !["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentStatus)
+        !["PAID", "PARTIALLY_REFUNDED", "REFUNDED"].includes(order.paymentStatus)
       ) {
         throw new InvoiceConflictError(
           "Only paid orders under responsible VAT can be invoiced.",
@@ -372,6 +404,7 @@ export class InvoiceService {
         action: "TAX_INVOICE_PREPARED",
         targetType: "TaxInvoice",
         targetId: created.id,
+        orderId,
         audit,
         metadata: { orderId, fullNumber, status: created.status },
       });
@@ -414,6 +447,7 @@ export class InvoiceService {
     const credentials = await this.credentials(refund.order.taxInvoice.credentialId);
     return this.db.$transaction(async (tx) => {
       if (audit) await this.assertActor(tx, audit, true);
+      await tx.$queryRaw`SELECT "id" FROM "Order" WHERE "id" = ${refund.orderId}::uuid FOR SHARE`;
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"dian-credit-note:" + refund.order.taxInvoice!.credentialId + ":" + credentials.creditNotePrefix}, 0))`;
       const lockedRefund = await tx.orderRefund.findUniqueOrThrow({
         where: { id: refundId },
@@ -467,11 +501,16 @@ export class InvoiceService {
         0n,
       );
       const discountCents = subtotalCents - lockedRefund.subtotalCents;
+      const lineExtensionCents =
+        lines.length === 0 && lockedRefund.shippingCents > 0n
+          ? lockedRefund.shippingCents
+          : subtotalCents - discountCents;
       const cude = calculateCude({
         fullNumber,
         issueDate,
         subtotalCents,
         discountCents,
+        lineExtensionCents,
         taxCents: lockedRefund.taxCents,
         totalCents: lockedRefund.totalCents,
         issuerNit: credentials.issuerNit,
@@ -535,6 +574,7 @@ export class InvoiceService {
         action: "CREDIT_NOTE_PREPARED",
         targetType: "CreditNote",
         targetId: created.id,
+        orderId: invoice.orderId,
         audit,
         metadata: { orderId: invoice.orderId, refundId, fullNumber },
       });
@@ -611,6 +651,7 @@ export class InvoiceService {
         action: "TAX_INVOICE_ACCEPTED",
         targetType: "TaxInvoice",
         targetId: invoiceId,
+        orderId: invoice.orderId,
         audit,
         metadata: {
           orderId: invoice.orderId,
@@ -686,6 +727,7 @@ export class InvoiceService {
         action: uncertain ? "TAX_INVOICE_MARKED_UNCERTAIN" : "TAX_INVOICE_REJECTED",
         targetType: "TaxInvoice",
         targetId: invoiceId,
+        orderId: invoice.orderId,
         audit,
         metadata: {
           orderId: invoice.orderId,
@@ -751,6 +793,7 @@ export class InvoiceService {
         action: "TAX_INVOICE_MARKED_UNCERTAIN",
         targetType: "TaxInvoice",
         targetId: invoiceId,
+        orderId: invoice.orderId,
         audit,
         metadata: {
           orderId: invoice.orderId,
@@ -824,12 +867,13 @@ export class InvoiceService {
       };
     let current = claimed;
     try {
-      const credentials = await this.credentials(claimed.credentialId);
+      const credentials = await this.credentials(current.credentialId);
       const provider = this.provider(credentials);
       if (current.status === "UNCERTAIN") {
         const found = await provider.find(current.cufe, current.fullNumber, "INVOICE");
         if (found) return this.acceptInvoice(invoiceId, found, claimToken, audit);
         current = await this.db.$transaction(async (tx) => {
+          if (audit) await this.assertActor(tx, audit, true);
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
           const moved = await tx.taxInvoice.updateMany({
@@ -855,6 +899,7 @@ export class InvoiceService {
       }
       if (!current.transmittedAt) {
         current = await this.db.$transaction(async (tx) => {
+          if (audit) await this.assertActor(tx, audit, true);
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
           const stamped = await tx.taxInvoice.updateMany({
@@ -890,7 +935,7 @@ export class InvoiceService {
         if (current.status === "UNCERTAIN") {
           return this.releaseUncertainInvoiceClaim(invoiceId, claimToken, error.code, audit);
         }
-        const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
+        const uncertain = error.code !== "REJECTED";
         return this.failInvoice(invoiceId, claimToken, uncertain, error.code, audit);
       }
       if (current.status === "UNCERTAIN") {
@@ -980,6 +1025,7 @@ export class InvoiceService {
         action: "CREDIT_NOTE_ACCEPTED",
         targetType: "CreditNote",
         targetId: creditNoteId,
+        orderId: invoice.orderId,
         audit,
         metadata: {
           orderId: invoice.orderId,
@@ -1058,6 +1104,7 @@ export class InvoiceService {
         action: uncertain ? "CREDIT_NOTE_MARKED_UNCERTAIN" : "CREDIT_NOTE_REJECTED",
         targetType: "CreditNote",
         targetId: creditNoteId,
+        orderId: invoice.orderId,
         audit,
         metadata: {
           orderId: invoice.orderId,
@@ -1121,6 +1168,7 @@ export class InvoiceService {
         action: "CREDIT_NOTE_MARKED_UNCERTAIN",
         targetType: "CreditNote",
         targetId: creditNoteId,
+        orderId: invoice.orderId,
         audit,
         metadata: {
           orderId: invoice.orderId,
@@ -1190,12 +1238,13 @@ export class InvoiceService {
       };
     let current = claimed;
     try {
-      const credentials = await this.credentials(claimed.credentialId);
+      const credentials = await this.credentials(current.credentialId);
       const provider = this.provider(credentials);
       if (current.status === "UNCERTAIN") {
         const found = await provider.find(current.cude, current.fullNumber, "CREDIT_NOTE");
         if (found) return this.acceptCreditNote(creditNoteId, found, claimToken, audit);
         current = await this.db.$transaction(async (tx) => {
+          if (audit) await this.assertActor(tx, audit, true);
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
           const moved = await tx.creditNote.updateMany({
@@ -1221,6 +1270,7 @@ export class InvoiceService {
       }
       if (!current.transmittedAt) {
         current = await this.db.$transaction(async (tx) => {
+          if (audit) await this.assertActor(tx, audit, true);
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
           const stamped = await tx.creditNote.updateMany({
@@ -1258,7 +1308,7 @@ export class InvoiceService {
         if (current.status === "UNCERTAIN") {
           return this.releaseUncertainCreditNoteClaim(creditNoteId, claimToken, error.code, audit);
         }
-        const uncertain = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
+        const uncertain = error.code !== "REJECTED";
         return this.failCreditNote(creditNoteId, claimToken, uncertain, error.code, audit);
       }
       if (current.status === "UNCERTAIN") {

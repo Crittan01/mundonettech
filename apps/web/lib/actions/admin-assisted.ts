@@ -1,5 +1,7 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
   absolutePublicUrl,
   normalizeEmail,
@@ -43,6 +45,7 @@ async function context() {
     actorAdminUserId: session.profile.id,
     ipHash: request.ipHash,
     userAgentHash: request.userAgentHash,
+    requestId: randomUUID(),
   };
 }
 
@@ -150,7 +153,10 @@ export async function mutateAssistedCartAction(
     await assertAssistedCart(cartId);
     const service = new CartService(getDatabase());
     const reference = { cartId };
-    const quantity = quantitySchema.safeParse(formString(formData, "quantity") || "1");
+    const rawQuantity = formString(formData, "quantity");
+    const quantity = quantitySchema.safeParse(
+      operation === "set_quantity" ? rawQuantity : rawQuantity || "1",
+    );
     switch (operation) {
       case "add_variant": {
         if (!quantity.success || quantity.data < 1)
@@ -168,7 +174,7 @@ export async function mutateAssistedCartAction(
           where: { sku, deletedAt: null },
           select: { id: true },
         });
-        if (!variant) return actionError("No encontramos ese SKU activo o archivado.", values);
+        if (!variant) return actionError("No encontramos ese SKU activo.", values);
         await service.addVariant(reference, variant.id, quantity.data, audit);
         break;
       }

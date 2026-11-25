@@ -6,11 +6,14 @@ import { ReceiptBalanceError } from "../../packages/db/dist/index.js";
 import { expectMethodAllowlist, expectNoStoreNoIndex } from "./test-helpers";
 
 const mocks = vi.hoisted(() => ({
+  consumeOperationRateLimit: vi.fn(),
   creditNoteFindFirst: vi.fn(),
   credentialList: vi.fn(),
   creditGet: vi.fn(),
+  fulfillmentFindFirst: vi.fn(),
   getDatabaseClock: vi.fn(),
   getReceiptByToken: vi.fn(),
+  getRequestSecurityContext: vi.fn(),
   hashCartToken: vi.fn((token: string) => {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new TypeError("invalid token");
     return Uint8Array.from([1, 2, 3]);
@@ -19,10 +22,19 @@ const mocks = vi.hoisted(() => ({
   listOrderPayments: vi.fn(),
   optionalCustomerId: vi.fn(),
   orderFindUnique: vi.fn(),
+  packageFindFirst: vi.fn(),
   paymentAttemptFindMany: vi.fn(),
+  shipmentFindFirst: vi.fn(),
 }));
 
 vi.mock("server-only", () => ({}));
+vi.mock("@mundonettech/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../packages/db/dist/index.js")>();
+  return {
+    ...actual,
+    consumeOperationRateLimit: mocks.consumeOperationRateLimit,
+  };
+});
 vi.mock("@/components/orders/receipt-payment-panel", () => ({
   ReceiptPaymentPanel: () => null,
 }));
@@ -36,9 +48,15 @@ vi.mock("@/lib/db", () => ({
   getDatabase: () => ({
     creditNote: { findFirst: mocks.creditNoteFindFirst },
     order: { findUnique: mocks.orderFindUnique },
+    orderFulfillment: { findFirst: mocks.fulfillmentFindFirst },
     paymentAttempt: { findMany: mocks.paymentAttemptFindMany },
+    shipment: { findFirst: mocks.shipmentFindFirst },
+    shipmentPackage: { findFirst: mocks.packageFindFirst },
     taxInvoice: { findFirst: mocks.invoiceFindFirst },
   }),
+}));
+vi.mock("@/lib/security/request-context", () => ({
+  getRequestSecurityContext: mocks.getRequestSecurityContext,
 }));
 vi.mock("@/lib/integrations", () => ({
   getBankTransferInstructions: () => null,
@@ -141,13 +159,21 @@ function documentRequest(kind = "invoice", id = documentId, value = token): Prom
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.consumeOperationRateLimit.mockResolvedValue({ allowed: true });
   mocks.credentialList.mockResolvedValue({ items: [] });
   mocks.creditGet.mockResolvedValue(null);
+  mocks.fulfillmentFindFirst.mockResolvedValue(null);
   mocks.getDatabaseClock.mockResolvedValue(new Date("2026-02-01T12:00:00.000Z"));
+  mocks.getRequestSecurityContext.mockResolvedValue({
+    ipHash: new Uint8Array(32).fill(1),
+    userAgentHash: new Uint8Array(32).fill(2),
+  });
   mocks.listOrderPayments.mockResolvedValue([]);
   mocks.optionalCustomerId.mockResolvedValue(null);
   mocks.orderFindUnique.mockResolvedValue({ customerId: null });
+  mocks.packageFindFirst.mockResolvedValue(null);
   mocks.paymentAttemptFindMany.mockResolvedValue([]);
+  mocks.shipmentFindFirst.mockResolvedValue(null);
   mocks.getReceiptByToken.mockResolvedValue(structuredClone(receipt));
   mocks.invoiceFindFirst.mockResolvedValue({
     fullNumber: "FAC-2026-1",

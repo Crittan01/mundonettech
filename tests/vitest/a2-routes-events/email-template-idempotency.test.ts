@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
-import { IntegrationEnvironment } from "../../../packages/db/dist/index.js";
+import {
+  AdminActorAuthorizationError,
+  IntegrationEnvironment,
+} from "../../../packages/db/dist/index.js";
 import {
   EmailConflictError,
   EmailNotFoundError,
@@ -100,8 +103,18 @@ function createService(
         IntegrationEnvironment,
         ...((db as { __dbMocks?: Record<string, unknown> }).__dbMocks ?? {}),
       },
+      "./credential-vault.js": {
+        CredentialNotFoundError: class extends Error {},
+        CredentialRevokedError: class extends Error {},
+      },
       "./email-templates.js": {
-        defaultEmailTemplate: vi.fn(),
+        defaultEmailTemplate: () => ({
+          templateKey: "order.paid",
+          subject: "Pago confirmado para {{orderNumber}}",
+          htmlBody: "<p>{{orderNumber}}</p>",
+          textBody: "{{orderNumber}}",
+          variables: ["orderNumber", "storeName", "receiptUrl", "unsubscribeUrl"],
+        }),
         renderEmailTemplate: vi.fn(),
         validateEmailTemplate: (value: TemplateInput) => ({
           ...value,
@@ -241,12 +254,23 @@ function createHarness() {
       void transaction;
       for (const key of keys) operations.push(`lock:${key}`);
     }),
+    assertAdminActorInTransaction: vi.fn(async () => {
+      const actor = await db.adminUser.findFirst();
+      if (!actor || !["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(actor.role)) {
+        throw new AdminActorAuthorizationError("Administrator lacks communications:write.");
+      }
+      return actor;
+    }),
     completeIdempotencyKey,
     hasUniqueViolation: (error: unknown) =>
       typeof error === "object" &&
       error !== null &&
       "code" in error &&
       (error.code === "23505" || error.code === "P2002"),
+    inInventoryTransaction: async <T>(
+      database: { $transaction: (callback: (transaction: typeof tx) => Promise<T>) => Promise<T> },
+      callback: (transaction: typeof tx) => Promise<T>,
+    ) => database.$transaction(callback),
     marketingEmailConsentGranted: vi.fn(),
   };
   const db = {
@@ -337,7 +361,7 @@ describe("A2 email template persistent idempotency and serialized versions", () 
     const service = createService(current.db);
     await expect(
       service.saveTemplate(input("template-request-unauthorized"), audit),
-    ).rejects.toBeInstanceOf(EmailValidationError);
+    ).rejects.toBeInstanceOf(AdminActorAuthorizationError);
     expect(current.acquireIdempotencyKey).not.toHaveBeenCalled();
     expect(current.templates).toHaveLength(0);
     expect(current.logs).toHaveLength(0);

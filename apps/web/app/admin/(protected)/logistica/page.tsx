@@ -41,13 +41,39 @@ const statusLabels: Record<string, string> = {
   READY: "Listo",
   CANCELLED: "Cancelado",
 };
+const shipmentKindLabels: Record<string, string> = {
+  DELIVERY: "Envío a domicilio",
+  CLICK_COLLECT: "Recogida en tienda",
+};
+const paymentStatusLabels: Record<string, string> = {
+  UNPAID: "Sin pago",
+  PARTIALLY_PAID: "Pago parcial",
+  PAID: "Pagado",
+  PARTIALLY_REFUNDED: "Reembolso parcial",
+  REFUNDED: "Reembolsado",
+  FAILED: "Fallido",
+};
 
 export default async function LogisticsPage() {
   const session = await requireAdminPage("fulfillment:read");
   const db = getDatabase();
   const [shipments, zoneRecords] = await Promise.all([
     db.shipment.findMany({
-      where: { status: { notIn: ["DELIVERED", "CANCELLED"] } },
+      where: {
+        status: { notIn: ["DELIVERED", "CANCELLED"] },
+        order: {
+          orderStatus: { in: ["CONFIRMED", "COMPLETED"] },
+          OR: [
+            { paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED"] } },
+            {
+              paymentStatus: { in: ["UNPAID", "PARTIALLY_PAID"] },
+              paymentAttempts: {
+                some: { provider: "COD", status: { in: ["PENDING", "PROCESSING"] } },
+              },
+            },
+          ],
+        },
+      },
       select: {
         id: true,
         kind: true,
@@ -168,13 +194,18 @@ export default async function LogisticsPage() {
                   <div>
                     <h3 className="font-semibold">
                       {shipment.order.orderNumber} ·{" "}
-                      {shipment.localDeliveryZone?.code ?? shipment.kind}
+                      {shipment.localDeliveryZone?.code ??
+                        shipmentKindLabels[shipment.kind] ??
+                        shipment.kind}
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {shipment.order.emailSnapshot
                         ? maskEmail(shipment.order.emailSnapshot)
                         : "Sin correo"}{" "}
-                      · {shipment.order.paymentStatus} ·{" "}
+                      ·{" "}
+                      {paymentStatusLabels[shipment.order.paymentStatus] ??
+                        shipment.order.paymentStatus}{" "}
+                      ·{" "}
                       {statusLabels[shipment.fulfillment?.status ?? shipment.status] ??
                         shipment.status}
                     </p>

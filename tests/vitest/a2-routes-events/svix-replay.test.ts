@@ -119,7 +119,16 @@ function createModule(db: unknown) {
           markEmailSuppressed = vi.fn();
           suppressCustomerTopic = vi.fn();
         },
+        acquireOperationLocks: vi.fn(async () => undefined),
+        inInventoryTransaction: async <T>(
+          database: { $transaction: (callback: (tx: unknown) => Promise<T>) => Promise<T> },
+          callback: (tx: unknown) => Promise<T>,
+        ) => database.$transaction(callback),
         marketingEmailConsentGranted: vi.fn(),
+      },
+      "./credential-vault.js": {
+        CredentialNotFoundError: class extends Error {},
+        CredentialRevokedError: class extends Error {},
       },
       "./email-templates.js": {
         defaultEmailTemplate: vi.fn(),
@@ -200,7 +209,12 @@ function createHarness(
     return stored;
   });
   const tx = {
-    emailEvent: { findUnique: vi.fn(async () => email), update },
+    emailEvent: {
+      findFirst: vi.fn(async () => email),
+      findUnique: vi.fn(async () => email),
+      update,
+    },
+    guestOrderChallenge: { findFirst: vi.fn(async () => null) },
     emailWebhookEvent: { create },
     $executeRaw: vi.fn(),
     $queryRaw: vi.fn(async () => [email]),
@@ -331,7 +345,12 @@ describe("A2 Svix payload-bound replay and unique conflicts", () => {
       return stored ? { ...stored, emailEvent: { id: email.id, status: email.status } } : null;
     });
     const tx = {
-      emailEvent: { findUnique: vi.fn(async () => email), update },
+      emailEvent: {
+        findFirst: vi.fn(async () => email),
+        findUnique: vi.fn(async () => email),
+        update,
+      },
+      guestOrderChallenge: { findFirst: vi.fn(async () => null) },
       emailWebhookEvent: { create },
       $executeRaw: vi.fn(),
       $queryRaw: vi.fn(async () => [email]),

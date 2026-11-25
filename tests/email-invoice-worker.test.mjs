@@ -723,4 +723,94 @@ describe("F3.4 domain worker over the real outbox", () => {
     assert.equal(JSON.stringify(deadRecord).includes("@"), false);
     assert.equal((await deadWorker.runBatch(1)).claimed, 0);
   });
+
+  it("rejects unknown email template variables and consumes operational alert outbox events", async () => {
+    await assert.rejects(
+      email.saveTemplate(
+        {
+          templateKey: "order.paid",
+          subject: "Aviso {{unknownVar}}",
+          htmlBody: '<p>{{unknownVar}} <a href="{{unsubscribeUrl}}">baja</a></p>',
+          textBody: "{{unknownVar}} {{unsubscribeUrl}}",
+          variables: ["unknownVar", "unsubscribeUrl"],
+          publish: true,
+          idempotencyKey: `bad-vars-${randomUUID()}`,
+        },
+        audit,
+      ),
+      /contract/i,
+    );
+
+    const existingOrder = await db.order.findFirstOrThrow({ select: { id: true } });
+    const orderId = existingOrder.id;
+    const outboxEvents = [
+      {
+        eventType: "cart.expired.v1",
+        aggregateType: "Cart",
+        aggregateId: randomUUID(),
+        deduplicationKey: `test-cart-expired:${randomUUID()}`,
+        payload: { cartId: randomUUID() },
+      },
+      {
+        eventType: "order.cancelled.v1",
+        aggregateType: "Order",
+        aggregateId: orderId,
+        deduplicationKey: `test-order-cancelled:${randomUUID()}`,
+        payload: { orderId },
+      },
+      {
+        eventType: "order.refund.requested.v1",
+        aggregateType: "OrderRefund",
+        aggregateId: randomUUID(),
+        deduplicationKey: `test-refund-requested:${randomUUID()}`,
+        payload: { orderId, refundId: randomUUID() },
+      },
+      {
+        eventType: "order.payment.partial-expired-review-required.v1",
+        aggregateType: "Order",
+        aggregateId: orderId,
+        deduplicationKey: `test-partial-expired:${randomUUID()}`,
+        payload: { orderId },
+      },
+      {
+        eventType: "order.receipt.emission_blocked.v1",
+        aggregateType: "Order",
+        aggregateId: orderId,
+        deduplicationKey: `test-receipt-blocked:${randomUUID()}`,
+        payload: { orderId },
+      },
+      {
+        eventType: "order.receipt.integrity_failed.v1",
+        aggregateType: "Order",
+        aggregateId: orderId,
+        deduplicationKey: `test-receipt-integrity:${randomUUID()}`,
+        payload: { orderId },
+      },
+    ];
+    for (const data of outboxEvents) {
+      await db.domainOutbox.create({ data });
+    }
+    const alertWorker = new DomainEventWorker(db, {
+      workerId: `worker:alerts-${randomUUID()}`,
+      shipping: {},
+      email,
+      invoice: {},
+      vault: vault.forSystemProvider("resend"),
+      publicSiteUrl: "https://example.test",
+      storeName: "Tienda de pruebas",
+      receiptTokenForSubmission: () => "r".repeat(43),
+    });
+    const batch = await alertWorker.runBatch(50);
+    assert.ok(batch.completed >= 6);
+    assert.equal(batch.failed, 0);
+    for (const key of [
+      `payment-partial-expired:${orderId}`,
+      `order-receipt-emission_blocked:${orderId}`,
+      `order-receipt-integrity_failed:${orderId}`,
+    ]) {
+      const notification = await db.notification.findUnique({ where: { deduplicationKey: key } });
+      assert.ok(notification, `expected notification ${key}`);
+      assert.equal(notification.severity, "CRITICAL");
+    }
+  });
 });

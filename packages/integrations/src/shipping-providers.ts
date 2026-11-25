@@ -125,16 +125,37 @@ function guideRecord(root: Record<string, unknown>): Record<string, unknown> | n
   return recordValue(data?.guia) ?? recordValue(root.guia);
 }
 
+function isGuideNotFoundMessage(message: string): boolean {
+  if (
+    /token|empresa|usuario|clave|credencial|endpoint|ruta|url|permiso|autoriz|ciudad|destino|origen/i.test(
+      message,
+    )
+  ) {
+    return false;
+  }
+  return /(?:gu[ií]a|referencia|env[ií]o|dsreferencia)[^.]{0,60}(?:no\s+(?:se\s+)?encontr|not\s+found|no\s+existe)|^(?:no\s+se\s+encontr[oó]|not\s+found|gu[ií]a\s+no\s+existe)/i.test(
+    message.trim(),
+  );
+}
+
 function parseGuide(
   root: Record<string, unknown>,
   requestKey: string,
-  requireRequestReference = false,
+  options: { readonly isLookup?: boolean; readonly allowLoopback?: boolean } = {},
 ): ShippingLabelResult | null {
+  const isLookup = options.isLookup === true;
+  const allowLoopback = options.allowLoopback === true;
   const status = root.status;
   if (status === "error") {
     const message =
       typeof root.message === "string" ? root.message : "Provider rejected the request.";
-    if (/no se encontr|not found|no existe/i.test(message)) return null;
+    if (isLookup) {
+      if (isGuideNotFoundMessage(message)) return null;
+      throw new ShippingProviderError(
+        "Aveonline lookup returned an ambiguous error; reconciliation remains required.",
+        "NETWORK_UNCERTAIN",
+      );
+    }
     throw new ShippingProviderError("Aveonline rejected the shipping request.", "REJECTED");
   }
   if (status !== "ok")
@@ -146,7 +167,7 @@ function parseGuide(
   if (!guide)
     throw new ShippingProviderError("Aveonline omitted the generated guide.", "INVALID_RESPONSE");
   if (
-    (requireRequestReference && guide.dsreferencia !== requestKey) ||
+    (isLookup && guide.dsreferencia !== requestKey) ||
     (guide.dsreferencia !== undefined && guide.dsreferencia !== requestKey)
   ) {
     throw new ShippingProviderError(
@@ -180,7 +201,7 @@ function parseGuide(
         "INVALID_RESPONSE",
       );
     try {
-      labelUrl = publicHttpsUrl(rawUrl.replaceAll("&amp;", "&"), "labelUrl");
+      labelUrl = publicHttpsUrl(rawUrl.replaceAll("&amp;", "&"), "labelUrl", { allowLoopback });
     } catch {
       throw new ShippingProviderError(
         "Aveonline returned an unsafe label URL.",
@@ -198,17 +219,20 @@ function parseGuide(
 
 export class AveonlineShippingProvider implements ShippingProvider {
   private token: { value: string; expiresAt: number } | null = null;
+  private readonly allowLoopback: boolean;
 
   constructor(
     private readonly credentials: AveonlineCredentials,
     private readonly options: {
       readonly fetchImpl?: typeof fetch;
       readonly timeoutMs?: number;
+      readonly allowLoopback?: boolean;
     } = {},
   ) {
     numericIdentifier(credentials.companyId, "companyId");
     numericIdentifier(credentials.agentId, "agentId");
     numericIdentifier(credentials.carrierId, "carrierId");
+    this.allowLoopback = options.allowLoopback === true;
   }
 
   private async request(
@@ -287,13 +311,13 @@ export class AveonlineShippingProvider implements ShippingProvider {
         );
       }
     }
-    if (expiresAt <= Date.now() + 30_000 || expiresAt > Date.now() + 7_200_000) {
+    if (expiresAt <= Date.now() + 30_000) {
       throw new ShippingProviderError(
         "Aveonline token expiration is outside the accepted window.",
         "INVALID_RESPONSE",
       );
     }
-    this.token = { value: token, expiresAt };
+    this.token = { value: token, expiresAt: Math.min(expiresAt, Date.now() + 7_200_000) };
     return token;
   }
 
@@ -355,7 +379,10 @@ export class AveonlineShippingProvider implements ShippingProvider {
       numeroFactura: input.orderNumber,
       dsvalor_pedido: centsToDecimal(input.declaredValueCents),
     });
-    const guide = parseGuide(response, input.requestKey);
+    const guide = parseGuide(response, input.requestKey, {
+      isLookup: false,
+      allowLoopback: this.allowLoopback,
+    });
     if (!guide)
       throw new ShippingProviderError(
         "Aveonline did not return the created guide.",
@@ -393,7 +420,10 @@ export class AveonlineShippingProvider implements ShippingProvider {
           "Aveonline rejected the reconciliation request.",
           "HTTP_ERROR",
         );
-      return parseGuide(parseHttpJson(response.body), requestKey, true);
+      return parseGuide(parseHttpJson(response.body), requestKey, {
+        isLookup: true,
+        allowLoopback: this.allowLoopback,
+      });
     } catch (error) {
       if (error instanceof ShippingProviderError) throw error;
       if (error instanceof IntegrationTransportError)

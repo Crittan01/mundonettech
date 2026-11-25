@@ -3,6 +3,7 @@ import {
   compareStrings,
   hasUniqueViolation,
   inInventoryTransaction,
+  isAdminSelfDealingCustomer,
   PaymentProvider,
   type PrismaClient,
 } from "@mundonettech/db";
@@ -60,7 +61,7 @@ export class CodReconciliationService {
     });
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
-        await assertFinancialActor(tx, input.audit.actorAdminUserId);
+        const actor = await assertFinancialActor(tx, input.audit.actorAdminUserId);
         const replayExisting = (batch: {
           id: string;
           status: string;
@@ -134,9 +135,28 @@ export class CodReconciliationService {
         });
         const reconciledAttemptIds: string[] = [];
         const discrepancyAttemptIds: string[] = [];
-        for (const item of items) {
-          const attemptMeta = attempts.find((entry) => entry.id === item.paymentAttemptId)!;
+        let selfDealing = false;
+        const attemptById = new Map(attempts.map((entry) => [entry.id, entry]));
+        const orderedItems = [...items].sort((left, right) => {
+          const leftOrderId = attemptById.get(left.paymentAttemptId)!.orderId;
+          const rightOrderId = attemptById.get(right.paymentAttemptId)!.orderId;
+          return (
+            compareStrings(leftOrderId, rightOrderId) ||
+            compareStrings(left.paymentAttemptId, right.paymentAttemptId)
+          );
+        });
+        for (const item of orderedItems) {
+          const attemptMeta = attemptById.get(item.paymentAttemptId)!;
           const order = await lockPaymentOrder(tx, attemptMeta.orderId);
+          if (
+            !selfDealing &&
+            (await isAdminSelfDealingCustomer(tx, actor, {
+              customerId: order.customerId,
+              email: order.emailSnapshot,
+            }))
+          ) {
+            selfDealing = true;
+          }
           if (order.orderStatus === "CANCELLED") {
             throw new PaymentConflictError("Cannot reconcile COD for a cancelled order.");
           }
@@ -270,6 +290,7 @@ export class CodReconciliationService {
           targetType: "RemittanceBatch",
           targetId: batch.id,
           audit: input.audit,
+          selfDealing,
           metadata: {
             reference,
             expectedCents: expectedCents.toString(),

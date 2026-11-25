@@ -94,10 +94,11 @@ export class StoreCreditService {
           }
           return snapshot(account);
         }
-        await tx.customer.findFirstOrThrow({
+        const customer = await tx.customer.findFirst({
           where: { id: input.customerId, status: "ACTIVE", deletedAt: null },
           select: { id: true },
         });
+        if (!customer) throw new PaymentNotFoundError("Active customer not found.");
         let account = await tx.storeCreditAccount.findUnique({
           where: { customerId_currency: { customerId: input.customerId, currency: "COP" } },
         });
@@ -152,7 +153,7 @@ export class StoreCreditService {
     assertPaymentUuid(customerId, "customerId");
     if (typeof active !== "boolean") throw new PaymentConflictError("active must be boolean.");
     return inInventoryTransaction(this.db, async (tx) => {
-      await assertFinancialActor(tx, audit.actorAdminUserId);
+      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       await acquireOperationLocks(tx, [`store-credit:${customerId}`]);
       const account = await tx.storeCreditAccount.findUnique({
         where: { customerId_currency: { customerId, currency: "COP" } },
@@ -171,11 +172,13 @@ export class StoreCreditService {
         where: { id: account.id },
         data: { active, version: { increment: 1 } },
       });
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, { customerId });
       await writePaymentAudit(tx, {
         action: active ? "STORE_CREDIT_ACTIVATED" : "STORE_CREDIT_DEACTIVATED",
         targetType: "StoreCreditAccount",
         targetId: account.id,
         audit,
+        selfDealing,
         metadata: { customerId, active },
       });
       return snapshot(updated);

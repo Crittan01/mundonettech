@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const phoneInputPattern =
-  /^(?=(?:[^0-9]*[0-9]){8,15}[^0-9]*$)(?:\+57[\s()-]*[36][0-9\s()-]+|[\s()-]*[36][0-9\s()-]+|\+[1-9][0-9\s()-]+)$/;
+  /^(?:[\s()-]*[36](?:[\s()-]*[0-9]){9}[\s()-]*|(?=(?:[^0-9]*[0-9]){8,15}[^0-9]*$)\+[1-9][0-9\s()-]+)$/;
 
 export function normalizePhoneE164(value: string): string {
   const compact = value.replace(/[\s()-]/g, "");

@@ -348,7 +348,10 @@ export async function proxy(request: NextRequest) {
     response.headers.set("Cache-Control", "private, no-store, max-age=0");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
   }
-  if (isCapabilityTokenPath(pathname)) {
+  if (
+    isCapabilityTokenPath(pathname) ||
+    (hasProtectedPathPrefix(pathname, "/ingresar") && request.nextUrl.searchParams.has("next"))
+  ) {
     response.headers.set("Referrer-Policy", "no-referrer");
     if (pathname === "/api/channels/mercado-libre/oauth/callback") {
       response.headers.set("Cache-Control", "no-store");

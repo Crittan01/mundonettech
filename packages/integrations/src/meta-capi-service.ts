@@ -208,7 +208,9 @@ export class MetaCapiService {
     private readonly db: PrismaClient,
     private readonly options: MetaCapiServiceOptions,
   ) {
-    this.publicSiteUrl = publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl").replace(/\/$/, "");
+    this.publicSiteUrl = publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl", {
+      allowLoopback: options.allowLoopback === true,
+    }).replace(/\/$/, "");
     this.client = options.client ?? new MetaConversionsApiClient();
     this.maximumAttempts = options.maximumAttempts ?? 5;
     this.claimMilliseconds = options.claimMilliseconds ?? 60_000;

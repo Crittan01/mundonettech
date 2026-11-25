@@ -3,6 +3,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 
 import { storeConfig } from "@mundonettech/config/store";
+import { IntegrationEnvironment } from "@mundonettech/db";
 import { DomainEventWorker } from "@mundonettech/integrations";
 
 import { receiptTokenForSubmission } from "@/lib/checkout";
@@ -10,6 +11,7 @@ import { getDatabase } from "@/lib/db";
 import {
   emailService,
   getIntegrationCredentialVault,
+  getIntegrationEnvironment,
   getPublicSiteUrl,
   invoiceService,
   metaCapiService,
@@ -19,6 +21,7 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 export function domainEventWorker(): DomainEventWorker {
   const db = getDatabase();
+  const environment = getIntegrationEnvironment();
   return new DomainEventWorker(db, {
     workerId: `worker:${randomUUID()}`,
     shipping: shippingService(db),
@@ -27,6 +30,7 @@ export function domainEventWorker(): DomainEventWorker {
     metaCapi: metaCapiService(db),
     vault: getIntegrationCredentialVault().forSystemProvider("resend"),
     publicSiteUrl: getPublicSiteUrl(),
+    allowLoopback: environment === IntegrationEnvironment.LOCAL,
     storeName: storeConfig.name,
     receiptTokenForSubmission,
     eraseAuthUser: async (authUserId) => {

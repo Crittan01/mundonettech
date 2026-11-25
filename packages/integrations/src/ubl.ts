@@ -76,6 +76,12 @@ function validateDocument(input: InvoiceDocumentInput | CreditNoteDocumentInput)
     money(line.discountCents, "discountCents");
     money(line.lineTotalCents, "lineTotalCents");
     money(line.taxCents, "taxCents");
+    if (
+      (line.taxCategory === "EXEMPT" || line.taxCategory === "EXCLUDED") &&
+      (line.taxRateBps !== 0 || line.taxCents !== 0n)
+    ) {
+      throw new InvoiceValidationError("Exempt or excluded fiscal lines must carry 0% tax.");
+    }
     if (line.unitPriceCents * BigInt(line.quantity) - line.discountCents !== line.lineTotalCents)
       throw new InvoiceValidationError("Fiscal line discount does not balance its net amount.");
     net += line.lineTotalCents;
@@ -161,21 +167,33 @@ function percent(rateBps: number): string {
   return `${rate / 100n}.${(rate % 100n).toString().padStart(2, "0")}`;
 }
 
+const taxCategoryCodes = new Map<TaxCategory, string>([
+  ["STANDARD", "S"],
+  ["EXEMPT", "E"],
+  ["EXCLUDED", "O"],
+]);
+
 function taxCategory(line: Pick<FiscalLine, "taxCategory" | "taxRateBps">): string {
   const category = line.taxCategory ?? "STANDARD";
-  const code = { STANDARD: "S", EXEMPT: "E", EXCLUDED: "O" }[category];
+  const code = taxCategoryCodes.get(category);
   if (!code) throw new InvoiceValidationError("Fiscal tax category is invalid.");
   return `<cac:TaxCategory><cbc:ID>${code}</cbc:ID><cbc:Percent>${percent(line.taxRateBps)}</cbc:Percent><cac:TaxScheme><cbc:ID>01</cbc:ID><cbc:Name>IVA</cbc:Name></cac:TaxScheme></cac:TaxCategory>`;
 }
 
-function lines(input: readonly FiscalLine[], shippingCents = 0n): string {
+function lines(
+  input: readonly FiscalLine[],
+  shippingCents = 0n,
+  kind: "invoice" | "credit-note" = "invoice",
+): string {
+  const lineTag = kind === "credit-note" ? "CreditNoteLine" : "InvoiceLine";
+  const quantityTag = kind === "credit-note" ? "CreditedQuantity" : "InvoicedQuantity";
   return fiscalLines(input, shippingCents)
     .map((line, index) => {
       const discount =
         line.discountCents > 0n
           ? `<cac:AllowanceCharge><cbc:ChargeIndicator>false</cbc:ChargeIndicator><cbc:AllowanceChargeReasonCode>1</cbc:AllowanceChargeReasonCode><cbc:AllowanceChargeReason>Descuento comercial</cbc:AllowanceChargeReason><cbc:Amount currencyID="COP">${money(line.discountCents, "discountCents")}</cbc:Amount></cac:AllowanceCharge>`
           : "";
-      return `<cac:InvoiceLine><cbc:ID>${index + 1}</cbc:ID><cbc:InvoicedQuantity unitCode="EA">${line.quantity}</cbc:InvoicedQuantity><cbc:LineExtensionAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:LineExtensionAmount>${discount}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:TaxableAmount><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount>${taxCategory(line)}</cac:TaxSubtotal></cac:TaxTotal><cac:Item><cbc:Description>${xml(line.title, 200)}</cbc:Description><cac:SellersItemIdentification><cbc:ID>${xml(line.sku, 64)}</cbc:ID></cac:SellersItemIdentification></cac:Item><cac:Price><cbc:PriceAmount currencyID="COP">${money(line.unitPriceCents, "unitPriceCents")}</cbc:PriceAmount><cbc:BaseQuantity unitCode="EA">1</cbc:BaseQuantity></cac:Price></cac:InvoiceLine>`;
+      return `<cac:${lineTag}><cbc:ID>${index + 1}</cbc:ID><cbc:${quantityTag} unitCode="EA">${line.quantity}</cbc:${quantityTag}><cbc:LineExtensionAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:LineExtensionAmount>${discount}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount><cac:TaxSubtotal><cbc:TaxableAmount currencyID="COP">${money(line.lineTotalCents, "lineTotalCents")}</cbc:TaxableAmount><cbc:TaxAmount currencyID="COP">${money(line.taxCents, "taxCents")}</cbc:TaxAmount>${taxCategory(line)}</cac:TaxSubtotal></cac:TaxTotal><cac:Item><cbc:Description>${xml(line.title, 200)}</cbc:Description><cac:SellersItemIdentification><cbc:ID>${xml(line.sku, 64)}</cbc:ID></cac:SellersItemIdentification></cac:Item><cac:Price><cbc:PriceAmount currencyID="COP">${money(line.unitPriceCents, "unitPriceCents")}</cbc:PriceAmount><cbc:BaseQuantity unitCode="EA">1</cbc:BaseQuantity></cac:Price></cac:${lineTag}>`;
     })
     .join("");
 }
@@ -204,7 +222,9 @@ function taxSubtotals(input: InvoiceDocumentInput | CreditNoteDocumentInput): st
     .sort((left, right) =>
       left.category === right.category
         ? left.rateBps - right.rateBps
-        : left.category.localeCompare(right.category),
+        : left.category < right.category
+          ? -1
+          : 1,
     )
     .map((group) => {
       taxableCents += group.taxableCents;
@@ -222,11 +242,17 @@ function taxSubtotals(input: InvoiceDocumentInput | CreditNoteDocumentInput): st
 }
 
 function totals(input: InvoiceDocumentInput | CreditNoteDocumentInput): string {
-  const shipping =
-    input.shippingCents > 0n && !usesShippingLine(input)
-      ? `<cac:AllowanceCharge><cbc:ChargeIndicator>true</cbc:ChargeIndicator><cbc:AllowanceChargeReasonCode>1</cbc:AllowanceChargeReasonCode><cbc:AllowanceChargeReason>Flete</cbc:AllowanceChargeReason><cbc:Amount currencyID="COP">${money(input.shippingCents, "shippingCents")}</cbc:Amount></cac:AllowanceCharge>`
-      : "";
-  return `${shipping}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(input.taxCents, "taxCents")}</cbc:TaxAmount>${taxSubtotals(input)}</cac:TaxTotal><cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">${money(usesShippingLine(input) ? input.shippingCents : input.subtotalCents - input.discountCents, "lineExtensionCents")}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">${money(input.subtotalCents - input.discountCents + input.shippingCents, "taxExclusiveCents")}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">${money(input.totalCents, "totalCents")}</cbc:TaxInclusiveAmount><cbc:PayableAmount currencyID="COP">${money(input.totalCents, "totalCents")}</cbc:PayableAmount></cac:LegalMonetaryTotal>`;
+  const hasDocumentShippingCharge = input.shippingCents > 0n && !usesShippingLine(input);
+  const shipping = hasDocumentShippingCharge
+    ? `<cac:AllowanceCharge><cbc:ChargeIndicator>true</cbc:ChargeIndicator><cbc:AllowanceChargeReasonCode>1</cbc:AllowanceChargeReasonCode><cbc:AllowanceChargeReason>Flete</cbc:AllowanceChargeReason><cbc:Amount currencyID="COP">${money(input.shippingCents, "shippingCents")}</cbc:Amount></cac:AllowanceCharge>`
+    : "";
+  const chargeTotal = hasDocumentShippingCharge
+    ? `<cbc:ChargeTotalAmount currencyID="COP">${money(input.shippingCents, "shippingCents")}</cbc:ChargeTotalAmount>`
+    : "";
+  const lineExtensionCents = usesShippingLine(input)
+    ? input.shippingCents
+    : input.subtotalCents - input.discountCents;
+  return `${shipping}<cac:TaxTotal><cbc:TaxAmount currencyID="COP">${money(input.taxCents, "taxCents")}</cbc:TaxAmount>${taxSubtotals(input)}</cac:TaxTotal><cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">${money(lineExtensionCents, "lineExtensionCents")}</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">${money(lineExtensionCents, "taxExclusiveCents")}</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">${money(lineExtensionCents + input.taxCents, "taxInclusiveCents")}</cbc:TaxInclusiveAmount>${chargeTotal}<cbc:PayableAmount currencyID="COP">${money(input.totalCents, "totalCents")}</cbc:PayableAmount></cac:LegalMonetaryTotal>`;
 }
 
 export function buildInvoiceUbl(input: InvoiceDocumentInput, production: boolean): string {
@@ -242,9 +268,7 @@ export function buildCreditNoteUbl(input: CreditNoteDocumentInput, production: b
   if (!Number.isInteger(input.reasonCode) || input.reasonCode < 1 || input.reasonCode > 6)
     throw new InvoiceValidationError("Credit note reason code must be between 1 and 6.");
   const timestamp = dianTimestamp(input.issueDate);
-  const creditLines = lines(input.lines, input.shippingCents)
-    .replaceAll("InvoiceLine", "CreditNoteLine")
-    .replaceAll("InvoicedQuantity", "CreditedQuantity");
+  const creditLines = lines(input.lines, input.shippingCents, "credit-note");
   const reasons: Record<number, string> = {
     1: "Devolución parcial de bienes y/o servicios",
     2: "Anulación de factura electrónica",
@@ -253,5 +277,5 @@ export function buildCreditNoteUbl(input: CreditNoteDocumentInput, production: b
     5: "Descuento comercial",
     6: "Otro",
   };
-  return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><CreditNote xmlns="urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"><ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions><cbc:UBLVersionID>UBL 2.1</cbc:UBLVersionID><cbc:CustomizationID>DIAN 2.1</cbc:CustomizationID><cbc:ProfileID>DIAN 2.1: Nota Crédito</cbc:ProfileID><cbc:ProfileExecutionID>${production ? "1" : "2"}</cbc:ProfileExecutionID><cbc:ID>${xml(input.fullNumber, 40)}</cbc:ID><cbc:UUID schemeID="${production ? "1" : "2"}" schemeName="CUDE">${xml(input.cude, 96)}</cbc:UUID><cbc:IssueDate>${timestamp.date}</cbc:IssueDate><cbc:IssueTime>${timestamp.time}</cbc:IssueTime><cbc:CreditNoteTypeCode>91</cbc:CreditNoteTypeCode><cbc:DocumentCurrencyCode>COP</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>${usesShippingLine(input) ? 1 : input.lines.length}</cbc:LineCountNumeric><cac:DiscrepancyResponse><cac:ReferenceID>${xml(input.invoiceFullNumber, 40)}</cac:ReferenceID><cbc:ResponseCode>${input.reasonCode}</cbc:ResponseCode><cbc:Description>${xml(reasons[input.reasonCode]!, 200)}</cbc:Description></cac:DiscrepancyResponse><cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>${xml(input.invoiceFullNumber, 40)}</cbc:ID><cbc:UUID schemeName="CUFE">${xml(input.invoiceCufe, 96)}</cbc:UUID><cbc:IssueDate>${dianTimestamp(input.invoiceIssueDate).date}</cbc:IssueDate></cac:InvoiceDocumentReference></cac:BillingReference>${party(input.issuer, true)}${party(input.buyer, false)}${totals(input)}${creditLines}</CreditNote>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="no"?><CreditNote xmlns="urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2" xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"><ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions><cbc:UBLVersionID>UBL 2.1</cbc:UBLVersionID><cbc:CustomizationID>DIAN 2.1</cbc:CustomizationID><cbc:ProfileID>DIAN 2.1: Nota Crédito</cbc:ProfileID><cbc:ProfileExecutionID>${production ? "1" : "2"}</cbc:ProfileExecutionID><cbc:ID>${xml(input.fullNumber, 40)}</cbc:ID><cbc:UUID schemeID="${production ? "1" : "2"}" schemeName="CUDE">${xml(input.cude, 96)}</cbc:UUID><cbc:IssueDate>${timestamp.date}</cbc:IssueDate><cbc:IssueTime>${timestamp.time}</cbc:IssueTime><cbc:CreditNoteTypeCode>91</cbc:CreditNoteTypeCode><cbc:DocumentCurrencyCode>COP</cbc:DocumentCurrencyCode><cbc:LineCountNumeric>${usesShippingLine(input) ? 1 : input.lines.length}</cbc:LineCountNumeric><cac:DiscrepancyResponse><cbc:ReferenceID>${xml(input.invoiceFullNumber, 40)}</cbc:ReferenceID><cbc:ResponseCode>${input.reasonCode}</cbc:ResponseCode><cbc:Description>${xml(reasons[input.reasonCode]!, 200)}</cbc:Description></cac:DiscrepancyResponse><cac:BillingReference><cac:InvoiceDocumentReference><cbc:ID>${xml(input.invoiceFullNumber, 40)}</cbc:ID><cbc:UUID schemeName="CUFE">${xml(input.invoiceCufe, 96)}</cbc:UUID><cbc:IssueDate>${dianTimestamp(input.invoiceIssueDate).date}</cbc:IssueDate></cac:InvoiceDocumentReference></cac:BillingReference>${party(input.issuer, true)}${party(input.buyer, false)}${totals(input)}${creditLines}</CreditNote>`;
 }

@@ -318,7 +318,7 @@ export class OrderLifecycleService {
             const now = await databaseNow(tx);
             const candidates = await tx.$queryRaw<Order[]>`
               SELECT * FROM "Order"
-              WHERE "orderStatus" = 'CONFIRMED' AND "paymentStatus" = 'UNPAID'
+              WHERE "orderStatus" = 'CONFIRMED' AND "paymentStatus" IN ('UNPAID', 'FAILED')
                 AND "reservationExpiresAt" IS NOT NULL AND "reservationExpiresAt" <= ${now}
                 AND "reservationKey" IS NOT NULL AND "cartId" IS NOT NULL
                 AND NOT ("id" = ANY(${[...attempted]}::uuid[]))
@@ -399,7 +399,7 @@ export class OrderLifecycleService {
             );
             if (
               order.orderStatus !== "CONFIRMED" ||
-              order.paymentStatus !== "UNPAID" ||
+              !["UNPAID", "FAILED"].includes(order.paymentStatus) ||
               order.reservationKey === null ||
               order.cartId === null ||
               order.reservationExpiresAt === null ||
@@ -468,9 +468,21 @@ export class OrderLifecycleService {
               where: { orderId: order.id, status: "REDEEMED" },
               data: { status: "RELEASED", releasedAt: now },
             });
+            const finalPaymentStatus =
+              order.paymentStatus === "FAILED" ||
+              paymentAttempts.some((attempt) => attempt.status === "FAILED")
+                ? "FAILED"
+                : "UNPAID";
             await tx.order.update({
               where: { id: order.id },
-              data: { orderStatus: "CANCELLED", fulfillmentStatus: "CANCELLED", cancelledAt: now },
+              data: {
+                orderStatus: "CANCELLED",
+                ...(order.paymentStatus !== finalPaymentStatus
+                  ? { paymentStatus: finalPaymentStatus }
+                  : {}),
+                fulfillmentStatus: "CANCELLED",
+                cancelledAt: now,
+              },
             });
             const pendingFulfillments = fulfillments.filter(
               (fulfillment) => fulfillment.status === "PENDING",
@@ -496,7 +508,7 @@ export class OrderLifecycleService {
               data: {
                 orderId: order.id,
                 orderStatus: "CANCELLED",
-                paymentStatus: "UNPAID",
+                paymentStatus: finalPaymentStatus,
                 fulfillmentStatus: "CANCELLED",
                 reason: "RESERVATION_EXPIRED",
                 metadata: { releasedMovements: movements.length },
@@ -546,112 +558,141 @@ export class OrderLifecycleService {
     const orderIds: string[] = [];
     const attempted = new Set<string>();
     while (orderIds.length < limit) {
-      const outcome = await inInventoryTransaction(
-        this.db,
-        async (tx): Promise<{ candidateId: string | null; reviewed: boolean }> => {
-          const now = await databaseNow(tx);
-          const candidates = await tx.$queryRaw<Order[]>`
-            SELECT * FROM "Order"
-            WHERE "orderStatus" = 'CONFIRMED' AND "paymentStatus" = 'PARTIALLY_PAID'
-              AND "reservationExpiresAt" IS NOT NULL AND "reservationExpiresAt" <= ${now}
-              AND "reservationKey" IS NOT NULL AND "cartId" IS NOT NULL
-              AND NOT ("id" = ANY(${[...attempted]}::uuid[]))
-              AND NOT EXISTS (
-                SELECT 1 FROM "DomainOutbox" outbox
-                WHERE outbox."deduplicationKey" = concat('order:', "Order"."id", ':partial-payment-expired-review:v1')
-              )
-            ORDER BY "reservationExpiresAt", "id"
-            LIMIT 1
-          `;
-          const peek = candidates[0];
-          if (!peek) return { candidateId: null, reviewed: false };
-          const lockedLocks = await tryAcquireOperationLocks(tx, [
-            peek.reservationKey!,
-            `order-payment:${peek.id}`,
-          ]);
-          if (!lockedLocks) return { candidateId: peek.id, reviewed: false };
-          const order = await lockOrder(tx, peek.id);
-          if (!order) return { candidateId: peek.id, reviewed: false };
-          if (order.reservationKey !== peek.reservationKey) retryLockDivergence();
-          const paymentAttempts = await tx.paymentAttempt.findMany({
-            where: { orderId: order.id },
-            include: { transactions: true, codReconciliation: true },
-            orderBy: { id: "asc" },
-          });
-          const capturedCents = paymentAttempts.reduce(
-            (total, attempt) =>
-              total +
-              attempt.transactions.reduce(
-                (attemptTotal, transaction) =>
-                  transaction.kind === "CAPTURE" && transaction.status === "SUCCEEDED"
-                    ? attemptTotal + transaction.amountCents
-                    : attemptTotal,
-                0n,
-              ),
-            0n,
-          );
-          const existingOutbox = await tx.domainOutbox.findUnique({
-            where: {
-              deduplicationKey: `order:${order.id}:partial-payment-expired-review:v1`,
-            },
-            select: { id: true },
-          });
-          if (
-            order.orderStatus !== "CONFIRMED" ||
-            order.paymentStatus !== "PARTIALLY_PAID" ||
-            order.reservationKey === null ||
-            order.cartId === null ||
-            order.reservationExpiresAt === null ||
-            order.reservationExpiresAt > now ||
-            capturedCents <= 0n ||
-            capturedCents >= order.totalCents ||
-            existingOutbox
-          ) {
-            return { candidateId: order.id, reviewed: false };
-          }
-          const expirableAttempts = paymentAttempts.filter(
-            (attempt) =>
-              ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"].includes(attempt.status) &&
-              !attempt.transactions.some(
-                (transaction) =>
-                  transaction.kind === "CAPTURE" && transaction.status === "SUCCEEDED",
-              ) &&
-              !(
-                attempt.codReconciliation !== null &&
-                protectedCodStatuses.includes(
-                  attempt.codReconciliation.status as (typeof protectedCodStatuses)[number],
+      let lastCandidateId: string | null = null;
+      let outcome: { candidateId: string | null; reviewed: boolean };
+      try {
+        outcome = await inInventoryTransaction(
+          this.db,
+          async (tx): Promise<{ candidateId: string | null; reviewed: boolean }> => {
+            const now = await databaseNow(tx);
+            const candidates = await tx.$queryRaw<Order[]>`
+              SELECT * FROM "Order"
+              WHERE "orderStatus" = 'CONFIRMED' AND "paymentStatus" = 'PARTIALLY_PAID'
+                AND "reservationExpiresAt" IS NOT NULL AND "reservationExpiresAt" <= ${now}
+                AND "reservationKey" IS NOT NULL AND "cartId" IS NOT NULL
+                AND NOT ("id" = ANY(${[...attempted]}::uuid[]))
+                AND NOT EXISTS (
+                  SELECT 1 FROM "DomainOutbox" outbox
+                  WHERE outbox."deduplicationKey" = concat('order:', "Order"."id", ':partial-payment-expired-review:v1')
                 )
-              ),
-          );
-          for (const attempt of expirableAttempts) {
-            await tx.paymentAttempt.update({
-              where: { id: attempt.id },
-              data: { status: "EXPIRED", completedAt: now },
-            });
-          }
-          await tx.codReconciliation.updateMany({
-            where: {
-              paymentAttemptId: { in: expirableAttempts.map((attempt) => attempt.id) },
-              status: "PENDING_COLLECTION",
-            },
-            data: { status: "CANCELLED" },
-          });
-          await tx.domainOutbox.create({
-            data: {
-              eventType: "order.payment.partial-expired-review-required.v1",
-              aggregateType: "Order",
-              aggregateId: order.id,
-              deduplicationKey: `order:${order.id}:partial-payment-expired-review:v1`,
-              payload: {
-                orderId: order.id,
-                expiredAt: now.toISOString(),
-                expiredAttemptIds: expirableAttempts.map((attempt) => attempt.id),
+              ORDER BY "reservationExpiresAt", "id"
+              LIMIT 1
+            `;
+            const peek = candidates[0];
+            if (!peek) return { candidateId: null, reviewed: false };
+            lastCandidateId = peek.id;
+            const lockedLocks = await tryAcquireOperationLocks(tx, [
+              peek.reservationKey!,
+              `order-payment:${peek.id}`,
+            ]);
+            if (!lockedLocks) return { candidateId: peek.id, reviewed: false };
+            const order = await lockOrder(tx, peek.id);
+            if (!order) return { candidateId: peek.id, reviewed: false };
+            if (order.reservationKey !== peek.reservationKey) retryLockDivergence();
+            const [paymentAttempts, activeFulfillment, activeShipment] = await Promise.all([
+              tx.paymentAttempt.findMany({
+                where: { orderId: order.id },
+                include: { transactions: true, codReconciliation: true },
+                orderBy: { id: "asc" },
+              }),
+              tx.orderFulfillment.findFirst({
+                where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
+                select: { id: true },
+              }),
+              tx.shipment.findFirst({
+                where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
+                select: { id: true },
+              }),
+            ]);
+            const codSealedByLogistics = activeFulfillment !== null || activeShipment !== null;
+            const capturedCents = paymentAttempts.reduce(
+              (total, attempt) =>
+                total +
+                attempt.transactions.reduce(
+                  (attemptTotal, transaction) =>
+                    transaction.kind === "CAPTURE" && transaction.status === "SUCCEEDED"
+                      ? attemptTotal + transaction.amountCents
+                      : attemptTotal,
+                  0n,
+                ),
+              0n,
+            );
+            const existingOutbox = await tx.domainOutbox.findUnique({
+              where: {
+                deduplicationKey: `order:${order.id}:partial-payment-expired-review:v1`,
               },
-            },
-          });
-          return { candidateId: order.id, reviewed: true };
-        },
-      );
+              select: { id: true },
+            });
+            if (
+              order.orderStatus !== "CONFIRMED" ||
+              order.paymentStatus !== "PARTIALLY_PAID" ||
+              order.reservationKey === null ||
+              order.cartId === null ||
+              order.reservationExpiresAt === null ||
+              order.reservationExpiresAt > now ||
+              capturedCents <= 0n ||
+              capturedCents >= order.totalCents ||
+              existingOutbox
+            ) {
+              return { candidateId: order.id, reviewed: false };
+            }
+            const expirableAttempts = paymentAttempts.filter(
+              (attempt) =>
+                ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"].includes(
+                  attempt.status,
+                ) &&
+                !(attempt.provider === "COD" && codSealedByLogistics) &&
+                !attempt.transactions.some(
+                  (transaction) =>
+                    transaction.kind === "CAPTURE" && transaction.status === "SUCCEEDED",
+                ) &&
+                !(
+                  attempt.codReconciliation !== null &&
+                  protectedCodStatuses.includes(
+                    attempt.codReconciliation.status as (typeof protectedCodStatuses)[number],
+                  )
+                ),
+            );
+            for (const attempt of expirableAttempts) {
+              await tx.paymentAttempt.update({
+                where: { id: attempt.id },
+                data: { status: "EXPIRED", completedAt: now },
+              });
+            }
+            await tx.codReconciliation.updateMany({
+              where: {
+                paymentAttemptId: { in: expirableAttempts.map((attempt) => attempt.id) },
+                status: "PENDING_COLLECTION",
+              },
+              data: { status: "CANCELLED" },
+            });
+            await tx.domainOutbox.create({
+              data: {
+                eventType: "order.payment.partial-expired-review-required.v1",
+                aggregateType: "Order",
+                aggregateId: order.id,
+                deduplicationKey: `order:${order.id}:partial-payment-expired-review:v1`,
+                payload: {
+                  orderId: order.id,
+                  expiredAt: now.toISOString(),
+                  expiredAttemptIds: expirableAttempts.map((attempt) => attempt.id),
+                },
+              },
+            });
+            return { candidateId: order.id, reviewed: true };
+          },
+        );
+      } catch (error) {
+        if (
+          lastCandidateId !== null &&
+          (error instanceof OrderLifecycleError ||
+            (error as { code?: unknown } | null)?.code === "40001")
+        ) {
+          attempted.add(lastCandidateId);
+          continue;
+        }
+        throw error;
+      }
       if (!outcome.candidateId) break;
       attempted.add(outcome.candidateId);
       if (outcome.reviewed) orderIds.push(outcome.candidateId);

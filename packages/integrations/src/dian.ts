@@ -56,6 +56,9 @@ function dianCredentialObject(plaintext: Uint8Array): Record<string, unknown> {
   }
 }
 
+const singlePemCertificatePattern =
+  /^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/]{1,76}\r?\n)*[A-Za-z0-9+/=]{1,76}\r?\n-----END CERTIFICATE-----$/;
+
 function signatureTrustAnchor(
   record: Record<string, unknown>,
   environment: IntegrationEnvironment,
@@ -79,17 +82,30 @@ function signatureTrustAnchor(
   const pem = value.trim();
   if (
     pem.length < 500 ||
-    pem.length > 200_000 ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(pem)
+    pem.length > 16_384 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(pem) ||
+    !singlePemCertificatePattern.test(pem)
   ) {
     throw new InvoiceProviderError("DIAN signature trust anchor is invalid.", "INVALID_CREDENTIAL");
   }
   try {
     const certificate = new X509Certificate(pem);
     const now = Date.now();
+    const validFrom = Date.parse(certificate.validFrom);
+    const validTo = Date.parse(certificate.validTo);
+    const keyUsageAllowed =
+      !certificate.keyUsage ||
+      certificate.keyUsage.some((usage) =>
+        /digital\s*signature|non[- ]?repudiation|content\s*commitment|1\.3\.6\.1\.5\.5\.7\.3|2\.5\.29\.15/i.test(
+          usage,
+        ),
+      );
     if (
-      Date.parse(certificate.validFrom) > now ||
-      Date.parse(certificate.validTo) < now ||
+      !Number.isFinite(validFrom) ||
+      !Number.isFinite(validTo) ||
+      validFrom > now ||
+      validTo < now ||
+      !keyUsageAllowed ||
       certificate.publicKey.asymmetricKeyType !== "rsa" ||
       (certificate.publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048
     ) {
@@ -276,6 +292,7 @@ export interface FiscalHashInput {
   readonly issueDate: Date;
   readonly subtotalCents: bigint;
   readonly discountCents: bigint;
+  readonly lineExtensionCents?: bigint;
   readonly taxCents: bigint;
   readonly totalCents: bigint;
   readonly issuerNit: string;
@@ -287,11 +304,12 @@ export interface FiscalHashInput {
 
 function fiscalHash(input: FiscalHashInput): string {
   const timestamp = dianTimestamp(input.issueDate);
+  const lineExtensionCents = input.lineExtensionCents ?? input.subtotalCents - input.discountCents;
   const material = [
     input.fullNumber,
     timestamp.date,
     timestamp.time,
-    centsToDecimal(input.subtotalCents - input.discountCents),
+    centsToDecimal(lineExtensionCents),
     "01",
     centsToDecimal(input.taxCents),
     "04",

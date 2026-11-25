@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import { maxSignedBigInt } from "@mundonettech/core";
 import {
@@ -105,7 +105,7 @@ function validatePaymentAudit(audit: PaymentAuditContext): {
     actorAdminUserId: audit.actorAdminUserId,
     ipHash: paymentHash(audit.ipHash, "ipHash"),
     userAgentHash: audit.userAgentHash ? paymentHash(audit.userAgentHash, "userAgentHash") : null,
-    requestId: audit.requestId ?? null,
+    requestId: audit.requestId ?? randomUUID(),
   };
 }
 
@@ -165,10 +165,10 @@ export async function writePaymentOutbox(
   });
 }
 
-export async function assertCodDistributionMutable(
+export async function isCodDistributionSealed(
   tx: PaymentTransaction,
   orderId: string,
-): Promise<void> {
+): Promise<boolean> {
   assertPaymentUuid(orderId, "orderId");
   const [fulfillmentStarted, shipmentStarted, packageStarted] = await Promise.all([
     tx.orderFulfillment.findFirst({
@@ -184,7 +184,14 @@ export async function assertCodDistributionMutable(
       select: { id: true },
     }),
   ]);
-  if (fulfillmentStarted || shipmentStarted || packageStarted) {
+  return Boolean(fulfillmentStarted || shipmentStarted || packageStarted);
+}
+
+export async function assertCodDistributionMutable(
+  tx: PaymentTransaction,
+  orderId: string,
+): Promise<void> {
+  if (await isCodDistributionSealed(tx, orderId)) {
     throw new PaymentConflictError(
       "Cash on delivery cannot change after pick, pack or label processing starts.",
     );

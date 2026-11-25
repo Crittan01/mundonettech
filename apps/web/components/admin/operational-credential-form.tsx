@@ -204,7 +204,7 @@ export function OperationalCredentialForm({
                   id={id}
                   name={field.name}
                   rows={8}
-                  maxLength={200_000}
+                  maxLength={16_384}
                   autoComplete="off"
                   spellCheck={false}
                   defaultValue={defaultValue}

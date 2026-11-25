@@ -1293,4 +1293,29 @@ describe("F3.2 — abandoned carts, reservation expiry and partial refunds", () 
       1,
     );
   });
+
+  it("releases expired stock and coupon reservations even when paymentStatus is FAILED", async () => {
+    const { cart, email } = await makeCart(1);
+    const beforeStock = await db.stockLevel.findFirstOrThrow({
+      where: { variantId: catalog.variantId },
+    });
+    const result = await orders.checkout(await conversion(cart, email));
+    await db.order.update({
+      where: { id: result.orderId },
+      data: {
+        paymentStatus: "FAILED",
+        reservationExpiresAt: new Date(Date.now() - 60_000),
+      },
+    });
+    const lifecycle = new OrderLifecycleService(db);
+    const released = await lifecycle.releaseExpiredOrderReservations({ limit: 20 });
+    assert.ok(released.orderIds.includes(result.orderId));
+    const cancelled = await db.order.findUniqueOrThrow({ where: { id: result.orderId } });
+    assert.equal(cancelled.orderStatus, "CANCELLED");
+    assert.equal(cancelled.paymentStatus, "FAILED");
+    const afterStock = await db.stockLevel.findFirstOrThrow({
+      where: { variantId: catalog.variantId },
+    });
+    assert.equal(afterStock.committed, beforeStock.committed);
+  });
 });

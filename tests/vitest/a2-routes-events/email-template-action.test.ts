@@ -52,6 +52,9 @@ function createAction() {
       new URL("../../../apps/web/lib/actions/admin-communications.ts", import.meta.url),
     ),
     {
+      "@mundonettech/db": {
+        AdminActorAuthorizationError: class extends Error {},
+      },
       "@mundonettech/integrations": {
         EmailConflictError,
         EmailProviderError,

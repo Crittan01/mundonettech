@@ -187,6 +187,78 @@ export class OperationsService {
     });
   }
 
+  async openPartialPaymentReview(input: { orderId: string }): Promise<void> {
+    assertUuid(input.orderId, "orderId");
+    await inInventoryTransaction(this.db, async (tx) => {
+      await acquireOperationLocks(tx, [
+        `order-payment:${input.orderId}`,
+        "operations-notifications",
+      ]);
+      const orders = await tx.$queryRaw<Array<{ id: string; orderNumber: string }>>`
+        SELECT "id", "orderNumber" FROM "Order" WHERE "id" = ${input.orderId}::uuid FOR SHARE
+      `;
+      const order = orders[0];
+      if (!order) throw new Error("Partial payment review order not found.");
+      const values = {
+        category: "payments.partial-review",
+        severity: "CRITICAL",
+        title: `Pago parcial vencido por revisar ${order.orderNumber}`,
+        message:
+          "La reserva venció con un pago parcial registrado. Revisa el pedido para completar cobro o reembolsar manualmente.",
+        href: `/admin/pedidos/${order.id}`,
+        entityType: "Order",
+        entityId: order.id,
+      } as const;
+      await tx.notification.upsert({
+        where: { deduplicationKey: `payment-partial-expired:${order.id}` },
+        create: { deduplicationKey: `payment-partial-expired:${order.id}`, ...values },
+        update: { resolvedAt: null },
+      });
+    });
+  }
+
+  async openOrderReceiptAlert(input: {
+    orderId: string;
+    kind: "emission_blocked" | "integrity_failed";
+  }): Promise<void> {
+    assertUuid(input.orderId, "orderId");
+    await inInventoryTransaction(this.db, async (tx) => {
+      await acquireOperationLocks(tx, [`order:${input.orderId}`, "operations-notifications"]);
+      const orders = await tx.$queryRaw<Array<{ id: string; orderNumber: string }>>`
+        SELECT "id", "orderNumber" FROM "Order" WHERE "id" = ${input.orderId}::uuid FOR SHARE
+      `;
+      const order = orders[0];
+      if (!order) throw new Error("Receipt alert order not found.");
+      const values =
+        input.kind === "emission_blocked"
+          ? ({
+              category: "orders.receipt",
+              severity: "CRITICAL",
+              title: `Recibo bloqueado en ${order.orderNumber}`,
+              message:
+                "La emisión del comprobante quedó bloqueada por un control operativo. Revisa el pedido y la configuración.",
+              href: `/admin/pedidos/${order.id}`,
+              entityType: "Order",
+              entityId: order.id,
+            } as const)
+          : ({
+              category: "orders.receipt",
+              severity: "CRITICAL",
+              title: `Integridad de recibo fallida en ${order.orderNumber}`,
+              message:
+                "La verificación de integridad del comprobante detectó una inconsistencia y requiere revisión inmediata.",
+              href: `/admin/pedidos/${order.id}`,
+              entityType: "Order",
+              entityId: order.id,
+            } as const);
+      await tx.notification.upsert({
+        where: { deduplicationKey: `order-receipt-${input.kind}:${order.id}` },
+        create: { deduplicationKey: `order-receipt-${input.kind}:${order.id}`, ...values },
+        update: { resolvedAt: null },
+      });
+    });
+  }
+
   async synchronizeNotifications(): Promise<void> {
     await this.db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${"operations-notifications"}, 0))`;

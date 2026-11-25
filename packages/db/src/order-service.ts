@@ -307,16 +307,19 @@ async function settingsForCart(
   const settings = await lockedSettings(tx, defaults);
   if (cart.kind !== "B2B") return settings;
   const proposal = await b2bProposalForCart(tx, cart.id);
-  return validateSettings({
-    ...settings,
-    taxRegime: proposal.taxRegime,
-    uvtValueCents: proposal.uvtValueCents,
-    uvtYear: proposal.uvtYear,
-    standardShippingCents: proposal.shippingCents,
-    deliveryPromiseDays: proposal.deliveryPromiseDays,
-    reservationMinutes: proposal.reservationMinutes,
-    clickAndCollectEnabled: false,
-  });
+  return {
+    ...validateSettings({
+      ...settings,
+      taxRegime: proposal.taxRegime,
+      uvtValueCents: proposal.uvtValueCents,
+      uvtYear: proposal.uvtYear,
+      standardShippingCents: proposal.shippingCents,
+      deliveryPromiseDays: proposal.deliveryPromiseDays,
+      reservationMinutes: proposal.reservationMinutes,
+      clickAndCollectEnabled: false,
+    }),
+    localDeliveryEnabled: false,
+  };
 }
 
 function fingerprint(input: {
@@ -329,6 +332,7 @@ function fingerprint(input: {
   readonly zoneUpdatedAt?: Date;
   readonly deliveryPoint?: DeliveryPoint;
   readonly deliveryPromiseAt?: Date;
+  readonly timeZone?: string;
   readonly shippingCents: bigint;
   readonly deliveryPromiseDays: number;
   readonly reservationMinutes: number;
@@ -368,6 +372,15 @@ function fingerprint(input: {
           localDeliveryZoneId: input.localDeliveryZoneId,
           zoneUpdatedAt: input.zoneUpdatedAt?.toISOString(),
           deliveryPoint: input.deliveryPoint,
+          deliveryPromiseDay:
+            input.deliveryPromiseAt && input.timeZone
+              ? new Intl.DateTimeFormat("en-CA", {
+                  timeZone: input.timeZone,
+                  year: "numeric",
+                  month: "2-digit",
+                  day: "2-digit",
+                }).format(input.deliveryPromiseAt)
+              : null,
         }
       : {}),
     shippingCents: input.shippingCents.toString(),
@@ -995,6 +1008,7 @@ export class OrderService {
               zoneUpdatedAt: zone.updatedAt,
               deliveryPoint: point,
               deliveryPromiseAt: quote.deliveryPromiseAt,
+              timeZone: settings.timeZone,
               shippingCents: quote.shippingCents,
               deliveryPromiseDays: settings.deliveryPromiseDays,
               reservationMinutes: settings.reservationMinutes,
@@ -1337,6 +1351,7 @@ export class OrderService {
                 zoneUpdatedAt: localQuote.zoneUpdatedAt,
                 deliveryPoint,
                 deliveryPromiseAt: localQuote.deliveryPromiseAt,
+                timeZone: settings.timeZone,
               }
             : {}),
           shippingCents,
@@ -1349,6 +1364,8 @@ export class OrderService {
         if (reviewFingerprint !== input.expectedReviewFingerprint) {
           throw new CheckoutReviewRequiredError();
         }
+
+        const allocation = await this.planStock(tx, cart, locationId);
 
         let customerId = locked.customerId;
         if (customerId) {
@@ -1476,7 +1493,6 @@ export class OrderService {
           }
         }
 
-        const allocation = await this.planStock(tx, cart, locationId);
         const orderId = randomUUID();
         const reservationKey = `order-reservation:${orderId}`;
         const yearRows = await tx.$queryRaw<Array<{ year: number }>>`

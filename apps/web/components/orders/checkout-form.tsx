@@ -174,6 +174,9 @@ export function CheckoutForm({
       return;
     }
     if (step === 2 && method !== "CLICK_COLLECT" && !validateSection(1)) {
+      setLocalError(
+        "Completa tu tipo y número de documento y datos de contacto antes de continuar con entrega por transportista.",
+      );
       setStep(1);
       return;
     }
@@ -322,8 +325,15 @@ export function CheckoutForm({
                 name="buyerDocumentType"
                 className="flex py-2"
                 defaultValue={field("buyerDocumentType", "13")}
-                required={method !== "CLICK_COLLECT" || preview.taxRegime === "RESPONSABLE_IVA"}
+                required={
+                  preview.taxRegime === "RESPONSABLE_IVA" ||
+                  (!preview.clickAndCollectEnabled && method !== "CLICK_COLLECT") ||
+                  (step !== 1 && method !== "CLICK_COLLECT")
+                }
               >
+                {preview.taxRegime !== "RESPONSABLE_IVA" && preview.clickAndCollectEnabled ? (
+                  <option value="">Sin especificar (solo recogida en tienda)</option>
+                ) : null}
                 <option value="13">Cédula de ciudadanía</option>
                 <option value="31">NIT</option>
                 <option value="22">Documento de extranjería</option>
@@ -346,7 +356,11 @@ export function CheckoutForm({
                 pattern="[A-Za-z0-9.-]{3,30}"
                 minLength={3}
                 maxLength={30}
-                required={method !== "CLICK_COLLECT" || preview.taxRegime === "RESPONSABLE_IVA"}
+                required={
+                  preview.taxRegime === "RESPONSABLE_IVA" ||
+                  (!preview.clickAndCollectEnabled && method !== "CLICK_COLLECT") ||
+                  (step !== 1 && method !== "CLICK_COLLECT")
+                }
               />
               <p className="text-xs text-muted-foreground">
                 Se usa para la guía de transporte y, cuando aplique, la factura electrónica.
@@ -966,7 +980,7 @@ export function CheckoutForm({
           )}
         </div>
         <p id="checkout-confirmation-note" className="text-xs leading-5 text-muted-foreground">
-          La reserva se crea una sola vez para esta submission. Si la conexión falla, reintenta sin
+          La reserva se crea una sola vez para este envío. Si la conexión falla, reintenta sin
           cambiar los datos para recuperar la misma orden y comprobante.
         </p>
       </form>

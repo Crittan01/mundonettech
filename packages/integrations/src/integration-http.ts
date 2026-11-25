@@ -22,6 +22,9 @@ export async function fetchWithLimit(options: {
   readonly maximumBytes?: number;
 }): Promise<LimitedHttpResponse> {
   const maximumBytes = options.maximumBytes ?? 1_000_000;
+  if (!Number.isInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > 50_000_000) {
+    throw new TypeError("maximumBytes must be an integer between 1 and 50000000.");
+  }
   if (
     !Number.isInteger(options.timeoutMs) ||
     options.timeoutMs < 100 ||

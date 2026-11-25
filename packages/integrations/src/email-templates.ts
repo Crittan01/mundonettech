@@ -121,6 +121,31 @@ function tokens(value: string): string[] {
     .sort();
 }
 
+function decodeHtmlEntitiesForSafetyCheck(value: string): string {
+  return value
+    .replaceAll(/&#x([0-9a-f]+);?/gi, (_match, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) && code >= 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : "";
+    })
+    .replaceAll(/&#([0-9]+);?/g, (_match, dec: string) => {
+      const code = Number.parseInt(dec, 10);
+      return Number.isFinite(code) && code >= 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : "";
+    })
+    .replaceAll(/&colon;?/gi, ":")
+    .replaceAll(/&tab;?/gi, "\t")
+    .replaceAll(/&newline;?/gi, "\n")
+    .replaceAll(/[\u0000-\u0020]+/g, "");
+}
+
+const unsafeHtmlPattern =
+  /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|style)\b|[\s/]on[a-z]+\s*=|(?:javascript|vbscript)\s*:|data\s*:\s*(?:text\/html|image\/svg\+xml|application\/xhtml\+xml)|expression\s*\(/i;
+const unsafeDecodedUriPattern =
+  /(?:javascript|vbscript):|data:(?:text\/html|image\/svg\+xml|application\/xhtml\+xml)/i;
+
 export function validateEmailTemplate(input: EmailTemplateDefinition): EmailTemplateDefinition {
   validateKey(input.templateKey);
   if (
@@ -142,9 +167,8 @@ export function validateEmailTemplate(input: EmailTemplateDefinition): EmailTemp
     );
   }
   if (
-    /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|style)\b|[\s/]on[a-z]+\s*=|(?:javascript|vbscript)\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
-      input.htmlBody,
-    )
+    unsafeHtmlPattern.test(input.htmlBody) ||
+    unsafeDecodedUriPattern.test(decodeHtmlEntitiesForSafetyCheck(input.htmlBody))
   ) {
     throw new EmailValidationError("Email HTML contains active or unsafe content.");
   }

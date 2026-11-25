@@ -2412,4 +2412,65 @@ describe("F3.3 — persistent payment providers on PostgreSQL 17", () => {
       1,
     );
   });
+
+  it("re-blocks an expired blocked identity and accepts a Wompi VOIDED webhook after synchronize()", async () => {
+    const expiredIdentity = hash();
+    const firstBlock = await blocked.block({
+      kind: "EMAIL",
+      identityHash: expiredIdentity,
+      reason: "Bloqueo temporal vencido",
+      expiresAt: new Date(Date.now() + 250),
+      audit,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(await blocked.isBlocked({ EMAIL: expiredIdentity }), false);
+    const secondBlock = await blocked.block({
+      kind: "EMAIL",
+      identityHash: expiredIdentity,
+      reason: "Reincidencia posterior",
+      audit,
+    });
+    assert.notEqual(secondBlock.id, firstBlock.id);
+    assert.equal(await blocked.isBlocked({ EMAIL: expiredIdentity }), true);
+
+    const orderId = await makeOrder();
+    const attempt = await payments.start({
+      orderId,
+      provider: PaymentProvider.WOMPI,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      idempotencyKey: `wompi-sync-then-void:${randomUUID()}`,
+      returnUrl: "https://mundonettech.co/recibo/token",
+    });
+    const externalId = `tx_sync_void_${randomUUID().slice(0, 8)}`;
+    const syncService = new WompiWebhookService(db, {
+      vault,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              id: externalId,
+              reference: attempt.reference,
+              amount_in_cents: Number(attempt.amountCents),
+              currency: "COP",
+              status: "APPROVED",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+    await syncService.synchronize({
+      externalId,
+      environment: "LOCAL",
+      credentialId: wompiCredentialId,
+      expectedOrderId: orderId,
+    });
+    const voided = wompiEvent(attempt, "VOIDED", new Date(Date.now() + 1_000), externalId);
+    const voidWebhook = await webhooks.process({ body: voided.body, environment: "LOCAL" });
+    assert.equal(voidWebhook.status, "PROCESSED");
+    assert.equal(
+      (await db.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus,
+      "REFUNDED",
+    );
+  });
 });

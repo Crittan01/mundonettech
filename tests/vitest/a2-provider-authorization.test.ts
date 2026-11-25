@@ -102,7 +102,10 @@ describe("A2 — DIAN autoriza antes de bóveda, claims y proveedor", () => {
 
   it("un worker sin auditoría humana no consulta AdminUser", async () => {
     const adminUser = { findFirst: vi.fn() };
-    const db = { adminUser } as never;
+    const db = {
+      adminUser,
+      taxInvoice: { findUnique: vi.fn(async () => null) },
+    } as never;
     const vault = vaultHarness();
     const service = new InvoiceService(db, { vault, environment: "LOCAL" } as never);
     await expect(service.prepareInvoice(randomUUID())).rejects.toMatchObject({

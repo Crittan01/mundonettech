@@ -11,6 +11,8 @@ import {
   pointInDeliveryPolygon,
 } from "../../packages/core/dist/index.js";
 import { IntegrationEnvironment } from "../../packages/db/dist/index.js";
+import { validateEmailTemplate } from "../../packages/integrations/dist/email-templates.js";
+import { publicHttpsUrl } from "../../packages/integrations/dist/integration-utils.js";
 import {
   AveonlineShippingProvider,
   DianInvoiceProvider,
@@ -518,7 +520,7 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
     );
     expect(xml.match(/<cbc:ChargeIndicator>false/g)).toHaveLength(1);
     expect(xml).toContain(
-      '<cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">950.00</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">1000.00</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">1180.50</cbc:TaxInclusiveAmount>',
+      '<cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">950.00</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">950.00</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">1130.50</cbc:TaxInclusiveAmount><cbc:ChargeTotalAmount currencyID="COP">50.00</cbc:ChargeTotalAmount><cbc:PayableAmount currencyID="COP">1180.50</cbc:PayableAmount></cac:LegalMonetaryTotal>',
     );
   });
 
@@ -740,7 +742,10 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
     const validXml = signFiscalDocument({
       number: fiscal.fullNumber,
       scheme: "CUFE",
+      schemeId: "2",
       hash: fiscal.cufe,
+      extraChildren:
+        '<cbc:ProfileExecutionID>2</cbc:ProfileExecutionID><cac:AccountingSupplierParty><cac:Party><cac:PartyIdentification><cbc:ID>9010000001</cbc:ID></cac:PartyIdentification></cac:Party></cac:AccountingSupplierParty><cac:TaxTotal><cbc:TaxAmount currencyID="COP">180.50</cbc:TaxAmount></cac:TaxTotal><cac:LegalMonetaryTotal><cbc:PayableAmount currencyID="COP">1180.50</cbc:PayableAmount></cac:LegalMonetaryTotal>',
       privateKey: dianSigner.privateKey,
       certificate: dianSigner.certificate,
     }).xml;
@@ -774,11 +779,112 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
       validXml.replace(fiscal.cufe, "0".repeat(96)),
       validXml.replaceAll("ds:Signature", "ds:NotSignature"),
       validXml.replace("<Invoice ", "<CreditNote ").replace("</Invoice>", "</CreditNote>"),
+      validXml.replace(
+        "</ds:Signature>",
+        "<ds:Object><cbc:ID>smuggled</cbc:ID></ds:Object></ds:Signature>",
+      ),
+      validXml.replace("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256", "toString"),
+      validXml.replace(">1180.50</cbc:PayableAmount>", ">1.00</cbc:PayableAmount>"),
     ]) {
       signedXml = invalid;
       await expect(provider.transmit(transmission)).rejects.toMatchObject({
         code: "INVALID_RESPONSE",
       });
     }
+  });
+
+  it("enforces fail-closed publicHttpsUrl, entity-encoded HTML rejection, and Aveonline auth errors on lookup", async () => {
+    expect(() => publicHttpsUrl("http://127.0.0.1:4010/hook", "url")).toThrow(TypeError);
+    expect(publicHttpsUrl("http://127.0.0.1:4010/hook", "url", { allowLoopback: true })).toBe(
+      "http://127.0.0.1:4010/hook",
+    );
+    for (const blocked of [
+      "https://169.254.169.254/latest/meta-data",
+      "https://10.0.0.1/internal",
+      "https://localhost./admin",
+      "https://intranet/api",
+      "https://[64:ff9b::1]/api",
+      "https://[fe80::1]/api",
+    ]) {
+      expect(() => publicHttpsUrl(blocked, "url", { allowLoopback: true }), blocked).toThrow(
+        TypeError,
+      );
+    }
+
+    expect(() =>
+      validateEmailTemplate({
+        ...defaultEmailTemplate("order.paid"),
+        htmlBody:
+          '<p>{{orderNumber}} {{storeName}} <a href="&#x6a;avascript:alert(1)">{{receiptUrl}}</a> <a href="{{unsubscribeUrl}}">baja</a></p>',
+      }),
+    ).toThrow(/unsafe/i);
+    expect(() =>
+      validateEmailTemplate({
+        ...defaultEmailTemplate("order.paid"),
+        htmlBody:
+          '<p>{{orderNumber}} {{storeName}} <a href="data:image/svg+xml,<svg/>">{{receiptUrl}}</a> <a href="{{unsubscribeUrl}}">baja</a></p>',
+      }),
+    ).toThrow(/unsafe/i);
+
+    const creditXml = buildCreditNoteUbl(
+      {
+        fullNumber: "NC1",
+        issueDate: new Date("2026-11-21T20:00:00.000Z"),
+        cude: calculateCude({
+          fullNumber: "NC1",
+          issueDate: new Date("2026-11-21T20:00:00.000Z"),
+          subtotalCents: 5_000n,
+          discountCents: 0n,
+          lineExtensionCents: 0n,
+          taxCents: 0n,
+          totalCents: 5_000n,
+          issuerNit: "9010000001",
+          buyerDocumentNumber: "1020304050",
+          buyerDocumentType: "13",
+          softwarePin: "12345",
+          production: false,
+        }),
+        invoiceFullNumber: "FE1",
+        invoiceCufe: fiscalInput().cufe,
+        invoiceIssueDate: new Date("2026-11-21T20:00:00.000Z"),
+        reasonCode: 1,
+        issuer: fiscalInput().issuer,
+        buyer: fiscalInput().buyer,
+        lines: [],
+        subtotalCents: 0n,
+        discountCents: 0n,
+        taxCents: 0n,
+        shippingCents: 5_000n,
+        totalCents: 5_000n,
+      },
+      false,
+    );
+    expect(creditXml).toContain("<cbc:ReferenceID>FE1</cbc:ReferenceID>");
+    expect(creditXml).not.toContain("<cac:ReferenceID>");
+
+    const aveCreds = parseAveonlineCredentials(
+      encodedCredentials(aveonline),
+      IntegrationEnvironment.PRD,
+    );
+    const expiration = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiration })).toString("base64url")}.signature-with-enough-length`;
+    let call = 0;
+    const aveProvider = new AveonlineShippingProvider(aveCreds, {
+      fetchImpl: async () => {
+        call += 1;
+        if (call === 1) {
+          return new Response(JSON.stringify({ status: "ok", token: jwt, cuentas: [] }), {
+            status: 200,
+          });
+        }
+        return new Response(
+          JSON.stringify({ status: "error", message: "El token no existe o expiró" }),
+          { status: 200 },
+        );
+      },
+    });
+    await expect(aveProvider.findLabel("req-key-1")).rejects.toMatchObject({
+      code: "NETWORK_UNCERTAIN",
+    });
   });
 });
