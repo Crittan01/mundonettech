@@ -8,7 +8,7 @@ import {
 } from "node:crypto";
 
 import { normalizeOperationKey } from "@mundonettech/core";
-import type { PrismaClient } from "@mundonettech/db";
+import type { IntegrationEnvironment, PrismaClient } from "@mundonettech/db";
 import {
   acquireOperationLocks,
   hasUniqueViolation,
@@ -35,6 +35,7 @@ export class GuestOrderAccessError extends Error {
 export interface GuestOrderAccessOptions {
   readonly secret: Uint8Array;
   readonly storeName: string;
+  readonly environment?: IntegrationEnvironment;
   readonly vault: {
     list(options: { includeRevoked?: boolean; limit: number }): Promise<{
       items: readonly { id: string; provider: string; revokedAt: Date | null }[];
@@ -72,6 +73,10 @@ export class GuestOrderAccessService {
     private readonly db: PrismaClient,
     private readonly options: GuestOrderAccessOptions,
   ) {
+    this.options = {
+      ...options,
+      environment: options.environment ?? "PRD",
+    };
     if (options.secret.length !== 32)
       throw new TypeError("Guest order HMAC secret must contain 32 bytes.");
     if (options.storeName.trim().length < 2 || options.storeName.length > 120) {
@@ -99,7 +104,7 @@ export class GuestOrderAccessService {
     const id = active[0]!.id;
     const plaintext = await this.options.vault.reveal(id);
     try {
-      return { id, values: parseEmailCredentials(plaintext) };
+      return { id, values: parseEmailCredentials(plaintext, this.options.environment) };
     } finally {
       plaintext.fill(0);
     }

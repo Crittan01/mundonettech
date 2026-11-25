@@ -119,7 +119,15 @@ export async function transmitInvoiceAction(
       audit,
     );
     revalidatePath("/admin/facturacion");
-    return actionSuccess(`Factura ${result.fullNumber}: ${result.status}.`);
+    if (result.status !== "ACCEPTED") {
+      return actionError(
+        result.status === "UNCERTAIN"
+          ? `Factura ${result.fullNumber} con resultado incierto. Concilia antes de retransmitir.`
+          : `Factura ${result.fullNumber} rechazada por el proveedor fiscal.`,
+        values,
+      );
+    }
+    return actionSuccess(`Factura ${result.fullNumber}: aceptada.`);
   } catch (error) {
     return failure(error, values);
   }
@@ -156,7 +164,15 @@ export async function transmitCreditNoteAction(
       audit,
     );
     revalidatePath("/admin/facturacion");
-    return actionSuccess(`Nota crédito ${result.fullNumber}: ${result.status}.`);
+    if (result.status !== "ACCEPTED") {
+      return actionError(
+        result.status === "UNCERTAIN"
+          ? `Nota crédito ${result.fullNumber} con resultado incierto. Concilia antes de retransmitir.`
+          : `Nota crédito ${result.fullNumber} rechazada por el proveedor fiscal.`,
+        values,
+      );
+    }
+    return actionSuccess(`Nota crédito ${result.fullNumber}: aceptada.`);
   } catch (error) {
     return failure(error, values);
   }

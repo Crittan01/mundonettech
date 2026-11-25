@@ -110,6 +110,7 @@ function credentialPayload(
     issuerPhoneE164: required(formData, "issuerPhoneE164"),
     softwareId: required(formData, "softwareId"),
     softwarePin: required(formData, "softwarePin"),
+    signatureTrustAnchorPem: required(formData, "signatureTrustAnchorPem") || null,
     invoicePrefix: required(formData, "invoicePrefix"),
     invoiceResolutionNumber: required(formData, "invoiceResolutionNumber"),
     invoiceResolutionStart: integer(formData, "invoiceResolutionStart"),

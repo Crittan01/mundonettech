@@ -11,16 +11,27 @@ const mocks = vi.hoisted(() => {
   return {
     AdminAuthorizationError,
     adminActionLogCreate: vi.fn(),
+    consumeAdminOperationRateLimit: vi.fn(),
     creditNoteFindFirst: vi.fn(),
     exportCsv: vi.fn(),
     getAdminSession: vi.fn(),
     getDatabaseClock: vi.fn(),
     getRequestSecurityContext: vi.fn(),
     invoiceFindFirst: vi.fn(),
+    isAdminSelfDealingCustomer: vi.fn(),
     parseFinanceRange: vi.fn(),
   };
 });
 
+vi.mock("@mundonettech/db", () => ({
+  OperationRateLimitError: class OperationRateLimitError extends Error {
+    constructor(readonly retryAfterSeconds: number) {
+      super("Rate limit exceeded.");
+    }
+  },
+  consumeAdminOperationRateLimit: mocks.consumeAdminOperationRateLimit,
+  isAdminSelfDealingCustomer: mocks.isAdminSelfDealingCustomer,
+}));
 vi.mock("@/lib/security/admin-auth", () => ({
   AdminAuthorizationError: mocks.AdminAuthorizationError,
   getAdminSession: mocks.getAdminSession,
@@ -63,19 +74,28 @@ function financeRequest(query = "from=2026-01-01&to=2026-12-31&year=2026"): Prom
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.getAdminSession.mockResolvedValue({ profile: { id: "admin-id" } });
+  mocks.getAdminSession.mockResolvedValue({
+    profile: { id: "admin-id", authUserId: "auth-admin-id", email: "admin@example.test" },
+  });
   mocks.getRequestSecurityContext.mockResolvedValue({
     ipHash: new Uint8Array(32),
     userAgentHash: new Uint8Array(32),
   });
   mocks.adminActionLogCreate.mockResolvedValue({ id: "audit-id" });
+  mocks.consumeAdminOperationRateLimit.mockResolvedValue({
+    allowed: true,
+    retryAfterSeconds: 0,
+  });
+  mocks.isAdminSelfDealingCustomer.mockResolvedValue(false);
   mocks.invoiceFindFirst.mockResolvedValue({
     fullNumber: "FAC-2026-1",
     signedXml: "<Invoice><ID>FAC-2026-1</ID></Invoice>",
+    order: { customerId: "customer-1", emailSnapshot: "buyer@example.test" },
   });
   mocks.creditNoteFindFirst.mockResolvedValue({
     fullNumber: "NC-2026-1",
     signedXml: "<CreditNote><ID>NC-2026-1</ID></CreditNote>",
+    invoice: { order: { customerId: "customer-1", emailSnapshot: "buyer@example.test" } },
   });
   mocks.getDatabaseClock.mockResolvedValue(new Date("2026-06-01T12:00:00.000Z"));
   mocks.parseFinanceRange.mockReturnValue(range);
@@ -92,7 +112,11 @@ describe("admin fiscal document download", () => {
     });
     expect(mocks.invoiceFindFirst).toHaveBeenCalledWith({
       where: { id: documentId, status: "ACCEPTED" },
-      select: { fullNumber: true, signedXml: true },
+      select: {
+        fullNumber: true,
+        signedXml: true,
+        order: { select: { customerId: true, emailSnapshot: true } },
+      },
     });
   });
 
@@ -131,6 +155,7 @@ describe("admin fiscal document download", () => {
     mocks.invoiceFindFirst.mockResolvedValue({
       fullNumber: 'FAC/1"\r\nInjected: yes',
       signedXml: "<Invoice><Buyer>alice@example.test</Buyer></Invoice>",
+      order: { customerId: "customer-1", emailSnapshot: "buyer@example.test" },
     });
     const response = await documentRequest();
     expect(response.status).toBe(200);
@@ -148,7 +173,11 @@ describe("admin fiscal document download", () => {
     expect(credit.status).toBe(200);
     expect(mocks.creditNoteFindFirst).toHaveBeenCalledWith({
       where: { id: documentId, status: "ACCEPTED" },
-      select: { fullNumber: true, signedXml: true },
+      select: {
+        fullNumber: true,
+        signedXml: true,
+        invoice: { select: { order: { select: { customerId: true, emailSnapshot: true } } } },
+      },
     });
     mocks.creditNoteFindFirst.mockResolvedValue({ fullNumber: "NC-1", signedXml: null });
     const missing = await documentRequest("credit-note");

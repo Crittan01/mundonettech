@@ -13,6 +13,7 @@ import {
   OrderLifecycleService,
   OrderRefundService,
   OrderService,
+  OrderValidationError,
   ReceiptBalanceError,
   RefundConflictError,
   claimDomainOutbox,
@@ -73,6 +74,72 @@ function contact(email = `buyer-${randomUUID()}@example.test`) {
 
 function idempotency() {
   return { keyHash: hash(), subjectHash: hash(), requestHash: hash(), expiresAt: future(1) };
+}
+
+function legacyReceiptHash(order, receipt, items) {
+  const content = {
+    orderNumber: order.orderNumber,
+    receiptNumber: receipt.receiptNumber,
+    issuedAt: receipt.issuedAt.toISOString(),
+    taxRegime: order.taxRegime,
+    currency: order.currency,
+    fulfillmentMethod: order.fulfillmentMethod,
+    emailSnapshot: order.emailSnapshot,
+    recipientNameSnapshot: order.recipientNameSnapshot,
+    phoneE164Snapshot: order.phoneE164Snapshot,
+    countryCode: order.countryCode,
+    departmentCode: order.departmentCode,
+    departmentNameSnapshot: order.departmentNameSnapshot,
+    municipalityCode: order.municipalityCode,
+    municipalityNameSnapshot: order.municipalityNameSnapshot,
+    addressLine1Snapshot: order.addressLine1Snapshot,
+    addressLine2Snapshot: order.addressLine2Snapshot,
+    neighborhoodSnapshot: order.neighborhoodSnapshot,
+    postalCodeSnapshot: order.postalCodeSnapshot,
+    deliveryNotesSnapshot: order.deliveryNotesSnapshot,
+    clickCollectLocationId: order.clickCollectLocationId,
+    subtotalCents: order.subtotalCents.toString(),
+    wholesaleDiscountCents: order.wholesaleDiscountCents.toString(),
+    bundleDiscountCents: order.bundleDiscountCents.toString(),
+    couponDiscountCents: order.couponDiscountCents.toString(),
+    discountCents: order.discountCents.toString(),
+    taxCents: order.taxCents.toString(),
+    shippingCents: order.shippingCents.toString(),
+    totalCents: order.totalCents.toString(),
+    deliveryPromiseAt: order.deliveryPromiseAt?.toISOString() ?? null,
+    items: items.map((item) => ({
+      id: item.id,
+      variantId: item.variantId,
+      bundleId: item.bundleId,
+      quantity: item.quantity,
+      titleSnapshot: item.titleSnapshot,
+      productSlugSnapshot: item.productSlugSnapshot,
+      skuSnapshot: item.skuSnapshot,
+      unitPriceCents: item.unitPriceCents.toString(),
+      unitCostWacCents: item.unitCostWacCents.toString(),
+      wholesaleDiscountCents: item.wholesaleDiscountCents.toString(),
+      bundleDiscountCents: item.bundleDiscountCents.toString(),
+      couponDiscountCents: item.couponDiscountCents.toString(),
+      discountCents: item.discountCents.toString(),
+      lineTotalCents: item.lineTotalCents.toString(),
+      taxCents: item.taxCents.toString(),
+      taxLines: item.taxLines.map((line) => ({
+        taxGroupCode: line.taxGroupCode,
+        taxGroupName: line.taxGroupName,
+        treatment: line.treatment,
+        rule: line.rule,
+        catalogRateBps: line.catalogRateBps,
+        appliedRateBps: line.appliedRateBps,
+        uvtLimit: line.uvtLimit,
+        uvtValueCents: line.uvtValueCents.toString(),
+        uvtYear: line.uvtYear,
+        unitValueCents: line.unitValueCents.toString(),
+        taxableBaseCents: line.taxableBaseCents.toString(),
+        taxCents: line.taxCents.toString(),
+      })),
+    })),
+  };
+  return createHash("sha256").update(JSON.stringify(content)).digest();
 }
 
 async function makeCart(quantity, email) {
@@ -305,7 +372,226 @@ describe("F3.2 — atomic checkout, receipt and inventory snapshots", () => {
     assert.equal(receipt.totalCents, "100000");
     assert.equal("unitCostWacCents" in receipt.items[0], false);
     assert.equal(JSON.stringify(receipt).includes("unitCostWacCents"), false);
+    await db.stockLocation.update({
+      where: { id: inventory.destinationLocationId },
+      data: { name: "Nombre posterior de la sede" },
+    });
+    try {
+      const historical = await orders.getReceiptByToken(
+        createHash("sha256").update(receiptToken).digest(),
+      );
+      assert.equal(historical.pickupLocationName, "Sede secundaria");
+    } finally {
+      await db.stockLocation.update({
+        where: { id: inventory.destinationLocationId },
+        data: { name: "Sede secundaria" },
+      });
+    }
     assert.equal(await orders.getReceiptByToken(hash()), null);
+  });
+
+  it("reads a multi-line receipt canonically across legacy hashes, reordered rows and tampering", async () => {
+    await addPickupStock(1);
+    const secondVariantId = randomUUID();
+    await sql.query(
+      `INSERT INTO "ProductVariant" (
+         "id", "productId", "sku", "priceCents", "costCents", "weightGrams",
+         "lengthMillimeters", "widthMillimeters", "heightMillimeters", "isDefault", "status"
+       ) VALUES ($1, $2, $3, 50000, 30000, 250, 100, 100, 50, false, 'ACTIVE')`,
+      [
+        secondVariantId,
+        catalog.productId,
+        `SKU-RECEIPT-${randomUUID().replaceAll("-", "").slice(0, 10).toUpperCase()}`,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "StockLevel" ("locationId", "variantId", "onHand", "safetyStock", "weightedAvgCostCents")
+       VALUES ($1, $2, 1, 0, 30000)`,
+      [inventory.locationId, secondVariantId],
+    );
+    await sql.query(
+      `INSERT INTO "SerializedUnit" ("variantId", "locationId", "serial") VALUES ($1, $2, $3)`,
+      [secondVariantId, inventory.locationId, `RECEIPT-${randomUUID()}`],
+    );
+    await sql.query(
+      `INSERT INTO "InventoryLedger" (
+         "locationId", "variantId", "entryType", "quantityDelta", "committedDelta", "onHandAfter",
+         "committedAfter", "safetyStockAfter", "weightedAvgCostAfterCents", "operationKey", "operationHash", "operationSequence"
+       ) VALUES ($1, $2, 'OPENING', 1, 0, 1, 0, 0, 30000, $3, $4, 0)`,
+      [inventory.locationId, secondVariantId, `receipt-open-${randomUUID()}`, randomBytes(32)],
+    );
+    const cart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      expiresAt: future(24 * 30),
+    });
+    await carts.addVariant({ cartId: cart.id }, catalog.variantId, 1);
+    await carts.addVariant({ cartId: cart.id }, secondVariantId, 1);
+    const receiptToken = randomBytes(32).toString("base64url");
+    const result = await orders.checkout(
+      await conversion(cart, `receipt-multi-${randomUUID()}@example.test`, {
+        receiptAccessTokenHash: Uint8Array.from(createHash("sha256").update(receiptToken).digest()),
+      }),
+    );
+    const order = await db.order.findUniqueOrThrow({
+      where: { id: result.orderId },
+      include: {
+        receipt: true,
+        items: { include: { taxLines: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
+      },
+    });
+    assert.equal(order.items.length, 2);
+    assert.equal(result.totalCents, "1150000");
+    async function setReceiptHash(value) {
+      await sql.query("BEGIN");
+      try {
+        await sql.query("SET LOCAL session_replication_role = 'replica'");
+        await sql.query(`UPDATE "OrderReceipt" SET "contentHash" = $1 WHERE "id" = $2`, [
+          value,
+          order.receipt.id,
+        ]);
+        await sql.query("COMMIT");
+      } catch (error) {
+        await sql.query("ROLLBACK");
+        throw error;
+      }
+    }
+    const readCartItems = async () =>
+      db.cartItem.findMany({
+        where: { cartId: cart.id },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      });
+    let cartItems = await readCartItems();
+    const uuidSourceOrder = [...order.items]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((item) => item.sourceCartItemId);
+    if (cartItems.every((item, index) => item.id === uuidSourceOrder[index])) {
+      await sql.query("BEGIN");
+      try {
+        await sql.query("SET LOCAL session_replication_role = 'replica'");
+        await sql.query(
+          `UPDATE "CartItem"
+           SET "createdAt" = "createdAt" + CASE "id" WHEN $2::uuid THEN INTERVAL '1 day' ELSE INTERVAL '-1 day' END
+           WHERE "cartId" = $1`,
+          [cart.id, cartItems[0].id],
+        );
+        await sql.query("COMMIT");
+      } catch (error) {
+        await sql.query("ROLLBACK");
+        throw error;
+      }
+      cartItems = await readCartItems();
+    }
+    assert.notDeepEqual(
+      cartItems.map((item) => item.id),
+      uuidSourceOrder,
+    );
+    const legacyItems = cartItems.map((cartItem) =>
+      order.items.find((item) => item.sourceCartItemId === cartItem.id),
+    );
+    const legacyHash = legacyReceiptHash(order, order.receipt, legacyItems);
+    await setReceiptHash(legacyHash);
+    const legacy = await orders.getReceiptByToken(
+      createHash("sha256").update(receiptToken).digest(),
+    );
+    assert.equal(legacy.items.length, 2);
+
+    const missingSourceItem = order.items[0];
+    await sql.query("BEGIN");
+    try {
+      await sql.query("SET LOCAL session_replication_role = 'replica'");
+      await sql.query(`UPDATE "OrderItem" SET "sourceCartItemId" = NULL WHERE "id" = $1`, [
+        missingSourceItem.id,
+      ]);
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK");
+      throw error;
+    }
+    await assert.rejects(
+      orders.getReceiptByToken(createHash("sha256").update(receiptToken).digest()),
+      ReceiptBalanceError,
+    );
+    await sql.query("BEGIN");
+    try {
+      await sql.query("SET LOCAL session_replication_role = 'replica'");
+      await sql.query(`UPDATE "OrderItem" SET "sourceCartItemId" = $1 WHERE "id" = $2`, [
+        missingSourceItem.sourceCartItemId,
+        missingSourceItem.id,
+      ]);
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK");
+      throw error;
+    }
+    await setReceiptHash(order.receipt.contentHash);
+
+    cartItems = await readCartItems();
+    const reversedCartItems = [...cartItems].reverse();
+    const reorderBase = Date.UTC(2026, 0, 1);
+    await sql.query("BEGIN");
+    try {
+      await sql.query("SET LOCAL session_replication_role = 'replica'");
+      for (const [index, cartItem] of reversedCartItems.entries()) {
+        await sql.query(
+          `UPDATE "OrderItem" SET "createdAt" = $1
+           WHERE "orderId" = $2 AND "sourceCartItemId" = $3`,
+          [new Date(reorderBase + index * 1000), order.id, cartItem.id],
+        );
+      }
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK");
+      throw error;
+    }
+    const reordered = await db.orderItem.findMany({
+      where: { orderId: order.id },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    assert.deepEqual(
+      reordered.map((item) => item.sourceCartItemId),
+      reversedCartItems.map((item) => item.id),
+    );
+    assert.notDeepEqual(
+      reordered.map((item) => item.sourceCartItemId),
+      cartItems.map((item) => item.id),
+    );
+    const canonical = await orders.getReceiptByToken(
+      createHash("sha256").update(receiptToken).digest(),
+    );
+    assert.equal(canonical.items.length, 2);
+    assert.equal(canonical.totalCents, "1150000");
+
+    const taxLine = await db.orderItemTaxLine.findFirstOrThrow({
+      where: { orderItemId: order.items[0].id },
+    });
+    async function setTaxGroup(value) {
+      await sql.query("BEGIN");
+      try {
+        await sql.query("SET LOCAL session_replication_role = 'replica'");
+        await sql.query(`UPDATE "OrderItemTaxLine" SET "taxGroupCode" = $1 WHERE "id" = $2`, [
+          value,
+          taxLine.id,
+        ]);
+        await sql.query("COMMIT");
+      } catch (error) {
+        await sql.query("ROLLBACK");
+        throw error;
+      }
+    }
+    await setTaxGroup("TAMPERED");
+    try {
+      await assert.rejects(
+        orders.getReceiptByToken(createHash("sha256").update(receiptToken).digest()),
+        ReceiptBalanceError,
+      );
+    } finally {
+      await setTaxGroup(taxLine.taxGroupCode);
+    }
+    assert.equal(
+      (await orders.getReceiptByToken(createHash("sha256").update(receiptToken).digest())).items
+        .length,
+      2,
+    );
   });
 
   it("switches to responsible VAT, seals rates and rejects stale review fingerprints", async () => {
@@ -339,6 +625,19 @@ describe("F3.2 — atomic checkout, receipt and inventory snapshots", () => {
     assert.equal(item.taxLines[0].appliedRateBps, 1900);
     assert.equal(item.taxLines[0].uvtValueCents, 5_237_400n);
 
+    await addPickupStock(1);
+    const pickup = await makeCart(1);
+    const pickupInput = await conversion(pickup.cart, pickup.email, {
+      pickupLocationId: inventory.destinationLocationId,
+    });
+    pickupInput.contact.buyerDocumentType = "";
+    pickupInput.contact.buyerDocumentNumber = "";
+    await assert.rejects(
+      orders.checkout(pickupInput),
+      (error) => error instanceof OrderValidationError && /identification/.test(error.message),
+    );
+    assert.equal(await db.order.count({ where: { cartId: pickup.cart.id } }), 0);
+
     const stale = await makeCart(1);
     const staleInput = await conversion(stale.cart, stale.email);
     await sql.query(`UPDATE "ProductVariant" SET "priceCents" = 110000 WHERE "id" = $1`, [
@@ -353,6 +652,120 @@ describe("F3.2 — atomic checkout, receipt and inventory snapshots", () => {
     await sql.query(`UPDATE "ProductVariant" SET "priceCents" = 100000 WHERE "id" = $1`, [
       catalog.variantId,
     ]);
+  });
+
+  it("requires a fresh review when delivery promises or reservation terms change", async () => {
+    const { cart, email } = await makeCart(1);
+    const input = await conversion(cart, email);
+    for (const data of [{ deliveryPromiseDays: 31 }, { reservationMinutes: 121 }]) {
+      await db.storeSettings.update({ where: { key: "default" }, data });
+      await assert.rejects(orders.checkout(input), CheckoutReviewRequiredError);
+      assert.equal(await db.order.count({ where: { cartId: cart.id } }), 0);
+      await db.storeSettings.update({
+        where: { key: "default" },
+        data: { deliveryPromiseDays: 30, reservationMinutes: 120 },
+      });
+    }
+    await addPickupStock(1);
+    const pickup = await makeCart(1);
+    const pickupInput = await conversion(pickup.cart, pickup.email, {
+      pickupLocationId: inventory.destinationLocationId,
+    });
+    await db.stockLocation.update({
+      where: { id: inventory.destinationLocationId },
+      data: { pickupInstructions: "Instrucciones cambiadas antes de confirmar" },
+    });
+    try {
+      await assert.rejects(orders.checkout(pickupInput), CheckoutReviewRequiredError);
+      assert.equal(await db.order.count({ where: { cartId: pickup.cart.id } }), 0);
+    } finally {
+      await db.stockLocation.update({
+        where: { id: inventory.destinationLocationId },
+        data: { pickupInstructions: "Presenta tu documento y el número de pedido." },
+      });
+    }
+  });
+
+  it("requires buyer identification for local carrier delivery even without VAT invoicing", async () => {
+    const admin = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `local-checkout-${randomUUID()}@example.test`,
+        displayName: "Administrador de entrega local",
+        role: "OPERATIONS_MANAGER",
+        status: "ACTIVE",
+      },
+    });
+    const point = { latitudeE6: 46_000_000, longitudeE6: -74_100_000 };
+    const zone = await db.localDeliveryZone.create({
+      data: {
+        code: `LOCAL-${randomUUID().slice(0, 8).toUpperCase()}`,
+        name: "Zona local de checkout",
+        municipalityCodes: ["11001"],
+        polygon: [
+          { latitudeE6: 45_000_000, longitudeE6: -74_200_000 },
+          { latitudeE6: 45_000_000, longitudeE6: -74_000_000 },
+          { latitudeE6: 47_000_000, longitudeE6: -74_000_000 },
+          { latitudeE6: 47_000_000, longitudeE6: -74_200_000 },
+        ],
+        baseFeeCents: 500_000n,
+        cutoffMinutes: 720,
+        deliveryPromiseMinutes: 120,
+        createdByAdminUserId: admin.id,
+        updatedByAdminUserId: admin.id,
+      },
+    });
+    await db.storeSettings.update({
+      where: { key: "default" },
+      data: { taxRegime: "NO_RESPONSABLE_IVA", localDeliveryEnabled: true },
+    });
+    try {
+      const { cart, email } = await makeCart(1);
+      const input = await conversion(cart, email);
+      const quotes = await orders.localDeliveryQuotes(
+        { cartId: cart.id },
+        { municipalityCode: "11001", point },
+      );
+      assert.equal(quotes.length, 1);
+      input.fulfillment = {
+        method: "LOCAL_DELIVERY",
+        departmentCode: "11",
+        municipalityCode: "11001",
+        addressLine1: "Carrera 7 # 71-21",
+        zoneId: zone.id,
+        point,
+      };
+      input.expectedReviewFingerprint = quotes[0].reviewFingerprint;
+      input.contact.buyerDocumentType = "";
+      input.contact.buyerDocumentNumber = "";
+      await assert.rejects(
+        orders.checkout(input),
+        (error) => error instanceof OrderValidationError && /identification/.test(error.message),
+      );
+      assert.equal(await db.order.count({ where: { cartId: cart.id } }), 0);
+
+      input.contact.buyerDocumentType = "13";
+      input.contact.buyerDocumentNumber = "1020304050";
+      const result = await orders.checkout(input);
+      assert.equal(result.totalCents, "600000");
+      const order = await db.order.findUniqueOrThrow({
+        where: { id: result.orderId },
+        include: { shipments: true },
+      });
+      assert.equal(order.fulfillmentMethod, "LOCAL_DELIVERY");
+      assert.equal(order.shippingCents, 500_000n);
+      assert.equal(order.shipments.length, 1);
+      assert.equal(order.shipments[0].localDeliveryZoneId, zone.id);
+      assert.equal(
+        (await db.localDeliveryZone.findUniqueOrThrow({ where: { id: zone.id } })).deletedAt,
+        null,
+      );
+    } finally {
+      await db.storeSettings.update({
+        where: { key: "default" },
+        data: { taxRegime: "RESPONSABLE_IVA", localDeliveryEnabled: false },
+      });
+    }
   });
 
   it("redeems a coupon exactly once and serializes concurrent equivalent submissions", async () => {
@@ -378,6 +791,51 @@ describe("F3.2 — atomic checkout, receipt and inventory snapshots", () => {
 
     const second = await makeCart(1);
     await assert.rejects(carts.applyCoupon({ cartId: second.cart.id }, coupon.code));
+  });
+
+  it("blocks receipt reads when the sealed coupon snapshot changes", async () => {
+    await addPickupStock(1);
+    const couponId = randomUUID();
+    await sql.query(
+      `INSERT INTO "Coupon" ("id", "code", "name", "discountType", "status", "percentageBps")
+       VALUES ($1, $2, 'Receipt coupon integrity', 'PERCENTAGE', 'ACTIVE', 1000)`,
+      [couponId, `RECEIPT-${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`],
+    );
+    const coupon = await db.coupon.findUniqueOrThrow({ where: { id: couponId } });
+    const { cart, email } = await makeCart(1);
+    await carts.applyCoupon({ cartId: cart.id }, coupon.code);
+    const receiptToken = randomBytes(32).toString("base64url");
+    const input = await conversion(cart, email, {
+      receiptAccessTokenHash: Uint8Array.from(createHash("sha256").update(receiptToken).digest()),
+    });
+    const result = await orders.checkout(input);
+    async function setCouponSnapshot(value) {
+      await sql.query("BEGIN");
+      try {
+        await sql.query("SET LOCAL session_replication_role = 'replica'");
+        await sql.query(`UPDATE "Order" SET "couponCodeSnapshot" = $1 WHERE "id" = $2`, [
+          value,
+          result.orderId,
+        ]);
+        await sql.query("COMMIT");
+      } catch (error) {
+        await sql.query("ROLLBACK");
+        throw error;
+      }
+    }
+    await setCouponSnapshot("COUPON-TAMPERED");
+    try {
+      await assert.rejects(
+        orders.getReceiptByToken(createHash("sha256").update(receiptToken).digest()),
+        ReceiptBalanceError,
+      );
+    } finally {
+      await setCouponSnapshot(coupon.code);
+    }
+    const restored = await orders.getReceiptByToken(
+      createHash("sha256").update(receiptToken).digest(),
+    );
+    assert.equal(restored.couponCodeSnapshot, coupon.code);
   });
 
   it("binds guest coupon redemptions to customer identity, records Ley 1581 consent, prefills active customers and blocks receipt tampering", async () => {
@@ -834,5 +1292,30 @@ describe("F3.2 — abandoned carts, reservation expiry and partial refunds", () 
       }),
       1,
     );
+  });
+
+  it("releases expired stock and coupon reservations even when paymentStatus is FAILED", async () => {
+    const { cart, email } = await makeCart(1);
+    const beforeStock = await db.stockLevel.findFirstOrThrow({
+      where: { variantId: catalog.variantId },
+    });
+    const result = await orders.checkout(await conversion(cart, email));
+    await db.order.update({
+      where: { id: result.orderId },
+      data: {
+        paymentStatus: "FAILED",
+        reservationExpiresAt: new Date(Date.now() - 60_000),
+      },
+    });
+    const lifecycle = new OrderLifecycleService(db);
+    const released = await lifecycle.releaseExpiredOrderReservations({ limit: 20 });
+    assert.ok(released.orderIds.includes(result.orderId));
+    const cancelled = await db.order.findUniqueOrThrow({ where: { id: result.orderId } });
+    assert.equal(cancelled.orderStatus, "CANCELLED");
+    assert.equal(cancelled.paymentStatus, "FAILED");
+    const afterStock = await db.stockLevel.findFirstOrThrow({
+      where: { variantId: catalog.variantId },
+    });
+    assert.equal(afterStock.committed, beforeStock.committed);
   });
 });

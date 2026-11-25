@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { optionalTrimmedText, phoneInputPattern } from "../../apps/web/lib/form-validation";
+import {
+  normalizePhoneE164,
+  optionalTrimmedText,
+  phoneInputPattern,
+} from "../../apps/web/lib/form-validation";
 
 import * as core from "../../packages/core/dist/index.js";
 import * as db from "../../packages/db/dist/index.js";
@@ -13,7 +17,7 @@ import {
   formString,
   type ActionState,
 } from "../../apps/web/lib/action-state";
-import { loadActionModule } from "./a2-action-loader";
+import { loadActionModule, loadWebModule } from "./a2-action-loader";
 
 const mocks = {
   revalidatePath: vi.fn(),
@@ -106,6 +110,8 @@ const moduleMocks: Record<string, unknown> = {
   },
   "@/lib/security/customer-auth-request": {
     establishCustomerAuthRequest: mocks.establishCustomerAuthRequest,
+    normalizeInternalNextPath: (value: string | null | undefined) =>
+      realAuthRequest.normalizeInternalNextPath(value),
     readCustomerAuthRequest: mocks.readCustomerAuthRequest,
     clearCustomerAuthRequest: mocks.clearCustomerAuthRequest,
   },
@@ -136,11 +142,41 @@ const moduleMocks: Record<string, unknown> = {
   },
   "@/lib/checkout": { orderService: () => ({ checkout: mocks.checkout }) },
   "@/lib/checkout-errors": { checkoutMutationMessage: () => "No pudimos confirmar." },
-  "@/lib/form-validation": { optionalTrimmedText, phoneInputPattern },
+  "@/lib/form-validation": { normalizePhoneE164, optionalTrimmedText, phoneInputPattern },
   "@/lib/legal": {
     getConfiguredLegalDocument: (slug: string) => ({ slug, version: "2026-01", content: "legal" }),
   },
 };
+
+const authRequestJar = new Map<string, string>();
+const authRequestCookieSet = vi.fn((name: string, value: string) => {
+  if (value) authRequestJar.set(name, value);
+  else authRequestJar.delete(name);
+});
+const realAuthRequest = loadWebModule<
+  typeof import("../../apps/web/lib/security/customer-auth-request")
+>("lib/security/customer-auth-request.ts", {
+  "server-only": {},
+  "@mundonettech/core": core,
+  "next/headers": {
+    cookies: async () => ({
+      set: authRequestCookieSet,
+      get: (name: string) => {
+        const value = authRequestJar.get(name);
+        return value === undefined ? undefined : { value };
+      },
+    }),
+  },
+  "@/lib/env": { getSessionHmacSecret: () => new Uint8Array(32).fill(9) },
+  "@/lib/security/session-policy": {
+    customerAuthRequestCookie: "customer_auth_request",
+    sessionCookieOptions: { httpOnly: true, sameSite: "strict", secure: true, path: "/" },
+  },
+});
+const realCustomerAuthActions = loadActionModule<Record<string, ServerAction>>("customer-auth", {
+  ...moduleMocks,
+  "@/lib/security/customer-auth-request": realAuthRequest,
+});
 
 const cartActions = loadActionModule<Record<string, ServerAction>>("cart", moduleMocks);
 const growthActions = loadActionModule<Record<string, ServerAction>>("growth", moduleMocks);
@@ -165,6 +201,14 @@ const updateProfileAction = requiredAction(accountActions, "updateProfileAction"
 const anonymizeAccountAction = requiredAction(accountActions, "anonymizeAccountAction");
 const requestCustomerOtpAction = requiredAction(customerAuthActions, "requestCustomerOtpAction");
 const verifyCustomerOtpAction = requiredAction(customerAuthActions, "verifyCustomerOtpAction");
+const requestRealCustomerOtpAction = requiredAction(
+  realCustomerAuthActions,
+  "requestCustomerOtpAction",
+);
+const verifyRealCustomerOtpAction = requiredAction(
+  realCustomerAuthActions,
+  "verifyCustomerOtpAction",
+);
 const resetCustomerPasswordAction = requiredAction(
   customerAuthActions,
   "resetCustomerPasswordAction",
@@ -187,6 +231,7 @@ const token = "t".repeat(43);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authRequestJar.clear();
   mocks.requireCustomerPage.mockResolvedValue({ profile: { id: customerId } });
   mocks.attributeReferral.mockResolvedValue({ replayed: false });
   mocks.createReferralCode.mockResolvedValue({ code: "23456789ABCD", replayed: false });
@@ -395,6 +440,58 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     expect(mocks.clearCustomerAuthRequest).toHaveBeenCalledOnce();
     expect(mocks.synchronizeCustomerProfile).toHaveBeenCalledWith(customerId, "cookie@example.co");
     expect(mocks.establishCustomerActivity).toHaveBeenCalledWith(customerId);
+    expect(mocks.redirect).toHaveBeenLastCalledWith("/mi-cuenta");
+  });
+
+  it("rechaza un next externo antes de Turnstile o Supabase", async () => {
+    const form = new FormData();
+    form.set("email", "cliente@example.co");
+    form.set("turnstileToken", "captcha-token");
+    form.set("next", "https://evil.example/robo");
+
+    const result = await requestCustomerOtpAction(idle, form);
+
+    expect(result.status).toBe("error");
+    expect(result.message).toContain("destino de regreso");
+    expect(mocks.verifyTurnstileToken).not.toHaveBeenCalled();
+    expect(mocks.signInWithOtp).not.toHaveBeenCalled();
+    expect(mocks.establishCustomerAuthRequest).not.toHaveBeenCalled();
+  });
+
+  it("completa el flujo real con cookie cifrada, ignora next inyectado y bloquea replay", async () => {
+    const next = `/pagar/${token}`;
+    const request = new FormData();
+    request.set("email", "cliente@example.co");
+    request.set("turnstileToken", "captcha-token");
+    request.set("next", next);
+
+    const requested = await requestRealCustomerOtpAction(idle, request);
+
+    expect(requested.status).toBe("success");
+    const sealed = authRequestJar.get("customer_auth_request");
+    expect(sealed).toBeTruthy();
+    expect(Buffer.from(sealed!, "base64url").toString("utf8")).not.toContain(next);
+    mocks.verifyOtp.mockResolvedValueOnce({
+      data: { user: { id: customerId }, session: { access_token: "session" } },
+      error: null,
+    });
+    const verification = new FormData();
+    verification.set("code", "123456");
+    verification.set("turnstileToken", "captcha-token");
+    verification.set("next", "https://evil.example/robo");
+
+    await expect(verifyRealCustomerOtpAction(idle, verification)).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+
+    expect(mocks.redirect).toHaveBeenLastCalledWith(next);
+    expect(mocks.consumeReferralPath).toHaveBeenCalledOnce();
+    expect(mocks.synchronizeCustomerProfile).toHaveBeenCalledWith(customerId, "cliente@example.co");
+    expect(authRequestJar.has("customer_auth_request")).toBe(false);
+    const replay = await verifyRealCustomerOtpAction(idle, verification);
+    expect(replay.status).toBe("error");
+    expect(replay.message).toContain("expiró");
+    expect(mocks.verifyOtp).toHaveBeenCalledOnce();
   });
 
   it("bloquea páginas sin solicitud y cancela limpiando el estado antes de redirigir", async () => {
@@ -417,6 +514,19 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     });
     expect(mocks.clearCustomerAuthRequest).toHaveBeenCalledTimes(2);
     expect(mocks.redirect).toHaveBeenLastCalledWith("/recuperar");
+
+    mocks.readCustomerAuthRequest.mockResolvedValueOnce({
+      purpose: "login",
+      email: "cookie@example.co",
+      next: `/pagar/${token}`,
+    });
+    await expect(cancelCustomerAuthRequestAction(idle, new FormData())).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    expect(mocks.clearCustomerAuthRequest).toHaveBeenCalledTimes(3);
+    expect(mocks.redirect).toHaveBeenLastCalledWith(
+      `/ingresar?next=${encodeURIComponent(`/pagar/${token}`)}`,
+    );
   });
 
   it("liga el reset al propósito recovery y consume el estado antes de actualizar", async () => {

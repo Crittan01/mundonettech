@@ -1,3 +1,5 @@
+import type { IntegrationEnvironment } from "@mundonettech/db";
+
 export class EmailValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -103,5 +105,6 @@ export interface EmailServiceOptions {
     reveal(id: string): Promise<Uint8Array>;
   };
   readonly publicSiteUrl: string;
+  readonly environment?: IntegrationEnvironment;
   readonly providerFactory?: (credentials: EmailCredentials) => EmailProvider;
 }

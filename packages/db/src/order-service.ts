@@ -21,6 +21,7 @@ import { LocalDeliveryConflictError, quoteLocalDeliveryZone } from "./local-deli
 import type { CartReference, CartSnapshot } from "./cart-types.js";
 import type {
   Cart,
+  LocalDeliveryZone,
   Order,
   OrderItem,
   OrderItemTaxLine,
@@ -128,11 +129,18 @@ interface StockAllocation {
   readonly unitCostWacCents: bigint;
 }
 
-type OrderItemWithTaxes = OrderItem & { taxLines: OrderItemTaxLine[] };
+type OrderItemWithTaxes = OrderItem & {
+  taxLines: OrderItemTaxLine[];
+  sourceCartItem?: { createdAt: Date; id: string } | null;
+};
 type ReceiptWithOrder = OrderReceipt & {
   order: Order & {
-    clickCollectLocation: { name: string } | null;
     items: OrderItemWithTaxes[];
+    statusEvents: Array<{
+      orderStatus: Order["orderStatus"];
+      reason: string | null;
+      metadata: Prisma.JsonValue;
+    }>;
   };
 };
 
@@ -299,16 +307,19 @@ async function settingsForCart(
   const settings = await lockedSettings(tx, defaults);
   if (cart.kind !== "B2B") return settings;
   const proposal = await b2bProposalForCart(tx, cart.id);
-  return validateSettings({
-    ...settings,
-    taxRegime: proposal.taxRegime,
-    uvtValueCents: proposal.uvtValueCents,
-    uvtYear: proposal.uvtYear,
-    standardShippingCents: proposal.shippingCents,
-    deliveryPromiseDays: proposal.deliveryPromiseDays,
-    reservationMinutes: proposal.reservationMinutes,
-    clickAndCollectEnabled: false,
-  });
+  return {
+    ...validateSettings({
+      ...settings,
+      taxRegime: proposal.taxRegime,
+      uvtValueCents: proposal.uvtValueCents,
+      uvtYear: proposal.uvtYear,
+      standardShippingCents: proposal.shippingCents,
+      deliveryPromiseDays: proposal.deliveryPromiseDays,
+      reservationMinutes: proposal.reservationMinutes,
+      clickAndCollectEnabled: false,
+    }),
+    localDeliveryEnabled: false,
+  };
 }
 
 function fingerprint(input: {
@@ -316,11 +327,15 @@ function fingerprint(input: {
   readonly taxes: readonly CalculatedOrderTaxLine[];
   readonly fulfillmentMethod: "HOME_DELIVERY" | "CLICK_COLLECT" | "LOCAL_DELIVERY";
   readonly clickCollectLocationId: string | null;
+  readonly clickCollectLocationUpdatedAt?: Date;
   readonly localDeliveryZoneId?: string;
   readonly zoneUpdatedAt?: Date;
   readonly deliveryPoint?: DeliveryPoint;
   readonly deliveryPromiseAt?: Date;
+  readonly timeZone?: string;
   readonly shippingCents: bigint;
+  readonly deliveryPromiseDays: number;
+  readonly reservationMinutes: number;
   readonly taxRegime: StoreTaxRegimeValue;
   readonly uvtValueCents: bigint;
   readonly uvtYear: number;
@@ -349,14 +364,28 @@ function fingerprint(input: {
     })),
     fulfillmentMethod: input.fulfillmentMethod,
     clickCollectLocationId: input.clickCollectLocationId,
+    ...(input.fulfillmentMethod === "CLICK_COLLECT"
+      ? { clickCollectLocationUpdatedAt: input.clickCollectLocationUpdatedAt?.toISOString() }
+      : {}),
     ...(input.fulfillmentMethod === "LOCAL_DELIVERY"
       ? {
           localDeliveryZoneId: input.localDeliveryZoneId,
           zoneUpdatedAt: input.zoneUpdatedAt?.toISOString(),
           deliveryPoint: input.deliveryPoint,
+          deliveryPromiseDay:
+            input.deliveryPromiseAt && input.timeZone
+              ? new Intl.DateTimeFormat("en-CA", {
+                  timeZone: input.timeZone,
+                  year: "numeric",
+                  month: "2-digit",
+                  day: "2-digit",
+                }).format(input.deliveryPromiseAt)
+              : null,
         }
       : {}),
     shippingCents: input.shippingCents.toString(),
+    deliveryPromiseDays: input.deliveryPromiseDays,
+    reservationMinutes: input.reservationMinutes,
     taxRegime: input.taxRegime,
     uvtValueCents: input.uvtValueCents.toString(),
     uvtYear: input.uvtYear,
@@ -464,6 +493,102 @@ function receiptHash(
   order: Order,
   receipt: { readonly receiptNumber: string; readonly issuedAt: Date },
   items: readonly OrderItemWithTaxes[],
+  pickupLocationName: string | null,
+): Uint8Array<ArrayBuffer> {
+  const content = {
+    orderNumber: order.orderNumber,
+    receiptNumber: receipt.receiptNumber,
+    issuedAt: receipt.issuedAt.toISOString(),
+    taxRegime: order.taxRegime,
+    uvtValueCents: order.uvtValueCents?.toString() ?? null,
+    uvtYear: order.uvtYear,
+    currency: order.currency,
+    fulfillmentMethod: order.fulfillmentMethod,
+    emailSnapshot: order.emailSnapshot,
+    recipientNameSnapshot: order.recipientNameSnapshot,
+    phoneE164Snapshot: order.phoneE164Snapshot,
+    buyerDocumentTypeSnapshot: order.buyerDocumentTypeSnapshot,
+    buyerDocumentNumberSnapshot: order.buyerDocumentNumberSnapshot,
+    buyerTaxRegimeSnapshot: order.buyerTaxRegimeSnapshot,
+    countryCode: order.countryCode,
+    departmentCode: order.departmentCode,
+    departmentNameSnapshot: order.departmentNameSnapshot,
+    municipalityCode: order.municipalityCode,
+    municipalityNameSnapshot: order.municipalityNameSnapshot,
+    addressLine1Snapshot: order.addressLine1Snapshot,
+    addressLine2Snapshot: order.addressLine2Snapshot,
+    neighborhoodSnapshot: order.neighborhoodSnapshot,
+    postalCodeSnapshot: order.postalCodeSnapshot,
+    deliveryLatitudeE6: order.deliveryLatitudeE6,
+    deliveryLongitudeE6: order.deliveryLongitudeE6,
+    deliveryNotesSnapshot: order.deliveryNotesSnapshot,
+    clickCollectLocationId: order.clickCollectLocationId,
+    pickupLocationName,
+    couponCodeSnapshot: order.couponCodeSnapshot,
+    termsVersion: order.termsVersion,
+    privacyPolicyVersion: order.privacyPolicyVersion,
+    acceptanceProofHash: order.acceptanceProofHash
+      ? Buffer.from(order.acceptanceProofHash).toString("base64")
+      : null,
+    acceptanceIpHash: order.acceptanceIpHash
+      ? Buffer.from(order.acceptanceIpHash).toString("base64")
+      : null,
+    acceptanceUserAgentHash: order.acceptanceUserAgentHash
+      ? Buffer.from(order.acceptanceUserAgentHash).toString("base64")
+      : null,
+    acceptedAt: order.acceptedAt?.toISOString() ?? null,
+    subtotalCents: order.subtotalCents.toString(),
+    wholesaleDiscountCents: order.wholesaleDiscountCents.toString(),
+    bundleDiscountCents: order.bundleDiscountCents.toString(),
+    couponDiscountCents: order.couponDiscountCents.toString(),
+    discountCents: order.discountCents.toString(),
+    taxCents: order.taxCents.toString(),
+    shippingCents: order.shippingCents.toString(),
+    totalCents: order.totalCents.toString(),
+    deliveryPromiseAt: order.deliveryPromiseAt?.toISOString() ?? null,
+    items: [...items]
+      .sort((left, right) => compareStrings(left.id, right.id))
+      .map((item) => ({
+        id: item.id,
+        variantId: item.variantId,
+        bundleId: item.bundleId,
+        quantity: item.quantity,
+        titleSnapshot: item.titleSnapshot,
+        productSlugSnapshot: item.productSlugSnapshot,
+        skuSnapshot: item.skuSnapshot,
+        unitPriceCents: item.unitPriceCents.toString(),
+        unitCostWacCents: item.unitCostWacCents.toString(),
+        wholesaleDiscountCents: item.wholesaleDiscountCents.toString(),
+        bundleDiscountCents: item.bundleDiscountCents.toString(),
+        couponDiscountCents: item.couponDiscountCents.toString(),
+        discountCents: item.discountCents.toString(),
+        lineTotalCents: item.lineTotalCents.toString(),
+        taxCents: item.taxCents.toString(),
+        taxLines: [...item.taxLines]
+          .sort((left, right) => compareStrings(left.id, right.id))
+          .map((line) => ({
+            taxGroupCode: line.taxGroupCode,
+            taxGroupName: line.taxGroupName,
+            treatment: line.treatment,
+            rule: line.rule,
+            catalogRateBps: line.catalogRateBps,
+            appliedRateBps: line.appliedRateBps,
+            uvtLimit: line.uvtLimit,
+            uvtValueCents: line.uvtValueCents.toString(),
+            uvtYear: line.uvtYear,
+            unitValueCents: line.unitValueCents.toString(),
+            taxableBaseCents: line.taxableBaseCents.toString(),
+            taxCents: line.taxCents.toString(),
+          })),
+      })),
+  };
+  return createHash("sha256").update(JSON.stringify(content)).digest();
+}
+
+function legacyReceiptHash(
+  order: Order,
+  receipt: { readonly receiptNumber: string; readonly issuedAt: Date },
+  items: readonly OrderItemWithTaxes[],
 ): Uint8Array<ArrayBuffer> {
   const content = {
     orderNumber: order.orderNumber,
@@ -530,18 +655,65 @@ function receiptHash(
   return createHash("sha256").update(JSON.stringify(content)).digest();
 }
 
+function sourceCartOrder(item: OrderItemWithTaxes): { createdAt: Date; id: string } {
+  if (!item.sourceCartItem || item.sourceCartItem.id !== item.sourceCartItemId) {
+    throw new ReceiptBalanceError("Legacy receipt source cart order is unavailable.");
+  }
+  return item.sourceCartItem;
+}
+
+function legacyReceiptItems(items: readonly OrderItemWithTaxes[]): OrderItemWithTaxes[] {
+  if (items.length <= 1) return [...items];
+  return [...items].sort((left, right) => {
+    const leftSource = sourceCartOrder(left);
+    const rightSource = sourceCartOrder(right);
+    const chronological = leftSource.createdAt.getTime() - rightSource.createdAt.getTime();
+    return chronological || compareStrings(leftSource.id, rightSource.id);
+  });
+}
+
 function requiredSnapshot(value: string | null, field: string): string {
   if (value === null) throw new ReceiptBalanceError(`Receipt is missing ${field}.`);
   return value;
 }
 
-function receiptSnapshot(record: ReceiptWithOrder): OrderReceiptSnapshot {
+function sealedPickupLocationName(order: ReceiptWithOrder["order"]): string | null {
+  if (order.fulfillmentMethod !== "CLICK_COLLECT") return null;
+  const confirmation = order.statusEvents.find(
+    (event) => event.orderStatus === "CONFIRMED" && event.reason === "CHECKOUT_CONFIRMED",
+  );
+  if (
+    !confirmation ||
+    typeof confirmation.metadata !== "object" ||
+    confirmation.metadata === null ||
+    Array.isArray(confirmation.metadata)
+  ) {
+    throw new ReceiptBalanceError("Receipt is missing its pickup location snapshot.");
+  }
+  const name = (confirmation.metadata as Record<string, unknown>).pickupLocationName;
+  if (
+    typeof name !== "string" ||
+    name.trim() !== name ||
+    name.length === 0 ||
+    name.length > 120 ||
+    /[\u0000-\u001f\u007f]/.test(name)
+  ) {
+    throw new ReceiptBalanceError("Receipt pickup location snapshot is invalid.");
+  }
+  return name;
+}
+
+function receiptSnapshot(
+  record: ReceiptWithOrder,
+  pickupLocationName: string | null,
+): OrderReceiptSnapshot {
   const { order } = record;
   if (
     order.fulfillmentMethod === null ||
     order.taxRegime === null ||
     record.taxRegime !== order.taxRegime ||
-    order.currency !== "COP"
+    order.currency !== "COP" ||
+    record.currency !== "COP"
   ) {
     throw new ReceiptBalanceError("Receipt fiscal snapshots are incomplete.");
   }
@@ -572,7 +744,7 @@ function receiptSnapshot(record: ReceiptWithOrder): OrderReceiptSnapshot {
     neighborhoodSnapshot: order.neighborhoodSnapshot,
     postalCodeSnapshot: order.postalCodeSnapshot,
     deliveryNotesSnapshot: order.deliveryNotesSnapshot,
-    pickupLocationName: order.clickCollectLocation?.name ?? null,
+    pickupLocationName,
     couponCodeSnapshot: order.couponCodeSnapshot,
     subtotalCents: record.subtotalCents.toString(),
     wholesaleDiscountCents: order.wholesaleDiscountCents.toString(),
@@ -643,6 +815,8 @@ export class OrderService {
         fulfillmentMethod: "HOME_DELIVERY",
         clickCollectLocationId: null,
         shippingCents: settings.standardShippingCents,
+        deliveryPromiseDays: settings.deliveryPromiseDays,
+        reservationMinutes: settings.reservationMinutes,
         taxRegime: settings.taxRegime,
         uvtValueCents: settings.uvtValueCents,
         uvtYear: settings.uvtYear,
@@ -701,7 +875,10 @@ export class OrderService {
             taxes,
             fulfillmentMethod: "CLICK_COLLECT",
             clickCollectLocationId: location.id,
+            clickCollectLocationUpdatedAt: location.updatedAt,
             shippingCents: 0n,
+            deliveryPromiseDays: settings.deliveryPromiseDays,
+            reservationMinutes: settings.reservationMinutes,
             taxRegime: settings.taxRegime,
             uvtValueCents: settings.uvtValueCents,
             uvtYear: settings.uvtYear,
@@ -831,7 +1008,10 @@ export class OrderService {
               zoneUpdatedAt: zone.updatedAt,
               deliveryPoint: point,
               deliveryPromiseAt: quote.deliveryPromiseAt,
+              timeZone: settings.timeZone,
               shippingCents: quote.shippingCents,
+              deliveryPromiseDays: settings.deliveryPromiseDays,
+              reservationMinutes: settings.reservationMinutes,
               taxRegime: settings.taxRegime,
               uvtValueCents: settings.uvtValueCents,
               uvtYear: settings.uvtYear,
@@ -1035,6 +1215,7 @@ export class OrderService {
           department: { code: string; name: string };
         } | null = null;
         let pickupLocationName: string | null = null;
+        let pickupLocationUpdatedAt: Date | null = null;
         let addressLine1: string;
         let addressLine2: string | null = null;
         let neighborhood: string | null = null;
@@ -1064,6 +1245,7 @@ export class OrderService {
           }
           municipality = location.municipality;
           pickupLocationName = location.name;
+          pickupLocationUpdatedAt = location.updatedAt;
           addressLine1 = location.addressLine1;
         } else {
           const departmentCode = daneCode(input.fulfillment.departmentCode, 2, "departmentCode");
@@ -1108,7 +1290,7 @@ export class OrderService {
         }
         if (
           (settings.taxRegime === "RESPONSABLE_IVA" ||
-            input.fulfillment.method === "HOME_DELIVERY") &&
+            input.fulfillment.method !== "CLICK_COLLECT") &&
           !contact.buyerDocumentNumber
         ) {
           throw new OrderValidationError(
@@ -1128,11 +1310,18 @@ export class OrderService {
           if (!settings.localDeliveryEnabled)
             throw new OrderValidationError("Local Flex delivery is disabled.");
           deliveryPoint = assertDeliveryPoint(input.fulfillment.point);
-          const zone = await tx.localDeliveryZone.findUnique({
-            where: { id: assertUuid(input.fulfillment.zoneId, "zoneId") },
-          });
+          const zoneId = assertUuid(input.fulfillment.zoneId, "zoneId");
+          const zones = await tx.$queryRaw<LocalDeliveryZone[]>`
+            SELECT * FROM "LocalDeliveryZone" WHERE "id" = ${zoneId}::uuid FOR SHARE
+          `;
+          const zone = zones[0];
           if (!zone)
             throw new OrderValidationError("The selected local delivery zone no longer exists.");
+          if (!zone.active || zone.deletedAt !== null) {
+            throw new OrderValidationError(
+              "The selected local delivery zone is no longer available.",
+            );
+          }
           localQuote = quoteLocalDeliveryZone(zone, {
             municipalityCode: municipality.code,
             point: deliveryPoint,
@@ -1153,15 +1342,21 @@ export class OrderService {
           taxes,
           fulfillmentMethod: input.fulfillment.method,
           clickCollectLocationId: locationId,
+          ...(pickupLocationUpdatedAt
+            ? { clickCollectLocationUpdatedAt: pickupLocationUpdatedAt }
+            : {}),
           ...(localQuote && deliveryPoint
             ? {
                 localDeliveryZoneId: localQuote.zoneId,
                 zoneUpdatedAt: localQuote.zoneUpdatedAt,
                 deliveryPoint,
                 deliveryPromiseAt: localQuote.deliveryPromiseAt,
+                timeZone: settings.timeZone,
               }
             : {}),
           shippingCents,
+          deliveryPromiseDays: settings.deliveryPromiseDays,
+          reservationMinutes: settings.reservationMinutes,
           taxRegime: settings.taxRegime,
           uvtValueCents: settings.uvtValueCents,
           uvtYear: settings.uvtYear,
@@ -1169,6 +1364,8 @@ export class OrderService {
         if (reviewFingerprint !== input.expectedReviewFingerprint) {
           throw new CheckoutReviewRequiredError();
         }
+
+        const allocation = await this.planStock(tx, cart, locationId);
 
         let customerId = locked.customerId;
         if (customerId) {
@@ -1296,7 +1493,6 @@ export class OrderService {
           }
         }
 
-        const allocation = await this.planStock(tx, cart, locationId);
         const orderId = randomUUID();
         const reservationKey = `order-reservation:${orderId}`;
         const yearRows = await tx.$queryRaw<Array<{ year: number }>>`
@@ -1605,7 +1801,12 @@ export class OrderService {
         });
         const receiptNumber = `R-${order.orderNumber}`;
         const issuedAt = await databaseNow(tx);
-        const contentHash = receiptHash(order, { receiptNumber, issuedAt }, createdItems);
+        const contentHash = receiptHash(
+          order,
+          { receiptNumber, issuedAt },
+          createdItems,
+          pickupLocationName,
+        );
         const receipt = await tx.orderReceipt.create({
           data: {
             orderId,
@@ -1800,8 +2001,19 @@ export class OrderService {
       include: {
         order: {
           include: {
-            clickCollectLocation: { select: { name: true } },
-            items: { include: { taxLines: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
+            items: {
+              include: {
+                taxLines: true,
+                sourceCartItem: { select: { createdAt: true, id: true } },
+              },
+              orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            },
+            statusEvents: {
+              where: { orderStatus: "CONFIRMED", reason: "CHECKOUT_CONFIRMED" },
+              select: { orderStatus: true, reason: true, metadata: true },
+              orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
+              take: 10,
+            },
           },
         },
       },
@@ -1810,16 +2022,27 @@ export class OrderService {
     const typed = record as ReceiptWithOrder;
     if (typed.order.anonymizedAt !== null) return null;
     try {
+      const pickupLocationName = sealedPickupLocationName(typed.order);
       const expected = receiptHash(
         typed.order,
         { receiptNumber: typed.receiptNumber, issuedAt: typed.issuedAt },
         typed.order.items,
+        pickupLocationName,
       );
       const actual = Uint8Array.from(record.contentHash);
-      if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-        throw new ReceiptBalanceError();
+      const matchesCurrent = actual.length === expected.length && timingSafeEqual(actual, expected);
+      let matchesLegacy = false;
+      if (!matchesCurrent) {
+        const legacyExpected = legacyReceiptHash(
+          typed.order,
+          { receiptNumber: typed.receiptNumber, issuedAt: typed.issuedAt },
+          legacyReceiptItems(typed.order.items),
+        );
+        matchesLegacy =
+          actual.length === legacyExpected.length && timingSafeEqual(actual, legacyExpected);
       }
-      const snapshot = receiptSnapshot(typed);
+      if (!matchesCurrent && !matchesLegacy) throw new ReceiptBalanceError();
+      const snapshot = receiptSnapshot(typed, pickupLocationName);
       assertReceiptBalanced({
         items: typed.order.items.map((item) => ({
           quantity: item.quantity,

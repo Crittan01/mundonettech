@@ -20,8 +20,10 @@ import { actionError, formString, type ActionState } from "@/lib/action-state";
 import { optionalCustomerId } from "@/lib/cart";
 import { hashCartToken } from "@/lib/cart-token";
 import { orderService } from "@/lib/checkout";
+import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import {
+  getBankTransferInstructions,
   getIntegrationEnvironment,
   getPublicSiteUrl,
   paymentService,
@@ -137,22 +139,44 @@ export async function startReceiptPaymentAction(
     ) {
       return actionError("Este pedido no admite nuevos intentos de pago.");
     }
-    const [order, attempts] = await Promise.all([
-      getDatabase().order.findUnique({
-        where: { id: receipt.orderId },
-        select: { customerId: true, buyerDocumentNumberSnapshot: true },
-      }),
-      getDatabase().paymentAttempt.findMany({
-        where: { orderId: receipt.orderId },
-        select: {
-          status: true,
-          amountCents: true,
-          expiresAt: true,
-          transactions: { where: { kind: "CAPTURE" }, select: { status: true } },
-        },
-      }),
-    ]);
-    const now = new Date();
+    if (paymentMethod === "BANK_TRANSFER" && getBankTransferInstructions() === null) {
+      return actionError(
+        "La transferencia bancaria no está disponible en este momento. Elige otro método de pago.",
+      );
+    }
+    const db = getDatabase();
+    const [order, attempts, fulfillmentStarted, shipmentStarted, packageStarted, now] =
+      await Promise.all([
+        db.order.findUnique({
+          where: { id: receipt.orderId },
+          select: { customerId: true, buyerDocumentNumberSnapshot: true },
+        }),
+        db.paymentAttempt.findMany({
+          where: { orderId: receipt.orderId },
+          select: {
+            provider: true,
+            status: true,
+            amountCents: true,
+            expiresAt: true,
+            codReconciliation: { select: { status: true } },
+            transactions: { where: { kind: "CAPTURE" }, select: { status: true } },
+          },
+        }),
+        db.orderFulfillment.findFirst({
+          where: { orderId: receipt.orderId, status: { notIn: ["PENDING", "CANCELLED"] } },
+          select: { id: true },
+        }),
+        db.shipment.findFirst({
+          where: { orderId: receipt.orderId, status: { notIn: ["PENDING", "CANCELLED"] } },
+          select: { id: true },
+        }),
+        db.shipmentPackage.findFirst({
+          where: { shipment: { orderId: receipt.orderId, status: { not: "CANCELLED" } } },
+          select: { id: true },
+        }),
+        getDatabaseClock(db),
+      ]);
+    const codSealed = Boolean(fulfillmentStarted || shipmentStarted || packageStarted);
     const captured = attempts
       .filter((attempt) => attempt.status === "SUCCEEDED")
       .reduce((sum, attempt) => sum + attempt.amountCents, 0n);
@@ -161,8 +185,13 @@ export async function startReceiptPaymentAction(
         if (!["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"].includes(attempt.status)) {
           return false;
         }
+        const codUntouched =
+          attempt.codReconciliation === null ||
+          attempt.codReconciliation.status === "PENDING_COLLECTION";
         const expiredUntouched =
           ["REQUIRES_ACTION", "PENDING"].includes(attempt.status) &&
+          !(attempt.provider === "COD" && codSealed) &&
+          codUntouched &&
           attempt.expiresAt !== null &&
           attempt.expiresAt.getTime() <= now.getTime() &&
           attempt.transactions.length === 0;
@@ -278,22 +307,23 @@ export async function verifyWompiPaymentAction(
       select: { attempt: { select: { orderId: true, credentialId: true } } },
     });
     if (matchedTx && matchedTx.attempt.orderId !== receipt.orderId) {
-      return actionError("No hay un intento Wompi asociado a este pedido.");
+      throw new PaymentValidationError("Wompi transaction does not belong to this order.");
     }
-    const attempt =
-      matchedTx?.attempt ??
-      (await db.paymentAttempt.findFirst({
-        where: { orderId: receipt.orderId, provider: "WOMPI" },
+    let credentialId = matchedTx?.attempt.credentialId ?? null;
+    if (!credentialId) {
+      const fallbackAttempt = await db.paymentAttempt.findFirst({
+        where: { orderId: receipt.orderId, provider: "WOMPI", credentialId: { not: null } },
         orderBy: { createdAt: "desc" },
         select: { credentialId: true },
-      }));
-    if (!attempt?.credentialId)
-      return actionError("No hay un intento Wompi asociado a este pedido.");
+      });
+      credentialId = fallbackAttempt?.credentialId ?? null;
+    }
+    if (!credentialId) return actionError("No hay un intento Wompi asociado a este pedido.");
     await consumeWompiOrderQuota(db, receipt.orderId, ipHash);
     await wompiWebhookService().synchronize({
       externalId,
       environment: getIntegrationEnvironment(),
-      credentialId: attempt.credentialId,
+      credentialId,
       expectedOrderId: receipt.orderId,
     });
     revalidatePath(`/recibo/${token}`);

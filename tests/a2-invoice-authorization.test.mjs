@@ -49,6 +49,8 @@ let adminId;
 let listCalls;
 let revealCalls;
 let transmitCalls;
+let findCalls;
+let invoiceTransmitWait;
 
 before(
   async () => {
@@ -99,6 +101,8 @@ before(
     listCalls = 0;
     revealCalls = 0;
     transmitCalls = 0;
+    findCalls = 0;
+    invoiceTransmitWait = null;
     invoice = new InvoiceService(db, {
       environment: "LOCAL",
       vault: {
@@ -115,12 +119,17 @@ before(
       providerFactory: () => ({
         async transmit(input) {
           transmitCalls += 1;
+          if (invoiceTransmitWait) {
+            invoiceTransmitWait.started();
+            await invoiceTransmitWait.wait;
+          }
           return {
             providerDocumentId: `doc-${input.documentHash.slice(0, 12)}`,
             signedXml: `<Document><UUID>${input.documentHash}</UUID><Signature>valid-test-signature</Signature></Document>`,
           };
         },
         async find() {
+          findCalls += 1;
           return null;
         },
       }),
@@ -154,9 +163,34 @@ describe("A2 — autorización DIAN humana y workers", () => {
     assert.equal(revealCalls, 1);
     assert.equal(await db.adminActionLog.count({ where: { action: "TAX_INVOICE_PREPARED" } }), 0);
 
+    let releaseTransmission;
+    let markStarted;
+    const started = new Promise((resolve) => {
+      markStarted = resolve;
+    });
+    invoiceTransmitWait = {
+      wait: new Promise((resolve) => {
+        releaseTransmission = resolve;
+      }),
+      started: () => markStarted(),
+    };
+    const stale = invoice.transmitInvoice(prepared.id, "admin:fiscal-a2", audit);
+    await started;
+    await sql.query(
+      `UPDATE "TaxInvoice" SET "claimExpiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE "id" = $1`,
+      [prepared.id],
+    );
+    releaseTransmission();
+    await assert.rejects(stale, (error) => error.code === "PROVIDER_UNCERTAIN");
+    invoiceTransmitWait = null;
+    const expired = await db.taxInvoice.findUniqueOrThrow({ where: { id: prepared.id } });
+    assert.equal(expired.status, "TRANSMITTING");
+    assert.equal(expired.signedXml, null);
+
     const accepted = await invoice.transmitInvoice(prepared.id, "admin:fiscal-a2", audit);
     assert.equal(accepted.status, "ACCEPTED");
-    assert.equal(transmitCalls, 1);
+    assert.equal(transmitCalls, 2);
+    assert.equal(findCalls, 1);
     const acceptedLog = await db.adminActionLog.findFirstOrThrow({
       where: { action: "TAX_INVOICE_ACCEPTED", targetId: prepared.id },
     });

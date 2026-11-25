@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -180,10 +180,20 @@ export function VoidPaymentForm({ paymentAttemptId }: { paymentAttemptId: string
 }
 
 export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: string }) {
-  const [state, action, pending] = useActionState(adjustStoreCreditAction, initialActionState);
+  const [currentKey, setCurrentKey] = useState(operationKey);
+  const [state, action, pending] = useActionState(
+    async (previous: typeof initialActionState, formData: FormData) => {
+      const result = await adjustStoreCreditAction(previous, formData);
+      if (result.status === "success") {
+        setCurrentKey(`admin-credit:${crypto.randomUUID()}`);
+      }
+      return result;
+    },
+    initialActionState,
+  );
   return (
     <form action={action} className="space-y-4">
-      <input type="hidden" name="operationKey" value={operationKey} />
+      <input type="hidden" name="operationKey" value={currentKey} />
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="credit-customer">Correo exacto del cliente</Label>
@@ -226,7 +236,7 @@ export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: stri
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
-        Clave idempotente de esta operación: <span className="font-mono">{operationKey}</span>
+        Clave idempotente de esta operación: <span className="font-mono">{currentKey}</span>
       </p>
       <Button type="submit" disabled={pending}>
         {pending ? "Aplicando…" : "Aplicar ajuste de saldo"}

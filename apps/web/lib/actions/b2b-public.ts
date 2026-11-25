@@ -10,8 +10,9 @@ import { b2bService, hashProposalToken, receiptTokenForProposal, sha256 } from "
 import { orderService } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
 import {
+  normalizePhoneE164,
   optionalTrimmedText as optionalText,
-  phoneInputPattern as phonePattern,
+  phoneInputPattern,
 } from "@/lib/form-validation";
 import { getConfiguredLegalDocument as legalDocument } from "@/lib/legal";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
@@ -28,7 +29,20 @@ const leadSchema = z.object({
   givenName: z.string().trim().min(2).max(100),
   familyName: z.string().trim().min(2).max(100),
   email: z.string().trim().email().max(320),
-  phoneE164: z.string().trim().min(8).max(24).regex(phonePattern),
+  phoneE164: z
+    .string()
+    .trim()
+    .min(8)
+    .max(24)
+    .regex(phoneInputPattern)
+    .transform((value, ctx) => {
+      try {
+        return normalizePhoneE164(value);
+      } catch {
+        ctx.addIssue({ code: "custom", message: "Teléfono inválido." });
+        return z.NEVER;
+      }
+    }),
   requirements: z.string().trim().min(10).max(5000),
   dataProcessingAccepted: z.literal("true"),
   turnstileToken: z.string().max(2048),

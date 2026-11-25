@@ -64,9 +64,9 @@ export async function seedInventoryFixture(client, catalog) {
   );
   await client.query(
     `INSERT INTO "Order" (
-       "id", "orderNumber", "customerId", "orderStatus", "paymentStatus",
+       "id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentMethod",
        "subtotalCents", "taxCents", "totalCents"
-     ) VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 100000, 19000, 119000)`,
+     ) VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'CLICK_COLLECT', 100000, 19000, 119000)`,
     [orderId, `ORD-${suffix.replaceAll("-", "").slice(0, 28).toUpperCase()}`, catalog.customerId],
   );
   for (const [index, unitId] of serializedUnitIds.entries()) {

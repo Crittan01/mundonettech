@@ -8,6 +8,9 @@ export default defineConfig({
   root,
   resolve: {
     alias: {
+      "@mundonettech/db": fileURLToPath(
+        new URL("../../packages/db/dist/index.js", import.meta.url),
+      ),
       "next/headers": fileURLToPath(new URL("./next-headers-stub.ts", import.meta.url)),
       "next/server": fileURLToPath(new URL("./next-server-stub.ts", import.meta.url)),
       "@": fileURLToPath(new URL("../../apps/web", import.meta.url)),

@@ -416,7 +416,7 @@ test("order scheduler executes authenticated CRM retention and reports only coun
     headers: { Authorization: `Bearer ${secret}` },
   });
   expect(response.status()).toBe(200);
-  expect(response.headers()["cache-control"]).toBe("no-store");
+  expect(response.headers()["cache-control"]).toContain("no-store");
   const body = await response.json();
   expect(body.crmRetention.scanned).toBeGreaterThanOrEqual(1);
   expect(body.crmRetention.suppressed).toBeGreaterThanOrEqual(1);

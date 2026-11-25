@@ -39,6 +39,21 @@ const statusLabels: Record<string, string> = {
   DISCREPANCY: "Con discrepancia",
   PARTIALLY_REFUNDED: "Reembolso parcial",
 };
+const refundReasonLabels: Record<string, string> = {
+  CUSTOMER_SUPPORT: "Servicio al cliente",
+  RETRACT: "Retracto",
+  WARRANTY: "Garantía",
+  ADJUSTMENT: "Ajuste comercial",
+};
+const identityKindLabels: Record<string, string> = {
+  EMAIL: "Correo",
+  PHONE: "Teléfono",
+  DOCUMENT: "Documento",
+};
+const bogotaDateFormatter = new Intl.DateTimeFormat("es-CO", {
+  timeZone: "America/Bogota",
+  dateStyle: "medium",
+});
 
 export default async function PaymentsPage() {
   const session = await requireAdminPage("payments:read");
@@ -96,12 +111,24 @@ export default async function PaymentsPage() {
         where: {
           status: "SUCCEEDED",
           provider: { not: "STORE_CREDIT" },
-          transactions: {
-            none: {
-              kind: { in: ["REFUND", "VOID"] },
-              status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+          AND: [
+            {
+              transactions: {
+                none: {
+                  kind: "REFUND",
+                  status: { not: "CANCELLED" },
+                },
+              },
             },
-          },
+            {
+              transactions: {
+                none: {
+                  kind: "VOID",
+                  status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+                },
+              },
+            },
+          ],
         },
         select: {
           id: true,
@@ -204,7 +231,8 @@ export default async function PaymentsPage() {
                 <div className="flex flex-wrap justify-between gap-3">
                   <div>
                     <h3 className="font-semibold">
-                      {refund.order.orderNumber} · {refund.reason}
+                      {refund.order.orderNumber} ·{" "}
+                      {refundReasonLabels[refund.reason] ?? refund.reason}
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {refund.order.emailSnapshot
@@ -285,7 +313,7 @@ export default async function PaymentsPage() {
               Abonos y retiros con libro consecutivo, locks por cliente e idempotencia persistente.
             </p>
           </div>
-          <StoreCreditAdjustmentForm key={creditOperationKey} operationKey={creditOperationKey} />
+          <StoreCreditAdjustmentForm operationKey={creditOperationKey} />
         </section>
       ) : null}
       <section aria-labelledby="blocked-identities" className="space-y-4">
@@ -306,12 +334,13 @@ export default async function PaymentsPage() {
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <h3 className="font-semibold">
-                      {identity.kind} · {identity.active ? "Bloqueo activo" : "Bloqueo histórico"}
+                      {identityKindLabels[identity.kind] ?? identity.kind} ·{" "}
+                      {identity.active ? "Bloqueo activo" : "Bloqueo histórico"}
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">{identity.reason}</p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {identity.expiresAt
-                        ? `Expira ${identity.expiresAt.toISOString().slice(0, 10)}`
+                        ? `Expira ${bogotaDateFormatter.format(identity.expiresAt)}`
                         : "Sin expiración"}{" "}
                       · El hash no se muestra.
                     </p>

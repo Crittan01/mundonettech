@@ -81,6 +81,12 @@ export async function POST(request: Request): Promise<Response> {
     if (error instanceof z.ZodError || error instanceof SyntaxError) {
       return Response.json({ error: "Invalid webhook payload." }, { status: 400, headers });
     }
+    if (error instanceof PaymentProviderError && error.code === "NETWORK_UNCERTAIN") {
+      return Response.json(
+        { error: "Upstream payment provider temporarily unavailable." },
+        { status: 503, headers },
+      );
+    }
     if (
       error instanceof PaymentValidationError ||
       error instanceof PaymentProviderError ||

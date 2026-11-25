@@ -202,3 +202,18 @@ describe("A2 — channel request stability across RSC refreshes", () => {
     expect(source).toContain('name="version" value={expectedVersion}');
   });
 });
+
+describe("A5 — DIAN trust anchor wizard", () => {
+  it("exposes the X.509 trust anchor as a multiline field required only in PRD", () => {
+    const filename = fileURLToPath(
+      new URL("../../apps/web/components/admin/operational-credential-form.tsx", import.meta.url),
+    );
+    const source = readFileSync(filename, "utf8");
+    expect(source).toContain('name: "signatureTrustAnchorPem"');
+    expect(source).toContain("Certificado X.509 del firmante");
+    expect(source).toContain("multiline: true");
+    expect(source).toContain('field.name === "signatureTrustAnchorPem"');
+    expect(source).toContain('environment === "PRD"');
+    expect(source).toContain("<textarea");
+  });
+});

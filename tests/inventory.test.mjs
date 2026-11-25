@@ -149,7 +149,7 @@ describe("F1.3 — persisted inventory schema and invariants", () => {
     );
     await assert.rejects(
       admin.query(
-        `INSERT INTO "Order" ("orderNumber", "subtotalCents", "totalCents") VALUES ($1, 100, 99)`,
+        `INSERT INTO "Order" ("orderNumber", "fulfillmentMethod", "subtotalCents", "totalCents") VALUES ($1, 'CLICK_COLLECT', 100, 99)`,
         [key("BAD").replaceAll("_", "-").slice(0, 32).toUpperCase()],
       ),
       /total_balanced/,

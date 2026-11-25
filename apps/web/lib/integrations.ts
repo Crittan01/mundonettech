@@ -126,6 +126,7 @@ export function emailService(db: PrismaClient = getDatabase()): EmailService {
   return new EmailService(db, {
     vault: getIntegrationCredentialVault().forSystemProvider("resend"),
     publicSiteUrl: getPublicSiteUrl(),
+    environment: getIntegrationEnvironment(),
   });
 }
 
@@ -148,6 +149,7 @@ export function guestOrderAccessService(db: PrismaClient = getDatabase()): Guest
     secret: getSessionHmacSecret(),
     storeName: storeConfig.name,
     vault: getIntegrationCredentialVault().forSystemProvider("resend"),
+    environment: getIntegrationEnvironment(),
   });
 }
 

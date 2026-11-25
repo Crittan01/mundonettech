@@ -76,8 +76,8 @@ export class StoreCreditService {
     });
     try {
       return await inInventoryTransaction(this.db, async (tx) => {
-        await acquireOperationLocks(tx, [`store-credit:${input.customerId}`]);
         const actor = await assertFinancialActor(tx, input.audit.actorAdminUserId);
+        await acquireOperationLocks(tx, [`store-credit:${input.customerId}`]);
         const existing = await tx.storeCreditEntry.findUnique({ where: { operationKey } });
         if (existing) {
           const account = await tx.storeCreditAccount.findUniqueOrThrow({
@@ -94,10 +94,11 @@ export class StoreCreditService {
           }
           return snapshot(account);
         }
-        await tx.customer.findFirstOrThrow({
+        const customer = await tx.customer.findFirst({
           where: { id: input.customerId, status: "ACTIVE", deletedAt: null },
           select: { id: true },
         });
+        if (!customer) throw new PaymentNotFoundError("Active customer not found.");
         let account = await tx.storeCreditAccount.findUnique({
           where: { customerId_currency: { customerId: input.customerId, currency: "COP" } },
         });
@@ -152,8 +153,8 @@ export class StoreCreditService {
     assertPaymentUuid(customerId, "customerId");
     if (typeof active !== "boolean") throw new PaymentConflictError("active must be boolean.");
     return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFinancialActor(tx, audit.actorAdminUserId);
       await acquireOperationLocks(tx, [`store-credit:${customerId}`]);
-      await assertFinancialActor(tx, audit.actorAdminUserId);
       const account = await tx.storeCreditAccount.findUnique({
         where: { customerId_currency: { customerId, currency: "COP" } },
       });
@@ -171,11 +172,13 @@ export class StoreCreditService {
         where: { id: account.id },
         data: { active, version: { increment: 1 } },
       });
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, { customerId });
       await writePaymentAudit(tx, {
         action: active ? "STORE_CREDIT_ACTIVATED" : "STORE_CREDIT_DEACTIVATED",
         targetType: "StoreCreditAccount",
         targetId: account.id,
         audit,
+        selfDealing,
         metadata: { customerId, active },
       });
       return snapshot(updated);

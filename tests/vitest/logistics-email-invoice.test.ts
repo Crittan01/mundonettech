@@ -1,5 +1,6 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
+import { createXmlDsigSigner, signFiscalDocument } from "../helpers/xml-dsig-fixtures.mjs";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,8 +11,11 @@ import {
   pointInDeliveryPolygon,
 } from "../../packages/core/dist/index.js";
 import { IntegrationEnvironment } from "../../packages/db/dist/index.js";
+import { validateEmailTemplate } from "../../packages/integrations/dist/email-templates.js";
+import { publicHttpsUrl } from "../../packages/integrations/dist/integration-utils.js";
 import {
   AveonlineShippingProvider,
+  DianInvoiceProvider,
   EmailValidationError,
   ResendEmailProvider,
   buildCreditNoteUbl,
@@ -79,6 +83,7 @@ const issuer = {
   legalName: "Emisor de Prueba",
 };
 const issueDate = new Date("2026-11-21T20:00:00.000Z");
+const dianSigner = createXmlDsigSigner("Logistics DIAN Signer");
 
 function fiscalInput() {
   const hashInput = {
@@ -92,11 +97,20 @@ function fiscalInput() {
     buyerDocumentNumber: party.documentNumber,
     buyerDocumentType: party.documentType,
     softwarePin: "software-secret-pin",
+    production: false,
   };
   return {
     fullNumber: "FE1",
     issueDate,
     cufe: calculateCufe(hashInput),
+    resolution: {
+      authorizationNumber: "18760000001",
+      prefix: "FE",
+      rangeStart: 1,
+      rangeEnd: 1000,
+      validFrom: "2026-01-01",
+      validTo: "2027-12-31",
+    },
     issuer,
     buyer: party,
     lines: [
@@ -304,7 +318,12 @@ describe("F3.4 provider HTTP contracts", () => {
             JSON.stringify({
               status: "ok",
               resultado: {
-                guia: { codigo: "0", numguia: 21027846356, transportadora: "SERVIENTREGA" },
+                guia: {
+                  codigo: "0",
+                  numguia: 21027846356,
+                  transportadora: "SERVIENTREGA",
+                  dsreferencia: requestKey,
+                },
               },
             }),
             { status: 200 },
@@ -318,6 +337,111 @@ describe("F3.4 provider HTTP contracts", () => {
     expect(requests[1]!.url).not.toContain(token);
     expect(requests[1]!.method).toBe("POST");
     expect(JSON.parse(requests[1]!.body).dsreferencia).toBe(requestKey);
+  });
+
+  it.each(["404", "provider-not-found"] as const)(
+    "confirms Aveonline label absence through %s without another creation",
+    async (absence) => {
+      const expiration = Math.floor(Date.now() / 1000) + 3600;
+      const token = `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiration })).toString("base64url")}.signature-with-enough-length`;
+      const operations: string[] = [];
+      const provider = new AveonlineShippingProvider(
+        parseAveonlineCredentials(encodedCredentials(aveonline)),
+        {
+          fetchImpl: async (_input, init) => {
+            const operation = JSON.parse(String(init?.body ?? "{}")) as { tipo?: string };
+            operations.push(operation.tipo ?? "unknown");
+            if (operation.tipo === "auth") {
+              return new Response(JSON.stringify({ status: "ok", token, cuentas: [] }), {
+                status: 200,
+              });
+            }
+            if (absence === "404") return new Response(null, { status: 404 });
+            return new Response(
+              JSON.stringify({ status: "error", message: "No se encontró la guía solicitada" }),
+              { status: 200 },
+            );
+          },
+        },
+      );
+      const requestKey = `shipment:${randomUUID()}:package:1:v1`;
+      await expect(provider.findLabel(requestKey)).resolves.toBeNull();
+      expect(operations).toEqual(["auth", "consultarGuia"]);
+      expect(operations).not.toContain("generarGuia2");
+    },
+  );
+
+  it("rejects an Aveonline guide whose dsreferencia belongs to another package", async () => {
+    const expiration = Math.floor(Date.now() / 1000) + 3600;
+    const token = `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiration })).toString("base64url")}.signature-with-enough-length`;
+    const operations: string[] = [];
+    const provider = new AveonlineShippingProvider(
+      parseAveonlineCredentials(encodedCredentials(aveonline)),
+      {
+        fetchImpl: async (_input, init) => {
+          const operation = JSON.parse(String(init?.body ?? "{}")) as { tipo?: string };
+          operations.push(operation.tipo ?? "unknown");
+          if (operation.tipo === "auth") {
+            return new Response(JSON.stringify({ status: "ok", token, cuentas: [] }), {
+              status: 200,
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              status: "ok",
+              resultado: {
+                guia: {
+                  codigo: "0",
+                  numguia: 21027846356,
+                  transportadora: "SERVIENTREGA",
+                  dsreferencia: `shipment:${randomUUID()}:package:99:v1`,
+                },
+              },
+            }),
+            { status: 200 },
+          );
+        },
+      },
+    );
+    await expect(provider.findLabel(`shipment:${randomUUID()}:package:1:v1`)).rejects.toMatchObject(
+      { code: "INVALID_RESPONSE" },
+    );
+    expect(operations).toEqual(["auth", "consultarGuia"]);
+    expect(operations).not.toContain("generarGuia2");
+  });
+
+  it("rejects an Aveonline reconciliation guide with a missing dsreferencia", async () => {
+    const expiration = Math.floor(Date.now() / 1000) + 3600;
+    const token = `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiration })).toString("base64url")}.signature-with-enough-length`;
+    const operations: string[] = [];
+    const provider = new AveonlineShippingProvider(
+      parseAveonlineCredentials(encodedCredentials(aveonline)),
+      {
+        fetchImpl: async (_input, init) => {
+          const operation = JSON.parse(String(init?.body ?? "{}")) as { tipo?: string };
+          operations.push(operation.tipo ?? "unknown");
+          if (operation.tipo === "auth") {
+            return new Response(JSON.stringify({ status: "ok", token, cuentas: [] }), {
+              status: 200,
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              status: "ok",
+              resultado: {
+                guia: { codigo: "0", numguia: 21027846356, transportadora: "SERVIENTREGA" },
+              },
+            }),
+            { status: 200 },
+          );
+        },
+      },
+    );
+    await expect(provider.findLabel(`shipment:${randomUUID()}:package:1:v1`)).rejects.toMatchObject(
+      { code: "INVALID_RESPONSE" },
+    );
+    expect(operations).toEqual(["auth", "consultarGuia"]);
+    expect(operations).not.toContain("generarGuia2");
   });
 
   it("classifies uncertain Aveonline network outcomes instead of retrying blindly", async () => {
@@ -388,6 +512,72 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
     expect(xml).toContain('currencyID="COP">1180.50</cbc:PayableAmount>');
     expect(xml).toContain(input.cufe);
     expect(xml).toContain("<cbc:ProfileExecutionID>2</cbc:ProfileExecutionID>");
+    expect(xml).toContain(
+      "<sts:InvoiceControl><cbc:InvoiceAuthorization>18760000001</cbc:InvoiceAuthorization>",
+    );
+    expect(xml).toContain(
+      "<sts:AuthorizedInvoice><cbc:Prefix>FE</cbc:Prefix><cbc:From>1</cbc:From><cbc:To>1000</cbc:To>",
+    );
+    expect(xml.match(/<cbc:ChargeIndicator>false/g)).toHaveLength(1);
+    expect(xml).toContain(
+      '<cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">950.00</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">950.00</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">1130.50</cbc:TaxInclusiveAmount><cbc:ChargeTotalAmount currencyID="COP">50.00</cbc:ChargeTotalAmount><cbc:PayableAmount currencyID="COP">1180.50</cbc:PayableAmount></cac:LegalMonetaryTotal>',
+    );
+  });
+
+  it("hashes the exact DIAN software PIN and environment material without extra buyer fields", () => {
+    const input = fiscalInput();
+    const material =
+      "FE1" +
+      "2026-11-21" +
+      "15:00:00-05:00" +
+      "950.00" +
+      "01" +
+      "180.50" +
+      "04" +
+      "0.00" +
+      "03" +
+      "0.00" +
+      "1180.50" +
+      issuer.documentNumber +
+      party.documentNumber +
+      "software-secret-pin" +
+      "2";
+    expect(input.cufe).toBe(createHash("sha384").update(material, "utf8").digest("hex"));
+    expect(
+      calculateCufe({
+        fullNumber: input.fullNumber,
+        issueDate: input.issueDate,
+        subtotalCents: input.subtotalCents,
+        discountCents: input.discountCents,
+        taxCents: input.taxCents,
+        totalCents: input.totalCents,
+        issuerNit: issuer.documentNumber,
+        buyerDocumentNumber: party.documentNumber,
+        buyerDocumentType: "99",
+        softwarePin: "software-secret-pin",
+        production: true,
+      }),
+    ).toBe(
+      createHash("sha384")
+        .update(`${material.slice(0, -1)}1`, "utf8")
+        .digest("hex"),
+    );
+  });
+
+  it("rejects invoice numbers and issue dates outside the sealed resolution", () => {
+    const input = fiscalInput();
+    expect(() => buildInvoiceUbl({ ...input, fullNumber: "FE1001" }, false)).toThrow(
+      /outside its DIAN resolution/,
+    );
+    expect(() =>
+      buildInvoiceUbl(
+        {
+          ...input,
+          resolution: { ...input.resolution, validTo: "2026-11-20" },
+        },
+        false,
+      ),
+    ).toThrow(/outside its DIAN resolution/);
   });
 
   it("rejects UBL when the buyer tax regime is missing", () => {
@@ -410,6 +600,7 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
       buyerDocumentNumber: party.documentNumber,
       buyerDocumentType: party.documentType,
       softwarePin: "software-secret-pin",
+      production: false,
     });
     const xml = buildCreditNoteUbl(
       {
@@ -447,6 +638,7 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
       buyerDocumentNumber: party.documentNumber,
       buyerDocumentType: party.documentType,
       softwarePin: "software-secret-pin",
+      production: false,
     });
     const xml = buildCreditNoteUbl(
       {
@@ -472,6 +664,10 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
     expect(xml).toContain("<cbc:Description>Flete</cbc:Description>");
     expect(xml).toContain('currencyID="COP">50.00</cbc:PayableAmount>');
     expect(xml).toContain("<cbc:Percent>0.00</cbc:Percent>");
+    expect(xml).not.toContain("<cbc:ChargeIndicator>true</cbc:ChargeIndicator>");
+    expect(xml).toContain(
+      '<cac:LegalMonetaryTotal><cbc:LineExtensionAmount currencyID="COP">50.00</cbc:LineExtensionAmount><cbc:TaxExclusiveAmount currencyID="COP">50.00</cbc:TaxExclusiveAmount><cbc:TaxInclusiveAmount currencyID="COP">50.00</cbc:TaxInclusiveAmount>',
+    );
   });
 
   it("validates the closed DIAN credential and resolution contract", () => {
@@ -510,5 +706,185 @@ describe("F3.4 DIAN UBL and SHA-384 documents", () => {
         IntegrationEnvironment.STG,
       ),
     ).toThrow();
+  });
+
+  it("accepts only signed provider XML bound to the transmitted root, number and CUFE", async () => {
+    const credentials = parseDianCredentials(
+      encodedCredentials({
+        bearerToken: "a-secure-provider-token",
+        providerUrl: "https://fiscal.example.test",
+        issuerNit: "9010000001",
+        issuerDv: "1",
+        issuerLegalName: "Emisor de Prueba",
+        issuerEmail: "fiscal@example.test",
+        issuerAddress: "Carrera 7 # 71-21",
+        issuerDepartmentCode: "11",
+        issuerDepartmentName: "Bogotá, D.C.",
+        issuerMunicipalityCode: "11001",
+        issuerMunicipalityName: "Bogotá, D.C.",
+        issuerPostalCode: "110231",
+        issuerPhoneE164: "+573001234567",
+        softwareId: "software-1234",
+        softwarePin: "software-secret-pin",
+        signatureTrustAnchorPem: dianSigner.certificate,
+        invoicePrefix: "FE",
+        invoiceResolutionNumber: "18760000001",
+        invoiceResolutionStart: 1,
+        invoiceResolutionEnd: 1000,
+        invoiceResolutionDate: "2026-01-01",
+        invoiceResolutionValidFrom: "2026-01-01",
+        invoiceResolutionValidTo: "2027-12-31",
+        creditNotePrefix: "NC",
+      }),
+      IntegrationEnvironment.STG,
+    );
+    const fiscal = fiscalInput();
+    const validXml = signFiscalDocument({
+      number: fiscal.fullNumber,
+      scheme: "CUFE",
+      schemeId: "2",
+      hash: fiscal.cufe,
+      extraChildren:
+        '<cbc:ProfileExecutionID>2</cbc:ProfileExecutionID><cac:AccountingSupplierParty><cac:Party><cac:PartyIdentification><cbc:ID>9010000001</cbc:ID></cac:PartyIdentification></cac:Party></cac:AccountingSupplierParty><cac:TaxTotal><cbc:TaxAmount currencyID="COP">180.50</cbc:TaxAmount></cac:TaxTotal><cac:LegalMonetaryTotal><cbc:PayableAmount currencyID="COP">1180.50</cbc:PayableAmount></cac:LegalMonetaryTotal>',
+      privateKey: dianSigner.privateKey,
+      certificate: dianSigner.certificate,
+    }).xml;
+    let signedXml = validXml;
+    const provider = new DianInvoiceProvider(credentials, {
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            status: "ACCEPTED",
+            providerDocumentId: "provider-document-1",
+            documentHash: fiscal.cufe,
+            signedXml,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const transmission = {
+      documentId: randomUUID(),
+      idempotencyKey: `fiscal:${randomUUID()}`,
+      documentType: "INVOICE" as const,
+      documentNumber: fiscal.fullNumber,
+      documentHash: fiscal.cufe,
+      unsignedXml: buildInvoiceUbl(fiscal, false),
+    };
+    await expect(provider.transmit(transmission)).resolves.toEqual({
+      providerDocumentId: "provider-document-1",
+      signedXml: validXml,
+    });
+    for (const invalid of [
+      validXml.replace(`<cbc:ID>${fiscal.fullNumber}</cbc:ID>`, "<cbc:ID>FE-OTRA</cbc:ID>"),
+      validXml.replace(fiscal.cufe, "0".repeat(96)),
+      validXml.replaceAll("ds:Signature", "ds:NotSignature"),
+      validXml.replace("<Invoice ", "<CreditNote ").replace("</Invoice>", "</CreditNote>"),
+      validXml.replace(
+        "</ds:Signature>",
+        "<ds:Object><cbc:ID>smuggled</cbc:ID></ds:Object></ds:Signature>",
+      ),
+      validXml.replace("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256", "toString"),
+      validXml.replace(">1180.50</cbc:PayableAmount>", ">1.00</cbc:PayableAmount>"),
+    ]) {
+      signedXml = invalid;
+      await expect(provider.transmit(transmission)).rejects.toMatchObject({
+        code: "INVALID_RESPONSE",
+      });
+    }
+  });
+
+  it("enforces fail-closed publicHttpsUrl, entity-encoded HTML rejection, and Aveonline auth errors on lookup", async () => {
+    expect(() => publicHttpsUrl("http://127.0.0.1:4010/hook", "url")).toThrow(TypeError);
+    expect(publicHttpsUrl("http://127.0.0.1:4010/hook", "url", { allowLoopback: true })).toBe(
+      "http://127.0.0.1:4010/hook",
+    );
+    for (const blocked of [
+      "https://169.254.169.254/latest/meta-data",
+      "https://10.0.0.1/internal",
+      "https://localhost./admin",
+      "https://intranet/api",
+      "https://[64:ff9b::1]/api",
+      "https://[fe80::1]/api",
+    ]) {
+      expect(() => publicHttpsUrl(blocked, "url", { allowLoopback: true }), blocked).toThrow(
+        TypeError,
+      );
+    }
+
+    expect(() =>
+      validateEmailTemplate({
+        ...defaultEmailTemplate("order.paid"),
+        htmlBody:
+          '<p>{{orderNumber}} {{storeName}} <a href="&#x6a;avascript:alert(1)">{{receiptUrl}}</a> <a href="{{unsubscribeUrl}}">baja</a></p>',
+      }),
+    ).toThrow(/unsafe/i);
+    expect(() =>
+      validateEmailTemplate({
+        ...defaultEmailTemplate("order.paid"),
+        htmlBody:
+          '<p>{{orderNumber}} {{storeName}} <a href="data:image/svg+xml,<svg/>">{{receiptUrl}}</a> <a href="{{unsubscribeUrl}}">baja</a></p>',
+      }),
+    ).toThrow(/unsafe/i);
+
+    const creditXml = buildCreditNoteUbl(
+      {
+        fullNumber: "NC1",
+        issueDate: new Date("2026-11-21T20:00:00.000Z"),
+        cude: calculateCude({
+          fullNumber: "NC1",
+          issueDate: new Date("2026-11-21T20:00:00.000Z"),
+          subtotalCents: 5_000n,
+          discountCents: 0n,
+          lineExtensionCents: 0n,
+          taxCents: 0n,
+          totalCents: 5_000n,
+          issuerNit: "9010000001",
+          buyerDocumentNumber: "1020304050",
+          buyerDocumentType: "13",
+          softwarePin: "12345",
+          production: false,
+        }),
+        invoiceFullNumber: "FE1",
+        invoiceCufe: fiscalInput().cufe,
+        invoiceIssueDate: new Date("2026-11-21T20:00:00.000Z"),
+        reasonCode: 1,
+        issuer: fiscalInput().issuer,
+        buyer: fiscalInput().buyer,
+        lines: [],
+        subtotalCents: 0n,
+        discountCents: 0n,
+        taxCents: 0n,
+        shippingCents: 5_000n,
+        totalCents: 5_000n,
+      },
+      false,
+    );
+    expect(creditXml).toContain("<cbc:ReferenceID>FE1</cbc:ReferenceID>");
+    expect(creditXml).not.toContain("<cac:ReferenceID>");
+
+    const aveCreds = parseAveonlineCredentials(
+      encodedCredentials(aveonline),
+      IntegrationEnvironment.PRD,
+    );
+    const expiration = Math.floor(Date.now() / 1000) + 3600;
+    const jwt = `${Buffer.from("{}").toString("base64url")}.${Buffer.from(JSON.stringify({ exp: expiration })).toString("base64url")}.signature-with-enough-length`;
+    let call = 0;
+    const aveProvider = new AveonlineShippingProvider(aveCreds, {
+      fetchImpl: async () => {
+        call += 1;
+        if (call === 1) {
+          return new Response(JSON.stringify({ status: "ok", token: jwt, cuentas: [] }), {
+            status: 200,
+          });
+        }
+        return new Response(
+          JSON.stringify({ status: "error", message: "El token no existe o expiró" }),
+          { status: 200 },
+        );
+      },
+    });
+    await expect(aveProvider.findLabel("req-key-1")).rejects.toMatchObject({
+      code: "NETWORK_UNCERTAIN",
+    });
   });
 });

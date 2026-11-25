@@ -1,8 +1,13 @@
-import { ReceiptBalanceError } from "@mundonettech/db";
+import {
+  consumeOperationRateLimit,
+  OperationRateLimitError,
+  ReceiptBalanceError,
+} from "@mundonettech/db";
 
 import { hashCartToken } from "@/lib/cart-token";
 import { orderService } from "@/lib/checkout";
 import { getDatabase } from "@/lib/db";
+import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const baseHeaders = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -31,15 +36,24 @@ export async function GET(
   }
   let receipt;
   try {
+    const db = getDatabase();
+    const { ipHash } = await getRequestSecurityContext();
+    await consumeOperationRateLimit(db, {
+      operation: "receipt.document.download.ip",
+      subject: { type: "IP" },
+      ipHash,
+      limit: 60,
+      windowSeconds: 60,
+    });
     receipt = await orderService().getReceiptByToken(hashCartToken(token));
     if (!receipt) return new Response(null, { status: 404, headers: baseHeaders });
     const document =
       kind === "invoice"
-        ? await getDatabase().taxInvoice.findFirst({
+        ? await db.taxInvoice.findFirst({
             where: { id, orderId: receipt.orderId, status: "ACCEPTED" },
             select: { fullNumber: true, signedXml: true },
           })
-        : await getDatabase().creditNote.findFirst({
+        : await db.creditNote.findFirst({
             where: { id, status: "ACCEPTED", invoice: { orderId: receipt.orderId } },
             select: { fullNumber: true, signedXml: true },
           });
@@ -54,6 +68,15 @@ export async function GET(
       },
     });
   } catch (error) {
+    if (error instanceof OperationRateLimitError) {
+      return Response.json(
+        { error: "Too many document download requests." },
+        {
+          status: 429,
+          headers: { ...baseHeaders, "Retry-After": String(error.retryAfterSeconds) },
+        },
+      );
+    }
     if (error instanceof TypeError || error instanceof ReceiptBalanceError) {
       return new Response(null, { status: 404, headers: baseHeaders });
     }

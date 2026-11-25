@@ -45,6 +45,25 @@ describe("dual Colombian order tax engine", () => {
     expect(result.lines[0]?.taxableBaseCents).toBe(100_001n);
   });
 
+  it("rejects malformed catalog definitions even when the store is not VAT responsible", () => {
+    const nonResponsible = { ...context, regime: "NO_RESPONSABLE_IVA" } as const;
+    expect(() => calculateOrderTaxes([line({ catalogRateBps: 0 })], nonResponsible)).toThrow(
+      /positive rate/,
+    );
+    expect(() =>
+      calculateOrderTaxes(
+        [line({ treatment: "EXEMPT", catalogRateBps: 0, uvtLimit: 50 })],
+        nonResponsible,
+      ),
+    ).toThrow(/Zero-rated/);
+    expect(() =>
+      calculateOrderTaxes(
+        [line({ treatment: "INVALID" as OrderTaxLineInput["treatment"] })],
+        nonResponsible,
+      ),
+    ).toThrow(/Unknown catalog tax treatment/);
+  });
+
   it("distinguishes exempt and excluded goods", () => {
     for (const treatment of ["EXEMPT", "EXCLUDED"] as const) {
       const result = calculateOrderTaxes([line({ treatment, catalogRateBps: 0 })], context);

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   assertCartQuantity,
   assertMoney,
@@ -186,6 +188,7 @@ async function writeAudit(
       targetId,
       ipHash: Uint8Array.from(audit.ipHash),
       userAgentHash: audit.userAgentHash ? Uint8Array.from(audit.userAgentHash) : null,
+      requestId: audit.requestId ?? randomUUID(),
       metadata: sanitizeAuditValue(metadata) as Prisma.JsonObject,
     },
   });

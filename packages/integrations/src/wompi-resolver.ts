@@ -1,6 +1,7 @@
 import type { IntegrationCredential, IntegrationEnvironment, PrismaClient } from "@mundonettech/db";
 
 import type { IntegrationCredentialVault } from "./credential-vault.js";
+import { assertPaymentUuid } from "./payment-shared.js";
 import { PaymentConflictError, PaymentNotFoundError } from "./payment-types.js";
 import { parseWompiCredentials, WompiPaymentProvider } from "./wompi.js";
 
@@ -17,6 +18,9 @@ export async function resolveWompiProvider(options: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
 }): Promise<WompiResolution> {
+  if (options.credentialId !== undefined) {
+    assertPaymentUuid(options.credentialId, "credentialId");
+  }
   const credentials = await options.db.integrationCredential.findMany({
     where: {
       ...(options.credentialId ? { id: options.credentialId } : {}),

@@ -17,7 +17,9 @@ export function emailIdentityHash(email: string): Uint8Array<ArrayBuffer> {
 export function phoneIdentityHash(phone: string): Uint8Array<ArrayBuffer> {
   const compact = phone.replace(/[\s()-]/g, "");
   const colombian = /^(?:\+57)?([36][0-9]{9})$/.exec(compact);
-  return digest("PHONE", colombian?.[1] ? `+57${colombian[1]}` : compact);
+  const normalized = colombian?.[1] ? `+57${colombian[1]}` : compact;
+  if (!/^\+[1-9][0-9]{7,14}$/.test(normalized)) throw new TypeError("Invalid phone identity.");
+  return digest("PHONE", normalized);
 }
 
 export function documentIdentityHash(document: string): Uint8Array<ArrayBuffer> {

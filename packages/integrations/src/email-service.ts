@@ -6,12 +6,16 @@ import {
   LifecycleService,
   acquireIdempotencyKey,
   acquireOperationLocks,
+  assertAdminActorInTransaction,
   completeIdempotencyKey,
   hasUniqueViolation,
+  inInventoryTransaction,
   marketingEmailConsentGranted,
   type EmailEvent,
   type EmailEventStatus,
 } from "@mundonettech/db";
+
+import { CredentialNotFoundError, CredentialRevokedError } from "./credential-vault.js";
 
 import {
   defaultEmailTemplate,
@@ -48,7 +52,6 @@ export interface EmailSendOutcome {
   readonly deferredByPause?: boolean;
 }
 
-const templateWriters = new Set(["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"]);
 const finalStatuses = new Set(["BOUNCED", "COMPLAINED", "SUPPRESSED", "CANCELLED", "FAILED"]);
 const sendLeaseMs = 5 * 60_000;
 
@@ -82,6 +85,20 @@ function statusRank(status: string): number {
 
 function errorCode(error: unknown): string {
   return error instanceof EmailProviderError ? error.code : "PROVIDER_FAILURE";
+}
+
+function assertSendLease(current: EmailEvent, claimed: EmailEvent, now: Date): void {
+  if (
+    !current.nextAttemptAt ||
+    !claimed.nextAttemptAt ||
+    current.nextAttemptAt.getTime() !== claimed.nextAttemptAt.getTime() ||
+    current.nextAttemptAt <= now
+  ) {
+    throw new EmailConflictError(
+      "Email claim expired before its provider outcome could be recorded.",
+      "PROVIDER_UNCERTAIN",
+    );
+  }
 }
 
 function matchesPayloadHash(stored: Uint8Array, incoming: Uint8Array): boolean {
@@ -120,20 +137,27 @@ function isSvixEventUniqueConflict(error: unknown): boolean {
 }
 
 export class EmailService {
+  private readonly allowLoopback: boolean;
+
   constructor(
     private readonly db: import("@mundonettech/db").PrismaClient,
     private readonly options: EmailServiceOptions,
   ) {
+    const environment = options.environment ?? "PRD";
+    this.allowLoopback = environment === "LOCAL";
     this.options = {
       ...options,
-      publicSiteUrl: publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl").replace(/\/$/, ""),
+      publicSiteUrl: publicHttpsUrl(options.publicSiteUrl, "publicSiteUrl", {
+        allowLoopback: this.allowLoopback,
+      }).replace(/\/$/, ""),
+      environment,
     };
   }
 
   private async credentials(credentialId: string): Promise<EmailCredentials> {
     const plaintext = await this.options.vault.reveal(credentialId);
     try {
-      return parseEmailCredentials(plaintext);
+      return parseEmailCredentials(plaintext, this.options.environment);
     } finally {
       plaintext.fill(0);
     }
@@ -141,15 +165,6 @@ export class EmailService {
 
   private provider(credentials: EmailCredentials): EmailProvider {
     return this.options.providerFactory?.(credentials) ?? new ResendEmailProvider(credentials);
-  }
-
-  private async assertWriter(actorAdminUserId: string): Promise<void> {
-    const actor = await this.db.adminUser.findFirst({
-      where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
-      select: { role: true },
-    });
-    if (!actor || !templateWriters.has(actor.role))
-      throw new EmailValidationError("Administrator is not authorized to manage email templates.");
   }
 
   async saveTemplate(input: EmailTemplateInput, audit: EmailAuditContext): Promise<string> {
@@ -161,6 +176,9 @@ export class EmailService {
     }
     assertIntegrationKey(input.idempotencyKey, "idempotencyKey");
     assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
+    if (audit.requestId !== undefined) {
+      assertIntegrationUuid(audit.requestId, "requestId");
+    }
     if (typeof input.publish !== "boolean") {
       throw new EmailValidationError("publish must be boolean.");
     }
@@ -171,7 +189,12 @@ export class EmailService {
       textBody: input.textBody,
       variables: input.variables,
     });
-    await this.assertWriter(audit.actorAdminUserId);
+    const allowedVariables = new Set(defaultEmailTemplate(key).variables);
+    if (template.variables.some((variable) => !allowedVariables.has(variable))) {
+      throw new EmailValidationError(
+        "Email template variables must belong to the template contract.",
+      );
+    }
     const scope = "email-template-save";
     const idempotency = {
       keyHash: createHash("sha256").update(input.idempotencyKey, "utf8").digest(),
@@ -179,7 +202,8 @@ export class EmailService {
       requestHash: integrationDigest({ ...template, publish: input.publish }),
       expiresAt: new Date(Date.now() + 24 * 3_600_000),
     };
-    return this.db.$transaction(async (tx) => {
+    return inInventoryTransaction(this.db, async (tx) => {
+      await assertAdminActorInTransaction(tx, audit.actorAdminUserId, "communications:write");
       let acquired;
       try {
         acquired = await acquireIdempotencyKey(tx, { scope, ...idempotency });
@@ -241,7 +265,7 @@ export class EmailService {
           action: input.publish ? "EMAIL_TEMPLATE_PUBLISHED" : "EMAIL_TEMPLATE_DRAFT_CREATED",
           targetType: "EmailTemplateOverride",
           targetId: created.id,
-          requestId: audit.requestId ?? null,
+          requestId: audit.requestId ?? randomUUID(),
           ipHash: hash32(audit.ipHash, "ipHash"),
           userAgentHash: audit.userAgentHash ? hash32(audit.userAgentHash, "userAgentHash") : null,
           metadata: { templateKey: key, version },
@@ -305,6 +329,18 @@ export class EmailService {
         existing.htmlBodySnapshot === rendered.htmlBody &&
         existing.textBodySnapshot === rendered.textBody;
     }
+    const storedVariables = existing.variablesSnapshot as Record<string, unknown>;
+    const inputVariableNames = Object.keys(params.input.variables).sort();
+    const storedVariableNames = Object.keys(storedVariables)
+      .filter((name) => name !== "unsubscribeUrl")
+      .sort();
+    const sameVariables =
+      inputVariableNames.length === storedVariableNames.length &&
+      inputVariableNames.every(
+        (name, index) =>
+          name === storedVariableNames[index] &&
+          storedVariables[name] === params.input.variables[name],
+      );
     const same =
       existing.templateKey === params.key &&
       existing.topic === params.topic &&
@@ -315,9 +351,7 @@ export class EmailService {
       (existing.abandonedCartId ?? null) === (params.input.abandonedCartId ?? null) &&
       (existing.lifecycleMessageId ?? null) === (params.input.lifecycleMessageId ?? null) &&
       sameSnapshot &&
-      Object.entries(params.input.variables).every(
-        ([name, value]) => (existing.variablesSnapshot as Record<string, unknown>)[name] === value,
-      );
+      sameVariables;
     if (!same)
       throw new EmailConflictError(
         "Email idempotency key was already used for another message.",
@@ -417,11 +451,25 @@ export class EmailService {
       topic,
     );
     const unsubscribeUrl = `${this.options.publicSiteUrl}/email/baja/${encodeURIComponent(token)}`;
-    const values = { ...input.variables, unsubscribeUrl };
-    for (const [name, value] of Object.entries(values)) {
-      if (name.endsWith("Url")) publicHttpsUrl(value, `variables.${name}`);
+    const allowedContractVars = new Set(defaultEmailTemplate(key).variables);
+    const baseVars = new Set(baseTemplate.variables);
+    for (const name of Object.keys(input.variables)) {
+      if (name === "unsubscribeUrl" || (!allowedContractVars.has(name) && !baseVars.has(name))) {
+        throw new EmailValidationError(`Unknown email variable ${name}.`);
+      }
     }
-    const rendered = renderEmailTemplate(baseTemplate, values);
+    const values: Record<string, string> = { ...input.variables, unsubscribeUrl };
+    for (const [name, value] of Object.entries(values)) {
+      if (name.endsWith("Url")) {
+        publicHttpsUrl(value, `variables.${name}`, { allowLoopback: this.allowLoopback });
+      }
+    }
+    const renderValues = Object.fromEntries(
+      baseTemplate.variables
+        .filter((name) => Object.hasOwn(values, name))
+        .map((name) => [name, values[name]!]),
+    );
+    const rendered = renderEmailTemplate(baseTemplate, renderValues);
     const suppression = await this.db.emailSuppression.findUnique({
       where: { recipientHash_topic: { recipientHash, topic } },
     });
@@ -509,7 +557,7 @@ export class EmailService {
   }): Promise<{ id: string; status: string } | null> {
     assertIntegrationUuid(options.lifecycleMessageId, "lifecycleMessageId");
     assertIntegrationUuid(options.credentialId, "credentialId");
-    publicHttpsUrl(options.accountUrl, "accountUrl");
+    publicHttpsUrl(options.accountUrl, "accountUrl", { allowLoopback: this.allowLoopback });
     const idempotencyKey = `domain:lifecycle.campaign:${options.lifecycleMessageId}`;
     const existing = await this.db.emailEvent.findUnique({ where: { idempotencyKey } });
     if (existing) {
@@ -590,7 +638,11 @@ export class EmailService {
             if (typeof value !== "string") {
               throw new EmailValidationError(`Missing lifecycle email variable ${variable}.`);
             }
-            if (variable.endsWith("Url")) publicHttpsUrl(value, `variables.${variable}`);
+            if (variable.endsWith("Url")) {
+              publicHttpsUrl(value, `variables.${variable}`, {
+                allowLoopback: this.allowLoopback,
+              });
+            }
             return [variable, value];
           }),
         );
@@ -668,7 +720,9 @@ export class EmailService {
       },
       select: { id: true },
     });
-    let outcome: "SUPPRESSED" | "NO_CONSENT" | "STALE" | null = suppression ? "SUPPRESSED" : null;
+    let outcome: "SUPPRESSED" | "NO_CONSENT" | "STALE" | "CANCELLED" | null = suppression
+      ? "SUPPRESSED"
+      : null;
     let abandonedCartId: string | null = null;
     let lastActivityAt: Date | null = null;
     let lifecycleReason:
@@ -681,7 +735,43 @@ export class EmailService {
     const lifecycle = new LifecycleService(this.db);
     if (!outcome && claimed.templateKey === "lifecycle.campaign" && claimed.lifecycleMessageId) {
       const eligibility = await lifecycle.messageEligibility(claimed.lifecycleMessageId);
-      if (eligibility.reason !== "ELIGIBLE") {
+      if (eligibility.reason === "PAUSED") {
+        const deferred = await inInventoryTransaction(this.db, async (tx) => {
+          const lockedRows = await tx.$queryRaw<
+            EmailEvent[]
+          >`SELECT * FROM "EmailEvent" WHERE "id" = ${claimed.id}::uuid FOR UPDATE`;
+          const locked = lockedRows[0];
+          if (!locked) throw new EmailNotFoundError();
+          if (locked.status !== "SENDING" || locked.attemptCount !== claimed.attemptCount) {
+            return { event: locked, deferredByPause: false };
+          }
+          const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+          const now = nowRows[0]!.now;
+          assertSendLease(locked, claimed, now);
+          const updated = await tx.emailEvent.update({
+            where: { id: claimed.id },
+            data: {
+              status: "SENDING",
+              statusRank: statusRank("SENDING"),
+              nextAttemptAt: new Date(now.getTime() + 5 * 60_000),
+            },
+          });
+          return { event: updated, deferredByPause: true };
+        });
+        if (!deferred.deferredByPause) {
+          await this.reconcileLifecycleTerminal(deferred.event);
+        }
+        return {
+          id: deferred.event.id,
+          status: deferred.event.status,
+          providerMessageId: deferred.event.providerMessageId,
+          nextAttemptAt: deferred.event.nextAttemptAt,
+          ...(deferred.deferredByPause ? { deferredByPause: true } : {}),
+        };
+      }
+      if (eligibility.reason === "ENROLLMENT_INACTIVE" || eligibility.reason === "MISSING") {
+        outcome = "CANCELLED";
+      } else if (eligibility.reason !== "ELIGIBLE") {
         outcome = "SUPPRESSED";
         lifecycleReason =
           eligibility.reason === "CUSTOMER_INACTIVE"
@@ -741,11 +831,13 @@ export class EmailService {
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
+      assertSendLease(locked, claimed, now);
+      const nextStatus: EmailEventStatus = outcome === "CANCELLED" ? "CANCELLED" : "SUPPRESSED";
       const updated = await tx.emailEvent.update({
         where: { id: claimed.id },
         data: {
-          status: "SUPPRESSED",
-          statusRank: statusRank("SUPPRESSED"),
+          status: nextStatus,
+          statusRank: statusRank(nextStatus),
           finalAt: now,
           nextAttemptAt: null,
         },
@@ -759,12 +851,12 @@ export class EmailService {
       return { current: updated, suppressedNow: true };
     });
     if (claimed.templateKey === "lifecycle.campaign" && claimed.lifecycleMessageId) {
-      if (suppressedNow || current.status === "SUPPRESSED") {
+      if (outcome !== "CANCELLED" && (suppressedNow || current.status === "SUPPRESSED")) {
         await lifecycle.markEmailSuppressed(
           claimed.lifecycleMessageId,
           lifecycleReason ?? "SUPPRESSED",
         );
-      } else {
+      } else if (outcome !== "CANCELLED") {
         await this.reconcileLifecycleTerminal(current);
       }
     }
@@ -805,6 +897,18 @@ export class EmailService {
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
+      if (current.anonymizedAt !== null) {
+        const cancelled = await tx.emailEvent.update({
+          where: { id: emailEventId },
+          data: {
+            status: "CANCELLED",
+            statusRank: statusRank("CANCELLED"),
+            finalAt: now,
+            nextAttemptAt: null,
+          },
+        });
+        return { event: cancelled, claimed: false as const, deferredByPause: false };
+      }
       if (current.nextAttemptAt && current.nextAttemptAt > now) {
         return { event: current, claimed: false as const, deferredByPause: false };
       }
@@ -886,6 +990,7 @@ export class EmailService {
         }
         const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
         const now = nowRows[0]!.now;
+        assertSendLease(current, claimed, now);
         const saved = await tx.emailEvent.update({
           where: { id: emailEventId },
           data: {
@@ -911,9 +1016,13 @@ export class EmailService {
         nextAttemptAt: sent.nextAttemptAt,
       };
     } catch (error) {
-      if (!(error instanceof EmailProviderError)) throw error;
-      const transient = ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
-      const code = errorCode(error);
+      const credentialUnavailable =
+        error instanceof CredentialNotFoundError || error instanceof CredentialRevokedError;
+      if (!(error instanceof EmailProviderError) && !credentialUnavailable) throw error;
+      const transient =
+        error instanceof EmailProviderError &&
+        ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
+      const code = credentialUnavailable ? "CREDENTIAL_UNAVAILABLE" : errorCode(error);
       if (transient) {
         const { event: retry, updated } = await this.db.$transaction(async (tx) => {
           const lockedRows = await tx.$queryRaw<
@@ -926,6 +1035,7 @@ export class EmailService {
           }
           const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
           const now = nowRows[0]!.now;
+          assertSendLease(current, claimed, now);
           const delay = Math.min(15 * 60_000, 5_000 * 2 ** Math.min(claimedAttemptCount, 8));
           const nextAttemptAt = new Date(now.getTime() + delay);
           const saved = await tx.emailEvent.update({
@@ -958,6 +1068,7 @@ export class EmailService {
         }
         const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
         const now = nowRows[0]!.now;
+        assertSendLease(current, claimed, now);
         const saved = await tx.emailEvent.update({
           where: { id: emailEventId },
           data: {
@@ -1006,7 +1117,18 @@ export class EmailService {
     const expected = Buffer.from(event.unsubscribeTokenHash);
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected))
       throw new EmailValidationError("Unsubscribe token is invalid.");
-    return this.db.$transaction(async (tx) => {
+    return inInventoryTransaction(this.db, async (tx) => {
+      let customerId = event.customerId;
+      if (!customerId && event.lifecycleMessageId) {
+        const lifecycleMessage = await tx.lifecycleMessage.findUnique({
+          where: { id: event.lifecycleMessageId },
+          select: { enrollment: { select: { customerId: true } } },
+        });
+        customerId = lifecycleMessage?.enrollment.customerId ?? null;
+      }
+      if (customerId) {
+        await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
+      }
       const lockedRows = await tx.$queryRaw<
         EmailEvent[]
       >`SELECT * FROM "EmailEvent" WHERE "id" = ${eventId}::uuid FOR UPDATE`;
@@ -1128,7 +1250,14 @@ export class EmailService {
     const existing = await this.webhookReplay(credentialId, event, payloadHash);
     if (existing) return existing;
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        const candidate = await tx.emailEvent.findFirst({
+          where: { credentialId, providerMessageId: event.providerMessageId },
+          select: { id: true, customerId: true },
+        });
+        if (candidate?.customerId) {
+          await acquireOperationLocks(tx, [`growth-customer:${candidate.customerId}`]);
+        }
         const lockedEmails = await tx.$queryRaw<EmailEvent[]>`
           SELECT * FROM "EmailEvent"
           WHERE "credentialId" = ${credentialId}::uuid
@@ -1136,6 +1265,24 @@ export class EmailService {
           FOR UPDATE
         `;
         const email = lockedEmails[0] ?? null;
+        if (!email) {
+          const guestChallenge = await tx.guestOrderChallenge.findFirst({
+            where: { providerMessageId: event.providerMessageId },
+            select: { id: true },
+          });
+          if (!guestChallenge) {
+            const inFlight = await tx.emailEvent.findFirst({
+              where: { credentialId, status: "SENDING" },
+              select: { id: true },
+            });
+            if (inFlight) {
+              throw new EmailProviderError(
+                "Email delivery commit is in flight; retry webhook.",
+                "NETWORK_UNCERTAIN",
+              );
+            }
+          }
+        }
         await tx.emailWebhookEvent.create({
           data: {
             credentialId,
@@ -1157,7 +1304,11 @@ export class EmailService {
         }[event.eventType] as EmailEventStatus | undefined;
         if (!targetStatus) return { eventId: email.id, status: email.status, replayed: false };
         const rank = statusRank(targetStatus);
-        if (email.statusRank > rank || finalStatuses.has(email.status))
+        if (
+          email.statusRank > rank ||
+          email.status === targetStatus ||
+          finalStatuses.has(email.status)
+        )
           return { eventId: email.id, status: email.status, replayed: false };
         await tx.emailEvent.update({
           where: { id: email.id },

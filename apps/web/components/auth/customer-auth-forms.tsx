@@ -136,11 +136,16 @@ export function RegistrationForm({ siteKey, nonce }: SecurityProps) {
   );
 }
 
-export function CustomerLoginForm({ siteKey, nonce }: SecurityProps) {
+export function CustomerLoginForm({
+  siteKey,
+  nonce,
+  next,
+}: SecurityProps & { next: string | null }) {
   const [state, action, pending] = useActionState(requestCustomerOtpAction, initialActionState);
   const [email, setEmail] = useState("");
   return (
     <form action={action} className="space-y-5">
+      {next ? <input type="hidden" name="next" value={next} /> : null}
       <EmailInput value={email} onChange={setEmail} state={state} errorId="login-email-error" />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_login" state={state} />
       <FormMessage state={state} />

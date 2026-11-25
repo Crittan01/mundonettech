@@ -83,8 +83,8 @@ async function createDeliveredOrder({
   await sql.query("BEGIN");
   try {
     await sql.query(
-      `INSERT INTO "Order" ("id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus", "taxRegime", "emailSnapshot", "recipientNameSnapshot", "phoneE164Snapshot", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt")
-       VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'FULFILLED', 'NO_RESPONSABLE_IVA', $4, 'Cliente Posventa', '+573001234567', $5, 0, 0, 0, $5, CURRENT_TIMESTAMP)`,
+      `INSERT INTO "Order" ("id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod", "taxRegime", "emailSnapshot", "recipientNameSnapshot", "phoneE164Snapshot", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt")
+       VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'FULFILLED', 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', $4, 'Cliente Posventa', '+573001234567', '13', '1020304050', $5, 0, 0, 0, $5, CURRENT_TIMESTAMP)`,
       [orderId, orderNumber, customerId, email, total],
     );
     await sql.query(
@@ -1095,10 +1095,13 @@ describe("F4A.2 — account anonymization and concurrency", () => {
         orderStatus: "CONFIRMED",
         paymentStatus: "PAID",
         fulfillmentStatus: "UNFULFILLED",
+        fulfillmentMethod: "HOME_DELIVERY",
         taxRegime: "NO_RESPONSABLE_IVA",
         emailSnapshot: customerEmail,
         recipientNameSnapshot: "Ciclo Consentimiento",
         phoneE164Snapshot: "+573001234567",
+        buyerDocumentTypeSnapshot: "13",
+        buyerDocumentNumberSnapshot: "1020304050",
         subtotalCents: 50_000n,
         discountCents: 0n,
         taxCents: 0n,

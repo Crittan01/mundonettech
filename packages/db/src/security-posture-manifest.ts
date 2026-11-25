@@ -6236,15 +6236,16 @@ export const securityPostureManifest = {
         "buyerDocumentTypeSnapshot",
         "buyerDocumentNumberSnapshot",
         "anonymizedAt",
-        "taxRegime",
+        "legacyNullFulfillmentDocumentExempt",
         "fulfillmentMethod",
+        "taxRegime",
       ],
       referencedTable: null,
       referencedColumns: [],
       deleteAction: null,
       validated: true,
       definition:
-        "CHECK ((\"buyerDocumentTypeSnapshot\" IS NULL) = (\"buyerDocumentNumberSnapshot\" IS NULL) AND (\"buyerDocumentTypeSnapshot\" IS NULL OR (\"buyerDocumentTypeSnapshot\" = ANY (ARRAY['11'::bpchar, '12'::bpchar, '13'::bpchar, '21'::bpchar, '22'::bpchar, '31'::bpchar, '41'::bpchar, '42'::bpchar, '50'::bpchar, '91'::bpchar]))) AND (\"buyerDocumentNumberSnapshot\" IS NULL OR \"buyerDocumentNumberSnapshot\"::text ~ '^[A-Za-z0-9.-]{3,30}$'::text) AND (\"anonymizedAt\" IS NOT NULL OR \"taxRegime\" IS DISTINCT FROM 'RESPONSABLE_IVA'::\"StoreTaxRegime\" AND \"fulfillmentMethod\" IS DISTINCT FROM 'HOME_DELIVERY'::\"OrderFulfillmentMethod\" OR \"buyerDocumentTypeSnapshot\" IS NOT NULL))",
+        'CHECK (("buyerDocumentTypeSnapshot" IS NULL) = ("buyerDocumentNumberSnapshot" IS NULL) AND ("buyerDocumentTypeSnapshot" IS NULL OR ("buyerDocumentTypeSnapshot" = ANY (ARRAY[\'11\'::bpchar, \'12\'::bpchar, \'13\'::bpchar, \'21\'::bpchar, \'22\'::bpchar, \'31\'::bpchar, \'41\'::bpchar, \'42\'::bpchar, \'50\'::bpchar, \'91\'::bpchar]))) AND ("buyerDocumentNumberSnapshot" IS NULL OR "buyerDocumentNumberSnapshot"::text ~ \'^[A-Za-z0-9.-]{3,30}$\'::text) AND ("anonymizedAt" IS NOT NULL OR "legacyNullFulfillmentDocumentExempt" AND "fulfillmentMethod" IS NULL OR "taxRegime" IS DISTINCT FROM \'RESPONSABLE_IVA\'::"StoreTaxRegime" AND NOT "fulfillmentMethod" IS DISTINCT FROM \'CLICK_COLLECT\'::"OrderFulfillmentMethod" OR "buyerDocumentTypeSnapshot" IS NOT NULL))',
     },
     {
       table: "Order",
@@ -6441,6 +6442,23 @@ export const securityPostureManifest = {
       deleteAction: null,
       validated: true,
       definition: 'CHECK ("discountCents" <= "subtotalCents")',
+    },
+    {
+      table: "Order",
+      name: "Order_legacy_null_fulfillment_document_exempt_valid",
+      kind: "c",
+      columns: [
+        "legacyNullFulfillmentDocumentExempt",
+        "fulfillmentMethod",
+        "buyerDocumentTypeSnapshot",
+        "buyerDocumentNumberSnapshot",
+      ],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK ("legacyNullFulfillmentDocumentExempt" = false OR "fulfillmentMethod" IS NULL AND "buyerDocumentTypeSnapshot" IS NULL AND "buyerDocumentNumberSnapshot" IS NULL)',
     },
     {
       table: "Order",
@@ -11121,6 +11139,13 @@ export const securityPostureManifest = {
     },
     {
       identity: "validate_inventory_ledger()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
+      identity: "validate_legacy_null_fulfillment_document_exempt()",
       kind: "f",
       securityDefiner: true,
       owner: "postgres",
@@ -20393,6 +20418,19 @@ export const securityPostureManifest = {
     },
     {
       table: "Order",
+      name: "Order_legacy_null_fulfillment_document_exempt_guard",
+      function: "validate_legacy_null_fulfillment_document_exempt()",
+      timing: "BEFORE",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: false,
+      initiallyDeferred: false,
+      definition:
+        'CREATE TRIGGER "Order_legacy_null_fulfillment_document_exempt_guard" BEFORE INSERT OR UPDATE ON "Order" FOR EACH ROW EXECUTE FUNCTION validate_legacy_null_fulfillment_document_exempt()',
+    },
+    {
+      table: "Order",
       name: "Order_protect_snapshots",
       function: "protect_order_snapshots()",
       timing: "BEFORE",
@@ -22090,6 +22128,8 @@ export const securityPostureManifest = {
     "20261124150000_a2_audit_security_hardening",
     "20261124160000_a3_db_constraints_locks",
     "20261124170000_a3_url_redirect_integrity",
+    "20261125120000_a5_checkout_flex_document",
+    "20261125120100_a5_checkout_flex_document_constraints",
   ],
   signedColumns: [
     {

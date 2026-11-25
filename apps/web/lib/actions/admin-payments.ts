@@ -197,6 +197,7 @@ export async function reconcileCodAction(
       "remittedCents",
       "carrierReference",
     ]);
+    const paymentAttemptId = z.string().uuid().parse(formString(formData, "paymentAttemptId"));
     const result = await codReconciliationService().reconcile({
       carrier: text(formString(formData, "carrier"), 1, 120),
       reference: z
@@ -205,7 +206,7 @@ export async function reconcileCodAction(
         .parse(formString(formData, "reference")),
       items: [
         {
-          paymentAttemptId: z.string().uuid().parse(formString(formData, "paymentAttemptId")),
+          paymentAttemptId,
           collectedCents: cents(formString(formData, "collectedCents")),
           remittedCents: cents(formString(formData, "remittedCents")),
           carrierReference: text(formString(formData, "carrierReference"), 3, 120),
@@ -213,7 +214,11 @@ export async function reconcileCodAction(
       ],
       audit,
     });
-    revalidatePaymentViews();
+    const attempt = await getDatabase().paymentAttempt.findUnique({
+      where: { id: paymentAttemptId },
+      select: { orderId: true },
+    });
+    revalidatePaymentViews(attempt?.orderId);
     return actionSuccess(
       result.status === "RECONCILED"
         ? "Remesa conciliada y pago acreditado."

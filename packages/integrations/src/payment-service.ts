@@ -5,6 +5,7 @@ import {
   hasUniqueViolation,
   inInventoryTransaction,
   IntegrationEnvironment,
+  isAdminSelfDealingCustomer,
   PaymentProvider,
   type PrismaClient,
 } from "@mundonettech/db";
@@ -13,11 +14,13 @@ import type { IntegrationCredentialVault } from "./credential-vault.js";
 import { OfflinePaymentProvider, StoreCreditPaymentProvider } from "./local-payment-providers.js";
 import {
   appendStoreCreditEntry,
+  assertCodDistributionMutable,
   assertFinancialActor,
   assertPaymentMoney,
   assertPaymentUuid,
   databaseNow,
   equalHash,
+  isCodDistributionSealed,
   lockPaymentAttempt,
   lockPaymentOrder,
   normalizePaymentKey,
@@ -101,10 +104,12 @@ export class PaymentService {
       throw new PaymentValidationError("Only Wompi accepts a payment credentialId.");
     }
     const identityHashes = Object.fromEntries(
-      Object.entries(input.identityHashes ?? {}).map(([kind, hash]) => [
-        kind,
-        paymentHash(hash, `${kind}Hash`),
-      ]),
+      Object.entries(input.identityHashes ?? {}).map(([kind, hash]) => {
+        if (!["EMAIL", "PHONE", "DOCUMENT"].includes(kind)) {
+          throw new PaymentValidationError("Unknown payment identity kind.");
+        }
+        return [kind, paymentHash(hash, `${kind}Hash`)];
+      }),
     );
     const result = await inInventoryTransaction(this.db, async (tx) => {
       await acquireOperationLocks(tx, [`order-payment:${input.orderId}`]);
@@ -146,6 +151,12 @@ export class PaymentService {
             "IDEMPOTENCY_CONFLICT",
           );
         }
+        if (
+          order.orderStatus === "CANCELLED" &&
+          ["REQUIRES_ACTION", "PENDING", "PROCESSING", "AUTHORIZED"].includes(existing.status)
+        ) {
+          throw new PaymentConflictError("A cancelled order cannot resume a payment attempt.");
+        }
         return { attempt: existing, replayed: true, now };
       }
       if (order.orderStatus !== "CONFIRMED") {
@@ -154,12 +165,17 @@ export class PaymentService {
       if (["PARTIALLY_REFUNDED", "REFUNDED"].includes(order.paymentStatus)) {
         throw new PaymentConflictError("A compensated order cannot accept new payment attempts.");
       }
+      const codSealed = await isCodDistributionSealed(tx, order.id);
+      if (providerCode === PaymentProvider.COD && codSealed) {
+        await assertCodDistributionMutable(tx, order.id);
+      }
       if (order.reservationExpiresAt && order.reservationExpiresAt <= now) {
         throw new PaymentConflictError("The order inventory reservation has expired.");
       }
       const staleAttempts = await tx.paymentAttempt.findMany({
         where: {
           orderId: order.id,
+          ...(codSealed ? { provider: { not: PaymentProvider.COD } } : {}),
           status: { in: ["REQUIRES_ACTION", "PENDING"] },
           expiresAt: { not: null, lte: now },
           transactions: { none: { kind: "CAPTURE" } },
@@ -224,6 +240,14 @@ export class PaymentService {
       if (
         providerCode === PaymentProvider.WOMPI &&
         resolvedExpiry &&
+        order.reservationExpiresAt &&
+        resolvedExpiry.getTime() > order.reservationExpiresAt.getTime()
+      ) {
+        resolvedExpiry = order.reservationExpiresAt;
+      }
+      if (
+        providerCode === PaymentProvider.WOMPI &&
+        resolvedExpiry &&
         resolvedExpiry.getTime() > now.getTime() + 86_400_000
       ) {
         throw new PaymentValidationError("Wompi payment expiration cannot exceed 24 hours.");
@@ -265,7 +289,15 @@ export class PaymentService {
       if (providerCode === PaymentProvider.STORE_CREDIT) {
         if (!order.customerId)
           throw new PaymentConflictError("Store credit requires an authenticated customer.");
-        await acquireOperationLocks(tx, [`store-credit:${order.customerId}`]);
+        const referral = await tx.referral.findUnique({
+          where: { referredCustomerId: order.customerId },
+          select: { referrerCustomerId: true },
+        });
+        await acquireOperationLocks(tx, [
+          `growth-customer:${order.customerId}`,
+          ...(referral ? [`growth-customer:${referral.referrerCustomerId}`] : []),
+          `store-credit:${order.customerId}`,
+        ]);
         const account = await tx.storeCreditAccount.findUnique({
           where: { customerId_currency: { customerId: order.customerId, currency: "COP" } },
         });
@@ -410,11 +442,18 @@ export class PaymentService {
       if (order.orderStatus !== "CONFIRMED") {
         throw new PaymentConflictError("Payments require a confirmed, non-cancelled order.");
       }
+      if (["PARTIALLY_REFUNDED", "REFUNDED"].includes(order.paymentStatus)) {
+        throw new PaymentConflictError("A compensated order cannot resume a payment attempt.");
+      }
       const now = await databaseNow(tx);
       if (attempt.status !== "REQUIRES_ACTION") {
         throw new PaymentConflictError("Wompi payment attempt is no longer awaiting checkout.");
       }
-      if (attempt.expiresAt && attempt.expiresAt.getTime() <= now.getTime()) {
+      const expiredByWindow =
+        (attempt.expiresAt !== null && attempt.expiresAt.getTime() <= now.getTime()) ||
+        (order.reservationExpiresAt !== null &&
+          order.reservationExpiresAt.getTime() <= now.getTime());
+      if (expiredByWindow) {
         const hasCapture = await tx.paymentTransaction.findFirst({
           where: { attemptId: attempt.id, kind: "CAPTURE" },
           select: { id: true },
@@ -424,6 +463,7 @@ export class PaymentService {
             where: { id: attempt.id },
             data: { status: "EXPIRED", completedAt: now },
           });
+          await refreshOrderPaymentStatus(tx, order.id);
         }
         return { expired: true as const };
       }
@@ -467,13 +507,13 @@ export class PaymentService {
         if (peek.provider !== PaymentProvider.BANK_TRANSFER) {
           throw new PaymentConflictError("Only bank transfer attempts can be confirmed manually.");
         }
+        const actor = await assertFinancialActor(tx, options.audit.actorAdminUserId);
         await acquireOperationLocks(tx, [
           `order-payment:${peek.orderId}`,
           `bank-reference:${externalReference}`,
         ]);
-        await lockPaymentOrder(tx, peek.orderId);
+        const order = await lockPaymentOrder(tx, peek.orderId);
         const attempt = await lockPaymentAttempt(tx, options.paymentAttemptId);
-        await assertFinancialActor(tx, options.audit.actorAdminUserId);
         const capture = await tx.paymentTransaction.findFirst({
           where: { attemptId: attempt.id, kind: "CAPTURE" },
         });
@@ -521,11 +561,16 @@ export class PaymentService {
           },
         });
         await refreshOrderPaymentStatus(tx, attempt.orderId);
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
         await writePaymentAudit(tx, {
           action: "BANK_TRANSFER_CONFIRMED",
           targetType: "PaymentAttempt",
           targetId: attempt.id,
           audit: options.audit,
+          selfDealing,
           metadata: { orderId: attempt.orderId, amountCents: attempt.amountCents.toString() },
         });
         return paymentAttemptSnapshot(updated, false);

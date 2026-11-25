@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,7 @@ import {
 
 export function AssistedSaleCreateForm() {
   const [state, action, pending] = useActionState(createAssistedSaleAction, initialActionState);
+  const [customerEmail, setCustomerEmail] = useState("");
   return (
     <form action={action} className="space-y-4 rounded-xl border border-border bg-card p-5">
       <div className="grid gap-4 sm:grid-cols-[1fr_180px]">
@@ -26,7 +27,8 @@ export function AssistedSaleCreateForm() {
             id="assisted-customer"
             name="customerEmail"
             type="email"
-            defaultValue={state.values?.customerEmail ?? ""}
+            value={customerEmail}
+            onChange={(event) => setCustomerEmail(event.target.value)}
             maxLength={320}
             placeholder="cliente@dominio.co"
           />

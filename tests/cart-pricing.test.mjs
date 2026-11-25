@@ -365,6 +365,59 @@ describe("F3.1 — cart revalidation, stock and coupon arithmetic", () => {
     );
   });
 
+  it("does not reserve coupon capacity for carts with blocking stock issues", async () => {
+    const cart = await createCart();
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1);
+    const coupon = await activePercentCoupon({ maximumUsages: 1 });
+    await sql.query(`UPDATE "StockLevel" SET "safetyStock" = "onHand" WHERE "variantId" = $1`, [
+      catalog.variantId,
+    ]);
+    try {
+      await assert.rejects(service.applyCoupon({ cartId: cart.id }, coupon.code), CartStockError);
+      assert.equal(await db.couponUsage.count({ where: { couponId: coupon.id } }), 0);
+      assert.equal((await service.getById(cart.id)).coupon, null);
+    } finally {
+      await sql.query(`UPDATE "StockLevel" SET "safetyStock" = 2 WHERE "variantId" = $1`, [
+        catalog.variantId,
+      ]);
+    }
+  });
+
+  it("releases a reserved coupon when no cart line remains eligible", async () => {
+    const root = await db.category.findUniqueOrThrow({
+      where: { id: catalog.rootCategoryId },
+      select: { slug: true },
+    });
+    const coupon = await activePercentCoupon({ categorySlugs: [root.slug], maximumUsages: 1 });
+    const cart = await createCart();
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1);
+    await service.applyCoupon({ cartId: cart.id }, coupon.code);
+    const snapshot = await service.setVariantQuantity(
+      { cartId: cart.id },
+      (await service.getById(cart.id)).items[0].id,
+      0,
+    );
+    assert.equal(snapshot.coupon, null);
+    assert.ok(snapshot.issues.some((issue) => issue.code === "COUPON_INVALID"));
+    const usage = await db.couponUsage.findFirstOrThrow({
+      where: { couponId: coupon.id, cartId: cart.id },
+    });
+    assert.equal(usage.status, "RELEASED");
+    assert.ok(usage.releasedAt);
+  });
+
+  it("marks an expired persisted cart as unable to continue", async () => {
+    const cart = await createCart();
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1);
+    await sql.query(
+      `UPDATE "Cart" SET "expiresAt" = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE "id" = $1`,
+      [cart.id],
+    );
+    const snapshot = await service.getById(cart.id);
+    assert.equal(snapshot.status, "ACTIVE");
+    assert.equal(snapshot.canContinue, false);
+  });
+
   it("transfers guest carts safely on sign-in and surfaces archived coupons as explicit issues", async () => {
     const freshCustomerId = randomUUID();
     await sql.query(
@@ -812,6 +865,147 @@ describe("A2 — assisted audit completeness and administrative cart isolation",
       failedLogCount,
     );
   });
+
+  it("revalidates sales:write for every assisted mutation without side effects", async () => {
+    const actors = await Promise.all([
+      db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `assisted-forbidden-${randomUUID()}@example.test`,
+          displayName: "Assisted Forbidden Admin",
+          role: "CMS_EDITOR",
+          status: "ACTIVE",
+        },
+      }),
+      db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `assisted-suspended-${randomUUID()}@example.test`,
+          displayName: "Assisted Suspended Admin",
+          role: "SUPERADMIN",
+          status: "SUSPENDED",
+        },
+      }),
+    ]);
+    const cart = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: adminId,
+      audit,
+    });
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1, audit);
+    const coupon = await activePercentCoupon();
+    const initialLogs = await db.adminActionLog.count({
+      where: { targetType: "Cart", targetId: cart.id },
+    });
+    for (const actor of actors) {
+      const actorAudit = { actorAdminUserId: actor.id, ipHash: hash(), userAgentHash: null };
+      await assert.rejects(
+        service.createAssistedCart({
+          accessTokenHash: hash(),
+          expiresAt: future(),
+          assistedByAdminUserId: actor.id,
+          audit: actorAudit,
+        }),
+        AdminActorAuthorizationError,
+      );
+      await assert.rejects(
+        service.addVariant({ cartId: cart.id }, catalog.variantId, 1, actorAudit),
+        AdminActorAuthorizationError,
+      );
+      await assert.rejects(
+        service.applyCoupon({ cartId: cart.id }, coupon.code, actorAudit),
+        AdminActorAuthorizationError,
+      );
+      await assert.rejects(
+        service.issueAssistedToken({
+          cartId: cart.id,
+          assistedTokenHash: hash(),
+          expiresAt: future(),
+          audit: actorAudit,
+        }),
+        AdminActorAuthorizationError,
+      );
+      await assert.rejects(
+        service.cancelAssistedCart(cart.id, actorAudit),
+        AdminActorAuthorizationError,
+      );
+      assert.equal(await db.adminActionLog.count({ where: { actorAdminUserId: actor.id } }), 0);
+    }
+    const persisted = await db.cart.findUniqueOrThrow({ where: { id: cart.id } });
+    assert.equal(persisted.status, "ACTIVE");
+    assert.equal(persisted.itemCount, 1);
+    assert.equal(persisted.couponId, null);
+    assert.equal(persisted.assistedTokenHash, null);
+    assert.equal(await db.couponUsage.count({ where: { cartId: cart.id } }), 0);
+    assert.equal(
+      await db.adminActionLog.count({ where: { targetType: "Cart", targetId: cart.id } }),
+      initialLogs,
+    );
+    assert.equal(
+      await db.cart.count({
+        where: { assistedByAdminUserId: { in: actors.map((actor) => actor.id) } },
+      }),
+      0,
+    );
+  });
+
+  it("binds the advisor to the actor and marks self-dealing with a stable request id", async () => {
+    const authUserId = randomUUID();
+    const selfAdmin = await db.adminUser.create({
+      data: {
+        authUserId,
+        email: `self-assisted-${randomUUID()}@example.test`,
+        displayName: "Self Assisted Admin",
+        role: "SUPERADMIN",
+        status: "ACTIVE",
+      },
+    });
+    const customer = await db.customer.create({
+      data: {
+        authUserId,
+        email: `self-customer-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+      },
+    });
+    const requestId = randomUUID();
+    const selfAudit = {
+      actorAdminUserId: selfAdmin.id,
+      ipHash: hash(),
+      userAgentHash: null,
+      requestId,
+    };
+    const cart = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: selfAdmin.id,
+      customerId: customer.id,
+      audit: selfAudit,
+    });
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1, selfAudit);
+    await service.issueAssistedToken({
+      cartId: cart.id,
+      assistedTokenHash: hash(),
+      expiresAt: future(),
+      audit: selfAudit,
+    });
+    await service.cancelAssistedCart(cart.id, selfAudit);
+    const logs = await db.adminActionLog.findMany({
+      where: { targetType: "Cart", targetId: cart.id },
+    });
+    assert.equal(logs.length, 4);
+    assert.ok(logs.every((log) => log.selfDealing));
+    assert.ok(logs.every((log) => log.requestId === requestId));
+    await assert.rejects(
+      service.createAssistedCart({
+        accessTokenHash: hash(),
+        expiresAt: future(),
+        assistedByAdminUserId: selfAdmin.id,
+        audit,
+      }),
+      /must match the audited actor/,
+    );
+  });
 });
 
 describe("A2 — pricing operational audit before/after and rollback", () => {
@@ -1037,5 +1231,41 @@ describe("A2 — pricing operational audit before/after and rollback", () => {
       assert.equal(await db.wholesaleTier.count({ where: { minimumQuantity } }), 0);
       assert.equal(await db.adminActionLog.count({ where: { actorAdminUserId: actor.id } }), 0);
     }
+  });
+
+  it("populates audit requestId by default, renews coupon reservations on assisted links, and detaches expired reservations", async () => {
+    const cart = await service.createAssistedCart({
+      accessTokenHash: hash(),
+      expiresAt: future(),
+      assistedByAdminUserId: adminId,
+      audit,
+    });
+    await service.addVariant({ cartId: cart.id }, catalog.variantId, 1, audit);
+    const coupon = await activePercentCoupon();
+    await service.applyCoupon({ cartId: cart.id }, coupon.code, audit);
+    const extendedExpiry = new Date(Date.now() + 36 * 3_600_000);
+    await service.issueAssistedToken({
+      cartId: cart.id,
+      assistedTokenHash: hash(),
+      expiresAt: extendedExpiry,
+      audit,
+    });
+    const renewedUsage = await db.couponUsage.findFirstOrThrow({
+      where: { cartId: cart.id, status: "RESERVED" },
+    });
+    assert.ok(renewedUsage.expiresAt.getTime() >= extendedExpiry.getTime() - 1000);
+    const logs = await db.adminActionLog.findMany({
+      where: { targetType: "Cart", targetId: cart.id },
+      select: { requestId: true },
+    });
+    assert.ok(logs.length > 0 && logs.every((entry) => typeof entry.requestId === "string"));
+
+    await db.couponUsage.update({
+      where: { id: renewedUsage.id },
+      data: { status: "RELEASED", releasedAt: new Date() },
+    });
+    const revalidated = await service.getById(cart.id);
+    assert.equal(revalidated.coupon, null);
+    assert.ok(revalidated.issues.some((issue) => issue.code === "COUPON_INVALID"));
   });
 });

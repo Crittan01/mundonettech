@@ -27,6 +27,12 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+const statusLabels = {
+  ACTIVE: "Expirada",
+  CONVERTED: "Convertida",
+  CANCELLED: "Cancelada",
+  EXPIRED: "Expirada",
+} as const;
 
 export default async function AssistedSaleDetailPage({
   params,
@@ -69,9 +75,7 @@ export default async function AssistedSaleDetailPage({
             ? `Aceptada ${dateFormatter.format(record.assistedClaimedAt)}`
             : active
               ? "En preparación"
-              : cart.status === "ACTIVE"
-                ? "Expirada"
-                : cart.status}
+              : statusLabels[cart.status]}
         </p>
       </div>
       {query.creado === "1" ? (

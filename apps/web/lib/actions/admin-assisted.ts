@@ -1,12 +1,14 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
   absolutePublicUrl,
   normalizeEmail,
   normalizePromotionSlug,
   normalizeSku,
 } from "@mundonettech/core";
-import { CartNotFoundError, CartService } from "@mundonettech/db";
+import { AdminActorAuthorizationError, CartNotFoundError, CartService } from "@mundonettech/db";
 import { storeConfig } from "@mundonettech/config/store";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -43,6 +45,7 @@ async function context() {
     actorAdminUserId: session.profile.id,
     ipHash: request.ipHash,
     userAgentHash: request.userAgentHash,
+    requestId: randomUUID(),
   };
 }
 
@@ -76,7 +79,7 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
   if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
     return actionError("Confirma tu autenticador antes de modificar la venta asistida.", values);
   }
-  if (error instanceof AdminAuthorizationError) {
+  if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para gestionar ventas asistidas.", values);
   }
   return actionError(cartMutationMessage(error), values);
@@ -150,7 +153,10 @@ export async function mutateAssistedCartAction(
     await assertAssistedCart(cartId);
     const service = new CartService(getDatabase());
     const reference = { cartId };
-    const quantity = quantitySchema.safeParse(formString(formData, "quantity") || "1");
+    const rawQuantity = formString(formData, "quantity");
+    const quantity = quantitySchema.safeParse(
+      operation === "set_quantity" ? rawQuantity : rawQuantity || "1",
+    );
     switch (operation) {
       case "add_variant": {
         if (!quantity.success || quantity.data < 1)
@@ -168,7 +174,7 @@ export async function mutateAssistedCartAction(
           where: { sku, deletedAt: null },
           select: { id: true },
         });
-        if (!variant) return actionError("No encontramos ese SKU activo o archivado.", values);
+        if (!variant) return actionError("No encontramos ese SKU activo.", values);
         await service.addVariant(reference, variant.id, quantity.data, audit);
         break;
       }
@@ -249,6 +255,7 @@ export async function issueAssistedLinkAction(
     ) {
       return actionError("Revisa el carrito y una vigencia entera entre 1 y 720 horas.", values);
     }
+    const base = absolutePublicUrl((process.env.SITE_URL ?? storeConfig.url).trim());
     const generated = createCartToken();
     await new CartService(getDatabase()).issueAssistedToken({
       cartId,
@@ -256,7 +263,6 @@ export async function issueAssistedLinkAction(
       expiresAt: expiration(hours.data),
       audit,
     });
-    const base = absolutePublicUrl((process.env.SITE_URL ?? storeConfig.url).trim());
     const paymentUrl = new URL(`/pagar/${generated.token}`, base).toString();
     revalidatePath(`/admin/venta-asistida/${cartId}`);
     return {

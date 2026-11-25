@@ -82,7 +82,7 @@ export default async function InvoicesPage() {
           autorizado. Los resultados inciertos se concilian antes de retransmitir.
         </p>
       </div>
-      {canWrite ? <CmsStepUp session={session} /> : null}
+      <CmsStepUp session={session} />
       <section aria-labelledby="invoice-preparation" className="space-y-3">
         <h2 id="invoice-preparation" className="text-xl font-semibold">
           Órdenes listas para facturar
@@ -155,7 +155,7 @@ export default async function InvoicesPage() {
                       <FiscalOperationForm
                         kind="transmit-invoice"
                         id={invoice.id}
-                        label={invoice.status === "UNCERTAIN" ? "Conciliar" : "Transmitir"}
+                        label={invoice.status === "DRAFT" ? "Transmitir" : "Conciliar"}
                       />
                     ) : null}
                     {invoice.status === "ACCEPTED" ? (
@@ -232,7 +232,7 @@ export default async function InvoicesPage() {
                       <FiscalOperationForm
                         kind="transmit-credit-note"
                         id={note.id}
-                        label={note.status === "UNCERTAIN" ? "Conciliar" : "Transmitir"}
+                        label={note.status === "DRAFT" ? "Transmitir" : "Conciliar"}
                       />
                     ) : null}
                     {note.status === "ACCEPTED" ? (

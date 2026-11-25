@@ -40,6 +40,7 @@ export function EmailTemplateForm({
   const [htmlBody, setHtmlBody] = useState(templates[firstKey]!.htmlBody);
   const [textBody, setTextBody] = useState(templates[firstKey]!.textBody);
   const [variables, setVariables] = useState(templates[firstKey]!.variables.join(","));
+  const [publish, setPublish] = useState(true);
   const values = useServerValues ? state.values : undefined;
   const currentSubject = values?.subject ?? subject;
   const currentHtml = values?.htmlBody ?? htmlBody;
@@ -140,7 +141,11 @@ export function EmailTemplateForm({
         <input
           type="checkbox"
           name="publish"
-          defaultChecked
+          checked={publish}
+          onChange={(event) => {
+            setUseServerValues(false);
+            setPublish(event.target.checked);
+          }}
           className="mt-1 size-4 accent-primary"
         />
         <span>Publicar esta versión y archivar la vigente anterior</span>

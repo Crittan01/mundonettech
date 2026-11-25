@@ -4,6 +4,7 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 
 import {
   AccountService,
+  IntegrationEnvironment,
   LifecycleError,
   LifecycleService,
   SegmentationService,
@@ -172,6 +173,7 @@ before(
     email = new EmailService(db, {
       vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "http://127.0.0.1:4110",
+      environment: IntegrationEnvironment.LOCAL,
       providerFactory: () => ({
         send: async (input) => {
           sent.push(input);
@@ -186,6 +188,7 @@ before(
       invoice: {},
       vault: vault.forSystemProvider("resend"),
       publicSiteUrl: "http://127.0.0.1:4110",
+      allowLoopback: true,
       storeName: "Tienda Lifecycle",
       receiptTokenForSubmission: () => "x".repeat(43),
       maximumAttempts: 3,

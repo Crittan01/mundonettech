@@ -23,6 +23,12 @@ const statusLabels: Record<string, string> = {
   FAILED: "Fallido",
 };
 
+const templateStatusLabels: Record<string, string> = {
+  DRAFT: "Borrador",
+  PUBLISHED: "Publicada",
+  ARCHIVED: "Archivada",
+};
+
 export default async function CommunicationsPage() {
   const session = await requireAdminPage("communications:read");
   const db = getDatabase();
@@ -97,14 +103,15 @@ export default async function CommunicationsPage() {
         </h2>
         {templates.length === 0 ? (
           <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-            Las plantillas predeterminadas están vigentes; aún no hay overrides.
+            Las plantillas predeterminadas están vigentes; aún no hay versiones personalizadas.
           </p>
         ) : (
           <ul className="space-y-3">
             {templates.map((template) => (
               <li key={template.id} className="rounded-xl border border-border bg-card p-4">
                 <h3 className="font-semibold">
-                  {template.templateKey} · versión {template.version} · {template.status}
+                  {template.templateKey} · versión {template.version} ·{" "}
+                  {templateStatusLabels[template.status] ?? template.status}
                 </h3>
                 <p className="mt-1 text-sm text-muted-foreground">{template.subject}</p>
               </li>

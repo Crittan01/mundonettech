@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
 import {
+  compareStrings,
+  fulfillStock,
+  inInventoryTransaction,
+  IntegrationEnvironment,
+  isAdminSelfDealingCustomer,
   ShippingProviderCode,
   type OrderFulfillmentStatus,
   type PrismaClient,
@@ -13,7 +18,12 @@ import {
   flexTrackingCode,
   parseAveonlineCredentials,
 } from "./shipping-providers.js";
-import { assertIntegrationUuid, integrationDigest, integrationText } from "./integration-utils.js";
+import {
+  assertIntegrationUuid,
+  databaseTimestamp,
+  integrationDigest,
+  integrationText,
+} from "./integration-utils.js";
 import {
   assertFulfillmentActor,
   assertPaidOrder,
@@ -53,6 +63,27 @@ export interface LabelProcessResult {
   readonly replayed: boolean;
 }
 
+interface ShippingRequestFence {
+  readonly claimedBy: string;
+  readonly requestStartedAt: Date | null;
+  readonly requestHash: Uint8Array;
+}
+
+function matchesRequestFence(
+  record: {
+    readonly claimedBy: string | null;
+    readonly requestStartedAt: Date | null;
+    readonly requestHash: Uint8Array;
+  },
+  fence: ShippingRequestFence,
+): boolean {
+  return (
+    record.claimedBy === fence.claimedBy &&
+    (record.requestStartedAt?.getTime() ?? null) === (fence.requestStartedAt?.getTime() ?? null) &&
+    Buffer.from(record.requestHash).equals(fence.requestHash)
+  );
+}
+
 function roundDiv(value: bigint, divisor: bigint): bigint {
   if (divisor <= 0n) throw new ShippingValidationError("Declared value divisor must be positive.");
   return (value + divisor / 2n) / divisor;
@@ -68,7 +99,10 @@ export class ShippingService {
     credentials: import("./shipping-types.js").AveonlineCredentials,
   ): ShippingProvider {
     return (
-      this.options.providerFactory?.(credentials) ?? new AveonlineShippingProvider(credentials)
+      this.options.providerFactory?.(credentials) ??
+      new AveonlineShippingProvider(credentials, {
+        allowLoopback: this.options.environment === IntegrationEnvironment.LOCAL,
+      })
     );
   }
 
@@ -76,27 +110,71 @@ export class ShippingService {
     db: PrismaClient | ShippingTransaction,
     audit: ShippingAuditContext | undefined,
     lock = false,
-  ): Promise<void> {
-    if (!audit) return;
+  ): Promise<{ id: string; authUserId: string; email: string; role: string } | null> {
+    if (!audit) return null;
     assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
-    let role: string | undefined;
     if (lock) {
-      const rows = await db.$queryRaw<Array<{ role: string }>>`
-        SELECT "role"::text AS "role" FROM "AdminUser"
-        WHERE "id" = ${audit.actorAdminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
-        FOR SHARE
-      `;
-      role = rows[0]?.role;
-    } else {
-      const actor = await db.adminUser.findFirst({
-        where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { role: true },
-      });
-      role = actor?.role;
+      return assertFulfillmentActor(db as ShippingTransaction, audit.actorAdminUserId);
     }
-    if (!role || !isAdminRole(role) || !hasAdminPermission(role, "fulfillment:write")) {
+    const actor = await db.adminUser.findFirst({
+      where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
+      select: { id: true, authUserId: true, email: true, role: true },
+    });
+    if (
+      !actor ||
+      !isAdminRole(actor.role) ||
+      !hasAdminPermission(actor.role, "fulfillment:write")
+    ) {
       throw new ShippingAuthorizationError();
     }
+    return actor;
+  }
+
+  private async fulfillCodStockIfNeeded(
+    tx: ShippingTransaction,
+    order: import("@mundonettech/db").Order,
+  ): Promise<void> {
+    if (["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentStatus)) return;
+    if (!order.reservationKey) {
+      throw new ShippingConflictError(
+        "A cash-on-delivery order requires its inventory reservation key before picking.",
+      );
+    }
+    const items = await tx.orderItem.findMany({
+      where: { orderId: order.id },
+      include: { reservations: true },
+    });
+    const movementMap = new Map<
+      string,
+      { variantId: string; locationId: string; quantity: number }
+    >();
+    for (const item of items) {
+      for (const reservation of item.reservations) {
+        const key = `${item.variantId}:${reservation.locationId}`;
+        const existing = movementMap.get(key);
+        movementMap.set(key, {
+          variantId: item.variantId,
+          locationId: reservation.locationId,
+          quantity: (existing?.quantity ?? 0) + reservation.quantity,
+        });
+      }
+    }
+    const movements = [...movementMap.values()].sort(
+      (left, right) =>
+        compareStrings(left.variantId, right.variantId) ||
+        compareStrings(left.locationId, right.locationId),
+    );
+    if (movements.length === 0) {
+      throw new ShippingConflictError(
+        "A cash-on-delivery order requires stock reservations before picking.",
+      );
+    }
+    await fulfillStock(tx, {
+      operationKey: `order-fulfillment:${order.id}`,
+      reservationKey: order.reservationKey,
+      orderId: order.id,
+      items: movements,
+    });
   }
 
   async ensureFulfillments(
@@ -109,12 +187,20 @@ export class ShippingService {
     await this.assertHumanActor(this.db, audit);
     const order = await this.db.order.findUnique({
       where: { id: orderId },
-      include: { shipments: true },
+      include: { shipments: { include: { fulfillment: { select: { id: true } } } } },
     });
     if (!order) throw new ShippingNotFoundError("Order not found.");
     await assertPaidOrder(this.db, order);
+    const needsNewFulfillment = order.shipments.some(
+      (shipment) => shipment.status !== "CANCELLED" && shipment.fulfillment === null,
+    );
+    if (needsNewFulfillment && order.fulfillmentMethod === null) {
+      throw new ShippingConflictError(
+        "Legacy orders without a fulfillment method cannot enter automated fulfillment.",
+      );
+    }
     let aveonlineCredentialId: string | null = null;
-    if (order.fulfillmentMethod === "HOME_DELIVERY") {
+    if (needsNewFulfillment && order.fulfillmentMethod === "HOME_DELIVERY") {
       const credentials = await this.options.vault.list({ includeRevoked: false, limit: 100 });
       const active = credentials.items.filter(
         (item) => item.provider === "aveonline" && !item.revokedAt,
@@ -131,8 +217,8 @@ export class ShippingService {
       }
       aveonlineCredentialId = selected.id;
     }
-    return this.db.$transaction(async (tx) => {
-      await this.assertHumanActor(tx, audit, true);
+    return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await this.assertHumanActor(tx, audit, true);
       const locked = await lockOrder(tx, orderId);
       await assertPaidOrder(tx, locked);
       const shipments = await tx.shipment.findMany({
@@ -141,7 +227,14 @@ export class ShippingService {
       });
       if (shipments.length === 0)
         throw new ShippingConflictError("The order has no shipments to fulfill.");
+      const selfDealing = actor
+        ? await isAdminSelfDealingCustomer(tx, actor, {
+            customerId: locked.customerId,
+            email: locked.emailSnapshot,
+          })
+        : false;
       const ids: string[] = [];
+      let credentialVerified = false;
       for (const shipment of shipments) {
         const existing = await tx.orderFulfillment.findUnique({
           where: { shipmentId: shipment.id },
@@ -151,12 +244,38 @@ export class ShippingService {
           continue;
         }
         if (shipment.status === "CANCELLED") continue;
+        if (locked.fulfillmentMethod === null) {
+          throw new ShippingConflictError(
+            "Legacy orders without a fulfillment method cannot enter automated fulfillment.",
+          );
+        }
         const provider =
           locked.fulfillmentMethod === "CLICK_COLLECT"
             ? ShippingProviderCode.PICKUP
             : locked.fulfillmentMethod === "LOCAL_DELIVERY"
               ? ShippingProviderCode.FLEX
               : ShippingProviderCode.AVEONLINE;
+        if (provider === ShippingProviderCode.AVEONLINE && !credentialVerified) {
+          if (!aveonlineCredentialId) {
+            throw new ShippingConflictError(
+              "An explicit active Aveonline credential is required before fulfillment.",
+            );
+          }
+          const lockedCredential = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id" FROM "IntegrationCredential"
+            WHERE "id" = ${aveonlineCredentialId}::uuid
+              AND "provider" = 'aveonline'
+              AND "environment" = ${this.options.environment}::"IntegrationEnvironment"
+              AND "revokedAt" IS NULL
+            FOR SHARE
+          `;
+          if (!lockedCredential[0]) {
+            throw new ShippingConflictError(
+              "The selected Aveonline credential is no longer active.",
+            );
+          }
+          credentialVerified = true;
+        }
         if (provider === ShippingProviderCode.FLEX && !shipment.localDeliveryZoneId) {
           throw new ShippingConflictError(
             "Local delivery shipment is missing its sealed zone.",
@@ -195,6 +314,7 @@ export class ShippingService {
             targetType: "OrderFulfillment",
             targetId: fulfillment.id,
             audit,
+            selfDealing,
             metadata: { orderId, shipmentId: shipment.id, provider },
           });
         }
@@ -206,15 +326,16 @@ export class ShippingService {
 
   async startPicking(shipmentId: string, audit: ShippingAuditContext): Promise<string> {
     assertIntegrationUuid(shipmentId, "shipmentId");
+    await this.assertHumanActor(this.db, audit);
     const shipment = await this.db.shipment.findUnique({
       where: { id: shipmentId },
       select: { orderId: true },
     });
     if (!shipment) throw new ShippingNotFoundError("Shipment not found.");
     await this.ensureFulfillments(shipment.orderId, undefined, audit);
-    return this.db.$transaction(async (tx) => {
-      await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const { fulfillment } = await lockShippingHierarchy(tx, {
+    return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      const { order, fulfillment } = await lockShippingHierarchy(tx, {
         orderId: shipment.orderId,
         shipmentId,
       });
@@ -223,6 +344,7 @@ export class ShippingService {
           return fulfillment.id;
         throw new ShippingConflictError("Fulfillment cannot start picking in its current state.");
       }
+      await this.fulfillCodStockIfNeeded(tx, order);
       await tx.orderFulfillment.update({
         where: { id: fulfillment.id },
         data: { status: "PICKING", version: { increment: 1 } },
@@ -235,11 +357,16 @@ export class ShippingService {
           eventKey: `picking:${fulfillment.id}`,
         },
       });
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: order.customerId,
+        email: order.emailSnapshot,
+      });
       await writeShippingAudit(tx, {
         action: "FULFILLMENT_PICKING_STARTED",
         targetType: "OrderFulfillment",
         targetId: fulfillment.id,
         audit,
+        selfDealing,
         metadata: { orderId: fulfillment.orderId, shipmentId },
       });
       return fulfillment.id;
@@ -260,14 +387,15 @@ export class ShippingService {
     if (packages.reduce((sum, record) => sum + record.items.length, 0) > 10_000) {
       throw new ShippingValidationError("Package content lines exceed the request resource limit.");
     }
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipment.findUnique({
       where: { id: shipmentId },
       select: { orderId: true },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment not found.");
-    return this.db.$transaction(async (tx) => {
-      await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const { fulfillment, shipment } = await lockShippingHierarchy(tx, {
+    return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      const { order, fulfillment, shipment } = await lockShippingHierarchy(tx, {
         orderId: identity.orderId,
         shipmentId,
       });
@@ -282,7 +410,7 @@ export class ShippingService {
           "IDEMPOTENCY_CONFLICT",
         );
       const allItems = await tx.shipmentItem.findMany({
-        where: { shipment: { orderId: fulfillment.orderId } },
+        where: { shipment: { orderId: fulfillment.orderId, status: { not: "CANCELLED" } } },
         include: { orderItem: true },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       });
@@ -439,11 +567,16 @@ export class ShippingService {
           carrier: firstTracking ? fulfillment.provider : null,
         },
       });
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: order.customerId,
+        email: order.emailSnapshot,
+      });
       await writeShippingAudit(tx, {
         action: "FULFILLMENT_PACKED",
         targetType: "OrderFulfillment",
         targetId: fulfillment.id,
         audit,
+        selfDealing,
         metadata: { shipmentId, packageIds, packageCount: packageIds.length },
       });
       return { fulfillmentId: fulfillment.id, status, packageIds };
@@ -453,10 +586,107 @@ export class ShippingService {
   private async credentials(credentialId: string) {
     const plaintext = await this.options.vault.reveal(credentialId);
     try {
-      return parseAveonlineCredentials(plaintext);
+      return parseAveonlineCredentials(plaintext, this.options.environment);
     } finally {
       plaintext.fill(0);
     }
+  }
+
+  private async cashOnDeliveryCents(
+    packageId: string,
+    orderId: string,
+    attempts: readonly { amountCents: bigint }[],
+  ): Promise<bigint> {
+    const openCash = attempts.reduce((sum, attempt) => sum + attempt.amountCents, 0n);
+    if (openCash === 0n) return 0n;
+    const order = await this.db.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { totalCents: true },
+    });
+    if (openCash < 0n || order.totalCents <= 0n || openCash > order.totalCents) {
+      throw new ShippingValidationError("Open cash on delivery exceeds the sealed order balance.");
+    }
+    const shipments = await this.db.shipment.findMany({
+      where: { orderId, status: { not: "CANCELLED" } },
+      include: {
+        items: {
+          include: { orderItem: true },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        },
+        packages: { orderBy: [{ packageNumber: "asc" }, { id: "asc" }] },
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
+    const declarationProgress = new Map<string, { quantity: number; value: bigint }>();
+    const shipmentTotals = new Map<string, bigint>();
+    const shipmentCollections = new Map<string, bigint>();
+    let expectedOrderTotal = 0n;
+    let allocatedShipmentCash = 0n;
+    for (const shipment of shipments) {
+      let merchandiseCents = 0n;
+      for (const item of shipment.items) {
+        const previous = declarationProgress.get(item.orderItemId) ?? { quantity: 0, value: 0n };
+        const quantity = previous.quantity + item.quantity;
+        const itemTotal = item.orderItem.lineTotalCents + item.orderItem.taxCents;
+        const declared =
+          item.declaredValueCents ??
+          roundDiv(itemTotal * BigInt(quantity), BigInt(item.orderItem.quantity)) - previous.value;
+        declarationProgress.set(item.orderItemId, {
+          quantity,
+          value: previous.value + declared,
+        });
+        merchandiseCents += declared;
+      }
+      const shipmentTotal = merchandiseCents + shipment.shippingCents;
+      expectedOrderTotal += shipmentTotal;
+      shipmentTotals.set(shipment.id, shipmentTotal);
+      const cumulativeCash = roundDiv(openCash * expectedOrderTotal, order.totalCents);
+      shipmentCollections.set(shipment.id, cumulativeCash - allocatedShipmentCash);
+      allocatedShipmentCash = cumulativeCash;
+    }
+    const current = shipments.find((shipment) =>
+      shipment.packages.some((record) => record.id === packageId),
+    );
+    const currentTotal = current ? shipmentTotals.get(current.id) : undefined;
+    const currentCash = current ? shipmentCollections.get(current.id) : undefined;
+    if (
+      !current ||
+      currentTotal === undefined ||
+      currentCash === undefined ||
+      expectedOrderTotal !== order.totalCents ||
+      allocatedShipmentCash !== openCash
+    ) {
+      throw new ShippingValidationError(
+        "Sealed shipment values do not balance the cash-on-delivery order.",
+      );
+    }
+    const packages = current.packages.filter((record) => record.status !== "CANCELLED");
+    const packagedTotal = packages.reduce(
+      (sum, record, index) =>
+        sum + record.declaredValueCents + (index === 0 ? current.shippingCents : 0n),
+      0n,
+    );
+    if (packagedTotal !== currentTotal) {
+      throw new ShippingValidationError(
+        "Package values do not cover the shipment cash-on-delivery balance.",
+      );
+    }
+    let cumulativePackageBase = 0n;
+    let allocatedPackageCash = 0n;
+    let packageCash: bigint | undefined;
+    for (const [index, record] of packages.entries()) {
+      cumulativePackageBase +=
+        record.declaredValueCents + (index === 0 ? current.shippingCents : 0n);
+      const cumulativeCash =
+        currentTotal === 0n ? 0n : roundDiv(currentCash * cumulativePackageBase, currentTotal);
+      const allocated = cumulativeCash - allocatedPackageCash;
+      allocatedPackageCash = cumulativeCash;
+      if (record.id === packageId) packageCash = allocated;
+    }
+    if (packageCash === undefined || allocatedPackageCash !== currentCash) {
+      throw new ShippingValidationError("Package cash-on-delivery allocation is incomplete.");
+    }
+    return packageCash;
   }
 
   private async labelRequest(
@@ -538,9 +768,10 @@ export class ShippingService {
       lengthMillimeters: record.lengthMillimeters,
       widthMillimeters: record.widthMillimeters,
       heightMillimeters: record.heightMillimeters,
-      cashOnDeliveryCents: order.paymentAttempts.reduce(
-        (sum, attempt) => sum + attempt.amountCents,
-        0n,
+      cashOnDeliveryCents: await this.cashOnDeliveryCents(
+        record.id,
+        order.id,
+        order.paymentAttempts,
       ),
       contents: record.items.map((item) => ({
         sku: item.shipmentItem.orderItem.skuSnapshot,
@@ -556,16 +787,18 @@ export class ShippingService {
     packageId: string,
     result: ShippingLabelResult,
     workerId: string,
-    requestStartedAt: Date | null,
+    fence: ShippingRequestFence | null,
     audit?: ShippingAuditContext,
   ): Promise<LabelProcessResult> {
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipmentPackage.findUnique({
       where: { id: packageId },
       select: { shipmentId: true, shipment: { select: { orderId: true } } },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
-    return this.db.$transaction(async (tx) => {
-      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+    return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await this.assertHumanActor(tx, audit, true);
+      const { order, fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
         orderId: identity.shipment.orderId,
         shipmentId: identity.shipmentId,
         packageId,
@@ -584,14 +817,14 @@ export class ShippingService {
       }
       if (!["CLAIMED", "RECONCILING"].includes(record.status))
         throw new ShippingConflictError("Only a claimed package can accept a provider label.");
-      if (requestStartedAt) {
-        if (
-          record.claimedBy !== workerId ||
-          record.requestStartedAt?.getTime() !== requestStartedAt.getTime()
-        ) {
-          throw new ShippingConflictError(
-            "Package label claim ownership changed before persistence.",
-          );
+      if (fence) {
+        if (!matchesRequestFence(record, fence)) {
+          return {
+            packageId,
+            status: record.status,
+            trackingCode: record.trackingCode,
+            replayed: true,
+          };
         }
       } else if (record.status !== "RECONCILING") {
         throw new ShippingConflictError("Only reconciliation can persist a label without a claim.");
@@ -634,6 +867,16 @@ export class ShippingService {
           where: { id: fulfillment.id },
           data: { status: "LABELLED", version: { increment: 1 } },
         });
+      } else if (pending > 0 && fulfillment.status === "RECONCILING") {
+        const remainingReconciling = await tx.shipmentPackage.count({
+          where: { shipmentId: record.shipmentId, status: "RECONCILING" },
+        });
+        if (remainingReconciling === 0) {
+          await tx.orderFulfillment.update({
+            where: { id: fulfillment.id },
+            data: { status: "PACKED", version: { increment: 1 } },
+          });
+        }
       }
       if (!shipment.trackingCode) {
         await tx.shipment.update({
@@ -653,12 +896,17 @@ export class ShippingService {
           workerId,
         },
       });
-      if (audit) {
+      if (audit && actor) {
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
         await writeShippingAudit(tx, {
           action: "SHIPMENT_LABEL_GENERATED",
           targetType: "ShipmentPackage",
           targetId: packageId,
           audit,
+          selfDealing,
           metadata: {
             orderId: fulfillment.orderId,
             shipmentId: record.shipmentId,
@@ -673,18 +921,20 @@ export class ShippingService {
   private async failLabel(
     packageId: string,
     workerId: string,
-    requestStartedAt: Date,
+    fence: ShippingRequestFence,
     uncertain: boolean,
     code: string,
     audit?: ShippingAuditContext,
   ): Promise<LabelProcessResult> {
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipmentPackage.findUnique({
       where: { id: packageId },
       select: { shipmentId: true, shipment: { select: { orderId: true } } },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
-    return this.db.$transaction(async (tx) => {
-      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+    return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await this.assertHumanActor(tx, audit, true);
+      const { order, fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
         orderId: identity.shipment.orderId,
         shipmentId: identity.shipmentId,
         packageId,
@@ -698,15 +948,16 @@ export class ShippingService {
           replayed: true,
         };
       }
-      if (
-        fulfillment.status === "CANCELLED" ||
-        shipment.status === "CANCELLED" ||
-        record.claimedBy !== workerId ||
-        record.requestStartedAt?.getTime() !== requestStartedAt.getTime()
-      ) {
-        throw new ShippingConflictError(
-          "Package label claim ownership changed before failure update.",
-        );
+      if (fulfillment.status === "CANCELLED" || shipment.status === "CANCELLED") {
+        throw new ShippingConflictError("A cancelled shipment cannot update a provider failure.");
+      }
+      if (!matchesRequestFence(record, fence)) {
+        return {
+          packageId,
+          status: record.status,
+          trackingCode: record.trackingCode,
+          replayed: true,
+        };
       }
       const status: ShipmentPackageStatus = uncertain ? "RECONCILING" : "SEALED";
       await tx.shipmentPackage.update({
@@ -736,20 +987,38 @@ export class ShippingService {
         },
       });
       if (uncertain) {
-        await writeShippingOutbox(tx, {
-          eventType: "shipping.provider.uncertain.v1",
-          aggregateType: "ShipmentPackage",
-          aggregateId: packageId,
-          deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1`,
-          payload: { orderId: fulfillment.orderId, shipmentId: record.shipmentId, packageId },
+        const now = await databaseTimestamp(tx);
+        await tx.domainOutbox.upsert({
+          where: { deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1` },
+          create: {
+            eventType: "shipping.provider.uncertain.v1",
+            aggregateType: "ShipmentPackage",
+            aggregateId: packageId,
+            deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1`,
+            payload: { orderId: fulfillment.orderId, shipmentId: record.shipmentId, packageId },
+          },
+          update: {
+            availableAt: now,
+            claimedAt: null,
+            claimedBy: null,
+            claimExpiresAt: null,
+            processedAt: null,
+            failedAt: null,
+            lastError: null,
+          },
         });
       }
-      if (audit) {
+      if (audit && actor) {
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
         await writeShippingAudit(tx, {
           action: uncertain ? "SHIPMENT_LABEL_MARKED_UNCERTAIN" : "SHIPMENT_LABEL_REJECTED",
           targetType: "ShipmentPackage",
           targetId: packageId,
           audit,
+          selfDealing,
           metadata: {
             orderId: fulfillment.orderId,
             shipmentId: record.shipmentId,
@@ -772,14 +1041,14 @@ export class ShippingService {
     const claimSeconds = this.options.claimSeconds ?? 300;
     if (!Number.isInteger(claimSeconds) || claimSeconds < 60 || claimSeconds > 900)
       throw new ShippingValidationError("claimSeconds must be between 60 and 900.");
-    const claim = await this.db.$transaction(async (tx) => {
-      await this.assertHumanActor(tx, audit, true);
+    const claim = await inInventoryTransaction(this.db, async (tx) => {
+      const actor = await this.assertHumanActor(tx, audit, true);
       const identity = await tx.shipmentPackage.findUnique({
         where: { id: packageId },
         select: { shipmentId: true, shipment: { select: { orderId: true } } },
       });
       if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
-      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+      const { order, fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
         orderId: identity.shipment.orderId,
         shipmentId: identity.shipmentId,
         packageId,
@@ -790,8 +1059,7 @@ export class ShippingService {
       if (record.status === "RECONCILING") return { outcome: "UNCERTAIN" as const, record };
       if (fulfillment.status === "CANCELLED" || shipment.status === "CANCELLED")
         throw new ShippingConflictError("A cancelled shipment cannot be claimed.");
-      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-      const now = nowRows[0]!.now;
+      const now = await databaseTimestamp(tx);
       const activeClaim = record.claimExpiresAt && record.claimExpiresAt > now;
       if (record.status === "CLAIMED" && activeClaim)
         throw new ShippingConflictError("Another worker already owns this package claim.");
@@ -805,13 +1073,56 @@ export class ShippingService {
             where: { id: fulfillment.id },
             data: { status: "RECONCILING", version: { increment: 1 } },
           });
-        await writeShippingOutbox(tx, {
-          eventType: "shipping.provider.uncertain.v1",
-          aggregateType: "ShipmentPackage",
-          aggregateId: packageId,
-          deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1`,
-          payload: { orderId: fulfillment.orderId, shipmentId: record.shipmentId, packageId },
+        const attemptStamp =
+          record.requestStartedAt?.toISOString() ?? record.claimedAt?.toISOString() ?? workerId;
+        await tx.shipmentEvent.upsert({
+          where: { eventKey: `provider-uncertain:${packageId}:${attemptStamp}` },
+          create: {
+            shipmentId: record.shipmentId,
+            packageId,
+            type: "PROVIDER_UNCERTAIN",
+            eventKey: `provider-uncertain:${packageId}:${attemptStamp}`,
+            metadata: { code: "CLAIM_EXPIRED" },
+          },
+          update: {},
         });
+        await tx.domainOutbox.upsert({
+          where: { deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1` },
+          create: {
+            eventType: "shipping.provider.uncertain.v1",
+            aggregateType: "ShipmentPackage",
+            aggregateId: packageId,
+            deduplicationKey: `shipment-package:${packageId}:provider-uncertain:v1`,
+            payload: { orderId: fulfillment.orderId, shipmentId: record.shipmentId, packageId },
+          },
+          update: {
+            availableAt: now,
+            claimedAt: null,
+            claimedBy: null,
+            claimExpiresAt: null,
+            processedAt: null,
+            failedAt: null,
+            lastError: null,
+          },
+        });
+        if (audit && actor) {
+          const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+            customerId: order.customerId,
+            email: order.emailSnapshot,
+          });
+          await writeShippingAudit(tx, {
+            action: "SHIPMENT_LABEL_MARKED_UNCERTAIN",
+            targetType: "ShipmentPackage",
+            targetId: packageId,
+            audit,
+            selfDealing,
+            metadata: {
+              orderId: fulfillment.orderId,
+              shipmentId: record.shipmentId,
+              code: "CLAIM_EXPIRED",
+            },
+          });
+        }
         return { outcome: "UNCERTAIN" as const, record };
       }
       if (record.status !== "SEALED" && record.status !== "CLAIMED")
@@ -850,12 +1161,17 @@ export class ShippingService {
           metadata: { workerId },
         },
       });
-      if (audit) {
+      if (audit && actor) {
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
         await writeShippingAudit(tx, {
           action: "SHIPMENT_LABEL_CLAIMED",
           targetType: "ShipmentPackage",
           targetId: packageId,
           audit,
+          selfDealing,
           metadata: { shipmentId: record.shipmentId, requestKey: record.requestKey },
         });
       }
@@ -870,15 +1186,38 @@ export class ShippingService {
       };
     if (claim.outcome === "UNCERTAIN")
       return { packageId, status: "RECONCILING", trackingCode: null, replayed: false };
-    const started = await this.db.$transaction(async (tx) => {
+    let preparedRequest: { request: ShippingLabelRequest; provider: ShippingProvider };
+    try {
+      preparedRequest = await this.labelRequest(packageId);
+    } catch (error) {
+      const code =
+        error instanceof ShippingProviderError
+          ? error.code
+          : error instanceof ShippingValidationError
+            ? error.message
+            : "PROVIDER_FAILURE";
+      return this.failLabel(
+        packageId,
+        workerId,
+        {
+          claimedBy: workerId,
+          requestStartedAt: null,
+          requestHash: claim.record.requestHash,
+        },
+        false,
+        code,
+        audit,
+      );
+    }
+    const started = await inInventoryTransaction(this.db, async (tx) => {
+      await this.assertHumanActor(tx, audit, true);
       const { record } = await lockShippingHierarchy(tx, {
         orderId: claim.identity.shipment.orderId,
         shipmentId: claim.identity.shipmentId,
         packageId,
       });
       if (!record) throw new ShippingNotFoundError("Shipment package not found.");
-      const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
-      const now = nowRows[0]!.now;
+      const now = await databaseTimestamp(tx);
       const fenced = await tx.shipmentPackage.updateMany({
         where: {
           id: packageId,
@@ -887,6 +1226,7 @@ export class ShippingService {
           claimedAt: claim.claimedAt,
           claimExpiresAt: { gt: now },
           requestStartedAt: null,
+          requestHash: claim.record.requestHash,
         },
         data: { requestStartedAt: now },
       });
@@ -900,23 +1240,28 @@ export class ShippingService {
         replayed: true,
       };
     }
+    const fence = {
+      claimedBy: workerId,
+      requestStartedAt: started.requestStartedAt,
+      requestHash: started.record.requestHash,
+    };
     let result: ShippingLabelResult;
     try {
-      const { request, provider } = await this.labelRequest(packageId);
-      result = await provider.createLabel(request);
+      result = await preparedRequest.provider.createLabel(preparedRequest.request);
     } catch (error) {
-      const uncertain =
+      const deterministic =
         error instanceof ShippingProviderError &&
-        ["NETWORK_UNCERTAIN", "INVALID_RESPONSE"].includes(error.code);
+        ["REJECTED", "HTTP_ERROR", "INVALID_CREDENTIAL"].includes(error.code);
+      const uncertain = !deterministic;
       const code =
         error instanceof ShippingProviderError
           ? error.code
           : error instanceof ShippingValidationError
             ? error.message
             : "PROVIDER_FAILURE";
-      return this.failLabel(packageId, workerId, started.requestStartedAt, uncertain, code, audit);
+      return this.failLabel(packageId, workerId, fence, uncertain, code, audit);
     }
-    return this.persistLabel(packageId, result, workerId, started.requestStartedAt, audit);
+    return this.persistLabel(packageId, result, workerId, fence, audit);
   }
 
   async reconcileLabel(
@@ -926,14 +1271,15 @@ export class ShippingService {
   ): Promise<LabelProcessResult> {
     assertIntegrationUuid(packageId, "packageId");
     const workerId = shippingWorkerId(workerIdInput);
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipmentPackage.findUnique({
       where: { id: packageId },
       select: { shipmentId: true, shipment: { select: { orderId: true } } },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment package not found.");
-    const current = await this.db.$transaction(async (tx) => {
-      if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+    const current = await inInventoryTransaction(this.db, async (tx) => {
+      const actor = audit ? await assertFulfillmentActor(tx, audit.actorAdminUserId) : null;
+      const { order, fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
         orderId: identity.shipment.orderId,
         shipmentId: identity.shipmentId,
         packageId,
@@ -949,12 +1295,17 @@ export class ShippingService {
       ) {
         throw new ShippingConflictError("Only an uncertain package requires reconciliation.");
       }
-      if (audit) {
+      if (audit && actor) {
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
         await writeShippingAudit(tx, {
           action: "SHIPMENT_LABEL_RECONCILIATION_STARTED",
           targetType: "ShipmentPackage",
           targetId: packageId,
           audit,
+          selfDealing,
         });
       }
       return { done: false as const, record };
@@ -967,22 +1318,29 @@ export class ShippingService {
         replayed: true,
       };
     }
-    const { provider } = await this.labelRequest(packageId);
+    if (!current.record.claimedBy) {
+      throw new ShippingConflictError("The uncertain package has no persistent claim owner.");
+    }
+    if (!current.record.credentialId) {
+      throw new ShippingNotFoundError("Aveonline package or credential not found.");
+    }
+    const fence = {
+      claimedBy: current.record.claimedBy,
+      requestStartedAt: current.record.requestStartedAt,
+      requestHash: current.record.requestHash,
+    };
+    const provider = this.provider(await this.credentials(current.record.credentialId));
     const result = await provider.findLabel(current.record.requestKey);
-    if (result) return this.persistLabel(packageId, result, workerId, null, audit);
-    return this.db.$transaction(async (tx) => {
-      if (audit) await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const { fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
+    if (result) return this.persistLabel(packageId, result, workerId, fence, audit);
+    return inInventoryTransaction(this.db, async (tx) => {
+      const actor = audit ? await assertFulfillmentActor(tx, audit.actorAdminUserId) : null;
+      const { order, fulfillment, shipment, record } = await lockShippingHierarchy(tx, {
         orderId: identity.shipment.orderId,
         shipmentId: identity.shipmentId,
         packageId,
       });
       if (!record) throw new ShippingNotFoundError("Shipment package not found.");
-      if (
-        record.status !== "RECONCILING" ||
-        record.requestStartedAt?.getTime() !== current.record.requestStartedAt?.getTime() ||
-        record.claimedBy !== current.record.claimedBy
-      ) {
+      if (record.status !== "RECONCILING" || !matchesRequestFence(record, fence)) {
         return {
           packageId,
           status: record.status,
@@ -1003,11 +1361,17 @@ export class ShippingService {
           lastError: "PROVIDER_CONFIRMED_NOT_FOUND",
         },
       });
-      if (fulfillment.status === "RECONCILING")
-        await tx.orderFulfillment.update({
-          where: { id: fulfillment.id },
-          data: { status: "PACKED", version: { increment: 1 } },
+      if (fulfillment.status === "RECONCILING") {
+        const remainingReconciling = await tx.shipmentPackage.count({
+          where: { shipmentId: record.shipmentId, status: "RECONCILING" },
         });
+        if (remainingReconciling === 0) {
+          await tx.orderFulfillment.update({
+            where: { id: fulfillment.id },
+            data: { status: "PACKED", version: { increment: 1 } },
+          });
+        }
+      }
       await tx.shipmentEvent.create({
         data: {
           shipmentId: record.shipmentId,
@@ -1017,12 +1381,17 @@ export class ShippingService {
           metadata: { code: "PROVIDER_CONFIRMED_NOT_FOUND" },
         },
       });
-      if (audit) {
+      if (audit && actor) {
+        const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+          customerId: order.customerId,
+          email: order.emailSnapshot,
+        });
         await writeShippingAudit(tx, {
           action: "SHIPMENT_LABEL_RECONCILED_NOT_FOUND",
           targetType: "ShipmentPackage",
           targetId: packageId,
           audit,
+          selfDealing,
           metadata: { orderId: fulfillment.orderId, shipmentId: record.shipmentId },
         });
       }
@@ -1110,6 +1479,7 @@ export class ShippingService {
     fulfillmentId: string,
     serialUnitIds: readonly string[],
     audit: ShippingAuditContext,
+    selfDealing: boolean,
   ): Promise<number> {
     if (!Array.isArray(serialUnitIds) || serialUnitIds.length > 10_000) {
       throw new ShippingValidationError("serialUnitIds must contain at most 10000 identifiers.");
@@ -1203,6 +1573,7 @@ export class ShippingService {
       targetType: "Shipment",
       targetId: shipmentId,
       audit,
+      selfDealing,
       metadata: { orderId: shipment.orderId, serializedUnitCount: ids.length },
     });
     return ids.length;
@@ -1214,26 +1585,32 @@ export class ShippingService {
     audit: ShippingAuditContext,
   ): Promise<number> {
     assertIntegrationUuid(shipmentId, "shipmentId");
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipment.findUnique({
       where: { id: shipmentId },
       select: { orderId: true },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment not found.");
-    return this.db.$transaction(async (tx) => {
-      await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const { fulfillment } = await lockShippingHierarchy(tx, {
+    return inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      const { order, fulfillment } = await lockShippingHierarchy(tx, {
         orderId: identity.orderId,
         shipmentId,
       });
       if (fulfillment.status !== "LABELLED") {
         throw new ShippingConflictError("Serial assignment requires a labelled fulfillment.");
       }
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: order.customerId,
+        email: order.emailSnapshot,
+      });
       return this.assignSerialUnitsInTransaction(
         tx,
         shipmentId,
         fulfillment.id,
         serialUnitIds,
         audit,
+        selfDealing,
       );
     });
   }
@@ -1246,19 +1623,24 @@ export class ShippingService {
     serialUnitIds?: readonly string[],
   ): Promise<void> {
     assertIntegrationUuid(shipmentId, "shipmentId");
+    await this.assertHumanActor(this.db, audit);
     const identity = await this.db.shipment.findUnique({
       where: { id: shipmentId },
       select: { orderId: true },
     });
     if (!identity) throw new ShippingNotFoundError("Shipment not found.");
-    await this.db.$transaction(async (tx) => {
-      await assertFulfillmentActor(tx, audit.actorAdminUserId);
-      const { fulfillment, shipment } = await lockShippingHierarchy(tx, {
+    await inInventoryTransaction(this.db, async (tx) => {
+      const actor = await assertFulfillmentActor(tx, audit.actorAdminUserId);
+      const { order, fulfillment, shipment } = await lockShippingHierarchy(tx, {
         orderId: identity.orderId,
         shipmentId,
       });
       if (fulfillment.status !== (target === "SHIPPED" ? "LABELLED" : "SHIPPED"))
         throw new ShippingConflictError(`Fulfillment cannot transition to ${target}.`);
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: order.customerId,
+        email: order.emailSnapshot,
+      });
       if (target === "SHIPPED" && serialUnitIds) {
         await this.assignSerialUnitsInTransaction(
           tx,
@@ -1266,6 +1648,7 @@ export class ShippingService {
           fulfillment.id,
           serialUnitIds,
           audit,
+          selfDealing,
         );
       }
       if (target === "SHIPPED") await this.assertSerialAssignments(tx, shipmentId);
@@ -1336,6 +1719,7 @@ export class ShippingService {
         targetType: "OrderFulfillment",
         targetId: fulfillment.id,
         audit,
+        selfDealing,
         metadata: { orderId: fulfillment.orderId, shipmentId, packageCount: packages.length },
       });
       await writeShippingOutbox(tx, {

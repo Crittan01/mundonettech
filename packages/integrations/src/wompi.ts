@@ -213,6 +213,7 @@ export function verifyWompiWebhook(options: {
   credentials: WompiCredentials;
   headerChecksum?: string | null;
   now?: Date;
+  requireSignedRouting?: boolean;
 }): WompiTransactionEvent {
   if (
     typeof options.body !== "string" ||
@@ -288,13 +289,15 @@ export function verifyWompiWebhook(options: {
     };
   }
   const signedProperties = new Set(properties as string[]);
-  if (
-    !["transaction.id", "transaction.status", "transaction.amount_in_cents"].every((required) =>
-      signedProperties.has(required),
-    )
-  ) {
+  const requiredProperties = [
+    "transaction.id",
+    "transaction.status",
+    "transaction.amount_in_cents",
+    ...(options.requireSignedRouting ? ["transaction.reference", "transaction.currency"] : []),
+  ];
+  if (!requiredProperties.every((required) => signedProperties.has(required))) {
     throw new PaymentValidationError(
-      "Wompi transaction webhook signature must cover id, status, and amount_in_cents.",
+      "Wompi transaction webhook signature must cover its amount and routing fields.",
     );
   }
   const transaction = objectValue(data.transaction);
@@ -329,6 +332,9 @@ export function verifyWompiWebhook(options: {
       .digest("hex"),
     payloadHash,
     supported: true,
+    routingSigned: ["transaction.reference", "transaction.currency"].every((required) =>
+      signedProperties.has(required),
+    ),
     occurredAt: new Date(timestamp * 1000),
     transaction: {
       id,
@@ -402,9 +408,14 @@ export class WompiPaymentProvider implements PaymentProvider {
         maximumBytes: maximumResponseBytes,
       });
       if (!expectedStatuses.includes(response.status)) {
+        const deterministicRejection = [400, 401, 403, 404, 405, 410, 412, 413, 415, 422].includes(
+          response.status,
+        );
         throw new PaymentProviderError(
-          `Wompi rejected the operation with HTTP ${response.status}.`,
-          "HTTP_ERROR",
+          deterministicRejection
+            ? `Wompi rejected the operation with HTTP ${response.status}.`
+            : "Wompi operation outcome is uncertain and must be reconciled before retrying.",
+          deterministicRejection ? "HTTP_ERROR" : "NETWORK_UNCERTAIN",
         );
       }
       try {
@@ -460,10 +471,10 @@ export class WompiPaymentProvider implements PaymentProvider {
     );
     const data = objectValue(response?.data);
     const id = data?.v2_refund_id ?? data?.id;
+    const externalId = typeof id === "string" || typeof id === "number" ? String(id) : "";
     if (
       !data ||
-      (typeof id !== "string" && typeof id !== "number") ||
-      String(id).length === 0 ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(externalId) ||
       data.transaction_id !== input.externalCaptureId ||
       providerAmount(data.amount_in_cents) !== input.amountCents ||
       !["APPROVED", "PENDING", "DECLINED", "ERROR", "CANCELLED"].includes(String(data.status))
@@ -477,7 +488,7 @@ export class WompiPaymentProvider implements PaymentProvider {
       data.status === "APPROVED" ? "SUCCEEDED" : data.status === "PENDING" ? "PENDING" : "FAILED";
     return {
       status,
-      externalId: String(id).slice(0, 128),
+      externalId,
       providerReference: `refund:${input.transactionId}`,
       message: typeof data.status_message === "string" ? data.status_message.slice(0, 500) : null,
     };

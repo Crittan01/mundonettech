@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,7 @@ import {
   saveDeliveryZoneAction,
   startPickingAction,
 } from "@/lib/actions/admin-logistics";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 export function StartPickingForm({ shipmentId }: { shipmentId: string }) {
   const [state, action, pending] = useActionState(startPickingAction, initialActionState);
@@ -109,13 +109,13 @@ export function PackShipmentForm({
               ] as const
             ).map(([name, label]) => (
               <div key={name} className="space-y-1">
-                <Label htmlFor={`${name}-${record.key}`}>{label}</Label>
+                <Label htmlFor={`${shipmentId}-${name}-${record.key}`}>{label}</Label>
                 <Input
-                  id={`${name}-${record.key}`}
+                  id={`${shipmentId}-${name}-${record.key}`}
                   type="number"
                   min={1}
                   max={name === "weightGrams" ? 10_000_000 : 100_000}
-                  value={record[name]}
+                  value={record[name] || ""}
                   onChange={(event) =>
                     update(
                       record.key,
@@ -133,11 +133,11 @@ export function PackShipmentForm({
           <div className="grid gap-3 sm:grid-cols-2">
             {items.map((item) => (
               <div key={item.id} className="space-y-1">
-                <Label htmlFor={`quantity-${record.key}-${item.id}`}>
+                <Label htmlFor={`${shipmentId}-quantity-${record.key}-${item.id}`}>
                   {item.title} · máximo {item.quantity}
                 </Label>
                 <Input
-                  id={`quantity-${record.key}-${item.id}`}
+                  id={`${shipmentId}-quantity-${record.key}-${item.id}`}
                   type="number"
                   min={0}
                   max={item.quantity}
@@ -194,6 +194,33 @@ export function PackShipmentForm({
   );
 }
 
+function labelOperationButtonLabel(pending: boolean, reconcile: boolean): string {
+  return pending ? "Procesando…" : reconcile ? "Conciliar con proveedor" : "Solicitar guía";
+}
+
+function publishLabelOperationMessage(
+  container: ParentNode,
+  packageId: string,
+  state: ActionState,
+  documentRef: Document = document,
+): void {
+  const selector = `output[data-label-operation-message="${packageId}"]`;
+  const existing = container.querySelector<HTMLOutputElement>(selector);
+  if (state.status === "idle" || !state.message) {
+    existing?.remove();
+    return;
+  }
+  const message = existing ?? documentRef.createElement("output");
+  message.dataset.labelOperationMessage = packageId;
+  message.className =
+    state.status === "error" ? "text-sm text-destructive" : "text-sm text-foreground";
+  message.setAttribute("role", state.status === "error" ? "alert" : "status");
+  message.setAttribute("aria-live", state.status === "error" ? "assertive" : "polite");
+  message.setAttribute("aria-atomic", "true");
+  message.textContent = state.message;
+  if (!existing) container.append(message);
+}
+
 export function LabelOperationForm({
   packageId,
   reconcile = false,
@@ -201,17 +228,29 @@ export function LabelOperationForm({
   packageId: string;
   reconcile?: boolean;
 }) {
+  const formRef = useRef<HTMLFormElement>(null);
+  const operation = reconcile ? reconcileLabelAction : processLabelAction;
   const [state, action, pending] = useActionState(
-    reconcile ? reconcileLabelAction : processLabelAction,
+    async (previous: ActionState, formData: FormData) => {
+      const container = formRef.current?.parentElement;
+      if (container) publishLabelOperationMessage(container, packageId, initialActionState);
+      const result = await operation(previous, formData);
+      if (container) publishLabelOperationMessage(container, packageId, result);
+      return result;
+    },
     initialActionState,
   );
+  useEffect(() => {
+    if (state.status === "idle") return;
+    const container = formRef.current?.parentElement;
+    if (container) publishLabelOperationMessage(container, packageId, state);
+  }, [packageId, state]);
   return (
-    <form action={action} className="space-y-2">
+    <form ref={formRef} action={action} className="space-y-2">
       <input type="hidden" name="packageId" value={packageId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
-        {pending ? "Procesando…" : reconcile ? "Conciliar con proveedor" : "Solicitar guía"}
+        {labelOperationButtonLabel(pending, reconcile)}
       </Button>
-      <FormMessage state={state} />
     </form>
   );
 }
@@ -266,6 +305,8 @@ export function DispatchShipmentForm({
   const [selected, setSelected] = useState<readonly string[]>(() =>
     availableUnits.filter((unit) => unit.shipmentId === shipmentId).map((unit) => unit.id),
   );
+  const [driverName, setDriverName] = useState("");
+  const [driverPhoneE164, setDriverPhoneE164] = useState("");
   const assignmentComplete = trackedItems.every(
     (item) =>
       selected.filter(
@@ -339,6 +380,8 @@ export function DispatchShipmentForm({
               <Input
                 id={`driver-name-${shipmentId}`}
                 name="driverName"
+                value={driverName}
+                onChange={(event) => setDriverName(event.target.value)}
                 minLength={2}
                 maxLength={200}
                 required
@@ -349,6 +392,8 @@ export function DispatchShipmentForm({
               <Input
                 id={`driver-phone-${shipmentId}`}
                 name="driverPhoneE164"
+                value={driverPhoneE164}
+                onChange={(event) => setDriverPhoneE164(event.target.value)}
                 placeholder="+573001234567"
                 maxLength={16}
                 required
@@ -417,7 +462,25 @@ export interface DeliveryZoneView {
 
 export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
   const [state, action, pending] = useActionState(saveDeliveryZoneAction, initialActionState);
-  const values = state.values;
+  const [code, setCode] = useState(zone?.code ?? "");
+  const [name, setName] = useState(zone?.name ?? "");
+  const [municipalityCodes, setMunicipalityCodes] = useState(
+    zone?.municipalityCodes.join(",") ?? "",
+  );
+  const [polygon, setPolygon] = useState(
+    zone?.polygon
+      .map((point) => `${point.latitudeE6 / 1_000_000},${point.longitudeE6 / 1_000_000}`)
+      .join(";") ?? "",
+  );
+  const [baseFeeCents, setBaseFeeCents] = useState(zone?.baseFeeCents ?? "0");
+  const [freeShippingThresholdCents, setFreeShippingThresholdCents] = useState(
+    zone?.freeShippingThresholdCents ?? "",
+  );
+  const [cutoffMinutes, setCutoffMinutes] = useState(String(zone?.cutoffMinutes ?? 720));
+  const [deliveryPromiseMinutes, setDeliveryPromiseMinutes] = useState(
+    String(zone?.deliveryPromiseMinutes ?? 120),
+  );
+  const [active, setActive] = useState(zone?.active ?? true);
   return (
     <form action={action} className="space-y-4">
       {zone ? <input type="hidden" name="zoneId" value={zone.id} /> : null}
@@ -428,7 +491,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
           <Input
             id={`zone-code-${zone?.id ?? "new"}`}
             name="code"
-            defaultValue={values?.code ?? zone?.code ?? ""}
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
             pattern="[A-Za-z0-9_-]{2,40}"
             maxLength={40}
             required
@@ -439,7 +503,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
           <Input
             id={`zone-name-${zone?.id ?? "new"}`}
             name="name"
-            defaultValue={values?.name ?? zone?.name ?? ""}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
             minLength={2}
             maxLength={120}
             required
@@ -452,7 +517,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
           <Input
             id={`zone-municipalities-${zone?.id ?? "new"}`}
             name="municipalityCodes"
-            defaultValue={values?.municipalityCodes ?? zone?.municipalityCodes.join(",") ?? ""}
+            value={municipalityCodes}
+            onChange={(event) => setMunicipalityCodes(event.target.value)}
             required
           />
         </div>
@@ -463,13 +529,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
           <textarea
             id={`zone-polygon-${zone?.id ?? "new"}`}
             name="polygon"
-            defaultValue={
-              values?.polygon ??
-              zone?.polygon
-                .map((point) => `${point.latitudeE6 / 1_000_000},${point.longitudeE6 / 1_000_000}`)
-                .join(";") ??
-              ""
-            }
+            value={polygon}
+            onChange={(event) => setPolygon(event.target.value)}
             rows={4}
             className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
             required
@@ -482,7 +543,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             name="baseFeeCents"
             inputMode="numeric"
             pattern="[0-9]+"
-            defaultValue={values?.baseFeeCents ?? zone?.baseFeeCents ?? "0"}
+            value={baseFeeCents}
+            onChange={(event) => setBaseFeeCents(event.target.value)}
             required
           />
         </div>
@@ -493,9 +555,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             name="freeShippingThresholdCents"
             inputMode="numeric"
             pattern="[0-9]+"
-            defaultValue={
-              values?.freeShippingThresholdCents ?? zone?.freeShippingThresholdCents ?? ""
-            }
+            value={freeShippingThresholdCents}
+            onChange={(event) => setFreeShippingThresholdCents(event.target.value)}
           />
         </div>
         <div className="space-y-2">
@@ -508,7 +569,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             type="number"
             min={0}
             max={1439}
-            defaultValue={values?.cutoffMinutes ?? zone?.cutoffMinutes ?? 720}
+            value={cutoffMinutes}
+            onChange={(event) => setCutoffMinutes(event.target.value)}
             required
           />
         </div>
@@ -520,7 +582,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             type="number"
             min={5}
             max={10080}
-            defaultValue={values?.deliveryPromiseMinutes ?? zone?.deliveryPromiseMinutes ?? 120}
+            value={deliveryPromiseMinutes}
+            onChange={(event) => setDeliveryPromiseMinutes(event.target.value)}
             required
           />
         </div>
@@ -529,7 +592,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
         <input
           type="checkbox"
           name="active"
-          defaultChecked={zone?.active ?? true}
+          checked={active}
+          onChange={(event) => setActive(event.target.checked)}
           className="size-4 accent-primary"
         />
         Zona activa para nuevas cotizaciones
@@ -544,13 +608,37 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
 
 export function ArchiveDeliveryZoneForm({ zone }: { zone: DeliveryZoneView }) {
   const [state, action, pending] = useActionState(archiveDeliveryZoneAction, initialActionState);
+  const [confirming, setConfirming] = useState(false);
   return (
     <form action={action} className="space-y-2">
       <input type="hidden" name="zoneId" value={zone.id} />
       <input type="hidden" name="expectedUpdatedAt" value={zone.updatedAt} />
-      <Button type="submit" variant="destructive" size="sm" disabled={pending}>
-        {pending ? "Archivando…" : "Archivar zona"}
-      </Button>
+      {confirming ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="submit" variant="destructive" size="sm" disabled={pending}>
+            {pending ? "Archivando…" : "Confirmar archivo de zona"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={pending}
+            onClick={() => setConfirming(false)}
+          >
+            Cancelar
+          </Button>
+        </div>
+      ) : (
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          disabled={pending}
+          onClick={() => setConfirming(true)}
+        >
+          Archivar zona
+        </Button>
+      )}
       <FormMessage state={state} />
     </form>
   );

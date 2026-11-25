@@ -1,12 +1,21 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { optionalTrimmedText, phoneInputPattern } from "../../apps/web/lib/form-validation";
+import {
+  normalizePhoneE164,
+  optionalTrimmedText,
+  phoneInputPattern,
+} from "../../apps/web/lib/form-validation";
 
 import { parseCoordinateE6 } from "../../packages/core/dist/index.js";
-import { OperationRateLimitError, PaymentProvider } from "../../packages/db/dist/index.js";
 import {
+  IntegrationEnvironment,
+  OperationRateLimitError,
+  PaymentProvider,
+} from "../../packages/db/dist/index.js";
+import {
+  InvoiceService,
   PaymentConflictError,
   PaymentNotFoundError,
   PaymentProviderError,
@@ -14,6 +23,7 @@ import {
 } from "../../packages/integrations/dist/index.js";
 import {
   actionError,
+  actionSuccess,
   formSnapshot,
   formString,
   type ActionState,
@@ -62,6 +72,7 @@ const moduleMocks: Record<string, unknown> = {
   "next/cache": { revalidatePath: mocks.revalidatePath, updateTag: mocks.updateTag },
   "next/navigation": { redirect: mocks.redirect },
   "@/lib/action-state": { actionError, formSnapshot, formString },
+  "@/lib/database-clock": { getDatabaseClock: async () => new Date() },
   "@/lib/cart": {
     clearCartAccessToken: mocks.clearCartAccessToken,
     optionalCustomerId: mocks.optionalCustomerId,
@@ -80,12 +91,19 @@ const moduleMocks: Record<string, unknown> = {
   "@/lib/db": {
     getDatabase: () => ({
       order: { findUnique: mocks.orderFindUnique },
+      orderFulfillment: { findFirst: vi.fn(async () => null) },
       paymentAttempt: { findMany: mocks.attemptFindMany, findFirst: mocks.attemptFindFirst },
       paymentTransaction: { findFirst: mocks.transactionFindFirst },
+      shipment: { findFirst: vi.fn(async () => null) },
+      shipmentPackage: { findFirst: vi.fn(async () => null) },
     }),
   },
   "@/lib/env": { getSecurityEventPepper: () => new Uint8Array(32).fill(9) },
-  "@/lib/form-validation": { optionalTrimmedText, phoneInputPattern },
+  "@/lib/form-validation": {
+    normalizePhoneE164,
+    optionalTrimmedText,
+    phoneInputPattern,
+  },
   "@/lib/integrations": {
     blockedIdentityService: () => ({ isBlocked: mocks.isBlocked }),
     getBankTransferInstructions: () => "Transferencia bancaria de prueba configurada",
@@ -252,6 +270,39 @@ describe("A2 — identidades COD y autoridad de checkout", () => {
     expect(mocks.paymentStart.mock.calls[0]?.[0]).not.toHaveProperty("amountCents");
   });
 
+  it("normaliza el teléfono antes de invocar checkout y rechaza más de 15 dígitos", async () => {
+    const formatted = checkoutForm();
+    formatted.set("phoneE164", "+123 (456) 789-012345");
+    await expect(confirmCheckoutAction(idle, formatted)).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    expect(mocks.checkout).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contact: expect.objectContaining({ phoneE164: "+123456789012345" }),
+      }),
+    );
+
+    for (const local of ["300 123 4567", "300-123-4567", "(300) 123 4567"]) {
+      mocks.checkout.mockClear();
+      formatted.set("phoneE164", local);
+      await expect(confirmCheckoutAction(idle, formatted)).rejects.toMatchObject({
+        digest: expect.stringContaining("NEXT_REDIRECT"),
+      });
+      expect(mocks.checkout).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contact: expect.objectContaining({ phoneE164: "+573001234567" }),
+        }),
+      );
+    }
+
+    mocks.checkout.mockClear();
+    const invalid = checkoutForm();
+    invalid.set("phoneE164", "+1234567890123456");
+    const result = await confirmCheckoutAction(idle, invalid);
+    expect(result.status).toBe("error");
+    expect(mocks.checkout).not.toHaveBeenCalled();
+  });
+
   it("bloquea la orden antes de reservar stock cuando cualquier identidad está bloqueada", async () => {
     mocks.isBlocked.mockResolvedValueOnce(true);
 
@@ -407,5 +458,249 @@ describe("A2 — pagos desde comprobante y titularidad", () => {
 
     expect(result.status).toBe("error");
     expect(JSON.stringify(result)).not.toContain("secret provider payload");
+  });
+
+  it("mantiene phoneInputPattern y normalizePhoneE164 alineados en números locales de 10 dígitos", () => {
+    expect(phoneInputPattern.test("3001234567")).toBe(true);
+    expect(phoneInputPattern.test("+573001234567")).toBe(true);
+    expect(phoneInputPattern.test("300123456")).toBe(false);
+    expect(phoneInputPattern.test("30012345678")).toBe(false);
+    expect(normalizePhoneE164("3001234567")).toBe("+573001234567");
+    expect(() => normalizePhoneE164("300123456")).toThrow();
+    expect(() => normalizePhoneE164("30012345678")).toThrow();
+  });
+});
+
+describe("A5 — normalized B2B phone capture", () => {
+  it("passes normalized E.164 to the B2B domain and rejects invalid numbers before capture", async () => {
+    const captureOpportunity = vi.fn(async () => ({
+      opportunityId: randomUUID(),
+      replayed: false,
+    }));
+    const b2bActions = loadActionModule<Record<string, ServerAction>>("b2b-public", {
+      "@mundonettech/db": { B2bError: class extends Error {} },
+      "next/cache": { revalidatePath: mocks.revalidatePath, updateTag: mocks.updateTag },
+      "next/navigation": { redirect: mocks.redirect },
+      "@/lib/action-state": { actionError, actionSuccess, formString },
+      "@/lib/b2b": {
+        b2bService: () => ({ captureOpportunity }),
+        hashProposalToken: (value: string) => value,
+        receiptTokenForProposal: (value: string) => value,
+        sha256: (value: string) => createHash("sha256").update(value).digest(),
+      },
+      "@/lib/checkout": { orderService: vi.fn() },
+      "@/lib/checkout-errors": { checkoutMutationMessage: () => "Error B2B" },
+      "@/lib/form-validation": { normalizePhoneE164, optionalTrimmedText, phoneInputPattern },
+      "@/lib/legal": {
+        getConfiguredLegalDocument: (slug: string) => ({
+          slug,
+          version: "2026-01",
+          content: "legal",
+        }),
+      },
+      "@/lib/security/request-context": {
+        getRequestSecurityContext: mocks.getRequestSecurityContext,
+      },
+      "@/lib/security/turnstile": { verifyTurnstileToken: vi.fn(async () => undefined) },
+    });
+    const form = new FormData();
+    form.set("submissionId", submissionId);
+    form.set("legalName", "Empresa de pruebas");
+    form.set("commercialName", "");
+    form.set("taxId", "9010000001");
+    form.set("givenName", "Nombre");
+    form.set("familyName", "Apellido");
+    form.set("email", "compras@example.test");
+    form.set("phoneE164", "+123 (456) 789-012345");
+    form.set("requirements", "Necesitamos equipos para toda la operación.");
+    form.set("dataProcessingAccepted", "true");
+    form.set("turnstileToken", "");
+    form.set("website", "");
+    const result = await b2bActions.captureB2bOpportunityAction!(idle, form);
+    expect(result.status).toBe("success");
+    expect(captureOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ phoneE164: "+123456789012345" }),
+    );
+
+    for (const local of ["300 123 4567", "300-123-4567", "(300) 123 4567"]) {
+      captureOpportunity.mockClear();
+      form.set("phoneE164", local);
+      const localResult = await b2bActions.captureB2bOpportunityAction!(idle, form);
+      expect(localResult.status).toBe("success");
+      expect(captureOpportunity).toHaveBeenCalledWith(
+        expect.objectContaining({ phoneE164: "+573001234567" }),
+      );
+    }
+
+    captureOpportunity.mockClear();
+    form.set("phoneE164", "+1234567890123456");
+    const invalid = await b2bActions.captureB2bOpportunityAction!(idle, form);
+    expect(invalid.status).toBe("error");
+    expect(captureOpportunity).not.toHaveBeenCalled();
+  });
+});
+
+const uvtCredentialId = "77777777-7777-4777-8777-777777777777";
+
+function uvtVault() {
+  return {
+    list: vi.fn(async () => ({
+      items: [{ id: uvtCredentialId, provider: "dian", revokedAt: null }],
+    })),
+    reveal: vi.fn(async () =>
+      new TextEncoder().encode(
+        JSON.stringify({
+          bearerToken: "a-secure-provider-token",
+          providerUrl: "https://fiscal.example.test",
+          issuerNit: "9010000001",
+          issuerDv: "1",
+          issuerLegalName: "Emisor de Prueba",
+          issuerEmail: "fiscal@example.test",
+          issuerAddress: "Carrera 7 # 71-21",
+          issuerDepartmentCode: "11",
+          issuerDepartmentName: "Bogotá, D.C.",
+          issuerMunicipalityCode: "11001",
+          issuerMunicipalityName: "Bogotá, D.C.",
+          issuerPostalCode: "110231",
+          issuerPhoneE164: "+573001234567",
+          softwareId: "software-1234",
+          softwarePin: "software-secret-pin",
+          signatureTrustAnchorPem: null,
+          invoicePrefix: "FE",
+          invoiceResolutionNumber: "18760000001",
+          invoiceResolutionStart: 1,
+          invoiceResolutionEnd: 1000,
+          invoiceResolutionDate: "2026-01-01",
+          invoiceResolutionValidFrom: "2026-01-01",
+          invoiceResolutionValidTo: "2027-12-31",
+          creditNotePrefix: "NC",
+        }),
+      ),
+    ),
+  };
+}
+
+function uvtOrder() {
+  const taxLines = [
+    {
+      appliedRateBps: 1900,
+      treatment: "UVT_THRESHOLD_EXCLUDED",
+      rule: "UVT_STANDARD_ABOVE_LIMIT",
+    },
+  ];
+  return {
+    id: orderId,
+    taxRegime: "RESPONSABLE_IVA",
+    paymentStatus: "PAID",
+    recipientNameSnapshot: "Comprador UVT",
+    emailSnapshot: "uvt@example.test",
+    phoneE164Snapshot: "+573001234567",
+    buyerDocumentTypeSnapshot: "13",
+    buyerDocumentNumberSnapshot: "1020304050",
+    buyerTaxRegimeSnapshot: "NO_RESPONSABLE_IVA",
+    addressLine1Snapshot: "Carrera 7 # 71-21",
+    departmentCode: "11",
+    departmentNameSnapshot: "Bogotá, D.C.",
+    municipalityCode: "11001",
+    municipalityNameSnapshot: "Bogotá, D.C.",
+    postalCodeSnapshot: "110231",
+    subtotalCents: 1_000n,
+    discountCents: 0n,
+    taxCents: 190n,
+    shippingCents: 0n,
+    totalCents: 1_190n,
+    items: [
+      {
+        skuSnapshot: "UVT-ITEM",
+        titleSnapshot: "Producto sobre UVT",
+        quantity: 1,
+        unitPriceCents: 1_000n,
+        discountCents: 0n,
+        lineTotalCents: 1_000n,
+        taxCents: 190n,
+        taxLines,
+      },
+    ],
+  };
+}
+
+function uvtDatabase() {
+  const order = uvtOrder();
+  const createdAt = new Date("2026-11-21T20:00:00.000Z");
+  const invoice = {
+    id: randomUUID(),
+    orderId,
+    credentialId: uvtCredentialId,
+    status: "ACCEPTED",
+    fullNumber: "FE1",
+    cufe: "a".repeat(96),
+    createdAt,
+    order,
+  };
+  const refund = {
+    id: randomUUID(),
+    status: "COMPLETED",
+    reason: "RETRACT",
+    subtotalCents: 1_000n,
+    taxCents: 190n,
+    shippingCents: 0n,
+    totalCents: 1_190n,
+    items: [{ quantity: 1, subtotalCents: 1_000n, taxCents: 190n, orderItem: order.items[0] }],
+    order: { taxInvoice: invoice },
+  };
+  const created: Record<string, unknown>[] = [];
+  const tx = {
+    $queryRaw: vi.fn(async (query: TemplateStringsArray) => {
+      const text = query.join(" ");
+      if (text.includes("CURRENT_TIMESTAMP")) return [{ now: createdAt }];
+      if (text.includes('FROM "Order"')) return [{ id: orderId }];
+      throw new Error(`Unexpected SQL: ${text}`);
+    }),
+    $executeRaw: vi.fn(async () => 0),
+    order: { findUniqueOrThrow: vi.fn(async () => order) },
+    orderRefund: { findUniqueOrThrow: vi.fn(async () => refund) },
+    taxInvoice: {
+      findUnique: vi.fn(async () => null),
+      findUniqueOrThrow: vi.fn(async () => invoice),
+      aggregate: vi.fn(async () => ({ _max: { number: null } })),
+      create: vi.fn(async (options: { data: Record<string, unknown> }) => {
+        created.push(options.data);
+        return { id: randomUUID(), status: "DRAFT", fullNumber: "FE1" };
+      }),
+    },
+    creditNote: {
+      findUnique: vi.fn(async () => null),
+      aggregate: vi.fn(async () => ({ _max: { number: null } })),
+      create: vi.fn(async (options: { data: Record<string, unknown> }) => {
+        created.push(options.data);
+        return { id: randomUUID(), status: "DRAFT", fullNumber: "NC1" };
+      }),
+    },
+    domainOutbox: { create: vi.fn(async () => ({})) },
+  };
+  const db = {
+    taxInvoice: { findUnique: vi.fn(async () => null) },
+    orderRefund: { findUnique: vi.fn(async () => refund) },
+    creditNote: { findUnique: vi.fn(async () => null) },
+    $transaction: async <T>(callback: (transaction: typeof tx) => Promise<T>) => callback(tx),
+  };
+  return { db, created, refund };
+}
+
+describe("A5 — UVT above-limit fiscal identity", () => {
+  it("uses STANDARD with a positive rate for UVT_STANDARD_ABOVE_LIMIT in invoice and credit note", async () => {
+    const { db, created, refund } = uvtDatabase();
+    const service = new InvoiceService(db as never, {
+      environment: IntegrationEnvironment.LOCAL,
+      vault: uvtVault(),
+    });
+    await service.prepareInvoice(orderId);
+    await service.prepareCreditNote(refund.id);
+    expect(created).toHaveLength(2);
+    for (const document of created) {
+      const xml = String(document.unsignedXml);
+      expect(xml).toContain("<cbc:ID>S</cbc:ID><cbc:Percent>19.00</cbc:Percent>");
+      expect(xml).not.toContain("<cbc:ID>O</cbc:ID><cbc:Percent>19.00</cbc:Percent>");
+    }
   });
 });

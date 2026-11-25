@@ -2,6 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 
+import { AdminActorAuthorizationError } from "@mundonettech/db";
 import {
   EmailConflictError,
   EmailProviderError,
@@ -97,7 +98,7 @@ export async function saveEmailTemplateAction(
   } catch (error) {
     if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE")
       return actionError("Confirma tu autenticador antes de modificar plantillas.", values);
-    if (error instanceof AdminAuthorizationError)
+    if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError)
       return actionError("Tu sesión no está autorizada para administrar comunicaciones.", values);
     if (
       error instanceof EmailValidationError ||

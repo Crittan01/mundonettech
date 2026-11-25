@@ -38,6 +38,8 @@ function signedEvent(options = {}) {
     "transaction.id",
     "transaction.status",
     "transaction.amount_in_cents",
+    "transaction.reference",
+    "transaction.currency",
   ];
   const values = properties.map((path) =>
     path.split(".").reduce((value, key) => value?.[key], data),
@@ -207,12 +209,40 @@ describe("F3.3 — authenticated Wompi webhooks", () => {
       credentials,
       headerChecksum: parsed.signature.checksum,
       now,
+      requireSignedRouting: true,
     });
     assert.equal(event.supported, true);
     assert.equal(event.transaction.amountCents, 4490000n);
     assert.equal(event.transaction.status, "APPROVED");
     assert.match(event.eventKey, /^[0-9a-f]{64}$/);
     assert.equal(event.payloadHash.length, 32);
+  });
+
+  it("requires signed payment routing and rejects an unsigned reference swap", () => {
+    const tampered = JSON.parse(signedEvent());
+    tampered.data.transaction.reference = "another-order-reference";
+    assert.throws(
+      () =>
+        verifyWompiWebhook({
+          body: JSON.stringify(tampered),
+          credentials,
+          now,
+          requireSignedRouting: true,
+        }),
+      PaymentValidationError,
+    );
+    assert.throws(
+      () =>
+        verifyWompiWebhook({
+          body: signedEvent({
+            properties: ["transaction.id", "transaction.status", "transaction.amount_in_cents"],
+          }),
+          credentials,
+          now,
+          requireSignedRouting: true,
+        }),
+      PaymentValidationError,
+    );
   });
 
   it("rejects tampering, replay windows, unsafe paths and environment confusion", () => {
@@ -317,6 +347,18 @@ describe("F3.3 — Wompi API refunds, voids and synchronization", () => {
       }).refund(operation()),
       (error) => error instanceof PaymentProviderError && error.code === "NETWORK_UNCERTAIN",
     );
+    for (const status of [408, 409, 429, 500, 503]) {
+      let calls = 0;
+      const gateway = provider(async () => {
+        calls += 1;
+        return new Response("{}", { status });
+      });
+      await assert.rejects(
+        gateway.refund(operation()),
+        (error) => error instanceof PaymentProviderError && error.code === "NETWORK_UNCERTAIN",
+      );
+      assert.equal(calls, 1);
+    }
     await assert.rejects(
       provider(
         async () =>

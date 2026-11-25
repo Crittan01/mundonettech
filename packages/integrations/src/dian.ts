@@ -1,13 +1,8 @@
-import { createHash } from "node:crypto";
+import { X509Certificate, createHash } from "node:crypto";
 
 import type { IntegrationEnvironment } from "@mundonettech/db";
 
-import {
-  centsToDecimal,
-  credentialObject,
-  integrationText,
-  publicHttpsUrl,
-} from "./integration-utils.js";
+import { centsToDecimal, integrationText, publicHttpsUrl } from "./integration-utils.js";
 import {
   InvoiceProviderError,
   InvoiceValidationError,
@@ -40,6 +35,91 @@ const keys = [
   "creditNotePrefix",
 ] as const;
 
+function dianCredentialObject(plaintext: Uint8Array): Record<string, unknown> {
+  const bytes = Buffer.from(plaintext);
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new TypeError("DIAN credential must be a JSON object.");
+    }
+    const record = parsed as Record<string, unknown>;
+    const allowed = new Set([...keys, "signatureTrustAnchorPem"]);
+    if (
+      Object.keys(record).some((key) => !allowed.has(key)) ||
+      keys.some((key) => !Object.hasOwn(record, key))
+    ) {
+      throw new TypeError("DIAN credential fields do not match the provider contract.");
+    }
+    return record;
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+const singlePemCertificatePattern =
+  /^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/]{1,76}\r?\n)*[A-Za-z0-9+/=]{1,76}\r?\n-----END CERTIFICATE-----$/;
+
+function signatureTrustAnchor(
+  record: Record<string, unknown>,
+  environment: IntegrationEnvironment,
+): string | null {
+  const value = record.signatureTrustAnchorPem;
+  if (value === undefined || value === null) {
+    if (environment === "PRD") {
+      throw new InvoiceProviderError(
+        "DIAN signature trust anchor is required in PRD.",
+        "INVALID_CREDENTIAL",
+      );
+    }
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw new InvoiceProviderError(
+      "DIAN signature trust anchor must be an X.509 PEM certificate.",
+      "INVALID_CREDENTIAL",
+    );
+  }
+  const pem = value.trim();
+  if (
+    pem.length < 500 ||
+    pem.length > 16_384 ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(pem) ||
+    !singlePemCertificatePattern.test(pem)
+  ) {
+    throw new InvoiceProviderError("DIAN signature trust anchor is invalid.", "INVALID_CREDENTIAL");
+  }
+  try {
+    const certificate = new X509Certificate(pem);
+    const now = Date.now();
+    const validFrom = Date.parse(certificate.validFrom);
+    const validTo = Date.parse(certificate.validTo);
+    const keyUsageAllowed =
+      !certificate.keyUsage ||
+      certificate.keyUsage.some((usage) =>
+        /digital\s*signature|non[- ]?repudiation|content\s*commitment|1\.3\.6\.1\.5\.5\.7\.3|2\.5\.29\.15/i.test(
+          usage,
+        ),
+      );
+    if (
+      !Number.isFinite(validFrom) ||
+      !Number.isFinite(validTo) ||
+      validFrom > now ||
+      validTo < now ||
+      !keyUsageAllowed ||
+      certificate.publicKey.asymmetricKeyType !== "rsa" ||
+      (certificate.publicKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048
+    ) {
+      throw new Error("invalid certificate");
+    }
+  } catch {
+    throw new InvoiceProviderError(
+      "DIAN signature trust anchor must be a valid RSA X.509 certificate.",
+      "INVALID_CREDENTIAL",
+    );
+  }
+  return pem;
+}
+
 function text(record: Record<string, unknown>, key: string, maximum: number, minimum = 1): string {
   const value = record[key];
   if (typeof value !== "string")
@@ -49,6 +129,17 @@ function text(record: Record<string, unknown>, key: string, maximum: number, min
   } catch {
     throw new InvoiceProviderError(`DIAN credential ${key} is invalid.`, "INVALID_CREDENTIAL");
   }
+}
+
+function phoneE164(record: Record<string, unknown>): string {
+  const value = text(record, "issuerPhoneE164", 16, 8);
+  if (!/^\+[1-9][0-9]{7,14}$/.test(value)) {
+    throw new InvoiceProviderError(
+      "DIAN issuerPhoneE164 must contain a normalized international E.164 number.",
+      "INVALID_CREDENTIAL",
+    );
+  }
+  return value;
 }
 
 function integer(record: Record<string, unknown>, key: string): number {
@@ -83,7 +174,7 @@ export function parseDianCredentials(
   if (!["LOCAL", "STG", "PRD"].includes(environment))
     throw new InvoiceProviderError("DIAN environment is invalid.", "INVALID_CREDENTIAL");
   try {
-    const record = credentialObject(plaintext, keys);
+    const record = dianCredentialObject(plaintext);
     const issuerNit = text(record, "issuerNit", 15, 5);
     const issuerDv = text(record, "issuerDv", 1, 1);
     if (!/^[0-9]+$/.test(issuerNit) || !/^[0-9]$/.test(issuerDv))
@@ -148,9 +239,10 @@ export function parseDianCredentials(
       issuerMunicipalityCode: municipalityCode,
       issuerMunicipalityName: text(record, "issuerMunicipalityName", 120, 2),
       issuerPostalCode: text(record, "issuerPostalCode", 6, 6),
-      issuerPhoneE164: text(record, "issuerPhoneE164", 16, 8),
+      issuerPhoneE164: phoneE164(record),
       softwareId,
       softwarePin,
+      signatureTrustAnchorPem: signatureTrustAnchor(record, environment),
       invoicePrefix,
       invoiceResolutionNumber: text(record, "invoiceResolutionNumber", 40),
       invoiceResolutionStart: resolutionStart,
@@ -200,21 +292,24 @@ export interface FiscalHashInput {
   readonly issueDate: Date;
   readonly subtotalCents: bigint;
   readonly discountCents: bigint;
+  readonly lineExtensionCents?: bigint;
   readonly taxCents: bigint;
   readonly totalCents: bigint;
   readonly issuerNit: string;
   readonly buyerDocumentNumber: string;
   readonly buyerDocumentType: string;
   readonly softwarePin: string;
+  readonly production: boolean;
 }
 
 function fiscalHash(input: FiscalHashInput): string {
   const timestamp = dianTimestamp(input.issueDate);
+  const lineExtensionCents = input.lineExtensionCents ?? input.subtotalCents - input.discountCents;
   const material = [
     input.fullNumber,
     timestamp.date,
     timestamp.time,
-    centsToDecimal(input.subtotalCents - input.discountCents),
+    centsToDecimal(lineExtensionCents),
     "01",
     centsToDecimal(input.taxCents),
     "04",
@@ -224,8 +319,8 @@ function fiscalHash(input: FiscalHashInput): string {
     centsToDecimal(input.totalCents),
     input.issuerNit,
     input.buyerDocumentNumber,
-    input.buyerDocumentType,
     input.softwarePin,
+    input.production ? "1" : "2",
   ].join("");
   return createHash("sha384").update(material, "utf8").digest("hex");
 }

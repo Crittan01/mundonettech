@@ -124,17 +124,20 @@ async function createOrder(client, options = {}) {
   const fulfillmentStatus = options.fulfillmentStatus ?? "FULFILLED";
   const total = 100000;
   const now = new Date();
+  const fulfillmentMethod =
+    options.fulfillmentMethod ?? (options.clickCollectLocationId ? "CLICK_COLLECT" : null);
+  const withBuyerDocument = options.withBuyerDocument ?? true;
   await client.query(
     `INSERT INTO "Order" (
        "id", "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus",
        "fulfillmentMethod", "clickCollectLocationId", "taxRegime", "subtotalCents",
        "discountCents", "taxCents", "shippingCents", "totalCents",
        "confirmedAt", "cancelledAt", "completedAt", "buyerDocumentTypeSnapshot",
-       "buyerDocumentNumberSnapshot", "buyerTaxRegimeSnapshot"
+       "buyerDocumentNumberSnapshot", "buyerTaxRegimeSnapshot", "deliveryLatitudeE6", "deliveryLongitudeE6"
      ) VALUES (
        $1, $2, $3::"OrderStatus", $4::"PaymentStatus", $5::"FulfillmentStatus",
        $6::"OrderFulfillmentMethod", $7, $8::"StoreTaxRegime", $9, 0, 0, 0, $9, $10, $11, $12,
-       $13, $14, $15::"StoreTaxRegime"
+       $13, $14, $15::"StoreTaxRegime", $16, $17
      )`,
     [
       id,
@@ -142,16 +145,18 @@ async function createOrder(client, options = {}) {
       orderStatus,
       paymentStatus,
       fulfillmentStatus,
-      options.clickCollectLocationId ? "CLICK_COLLECT" : null,
+      fulfillmentMethod,
       options.clickCollectLocationId ?? null,
       options.taxRegime ?? null,
       total,
       ["CONFIRMED", "COMPLETED"].includes(orderStatus) ? now : null,
       orderStatus === "CANCELLED" ? now : null,
       orderStatus === "COMPLETED" ? now : null,
-      options.taxRegime === "RESPONSABLE_IVA" ? "13" : null,
-      options.taxRegime === "RESPONSABLE_IVA" ? "900123456" : null,
+      withBuyerDocument ? "13" : null,
+      withBuyerDocument ? "900123456" : null,
       options.taxRegime === "RESPONSABLE_IVA" ? "RESPONSABLE_IVA" : null,
+      fulfillmentMethod === "LOCAL_DELIVERY" ? 46_000_000 : null,
+      fulfillmentMethod === "LOCAL_DELIVERY" ? -74_100_000 : null,
     ],
   );
   if (options.variantId) {
@@ -759,6 +764,211 @@ describe("A3 — stock location lifecycle protection", () => {
     });
   }
 
+  it("requires buyer documents for local delivery while allowing documented delivery and pickup without one", async () => {
+    await withRollback(async (client) => {
+      for (const [index, fulfillmentMethod] of ["LOCAL_DELIVERY", null].entries()) {
+        await client.query(`SAVEPOINT a5_buyer_document_${index}`);
+        await assert.rejects(
+          createOrder(client, {
+            fulfillmentMethod,
+            taxRegime: "NO_RESPONSABLE_IVA",
+            withBuyerDocument: false,
+          }),
+          (error) => {
+            assert.equal(error.code, "23514");
+            assert.equal(error.constraint, "Order_buyer_document_valid");
+            return true;
+          },
+        );
+        await client.query(`ROLLBACK TO SAVEPOINT a5_buyer_document_${index}`);
+        await client.query(`RELEASE SAVEPOINT a5_buyer_document_${index}`);
+      }
+      const local = await createOrder(client, {
+        fulfillmentMethod: "LOCAL_DELIVERY",
+        taxRegime: "NO_RESPONSABLE_IVA",
+        withBuyerDocument: true,
+      });
+      const pickup = await createOrder(client, {
+        fulfillmentMethod: "CLICK_COLLECT",
+        taxRegime: "NO_RESPONSABLE_IVA",
+        withBuyerDocument: false,
+      });
+      const persisted = await client.query(
+        `SELECT "fulfillmentMethod", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot"
+         FROM "Order" WHERE "id" = ANY($1::uuid[]) ORDER BY "fulfillmentMethod"`,
+        [[local.id, pickup.id]],
+      );
+      assert.equal(persisted.rows.length, 2);
+      assert.deepEqual(
+        persisted.rows.map((row) => [
+          row.fulfillmentMethod,
+          row.buyerDocumentTypeSnapshot,
+          row.buyerDocumentNumberSnapshot,
+        ]),
+        [
+          ["CLICK_COLLECT", null, null],
+          ["LOCAL_DELIVERY", "13", "900123456"],
+        ],
+      );
+    });
+  });
+
+  it("upgrades legacy NULL fulfillment rows without opening a document bypass", async () => {
+    await withRollback(async (client) => {
+      await client.query(
+        `DROP TRIGGER "Order_legacy_null_fulfillment_document_exempt_guard" ON "Order"`,
+      );
+      await client.query(`DROP FUNCTION "validate_legacy_null_fulfillment_document_exempt"()`);
+      await client.query(
+        `ALTER TABLE "Order"
+         DROP CONSTRAINT "Order_buyer_document_valid",
+         DROP CONSTRAINT "Order_legacy_null_fulfillment_document_exempt_valid",
+         DROP COLUMN "legacyNullFulfillmentDocumentExempt"`,
+      );
+      await client.query(
+        `ALTER TABLE "Order" ADD CONSTRAINT "Order_buyer_document_valid" CHECK (
+          (("buyerDocumentTypeSnapshot" IS NULL) = ("buyerDocumentNumberSnapshot" IS NULL)) AND
+          ("buyerDocumentTypeSnapshot" IS NULL OR "buyerDocumentTypeSnapshot" IN ('11', '12', '13', '21', '22', '31', '41', '42', '50', '91')) AND
+          ("buyerDocumentNumberSnapshot" IS NULL OR "buyerDocumentNumberSnapshot" ~ '^[A-Za-z0-9.-]{3,30}$') AND
+          ("anonymizedAt" IS NOT NULL OR (("taxRegime" IS DISTINCT FROM 'RESPONSABLE_IVA'::"StoreTaxRegime" AND "fulfillmentMethod" IS DISTINCT FROM 'HOME_DELIVERY'::"OrderFulfillmentMethod") OR "buyerDocumentTypeSnapshot" IS NOT NULL))
+        )`,
+      );
+      const legacyId = randomUUID();
+      await client.query(
+        `INSERT INTO "Order" ("id", "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus")
+         VALUES ($1, $2, 'PENDING', 'UNPAID', 'UNFULFILLED')`,
+        [legacyId, `A5LEGACY-${randomUUID().replaceAll("-", "").slice(0, 18).toUpperCase()}`],
+      );
+      await client.query("COMMIT");
+      await client.query("BEGIN");
+      await client.query(
+        readFileSync(
+          new URL(
+            "../packages/db/prisma/migrations/20261125120000_a5_checkout_flex_document/migration.sql",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      await client.query("COMMIT");
+      await client.query("BEGIN");
+      await client.query(
+        readFileSync(
+          new URL(
+            "../packages/db/prisma/migrations/20261125120100_a5_checkout_flex_document_constraints/migration.sql",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      );
+      const historical = await client.query(
+        `SELECT "fulfillmentMethod", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot",
+                "legacyNullFulfillmentDocumentExempt"
+         FROM "Order" WHERE "id" = $1`,
+        [legacyId],
+      );
+      assert.deepEqual(historical.rows[0], {
+        fulfillmentMethod: null,
+        buyerDocumentTypeSnapshot: null,
+        buyerDocumentNumberSnapshot: null,
+        legacyNullFulfillmentDocumentExempt: true,
+      });
+
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "Order" ("orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus")
+         VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED')`,
+        [`A5NEW-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`],
+        "23514",
+        "Order_buyer_document_valid",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "Order" ("orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus", "legacyNullFulfillmentDocumentExempt")
+         VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', true)`,
+        [`A5FLAG-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`],
+        "P0001",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "Order"
+         SET "fulfillmentMethod" = 'HOME_DELIVERY', "buyerDocumentTypeSnapshot" = '13',
+             "buyerDocumentNumberSnapshot" = '1020304050'
+         WHERE "id" = $1`,
+        [legacyId],
+        "23514",
+        "Order_legacy_null_fulfillment_document_exempt_valid",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "Order" ("orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod")
+         VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', 'HOME_DELIVERY')`,
+        [`A5HOME-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`],
+        "23514",
+        "Order_buyer_document_valid",
+      );
+      const mutableId = randomUUID();
+      await client.query(
+        `INSERT INTO "Order" (
+           "id", "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus",
+           "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot"
+         ) VALUES ($1, $2, 'PENDING', 'UNPAID', 'UNFULFILLED', '13', '1020304050')`,
+        [mutableId, `A5MUT-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "Order" SET "legacyNullFulfillmentDocumentExempt" = true WHERE "id" = $1`,
+        [mutableId],
+        "P0001",
+      );
+      await client.query(
+        `INSERT INTO "Order" ("orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod", "anonymizedAt")
+         VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', 'HOME_DELIVERY', CURRENT_TIMESTAMP)`,
+        [`A5ANON-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`],
+      );
+      await client.query(
+        `INSERT INTO "Order" ("orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod")
+         VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', 'CLICK_COLLECT')`,
+        [`A5PICKUP-${randomUUID().replaceAll("-", "").slice(0, 18).toUpperCase()}`],
+      );
+      await client.query(
+        `UPDATE "Order"
+         SET "emailSnapshot" = NULL, "recipientNameSnapshot" = NULL, "phoneE164Snapshot" = NULL,
+             "buyerDocumentTypeSnapshot" = NULL, "buyerDocumentNumberSnapshot" = NULL,
+             "buyerTaxRegimeSnapshot" = NULL, "addressLine1Snapshot" = NULL,
+             "addressLine2Snapshot" = NULL, "neighborhoodSnapshot" = NULL,
+             "postalCodeSnapshot" = NULL, "deliveryNotesSnapshot" = NULL,
+             "deliveryLatitudeE6" = NULL, "deliveryLongitudeE6" = NULL,
+             "acceptanceIpHash" = NULL, "acceptanceUserAgentHash" = NULL,
+             "anonymizedAt" = CURRENT_TIMESTAMP
+         WHERE "id" = $1`,
+        [legacyId],
+      );
+      const anonymized = await client.query(
+        `SELECT "anonymizedAt", "fulfillmentMethod", "buyerDocumentTypeSnapshot",
+                "buyerDocumentNumberSnapshot", "legacyNullFulfillmentDocumentExempt"
+         FROM "Order" WHERE "id" = $1`,
+        [legacyId],
+      );
+      assert.ok(anonymized.rows[0].anonymizedAt instanceof Date);
+      assert.deepEqual(anonymized.rows[0], {
+        anonymizedAt: anonymized.rows[0].anonymizedAt,
+        fulfillmentMethod: null,
+        buyerDocumentTypeSnapshot: null,
+        buyerDocumentNumberSnapshot: null,
+        legacyNullFulfillmentDocumentExempt: true,
+      });
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "Order" ("orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus", "legacyNullFulfillmentDocumentExempt")
+         VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', true)`,
+        [`A5POSTANON-${randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase()}`],
+        "P0001",
+      );
+      await client.query("COMMIT");
+    });
+  });
+
   it("blocks open click-and-collect obligations and permits their real closure", async () => {
     await withRollback(async (client) => {
       const fixture = await createCatalogFixture(client);
@@ -1128,9 +1338,9 @@ describe("A3 — hardened URL redirect, UVT, soft-delete lifecycle, and updatedA
         await expectSqlViolation(
           client,
           `INSERT INTO "Order" (
-             "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus",
+             "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod",
              "uvtYear", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents"
-           ) VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', $2, 100000, 0, 0, 0, 100000)`,
+           ) VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', 'CLICK_COLLECT', $2, 100000, 0, 0, 0, 100000)`,
           [`A3UVT-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`, invalidYear],
           "23514",
           "Order_uvtYear_valid",
@@ -1139,9 +1349,9 @@ describe("A3 — hardened URL redirect, UVT, soft-delete lifecycle, and updatedA
 
       const validOrder = await client.query(
         `INSERT INTO "Order" (
-           "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus",
+           "orderNumber", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod",
            "uvtYear", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents"
-         ) VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', 2026, 100000, 0, 0, 0, 100000)
+         ) VALUES ($1, 'PENDING', 'UNPAID', 'UNFULFILLED', 'CLICK_COLLECT', 2026, 100000, 0, 0, 0, 100000)
          RETURNING "cartId", "uvtYear"`,
         [`A3UVT-${randomUUID().replaceAll("-", "").slice(0, 20).toUpperCase()}`],
       );

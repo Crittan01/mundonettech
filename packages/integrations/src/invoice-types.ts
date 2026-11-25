@@ -62,6 +62,7 @@ export interface DianCredentials {
   readonly issuerPhoneE164: string;
   readonly softwareId: string;
   readonly softwarePin: string;
+  readonly signatureTrustAnchorPem: string | null;
   readonly invoicePrefix: string;
   readonly invoiceResolutionNumber: string;
   readonly invoiceResolutionStart: number;
@@ -96,12 +97,23 @@ export interface FiscalLine {
   readonly lineTotalCents: bigint;
   readonly taxCents: bigint;
   readonly taxRateBps: number;
+  readonly taxCategory?: "STANDARD" | "EXEMPT" | "EXCLUDED";
+}
+
+interface FiscalResolution {
+  readonly authorizationNumber: string;
+  readonly prefix: string;
+  readonly rangeStart: number;
+  readonly rangeEnd: number;
+  readonly validFrom: string;
+  readonly validTo: string;
 }
 
 export interface InvoiceDocumentInput {
   readonly fullNumber: string;
   readonly issueDate: Date;
   readonly cufe: string;
+  readonly resolution: FiscalResolution;
   readonly issuer: FiscalParty;
   readonly buyer: FiscalParty;
   readonly lines: readonly FiscalLine[];
@@ -112,7 +124,7 @@ export interface InvoiceDocumentInput {
   readonly totalCents: bigint;
 }
 
-export interface CreditNoteDocumentInput extends Omit<InvoiceDocumentInput, "cufe"> {
+export interface CreditNoteDocumentInput extends Omit<InvoiceDocumentInput, "cufe" | "resolution"> {
   readonly cude: string;
   readonly invoiceFullNumber: string;
   readonly invoiceCufe: string;
@@ -136,7 +148,11 @@ export interface FiscalTransmissionResult {
 
 export interface InvoiceProvider {
   transmit(input: FiscalTransmissionInput): Promise<FiscalTransmissionResult>;
-  find(documentHash: string): Promise<FiscalTransmissionResult | null>;
+  find(
+    documentHash: string,
+    documentNumber?: string,
+    documentType?: "INVOICE" | "CREDIT_NOTE",
+  ): Promise<FiscalTransmissionResult | null>;
 }
 
 export interface InvoiceServiceOptions {

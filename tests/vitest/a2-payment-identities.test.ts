@@ -6,8 +6,9 @@ import { normalizeEmail } from "../../packages/core/dist/index.js";
 import { loadWebModule } from "./a2-action-loader";
 
 const pepper = new Uint8Array(32).fill(9);
-const { documentIdentityHash } = loadWebModule<{
+const { documentIdentityHash, phoneIdentityHash } = loadWebModule<{
   documentIdentityHash(document: string): Uint8Array;
+  phoneIdentityHash(phone: string): Uint8Array;
 }>("lib/payment-identities.ts", {
   "server-only": {},
   "@mundonettech/core": { normalizeEmail },
@@ -16,6 +17,10 @@ const { documentIdentityHash } = loadWebModule<{
 
 function expected(document: string): Uint8Array {
   return createHmac("sha256", pepper).update(`DOCUMENT:${document}`, "utf8").digest();
+}
+
+function expectedPhone(phone: string): Uint8Array {
+  return createHmac("sha256", pepper).update(`PHONE:${phone}`, "utf8").digest();
 }
 
 describe("A2 — documento COD normalizado", () => {
@@ -40,6 +45,20 @@ describe("A2 — documento COD normalizado", () => {
       "   ",
     ]) {
       expect(() => documentIdentityHash(value), JSON.stringify(value)).toThrow(TypeError);
+    }
+  });
+});
+
+describe("A5 — teléfono COD normalizado y validado", () => {
+  it("canonicaliza formatos locales e internacionales antes del HMAC", () => {
+    expect(phoneIdentityHash("300 123 4567")).toEqual(expectedPhone("+573001234567"));
+    expect(phoneIdentityHash("+57 (300) 123-4567")).toEqual(expectedPhone("+573001234567"));
+    expect(phoneIdentityHash("+1 202 555 0199")).toEqual(expectedPhone("+12025550199"));
+  });
+
+  it("rechaza valores que no son E.164 en lugar de bloquear hashes arbitrarios", () => {
+    for (const value of ["", "300123", "abc", "+5730012345678901", "300-ABC-4567"]) {
+      expect(() => phoneIdentityHash(value), JSON.stringify(value)).toThrow(TypeError);
     }
   });
 });

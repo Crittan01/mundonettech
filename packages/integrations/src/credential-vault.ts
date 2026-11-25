@@ -333,6 +333,19 @@ export class IntegrationCredentialVault {
         ]);
         if (activeAccount || activeAttempt) throw new CredentialConflictError();
       }
+      if (existing.provider === "dian") {
+        const [activeInvoice, activeCreditNote] = await Promise.all([
+          tx.taxInvoice.findFirst({
+            where: { credentialId: existing.id, status: { in: ["TRANSMITTING", "UNCERTAIN"] } },
+            select: { id: true },
+          }),
+          tx.creditNote.findFirst({
+            where: { credentialId: existing.id, status: { in: ["TRANSMITTING", "UNCERTAIN"] } },
+            select: { id: true },
+          }),
+        ]);
+        if (activeInvoice || activeCreditNote) throw new CredentialConflictError();
+      }
       const sealed = encryptIntegrationCredential({
         credentialId: existing.id,
         environment: existing.environment,
@@ -451,6 +464,25 @@ export class IntegrationCredentialVault {
           }),
         ]);
         if (activeAccount || activeAttempt) throw new CredentialConflictError();
+      }
+      if (existing.provider === "dian") {
+        const [activeInvoice, activeCreditNote] = await Promise.all([
+          tx.taxInvoice.findFirst({
+            where: {
+              credentialId: existing.id,
+              status: { in: ["DRAFT", "TRANSMITTING", "UNCERTAIN"] },
+            },
+            select: { id: true },
+          }),
+          tx.creditNote.findFirst({
+            where: {
+              credentialId: existing.id,
+              status: { in: ["DRAFT", "TRANSMITTING", "UNCERTAIN"] },
+            },
+            select: { id: true },
+          }),
+        ]);
+        if (activeInvoice || activeCreditNote) throw new CredentialConflictError();
       }
       const result = await tx.integrationCredential.updateMany({
         where: { id: existing.id, nonce: existing.nonce, revokedAt: null },

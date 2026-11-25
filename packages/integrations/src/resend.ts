@@ -43,7 +43,7 @@ function email(value: string): string {
 
 export function parseEmailCredentials(
   plaintext: Uint8Array,
-  environment: IntegrationEnvironment = IntegrationEnvironment.LOCAL,
+  environment: IntegrationEnvironment = IntegrationEnvironment.PRD,
 ): EmailCredentials {
   const allowLoopback = environment === IntegrationEnvironment.LOCAL;
   try {
@@ -126,7 +126,12 @@ export class ResendEmailProvider implements EmailProvider {
         fetchImpl: this.options.fetchImpl ?? fetch,
         timeoutMs: this.options.timeoutMs ?? 15_000,
       });
-      if (response.status === 429 || response.status >= 500)
+      if (
+        response.status === 408 ||
+        response.status === 409 ||
+        response.status === 429 ||
+        response.status >= 500
+      )
         throw new EmailProviderError(
           "Resend is temporarily unavailable; the same idempotency key must be reused.",
           "NETWORK_UNCERTAIN",

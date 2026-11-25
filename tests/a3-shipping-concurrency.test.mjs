@@ -389,6 +389,41 @@ before(async () => {
   catalog = await seedCatalogFixture(sql);
   inventory = await seedInventoryFixture(sql, catalog);
   await seedPricingFixture(sql, catalog);
+  const additionalUnits = 4;
+  const capacity = await sql.query(
+    `UPDATE "StockLevel" SET "onHand" = "onHand" + $2
+     WHERE "locationId" = $1 AND "variantId" = $3
+     RETURNING "onHand", "committed", "safetyStock", "weightedAvgCostCents"`,
+    [inventory.locationId, additionalUnits, catalog.variantId],
+  );
+  for (let index = 0; index < additionalUnits; index += 1) {
+    await sql.query(
+      `INSERT INTO "SerializedUnit" ("id", "variantId", "locationId", "serial")
+       VALUES ($1, $2, $3, $4)`,
+      [randomUUID(), catalog.variantId, inventory.locationId, `A3-CAPACITY-${randomUUID()}`],
+    );
+  }
+  await sql.query(
+    `INSERT INTO "InventoryLedger" (
+      "locationId", "variantId", "entryType", "quantityDelta", "committedDelta",
+      "onHandAfter", "committedAfter", "safetyStockAfter", "weightedAvgCostAfterCents",
+      "operationKey", "operationHash", "operationSequence", "metadata"
+    ) VALUES (
+      $1, $2, 'ADJUSTMENT', $3, 0, $4, $5, $6, $7, $8, $9, 0,
+      '{"source":"a3-shipping-capacity"}'::jsonb
+    )`,
+    [
+      inventory.locationId,
+      catalog.variantId,
+      additionalUnits,
+      capacity.rows[0].onHand,
+      capacity.rows[0].committed,
+      capacity.rows[0].safetyStock,
+      capacity.rows[0].weightedAvgCostCents,
+      `a3-shipping-capacity-${randomUUID()}`,
+      randomBytes(32),
+    ],
+  );
   await sql.query("COMMIT");
   await sql.query(
     `UPDATE "StockLocation" SET "addressLine1" = 'Calle 93 # 13-24', "departmentCode" = '11', "municipalityCode" = '11001', "phoneE164" = '+573001234567' WHERE "id" = $1`,
@@ -824,5 +859,194 @@ describe("A3 shipping lock hierarchy and claim fencing", () => {
       }),
       1,
     );
+  });
+
+  it("ignores a stale positive findLabel after a newer attempt enters RECONCILING", async () => {
+    const fixture = await makePackedOrder();
+    const uncertainShipping = makeShipping(dbA, { uncertain: true });
+    const attempt1 = await uncertainShipping.processLabel(fixture.packageId, "worker:attempt-1");
+    assert.equal(attempt1.status, "RECONCILING");
+    const afterAttempt1 = await dbA.shipmentPackage.findUniqueOrThrow({
+      where: { id: fixture.packageId },
+    });
+
+    const findEntered = deferred();
+    const releaseFind = deferred();
+    const staleReconciler = makeShipping(dbA, {
+      findLabel: async () => {
+        findEntered.resolve();
+        await releaseFind.promise;
+        return {
+          providerReference: `stale-${fixture.packageId}`,
+          trackingCode: `STALE-${fixture.packageId.slice(0, 8)}`,
+          carrier: "SERVIENTREGA",
+          labelUrl: null,
+        };
+      },
+    });
+    const staleCall = staleReconciler.reconcileLabel(fixture.packageId, "worker:reconcile-stale");
+    let afterAttempt2;
+    try {
+      await findEntered.promise;
+      const reset = await shippingB.reconcileLabel(fixture.packageId, "worker:reconcile-first");
+      assert.equal(reset.status, "SEALED");
+      await delay(5);
+      const attempt2 = await uncertainShipping.processLabel(fixture.packageId, "worker:attempt-1");
+      assert.equal(attempt2.status, "RECONCILING");
+      afterAttempt2 = await dbA.shipmentPackage.findUniqueOrThrow({
+        where: { id: fixture.packageId },
+      });
+      assert.ok(
+        afterAttempt2.requestStartedAt.getTime() > afterAttempt1.requestStartedAt.getTime(),
+      );
+    } finally {
+      releaseFind.resolve();
+    }
+
+    const staleResult = await staleCall;
+    assert.equal(staleResult.status, "RECONCILING");
+    assert.equal(staleResult.replayed, true);
+    assert.equal(staleResult.trackingCode, null);
+    const finalPackage = await dbA.shipmentPackage.findUniqueOrThrow({
+      where: { id: fixture.packageId },
+    });
+    assert.equal(finalPackage.status, "RECONCILING");
+    assert.equal(finalPackage.trackingCode, null);
+    assert.deepEqual(finalPackage.requestHash, afterAttempt2.requestHash);
+    assert.equal(finalPackage.requestStartedAt.getTime(), afterAttempt2.requestStartedAt.getTime());
+    assert.equal(finalPackage.claimedBy, afterAttempt2.claimedBy);
+    assert.equal(providerCalls.length, 2);
+    assert.equal(
+      await dbA.shipmentEvent.count({
+        where: { packageId: fixture.packageId, type: "LABEL_GENERATED" },
+      }),
+      0,
+    );
+    assert.equal(
+      await dbA.domainOutbox.count({
+        where: { aggregateId: fixture.packageId, eventType: "shipping.label.generated.v1" },
+      }),
+      0,
+    );
+  });
+
+  it("keeps reconciliation pending without persistence or reissue on invalid provider references", async () => {
+    const fixture = await makePackedOrder();
+    const uncertainShipping = makeShipping(dbA, { uncertain: true });
+    const firstAttempt = await uncertainShipping.processLabel(
+      fixture.packageId,
+      "worker:invalid-reference-attempt",
+    );
+    assert.equal(firstAttempt.status, "RECONCILING");
+    assert.equal(providerCalls.length, 1);
+
+    const invalidShipping = makeShipping(dbB, {
+      findLabel: async () => {
+        throw new ShippingProviderError("Missing or crossed dsreferencia", "INVALID_RESPONSE");
+      },
+    });
+    await assert.rejects(
+      invalidShipping.reconcileLabel(fixture.packageId, "worker:invalid-reference-reconcile"),
+      (error) => error instanceof ShippingProviderError && error.code === "INVALID_RESPONSE",
+    );
+    assert.equal(providerCalls.length, 1);
+    const record = await dbA.shipmentPackage.findUniqueOrThrow({
+      where: { id: fixture.packageId },
+    });
+    assert.equal(record.status, "RECONCILING");
+    assert.equal(record.trackingCode, null);
+    assert.equal(record.providerReference, null);
+    assert.ok(record.requestStartedAt);
+    assert.equal(
+      await dbA.shipmentEvent.count({
+        where: { packageId: fixture.packageId, type: "LABEL_GENERATED" },
+      }),
+      0,
+    );
+    const blockedRetry = await shippingB.processLabel(fixture.packageId, "worker:no-blind-retry");
+    assert.equal(blockedRetry.status, "RECONCILING");
+    assert.equal(providerCalls.length, 1);
+  });
+
+  it("retries a label only after confirmed provider absence", async () => {
+    const fixture = await makePackedOrder();
+    const uncertainShipping = makeShipping(dbA, { uncertain: true });
+    const firstAttempt = await uncertainShipping.processLabel(
+      fixture.packageId,
+      "worker:first-attempt",
+    );
+    assert.equal(firstAttempt.status, "RECONCILING");
+    assert.equal(providerCalls.length, 1);
+
+    const blockedRetry = await shippingB.processLabel(fixture.packageId, "worker:blind-retry");
+    assert.equal(blockedRetry.status, "RECONCILING");
+    assert.equal(providerCalls.length, 1);
+
+    let lookups = 0;
+    const reconcilingShipping = makeShipping(dbB, {
+      findLabel: async (requestKey) => {
+        lookups += 1;
+        assert.equal(requestKey, providerCalls[0]);
+        return null;
+      },
+    });
+    const absent = await reconcilingShipping.reconcileLabel(
+      fixture.packageId,
+      "worker:confirmed-absence",
+    );
+    assert.equal(absent.status, "SEALED");
+    assert.equal(lookups, 1);
+    assert.equal(providerCalls.length, 1);
+
+    const retry = await reconcilingShipping.processLabel(
+      fixture.packageId,
+      "worker:safe-retry-after-absence",
+    );
+    assert.equal(retry.status, "LABELLED");
+    assert.equal(retry.replayed, false);
+    assert.equal(providerCalls.length, 2);
+    assert.equal(providerCalls[0], providerCalls[1]);
+    const finalPackage = await dbA.shipmentPackage.findUniqueOrThrow({
+      where: { id: fixture.packageId },
+    });
+    assert.equal(finalPackage.status, "LABELLED");
+    assert.equal(finalPackage.requestStartedAt, null);
+    assert.equal(finalPackage.lastError, null);
+    assert.equal(
+      await dbA.shipmentEvent.count({
+        where: { packageId: fixture.packageId, type: "LABEL_GENERATED" },
+      }),
+      1,
+    );
+  });
+
+  it("fences the actor with FOR SHARE even when picking is an idempotent no-op", async () => {
+    const fixture = await makePackedOrder();
+    const actorQueries = [];
+    const observedDb = bindClient(dbA, (callback, ...options) =>
+      dbA.$transaction(
+        async (tx) => {
+          const wrapped = new Proxy(tx, {
+            get(target, property) {
+              if (property === "$queryRaw") {
+                return async (...args) => {
+                  const query = Array.isArray(args[0]) ? args[0].join(" ") : String(args[0]);
+                  if (query.includes('FROM "AdminUser"')) actorQueries.push(query);
+                  return target.$queryRaw(...args);
+                };
+              }
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return callback(wrapped);
+        },
+        ...options,
+      ),
+    );
+    const fulfillmentId = await makeShipping(observedDb).startPicking(fixture.shipmentId, audit);
+    assert.ok(fulfillmentId);
+    assert.ok(actorQueries.length >= 2);
+    assert.ok(actorQueries.every((query) => query.includes("FOR SHARE")));
   });
 });

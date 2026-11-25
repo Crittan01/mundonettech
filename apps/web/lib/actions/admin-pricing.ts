@@ -1,5 +1,7 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
   AdminActorAuthorizationError,
   PricingConflictError,
@@ -77,6 +79,7 @@ async function auditContext() {
     actorAdminUserId: session.profile.id,
     ipHash: context.ipHash,
     userAgentHash: context.userAgentHash,
+    requestId: randomUUID(),
   };
 }
 
