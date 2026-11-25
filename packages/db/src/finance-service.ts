@@ -279,32 +279,67 @@ export class FinanceService {
     }
   }
 
+  private async runReadReport(
+    cte: Prisma.Sql,
+    rowLimit: number,
+  ): Promise<{ totals: FinanceSummaryRecord[]; records: FinanceRowRecord[] }> {
+    const isRetryable = (error: unknown): boolean => {
+      if (typeof error !== "object" || error === null) return false;
+      const code = "code" in error ? String(error.code) : "";
+      if (["P1001", "P1017", "P2024", "P2034", "40001", "40P01"].includes(code)) return true;
+      const cause = "cause" in error ? error.cause : null;
+      if (typeof cause === "object" && cause !== null && "code" in cause) {
+        return ["40001", "40P01"].includes(String(cause.code));
+      }
+      return false;
+    };
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.db.$transaction(
+          async (tx) => {
+            await tx.$executeRaw`SET TRANSACTION READ ONLY`;
+            const totals = await tx.$queryRaw<FinanceSummaryRecord[]>(PrismaSql`
+              ${cte}
+              SELECT count(*) AS "orderCount",
+                COALESCE(sum("capturedCents"), 0)::text AS "capturedCents",
+                COALESCE(sum("voidedCents"), 0)::text AS "voidedCents",
+                COALESCE(sum("grossCapturedCents"), 0)::text AS "grossCapturedCents",
+                COALESCE(sum("refundedCents"), 0)::text AS "refundedCents",
+                COALESCE(sum("netRevenueCents"), 0)::text AS "netRevenueCents",
+                COALESCE(sum("wacCostCents"), 0)::text AS "wacCostCents",
+                COALESCE(sum("marginCents"), 0)::text AS "marginCents"
+              FROM finance_rows
+            `);
+            const records = await tx.$queryRaw<FinanceRowRecord[]>(PrismaSql`
+              ${cte}
+              SELECT * FROM finance_rows
+              ORDER BY "recognizedAt" DESC, "orderId" DESC
+              LIMIT ${rowLimit}::int
+            `);
+            return { totals, records };
+          },
+          {
+            isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+            maxWait: 10_000,
+            timeout: 120_000,
+          },
+        );
+      } catch (error) {
+        lastError = error;
+        if (!isRetryable(error) || attempt === 2) throw error;
+      }
+    }
+    throw lastError;
+  }
+
   async report(rangeInput: FinanceRange, rowLimit = 100): Promise<FinanceReport> {
     const range = assertRange(rangeInput);
     if (!Number.isInteger(rowLimit) || rowLimit < 1 || rowLimit > 50_000) {
       throw new RangeError("rowLimit must be between 1 and 50000.");
     }
     const cte = financeCte(range);
-    const [totals, records] = await Promise.all([
-      this.db.$queryRaw<FinanceSummaryRecord[]>(PrismaSql`
-        ${cte}
-        SELECT count(*) AS "orderCount",
-          COALESCE(sum("capturedCents"), 0)::text AS "capturedCents",
-          COALESCE(sum("voidedCents"), 0)::text AS "voidedCents",
-          COALESCE(sum("grossCapturedCents"), 0)::text AS "grossCapturedCents",
-          COALESCE(sum("refundedCents"), 0)::text AS "refundedCents",
-          COALESCE(sum("netRevenueCents"), 0)::text AS "netRevenueCents",
-          COALESCE(sum("wacCostCents"), 0)::text AS "wacCostCents",
-          COALESCE(sum("marginCents"), 0)::text AS "marginCents"
-        FROM finance_rows
-      `),
-      this.db.$queryRaw<FinanceRowRecord[]>(PrismaSql`
-        ${cte}
-        SELECT * FROM finance_rows
-        ORDER BY "recognizedAt" DESC, "orderId" DESC
-        LIMIT ${rowLimit}::int
-      `),
-    ]);
+    const { totals, records } = await this.runReadReport(cte, rowLimit);
     const report = { summary: summary(totals[0]), rows: records.map(row) };
     if (report.summary.orderCount > rowLimit && rowLimit === 50_000) {
       throw new RangeError("The CSV export exceeds 50000 orders; narrow the date range.");
@@ -345,7 +380,7 @@ export class FinanceService {
   }
 
   async refreshFiscalWatch(year?: number): Promise<FiscalWatchView> {
-    if (year !== undefined && (!Number.isInteger(year) || year < 2000 || year > 9999)) {
+    if (year !== undefined && (!Number.isInteger(year) || year < 2000 || year > 9998)) {
       throw new RangeError("fiscalYear is outside the supported range.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
@@ -357,7 +392,7 @@ export class FinanceService {
       `;
       const clock = nowRows[0]!;
       const fiscalYear = year ?? clock.localYear;
-      if (!Number.isInteger(fiscalYear) || fiscalYear < 2000 || fiscalYear > 9999) {
+      if (!Number.isInteger(fiscalYear) || fiscalYear < 2000 || fiscalYear > 9998) {
         throw new RangeError("fiscalYear is outside the supported range.");
       }
       const settings = await tx.storeSettings.findUnique({ where: { key: "default" } });
@@ -427,32 +462,32 @@ export class FinanceService {
         create: { fiscalYear, snapshotDate: clock.localDate, ...values },
         update: values,
       });
-      const thresholdNotificationValues = {
+      const thresholdNotificationIdentity = {
         category: "fiscal.threshold",
+        entityType: "FiscalYear",
+        entityId: String(fiscalYear),
+      } as const;
+      const thresholdNotificationMutable = {
         severity: "CRITICAL" as const,
         title: `Vigilancia fiscal ${fiscalYear}: umbral alcanzado`,
         message: `Los ingresos brutos reconocidos alcanzaron el umbral configurado de ${thresholdUvt} UVT. Revisa el régimen tributario y la obligación de facturación.`,
         href: "/admin/finanzas",
-        entityType: "FiscalWatchSnapshot",
-        entityId: snapshot.id,
       };
-      const approachingNotificationValues = {
-        category: "fiscal.threshold",
+      const approachingNotificationMutable = {
         severity: "WARNING" as const,
         title: `Vigilancia fiscal ${fiscalYear}: próximo al umbral`,
         message: `Los ingresos brutos reconocidos superaron el 80 % del umbral anual de ${thresholdUvt} UVT. Prepara la revisión tributaria y de facturación.`,
         href: "/admin/finanzas",
-        entityType: "FiscalWatchSnapshot",
-        entityId: snapshot.id,
       };
       if (status === "THRESHOLD_REACHED") {
         await tx.notification.upsert({
           where: { deduplicationKey: `fiscal-watch:${fiscalYear}:threshold` },
           create: {
             deduplicationKey: `fiscal-watch:${fiscalYear}:threshold`,
-            ...thresholdNotificationValues,
+            ...thresholdNotificationIdentity,
+            ...thresholdNotificationMutable,
           },
-          update: { resolvedAt: null },
+          update: { ...thresholdNotificationMutable, resolvedAt: null },
         });
       } else {
         await tx.notification.updateMany({
@@ -465,9 +500,10 @@ export class FinanceService {
           where: { deduplicationKey: `fiscal-watch:${fiscalYear}:approaching` },
           create: {
             deduplicationKey: `fiscal-watch:${fiscalYear}:approaching`,
-            ...approachingNotificationValues,
+            ...thresholdNotificationIdentity,
+            ...approachingNotificationMutable,
           },
-          update: { resolvedAt: null },
+          update: { ...approachingNotificationMutable, resolvedAt: null },
         });
       } else {
         await tx.notification.updateMany({

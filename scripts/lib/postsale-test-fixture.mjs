@@ -28,17 +28,17 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
   const deliveredAt = new Date();
   await client.query(
     `INSERT INTO "Order" ("id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus", "fulfillmentMethod", "taxRegime", "emailSnapshot", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt")
-     VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'FULFILLED', 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', 'rls-postsale@example.test', '13', '1020304050', 200000, 0, 0, 0, 200000, CURRENT_TIMESTAMP)`,
+     VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'FULFILLED', 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', 'rls-postsale@example.test', '13', '1020304050', 300000, 0, 0, 0, 300000, CURRENT_TIMESTAMP)`,
     [orderId, orderNumber, catalog.customerId],
   );
   await client.query(
     `INSERT INTO "OrderItem" ("id", "orderId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot", "unitPriceCents", "unitCostWacCents", "discountCents", "lineTotalCents", "taxCents")
-     VALUES ($1, $2, $3, 2, 'Audífonos TÁCTILES Pro', 'producto-postsale', $4, 100000, 60000, 0, 200000, 0)`,
+     VALUES ($1, $2, $3, 3, 'Audífonos TÁCTILES Pro', 'producto-postsale', $4, 100000, 60000, 0, 300000, 0)`,
     [orderItemId, orderId, catalog.variantId, `POST-${randomUUID().slice(0, 8)}`],
   );
   await client.query(
     `INSERT INTO "OrderReceipt" ("orderId", "receiptNumber", "accessTokenHash", "taxRegime", "currency", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "contentHash")
-     VALUES ($1, $2, $3, 'NO_RESPONSABLE_IVA', 'COP', 200000, 0, 0, 0, 200000, $4)`,
+     VALUES ($1, $2, $3, 'NO_RESPONSABLE_IVA', 'COP', 300000, 0, 0, 0, 300000, $4)`,
     [orderId, `R-${orderNumber}`, randomBytes(32), randomBytes(32)],
   );
   await client.query(
@@ -46,10 +46,10 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
     [shipmentId, orderId, inventory.locationId],
   );
   await client.query(
-    `INSERT INTO "ShipmentItem" ("id", "shipmentId", "orderItemId", "quantity", "declaredValueCents") VALUES ($1, $2, $3, 2, 200000)`,
+    `INSERT INTO "ShipmentItem" ("id", "shipmentId", "orderItemId", "quantity", "declaredValueCents") VALUES ($1, $2, $3, 3, 300000)`,
     [shipmentItemId, shipmentId, orderItemId],
   );
-  const serializedUnitIds = [randomUUID(), randomUUID()];
+  const serializedUnitIds = [randomUUID(), randomUUID(), randomUUID()];
   for (const [index, id] of serializedUnitIds.entries()) {
     await client.query(
       `INSERT INTO "SerializedUnit" ("id", "variantId", "locationId", "orderId", "shipmentId", "serial", "status", "soldAt")
@@ -98,7 +98,7 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
   const returnRequestId = randomUUID();
   await client.query(
     `INSERT INTO "ReturnRequest" ("id", "orderId", "requesterCustomerId", "idempotencyKey", "requestHash", "kind", "status", "reason", "retractRefundDueAt")
-     VALUES ($1, $2, $3, $4, $5, 'REFUND', 'REJECTED', 'Solicitud parcial dentro de la ventana legal de retracto.', CURRENT_TIMESTAMP + INTERVAL '15 days')`,
+     VALUES ($1, $2, $3, $4, $5, 'REFUND', 'REQUESTED', 'Solicitud parcial dentro de la ventana legal de retracto.', CURRENT_TIMESTAMP + INTERVAL '15 days')`,
     [
       returnRequestId,
       orderId,
@@ -117,6 +117,33 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
     `INSERT INTO "ReturnRequestUnit" ("returnRequestItemId", "serializedUnitId") VALUES ($1, $2)`,
     [returnItemId, serializedUnitIds[0]],
   );
+  await client.query(
+    `UPDATE "ReturnRequest" SET "status" = 'REJECTED', "version" = 1 WHERE "id" = $1`,
+    [returnRequestId],
+  );
+
+  const requestedReturnId = randomUUID();
+  await client.query(
+    `INSERT INTO "ReturnRequest" ("id", "orderId", "requesterCustomerId", "idempotencyKey", "requestHash", "kind", "reason", "retractRefundDueAt")
+     VALUES ($1, $2, $3, $4, $5, 'REFUND', 'Solicitud activa para la sonda RLS.', CURRENT_TIMESTAMP + INTERVAL '15 days')`,
+    [
+      requestedReturnId,
+      orderId,
+      catalog.customerId,
+      `matrix-return-requested-${randomUUID()}`,
+      randomBytes(32),
+    ],
+  );
+  const requestedReturnItemId = randomUUID();
+  await client.query(
+    `INSERT INTO "ReturnRequestItem" ("id", "returnRequestId", "orderItemId", "shipmentItemId", "quantity", "deliveredAt", "retractDueAt")
+     VALUES ($1, $2, $3, $4, 1, $5, CURRENT_TIMESTAMP + INTERVAL '5 days')`,
+    [requestedReturnItemId, requestedReturnId, orderItemId, shipmentItemId, deliveredAt],
+  );
+  await client.query(
+    `INSERT INTO "ReturnRequestUnit" ("returnRequestItemId", "serializedUnitId") VALUES ($1, $2)`,
+    [requestedReturnItemId, serializedUnitIds[1]],
+  );
 
   await client.query(
     `INSERT INTO "WarrantyClaim" ("orderId", "orderItemId", "serializedUnitId", "requesterCustomerId", "idempotencyKey", "requestHash", "issueDescription", "remedy", "warrantyDueAt")
@@ -124,7 +151,7 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
     [
       orderId,
       orderItemId,
-      serializedUnitIds[1],
+      serializedUnitIds[2],
       catalog.customerId,
       `matrix-warranty-${randomUUID()}`,
       randomBytes(32),
@@ -169,6 +196,7 @@ export async function seedPostSaleFixture(client, { catalog, inventory }) {
     shipmentItemId,
     returnRequestId,
     returnItemId,
+    requestedReturnItemId,
     ticketId,
   };
 }

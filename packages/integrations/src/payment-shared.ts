@@ -372,6 +372,12 @@ export async function refreshOrderPaymentStatus(
   `;
   const captured = BigInt(totals[0]?.captured ?? 0n);
   const compensated = BigInt(totals[0]?.compensated ?? 0n);
+  if (captured > order.totalCents || compensated > captured) {
+    throw new PaymentConflictError(
+      "Payment captures or compensations exceed their order bounds.",
+      "AMOUNT_EXCEEDED",
+    );
+  }
   let status: PaymentStatus;
   if (compensated > 0n) {
     status = compensated === captured ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED;

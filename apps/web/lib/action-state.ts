@@ -24,10 +24,27 @@ export function formString(formData: FormData, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-export function formSnapshot(formData: FormData): Record<string, string> {
+export function closedFormObject(
+  formData: FormData,
+  allowedFields: readonly string[],
+): Record<string, string> | null {
+  const allowed = new Set(allowedFields);
+  const values: Record<string, string> = {};
+  for (const [key, value] of formEntries(formData)) {
+    if (!allowed.has(key) || typeof value !== "string" || Object.hasOwn(values, key)) return null;
+    values[key] = value;
+  }
+  return values;
+}
+
+export function formSnapshot(
+  formData: FormData,
+  allowedFields?: readonly string[],
+): Record<string, string> {
+  const allowed = allowedFields ? new Set(allowedFields) : null;
   const snapshot: Record<string, string> = {};
   for (const [key, value] of formEntries(formData)) {
-    if (typeof value === "string") {
+    if (typeof value === "string" && (!allowed || allowed.has(key))) {
       snapshot[key] = value;
     }
   }

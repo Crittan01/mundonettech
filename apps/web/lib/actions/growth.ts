@@ -4,12 +4,23 @@ import { GrowthError } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
+import { actionError, actionSuccess, closedFormObject, type ActionState } from "@/lib/action-state";
 import { growthService } from "@/lib/growth";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 import { clearReferralCode } from "@/lib/security/referral";
 
+function isNextRedirect(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "digest" in error &&
+    typeof error.digest === "string" &&
+    error.digest.startsWith("NEXT_REDIRECT")
+  );
+}
+
 function failure(error: unknown, values: Record<string, string>): ActionState {
+  if (isNextRedirect(error)) throw error;
   if (error instanceof GrowthError) {
     const messages = {
       VALIDATION: "El código debe tener 12 caracteres válidos, sin espacios internos.",
@@ -27,12 +38,14 @@ const referralCodeSchema = z.string().regex(/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]
 
 export async function createReferralCodeAction(
   _previous: ActionState,
-  _formData: FormData,
+  formData: FormData,
 ): Promise<ActionState> {
   void _previous;
-  void _formData;
   try {
     const { profile } = await requireCustomerPage();
+    if (!closedFormObject(formData, [])) {
+      return actionError("Revisa los campos de la solicitud.");
+    }
     const result = await growthService().createReferralCode(profile.id);
     revalidatePath("/mi-cuenta/beneficios");
     return actionSuccess(`Tu código ${result.code} está listo para compartir.`);
@@ -48,7 +61,11 @@ export async function attributeReferralAction(
   let values: Record<string, string> = {};
   try {
     const { profile } = await requireCustomerPage();
-    const parsed = referralCodeSchema.safeParse(formString(formData, "code"));
+    const raw = closedFormObject(formData, ["code"]);
+    if (!raw) {
+      return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.");
+    }
+    const parsed = referralCodeSchema.safeParse((raw.code ?? "").trim());
     if (!parsed.success) {
       return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.");
     }

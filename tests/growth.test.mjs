@@ -242,6 +242,14 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     assert.equal(earn.orderId, orderId);
     assert.equal(earn.points, 2);
     assert.equal(earn.balanceAfter, 2);
+    const accrualReplays = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        db.$transaction((tx) => growth.accruePaidOrderInTransaction(tx, orderId)),
+      ),
+    );
+    assert.ok(accrualReplays.every((result) => result.earnedPoints === 2));
+    assert.equal(await balance(customer.id), 2);
+    assert.equal(await db.loyaltyTxn.count({ where: { orderId, type: "EARN" } }), 1);
 
     const firstRefundId = await requestRefund(orderId, 1);
     assert.equal(await balance(customer.id), 1);
@@ -250,6 +258,14 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     });
     assert.equal(firstReversal.points, -1);
     assert.equal(firstReversal.refundId, firstRefundId);
+    const reversalReplays = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        db.$transaction((tx) => growth.reverseCompletedRefundInTransaction(tx, firstRefundId)),
+      ),
+    );
+    assert.ok(reversalReplays.every((result) => result.reversedPoints === 0));
+    assert.equal(await balance(customer.id), 1);
+    assert.equal(await db.loyaltyTxn.count({ where: { refundId: firstRefundId } }), 1);
 
     const secondRefundId = await requestRefund(orderId, 1);
     assert.equal(await balance(customer.id), 0);
@@ -289,6 +305,21 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     assert.equal(referral.status, "QUALIFIED");
     assert.ok([first.orderId, second.orderId].includes(referral.orderId));
     assert.equal(await db.loyaltyTxn.count({ where: { referralId: referral.id } }), 2);
+
+    const qualifiedOrder = await db.order.findUniqueOrThrow({
+      where: { id: referral.orderId },
+      select: { orderNumber: true },
+    });
+    const referrerOverview = await growth.getAccountOverview(referrer.id);
+    assert.equal(referrerOverview.referralsMade[0]?.id, referral.id);
+    assert.equal(referrerOverview.referralsMade[0]?.orderNumber, undefined);
+    assert.ok(referrerOverview.ledger.every((entry) => entry.orderNumber === null));
+    assert.equal(JSON.stringify(referrerOverview).includes(qualifiedOrder.orderNumber), false);
+    const referredOverview = await growth.getAccountOverview(referred.id);
+    assert.ok(
+      referredOverview.ledger.some((entry) => entry.orderNumber === qualifiedOrder.orderNumber),
+    );
+    assert.equal(referredOverview.referralReceived?.orderNumber, qualifiedOrder.orderNumber);
 
     await db.$transaction((tx) => growth.accruePaidOrderInTransaction(tx, referral.orderId));
     assert.equal(await balance(referred.id), 52);
@@ -380,6 +411,17 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     const { orderId, totalCents } = await createOrder(customer);
     await payOrder(orderId, totalCents, customer.id);
     assert.equal(await balance(customer.id), 1);
+    const consent = await db.consent.create({
+      data: {
+        customerId: customer.id,
+        purpose: "MARKETING_EMAIL",
+        status: "GRANTED",
+        source: "growth-anonymization-test",
+        policyVersion: "2026-01",
+        proofHash: hash(),
+      },
+    });
+    assert.equal(await growth.marketingEmailGranted(customer.id), true);
     const shipment = await db.shipment.findFirstOrThrow({ where: { orderId } });
     await sql.query(`UPDATE "SerializedUnit" SET "shipmentId" = $2 WHERE "orderId" = $1`, [
       orderId,
@@ -409,6 +451,12 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     const anonymized = await db.customer.findUniqueOrThrow({ where: { id: customer.id } });
     assert.equal(anonymized.status, "ANONYMIZED");
     assert.equal(anonymized.loyaltyPoints, 0);
+    assert.equal(await growth.marketingEmailGranted(customer.id), false);
+    const revocation = await db.consent.findFirstOrThrow({
+      where: { customerId: customer.id, revokesId: consent.id },
+    });
+    assert.equal(revocation.status, "REVOKED");
+    assert.equal(revocation.source, "customer-anonymization");
     assert.equal(
       (await db.referralCode.findUniqueOrThrow({ where: { code } })).disabledAt !== null,
       true,
@@ -421,6 +469,94 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     await assert.rejects(
       db.loyaltyTxn.update({ where: { id: forfeiture.id }, data: { points: 0 } }),
     );
+  });
+
+  it("suppresses pending referrals and recovery delivery idempotently", async () => {
+    const customer = await makeCustomer();
+    const outgoingReferred = await makeCustomer();
+    const incomingReferrer = await makeCustomer();
+    const { code } = await growth.createReferralCode(customer.id);
+    const incomingCode = await growth.createReferralCode(incomingReferrer.id);
+    await growth.attributeReferral(outgoingReferred.id, code);
+    await growth.attributeReferral(customer.id, incomingCode.code);
+
+    const cart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      customerId: customer.id,
+      expiresAt: future(24),
+    });
+    const currentCart = await db.cart.findUniqueOrThrow({ where: { id: cart.id } });
+    const abandoned = await db.abandonedCart.create({
+      data: {
+        cartId: cart.id,
+        customerId: customer.id,
+        contactEmail: customer.email,
+        lastActivityAt: currentCart.updatedAt,
+        lastReminderActivityAt: currentCart.updatedAt,
+        lastReminderOutcome: "QUEUED",
+        reminderCount: 1,
+        lastReminderAt: currentCart.updatedAt,
+      },
+    });
+    const credential = await db.integrationCredential.create({
+      data: {
+        provider: "resend",
+        environment: "LOCAL",
+        accountName: `growth-suppression-${randomUUID()}`,
+        keyVersion: 1,
+        nonce: randomBytes(12),
+        ciphertext: randomBytes(32),
+        authTag: randomBytes(16),
+        createdByAdminUserId: adminId,
+      },
+    });
+    const email = await db.emailEvent.create({
+      data: {
+        customerId: customer.id,
+        abandonedCartId: abandoned.id,
+        credentialId: credential.id,
+        templateKey: "cart.recovery",
+        topic: "cart-recovery",
+        subjectSnapshot: "Recupera tu carrito",
+        htmlBodySnapshot: "<p>Recupera tu carrito</p>",
+        textBodySnapshot: "Recupera tu carrito",
+        variablesSnapshot: {},
+        recipientEmail: customer.email,
+        recipientHash: hash(),
+        idempotencyKey: `growth-suppression-${randomUUID()}`,
+        unsubscribeTokenHash: hash(),
+        nextAttemptAt: future(1),
+      },
+    });
+
+    const now = new Date();
+    await db.$transaction(async (tx) => {
+      await growth.suppressCustomerGrowthInTransaction(tx, customer.id, now);
+      await growth.suppressCustomerGrowthInTransaction(tx, customer.id, now);
+    });
+
+    assert.ok((await db.referralCode.findUniqueOrThrow({ where: { code } })).disabledAt);
+    const outgoing = await db.referral.findUniqueOrThrow({
+      where: { referredCustomerId: outgoingReferred.id },
+    });
+    assert.equal(outgoing.status, "REJECTED");
+    assert.equal(outgoing.rejectionReason, "REFERRER_UNAVAILABLE");
+    const incoming = await db.referral.findUniqueOrThrow({
+      where: { referredCustomerId: customer.id },
+    });
+    assert.equal(incoming.status, "REJECTED");
+    assert.equal(incoming.rejectionReason, "REFERRED_UNAVAILABLE");
+    const suppressedCart = await db.abandonedCart.findUniqueOrThrow({
+      where: { id: abandoned.id },
+    });
+    assert.equal(suppressedCart.contactEmail, null);
+    assert.equal(suppressedCart.lastReminderOutcome, "SUPPRESSED");
+    assert.ok(suppressedCart.lastReminderActivityAt);
+    const suppressedEmail = await db.emailEvent.findUniqueOrThrow({ where: { id: email.id } });
+    assert.equal(suppressedEmail.status, "SUPPRESSED");
+    assert.equal(suppressedEmail.statusRank, 70);
+    assert.equal(suppressedEmail.nextAttemptAt, null);
+    assert.deepEqual(suppressedEmail.finalAt, now);
   });
 
   it("reverses loyalty and referral points when a captured bank transfer is voided", async () => {

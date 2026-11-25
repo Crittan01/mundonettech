@@ -24,14 +24,22 @@ export default async function AccountPage() {
           <dt className="text-sm text-muted-foreground">Correo verificado</dt>
           <dd className="mt-2 font-medium break-all">{account.email}</dd>
         </div>
-        <Link href="/mi-cuenta/pedidos" className="rounded-xl border border-border bg-card p-5">
+        <div className="rounded-xl border border-border bg-card p-5">
           <dt className="text-sm text-muted-foreground">Pedidos</dt>
-          <dd className="mt-2 font-medium">Consultar historial y posventa →</dd>
-        </Link>
-        <Link href="/mi-cuenta/beneficios" className="rounded-xl border border-border bg-card p-5">
+          <dd className="mt-2 font-medium">
+            <Link href="/mi-cuenta/pedidos" className="underline-offset-4 hover:underline">
+              Consultar historial y posventa →
+            </Link>
+          </dd>
+        </div>
+        <div className="rounded-xl border border-border bg-card p-5">
           <dt className="text-sm text-muted-foreground">Puntos disponibles</dt>
-          <dd className="mt-2 font-medium">{account.loyaltyPoints} · Ver beneficios →</dd>
-        </Link>
+          <dd className="mt-2 font-medium">
+            <Link href="/mi-cuenta/beneficios" className="underline-offset-4 hover:underline">
+              {account.loyaltyPoints} · Ver beneficios →
+            </Link>
+          </dd>
+        </div>
       </dl>
       <section aria-labelledby="profile-title" className="space-y-4">
         <h2 id="profile-title" className="text-2xl font-semibold">

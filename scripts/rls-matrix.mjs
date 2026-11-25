@@ -218,7 +218,7 @@ async function ensureMatrixFixtures(client) {
   const payments = await seedPaymentFixture(client, { checkout, catalog, adminId });
   await seedLogisticsFixture(client, { checkout, payments, adminId });
   await seedOperationsFixture(client, { adminId, catalog, checkout });
-  await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
+  const postsale = await seedPostSaleFixture(client, { catalog, inventory, checkout, adminId });
   const crm = await seedCrmFixture(client, { adminId });
   await seedB2bFixture(client, { adminId, catalog, crm });
   await seedGrowthFixture(client, { checkout, catalog, adminId });
@@ -228,29 +228,31 @@ async function ensureMatrixFixtures(client) {
     const requestedRefundFilter =
       table === "OrderRefundItem"
         ? `AND EXISTS (SELECT 1 FROM public."OrderRefund" refund WHERE refund."id" = t."refundId" AND refund."status" = 'REQUESTED')`
-        : table === "SerializedUnit"
-          ? `AND EXISTS (SELECT 1 FROM public."Shipment" shipment WHERE shipment."id" = t."shipmentId" AND shipment."status" IN ('PENDING', 'READY'))`
-          : table === "InventoryLedger"
-            ? `AND EXISTS (
+        : table === "ReturnRequestItem"
+          ? `AND EXISTS (SELECT 1 FROM public."ReturnRequest" request WHERE request."id" = t."returnRequestId" AND request."status" = 'REJECTED')`
+          : table === "SerializedUnit"
+            ? `AND EXISTS (SELECT 1 FROM public."Shipment" shipment WHERE shipment."id" = t."shipmentId" AND shipment."status" IN ('PENDING', 'READY'))`
+            : table === "InventoryLedger"
+              ? `AND EXISTS (
               SELECT 1 FROM public."StockLevel" level
               WHERE level."locationId" = t."locationId" AND level."variantId" = t."variantId"
                 AND level."onHand" = t."onHandAfter" AND level."committed" = t."committedAfter"
                 AND level."safetyStock" = t."safetyStockAfter"
                 AND level."weightedAvgCostCents" = t."weightedAvgCostAfterCents"
             )`
-            : table === "Referral"
-              ? `AND t."status" = 'ATTRIBUTED'`
-              : table === "LoyaltyTxn"
-                ? `AND EXISTS (SELECT 1 FROM public."Customer" customer WHERE customer."id" = t."customerId" AND customer."loyaltyPoints" = t."balanceAfter")`
-                : table === "LifecycleStep"
-                  ? `AND EXISTS (SELECT 1 FROM public."LifecycleJourney" journey WHERE journey."id" = t."journeyId" AND journey."status" = 'DRAFT')`
-                  : ["BackupRun", "DisasterRecoveryDrill"].includes(table)
-                    ? `AND t."status" = 'RUNNING'`
-                    : table === "RecoveryBucketCheck"
-                      ? `AND EXISTS (SELECT 1 FROM public."BackupRun" parent WHERE parent."id" = t."backupRunId" AND parent."status" = 'RUNNING')`
-                      : ["CustomerSegment", "LifecycleJourney"].includes(table)
-                        ? `AND t."status" = 'DRAFT'`
-                        : "";
+              : table === "Referral"
+                ? `AND t."status" = 'ATTRIBUTED'`
+                : table === "LoyaltyTxn"
+                  ? `AND EXISTS (SELECT 1 FROM public."Customer" customer WHERE customer."id" = t."customerId" AND customer."loyaltyPoints" = t."balanceAfter")`
+                  : table === "LifecycleStep"
+                    ? `AND EXISTS (SELECT 1 FROM public."LifecycleJourney" journey WHERE journey."id" = t."journeyId" AND journey."status" = 'DRAFT')`
+                    : ["BackupRun", "DisasterRecoveryDrill"].includes(table)
+                      ? `AND t."status" = 'RUNNING'`
+                      : table === "RecoveryBucketCheck"
+                        ? `AND EXISTS (SELECT 1 FROM public."BackupRun" parent WHERE parent."id" = t."backupRunId" AND parent."status" = 'RUNNING')`
+                        : ["CustomerSegment", "LifecycleJourney"].includes(table)
+                          ? `AND t."status" = 'DRAFT'`
+                          : "";
     const freshRow = await client.query(
       `SELECT t."id"
        FROM public."${table}" t
@@ -272,7 +274,26 @@ async function ensureMatrixFixtures(client) {
     }
     fixtureIds.set(table, rowId);
   }
+  fixtureIds.set("ReturnRequestItemInsert", postsale.requestedReturnItemId);
   return fixtureIds;
+}
+
+function matrixInsertSource(table) {
+  if (table === "CustomerSegmentMembership") {
+    return `SELECT "id", "segmentId", "customerId", "consentId", "sequence" + 1 AS "sequence", "segmentVersion", 'EXITED'::"SegmentMembershipStatus" AS "status", 'FILTER_CHANGED' AS "reason", "metrics", "definitionHash", "occurredAt" FROM public."${table}" WHERE "id" = $1::uuid`;
+  }
+  if (table === "ReturnRequestUnit") {
+    return `SELECT source."id", source."returnRequestItemId", (
+      SELECT rejected_unit."serializedUnitId"
+      FROM public."ReturnRequestUnit" rejected_unit
+      JOIN public."ReturnRequestItem" rejected_item ON rejected_item."id" = rejected_unit."returnRequestItemId"
+      JOIN public."ReturnRequest" rejected_request ON rejected_request."id" = rejected_item."returnRequestId"
+      WHERE rejected_request."status" = 'REJECTED'
+      LIMIT 1
+    ) AS "serializedUnitId", source."createdAt"
+    FROM public."${table}" source WHERE source."returnRequestItemId" = $1::uuid`;
+  }
+  return `SELECT * FROM public."${table}" WHERE "id" = $1::uuid`;
 }
 
 export async function runRlsMatrix(databaseUrl) {
@@ -353,8 +374,12 @@ export async function runRlsMatrix(databaseUrl) {
 
         await inSavepoint({ role: grantedRole, table, operation: "INSERT" }, async () => {
           await client.query(
-            `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS ${table === "CustomerSegmentMembership" ? `SELECT "id", "segmentId", "customerId", "consentId", "sequence" + 1 AS "sequence", "segmentVersion", 'EXITED'::"SegmentMembershipStatus" AS "status", 'FILTER_CHANGED' AS "reason", "metrics", "definitionHash", "occurredAt" FROM public."${table}" WHERE "id" = $1::uuid` : `SELECT * FROM public."${table}" WHERE "id" = $1::uuid`}`,
-            [fixtureId],
+            `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS ${matrixInsertSource(table)}`,
+            [
+              ["ReturnRequestItem", "ReturnRequestUnit"].includes(table)
+                ? fixtureIds.get("ReturnRequestItemInsert")
+                : fixtureId,
+            ],
           );
           await client.query(`GRANT SELECT ON pg_temp.matrix_source TO ${grantedRole}`);
           await client.query(`SET ROLE ${grantedRole}`);
@@ -382,8 +407,12 @@ export async function runRlsMatrix(databaseUrl) {
             await inSavepoint({ role: apiRole, table, operation }, async () => {
               if (operation === "INSERT") {
                 await client.query(
-                  `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS ${table === "CustomerSegmentMembership" ? `SELECT "id", "segmentId", "customerId", "consentId", "sequence" + 1 AS "sequence", "segmentVersion", 'EXITED'::"SegmentMembershipStatus" AS "status", 'FILTER_CHANGED' AS "reason", "metrics", "definitionHash", "occurredAt" FROM public."${table}" WHERE "id" = $1::uuid` : `SELECT * FROM public."${table}" WHERE "id" = $1::uuid`}`,
-                  [fixtureId],
+                  `CREATE TEMP TABLE matrix_source ON COMMIT DROP AS ${matrixInsertSource(table)}`,
+                  [
+                    ["ReturnRequestItem", "ReturnRequestUnit"].includes(table)
+                      ? fixtureIds.get("ReturnRequestItemInsert")
+                      : fixtureId,
+                  ],
                 );
                 await client.query(`GRANT SELECT ON pg_temp.matrix_source TO ${apiRole}`);
               }

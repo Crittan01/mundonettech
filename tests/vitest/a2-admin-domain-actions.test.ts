@@ -93,6 +93,11 @@ const effects = {
   createJourney: vi.fn(),
   updateJourney: vi.fn(),
   transitionJourney: vi.fn(),
+  transitionReturn: vi.fn(),
+  transitionWarranty: vi.fn(),
+  replySupport: vi.fn(),
+  closeSupport: vi.fn(),
+  moderateReview: vi.fn(),
 };
 
 function formEntries(formData: FormData): [string, FormDataEntryValue][] {
@@ -161,6 +166,13 @@ const mocks: Record<string, unknown> = {
     ...db,
     AdminOperationRateLimitError,
     consumeAdminOperationRateLimit: consumeRateLimit,
+    PostSaleAdminService: class {
+      transitionReturn = effects.transitionReturn;
+      transitionWarranty = effects.transitionWarranty;
+      replySupport = effects.replySupport;
+      closeSupport = effects.closeSupport;
+      moderateReview = effects.moderateReview;
+    },
   },
   "@mundonettech/integrations": integrations,
   "@mundonettech/media": media,
@@ -571,5 +583,104 @@ describe("A2/A4 — autorización y cierre de los 82 actions administrativos asi
     expect(result.status).toBe("success");
     expect(revalidatePath).toHaveBeenCalledWith(`/admin/pedidos/${orderId}`);
     expect(revalidatePath).not.toHaveBeenCalledWith(`/admin/pedidos/${otherOrderId}`);
+  });
+});
+
+describe("A6 — acciones administrativas de posventa y reseñas", () => {
+  it("propaga control optimista, nota y contexto de auditoría a una transición válida", async () => {
+    const returnRequestId = randomUUID();
+    effects.transitionReturn.mockResolvedValueOnce({
+      id: returnRequestId,
+      status: "AWAITING_RETURN",
+      replayed: false,
+    });
+    const form = new FormData();
+    form.set("returnRequestId", returnRequestId);
+    form.set("transition", "APPROVE");
+    form.set("expectedVersion", "0");
+    form.set("note", "Aprobación verificada");
+
+    const result = await modules["admin-postsale"].transitionReturnAction!(idle, form);
+
+    expect(result.status).toBe("success");
+    expect(effects.transitionReturn).toHaveBeenCalledExactlyOnceWith({
+      returnRequestId,
+      transition: "APPROVE",
+      expectedVersion: 0,
+      note: "Aprobación verificada",
+      audit: {
+        actorAdminUserId: adminId,
+        ipHash: new Uint8Array(32).fill(1),
+        userAgentHash: new Uint8Array(32).fill(2),
+        requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      },
+    });
+  });
+
+  it("rechaza campos duplicados y archivos sin llamar al dominio ni reflejar la nota", async () => {
+    const duplicated = new FormData();
+    duplicated.append("returnRequestId", randomUUID());
+    duplicated.append("transition", "APPROVE");
+    duplicated.append("transition", "REJECT");
+    duplicated.set("expectedVersion", "0");
+    duplicated.set("note", "persona@example.test");
+    const duplicateResult = await modules["admin-postsale"].transitionReturnAction!(
+      idle,
+      duplicated,
+    );
+    expect(duplicateResult.status).toBe("error");
+    expect(JSON.stringify(duplicateResult)).not.toContain("persona@example.test");
+
+    const uploaded = new FormData();
+    uploaded.set("warrantyClaimId", randomUUID());
+    uploaded.set("transition", "APPROVE");
+    uploaded.set("expectedVersion", "0");
+    uploaded.set("note", new File(["private"], "note.txt"));
+    const fileResult = await modules["admin-postsale"].transitionWarrantyAction!(idle, uploaded);
+    expect(fileResult.status).toBe("error");
+    expect(effects.transitionReturn).not.toHaveBeenCalled();
+    expect(effects.transitionWarranty).not.toHaveBeenCalled();
+  });
+
+  it("invalida reseñas con el slug devuelto por la mutación sin una lectura previa", async () => {
+    const reviewId = randomUUID();
+    effects.moderateReview.mockResolvedValueOnce({
+      id: reviewId,
+      status: "PUBLISHED",
+      productSlug: "teclado-confirmado",
+      replayed: false,
+    });
+    const form = new FormData();
+    form.set("reviewId", reviewId);
+    form.set("status", "PUBLISHED");
+    form.set("note", "Contenido verificado");
+    form.set("expectedUpdatedAt", "2026-11-25T12:00:00.000Z");
+
+    const result = await modules["admin-postsale"].moderateReviewAction!(idle, form);
+
+    expect(result.status).toBe("success");
+    expect(effects.moderateReview).toHaveBeenCalledTimes(1);
+    expect(updateTag).toHaveBeenCalledWith("reviews");
+    expect(updateTag).toHaveBeenCalledWith("reviews:teclado-confirmado");
+    expect(revalidatePath).toHaveBeenCalledWith("/producto/teclado-confirmado");
+  });
+
+  it("no refleja notas personales cuando la moderación falla", async () => {
+    effects.moderateReview.mockRejectedValueOnce(
+      new db.PostSaleError("VALIDATION", "Sensitive provider detail"),
+    );
+    const form = new FormData();
+    form.set("reviewId", randomUUID());
+    form.set("status", "PUBLISHED");
+    form.set("note", "Contactar a persona@example.test");
+    form.set("expectedUpdatedAt", "2026-11-25T12:00:00.000Z");
+
+    const result = await modules["admin-postsale"].moderateReviewAction!(idle, form);
+
+    expect(result.status).toBe("error");
+    expect(result.values).toEqual({ status: "PUBLISHED" });
+    expect(JSON.stringify(result)).not.toContain("persona@example.test");
+    expect(JSON.stringify(result)).not.toContain("Sensitive provider detail");
+    expect(updateTag).not.toHaveBeenCalled();
   });
 });

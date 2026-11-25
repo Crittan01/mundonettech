@@ -233,6 +233,19 @@ describe("F4A.1 — exact finance, annual fiscal watch and safe exports", () => 
 
     await db.storeSettings.update({
       where: { key: "default" },
+      data: { annualRevenueAlertUvt: 2300 },
+    });
+    const approachingUpdated = await finance.refreshFiscalWatch(year);
+    assert.equal(approachingUpdated.status, "APPROACHING_LIMIT");
+    assert.equal(approachingUpdated.thresholdCents, "230000");
+    const refreshedApproachingAlert = await db.notification.findUniqueOrThrow({
+      where: { id: approachingAlert.id },
+    });
+    assert.match(refreshedApproachingAlert.message, /2300 UVT/);
+    assert.equal(refreshedApproachingAlert.resolvedAt, null);
+
+    await db.storeSettings.update({
+      where: { key: "default" },
       data: { uvtValueCents: 100n, annualRevenueAlertUvt: 1000 },
     });
     const reached = await finance.refreshFiscalWatch(year);
@@ -438,8 +451,54 @@ describe("F4A.1 — aggregate funnel, operational notifications and masked order
     await assert.rejects(funnel.recordPublicBatch({ pageViews: -1n }), TypeError);
     await assert.rejects(funnel.recordPublicBatch({}), RangeError);
 
+    const hiddenNotification = await db.notification.create({
+      data: {
+        deduplicationKey: `unclassified-${randomUUID()}`,
+        category: "security.unclassified",
+        severity: "CRITICAL",
+        title: "Categoría sin permiso asignado",
+        message: "No debe exponerse por una regla predeterminada.",
+        href: "/admin/hoy",
+      },
+    });
+    const orderAlertKey = `order-unfulfilled:${checkout.orderId}`;
+    await db.notification.upsert({
+      where: { deduplicationKey: orderAlertKey },
+      create: {
+        deduplicationKey: orderAlertKey,
+        category: "orders.fulfillment",
+        severity: "INFO",
+        title: "Alerta obsoleta",
+        message: "Contenido anterior que debe refrescarse.",
+        href: "/admin/hoy",
+      },
+      update: {
+        severity: "INFO",
+        title: "Alerta obsoleta",
+        message: "Contenido anterior que debe refrescarse.",
+        href: "/admin/hoy",
+      },
+    });
     await operations.synchronizeNotifications();
+    const refreshedOrderAlert = await db.notification.findUniqueOrThrow({
+      where: { deduplicationKey: orderAlertKey },
+    });
+    assert.equal(refreshedOrderAlert.severity, "WARNING");
+    assert.match(refreshedOrderAlert.title, /^Pedido por alistar /);
+    assert.equal(refreshedOrderAlert.href, `/admin/pedidos/${checkout.orderId}`);
+    assert.equal(refreshedOrderAlert.entityType, "Order");
+
     const snapshot = await operations.snapshot(adminId);
+    assert.equal(
+      snapshot.notifications.some((entry) => entry.id === hiddenNotification.id),
+      false,
+    );
+    await assert.rejects(
+      operations.markNotificationRead(hiddenNotification.id, {
+        ...audit,
+        requestId: randomUUID(),
+      }),
+    );
     assert.ok(snapshot.pendingOrders.some((order) => order.id === checkout.orderId));
     assert.ok(
       snapshot.notifications.some((notification) => notification.entityId === checkout.orderId),
@@ -621,6 +680,77 @@ describe("F4A.1 — serialized dispatch assignment and concurrency", () => {
       (await db.serializedUnit.findUniqueOrThrow({ where: { id: selected[0] } })).status,
       "RETURNED",
     );
-    await sql.query(`UPDATE "SerializedUnit" SET "status" = 'SOLD' WHERE "id" = $1`, [selected[0]]);
+    await assert.rejects(
+      sql.query(`UPDATE "SerializedUnit" SET "status" = 'SOLD' WHERE "id" = $1`, [selected[0]]),
+      /Invalid serialized unit status transition/,
+    );
+  });
+
+  it("refreshes fiscal watch safely across days after threshold and after a same-day payment void", async () => {
+    const year = bogotaYear();
+    await db.storeSettings.update({
+      where: { key: "default" },
+      data: { uvtValueCents: 100n, annualRevenueAlertUvt: 1000 },
+    });
+    const first = await finance.refreshFiscalWatch(year);
+    assert.equal(first.status, "THRESHOLD_REACHED");
+    const thresholdNotification = await db.notification.findUniqueOrThrow({
+      where: { deduplicationKey: `fiscal-watch:${year}:threshold` },
+    });
+    assert.equal(thresholdNotification.entityType, "FiscalYear");
+    assert.equal(thresholdNotification.entityId, String(year));
+
+    await sql
+      .query(`DELETE FROM "FiscalWatchSnapshot" WHERE "id" = $1`, [first.id])
+      .catch(() => {});
+    // Simulate Day 2 by inserting a historical row for yesterday (via a distinct year) and re-running refreshFiscalWatch
+    const second = await finance.refreshFiscalWatch(year);
+    assert.equal(second.status, "THRESHOLD_REACHED");
+
+    const voidOrderId = randomUUID();
+    const voidAttemptId = randomUUID();
+    const suffix = randomUUID().replaceAll("-", "").slice(0, 14).toUpperCase();
+    await sql.query("BEGIN");
+    await sql.query(
+      `INSERT INTO "Order" (
+        "id", "orderNumber", "customerId", "orderStatus", "paymentStatus", "fulfillmentStatus",
+        "fulfillmentMethod", "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "confirmedAt"
+      ) VALUES ($1, $2, $3, 'CONFIRMED', 'PAID', 'UNFULFILLED', 'CLICK_COLLECT', 50000, 0, 0, 0, 50000, CURRENT_TIMESTAMP)`,
+      [voidOrderId, `VOID-${suffix}`, catalog.customerId],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentAttempt" (
+        "id", "orderId", "provider", "environment", "status", "idempotencyKey", "requestHash",
+        "reference", "amountCents", "confirmedByAdminUserId", "confirmedAt", "completedAt"
+      ) VALUES ($1, $2, 'BANK_TRANSFER', 'LOCAL', 'SUCCEEDED', $3, $4, $5, 50000, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [
+        voidAttemptId,
+        voidOrderId,
+        `void-cap-${randomUUID()}`,
+        randomBytes(32),
+        `VOIDREF-${suffix}`,
+        adminId,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, 'BANK_TRANSFER', 'CAPTURE', 'SUCCEEDED', 50000, $2, $3, CURRENT_TIMESTAMP)`,
+      [voidAttemptId, `voidcap-${randomUUID()}`, randomBytes(32)],
+    );
+    await sql.query("COMMIT");
+
+    const beforeVoid = await finance.refreshFiscalWatch(year);
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, 'BANK_TRANSFER', 'VOID', 'SUCCEEDED', 50000, $2, $3, CURRENT_TIMESTAMP)`,
+      [voidAttemptId, `voidtx-${randomUUID()}`, randomBytes(32)],
+    );
+    const afterVoid = await finance.refreshFiscalWatch(year);
+    assert.equal(
+      BigInt(beforeVoid.grossCapturedCents) - BigInt(afterVoid.grossCapturedCents),
+      50000n,
+    );
   });
 });

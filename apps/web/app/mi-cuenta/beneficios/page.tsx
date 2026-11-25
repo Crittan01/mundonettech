@@ -133,7 +133,6 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
                 <strong>{referralStatusLabels[referral.status]}</strong>
                 <span className="ml-2 text-muted-foreground">
                   {dateFormatter.format(referral.createdAt)}
-                  {referral.orderNumber ? ` · ${referral.orderNumber}` : ""}
                 </span>
               </li>
             ))}
@@ -177,7 +176,7 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
                   <tr key={entry.id} className="border-b border-border last:border-0">
                     <td className="p-4">{dateFormatter.format(entry.createdAt)}</td>
                     <td className="p-4">{loyaltyTxnTypeLabels[entry.type]}</td>
-                    <td className="p-4">{entry.orderNumber}</td>
+                    <td className="p-4">{entry.orderNumber ?? "—"}</td>
                     <td className="p-4 text-right font-medium">
                       {entry.points > 0 ? "+" : ""}
                       {entry.points}

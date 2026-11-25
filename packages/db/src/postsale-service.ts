@@ -81,13 +81,20 @@ export interface ReviewInput {
 const printablePattern = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const activeReturnStatuses = ["REQUESTED", "AWAITING_RETURN", "RECEIVED", "COMPLETED"] as const;
 
-function printable(value: unknown, field: string, minimum: number, maximum: number): string {
+function printable(
+  value: unknown,
+  field: string,
+  minimum: number,
+  maximum: number,
+  options: { readonly singleLine?: boolean } = {},
+): string {
   if (
     typeof value !== "string" ||
     value.trim() !== value ||
     value.length < minimum ||
     value.length > maximum ||
-    printablePattern.test(value)
+    printablePattern.test(value) ||
+    (options.singleLine && /[\r\n\t]/.test(value))
   ) {
     throw new PostSaleError(
       "VALIDATION",
@@ -141,6 +148,9 @@ export class PostSaleService {
     >`SELECT * FROM "Order" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
     const order = orders[0];
     if (!order) throw new PostSaleError("NOT_FOUND", "Order not found.");
+    if (order.anonymizedAt) {
+      throw new PostSaleError("FORBIDDEN", "This order is no longer available for post-sale.");
+    }
     const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]!.now;
     if (actor.kind === "CUSTOMER") {
@@ -169,9 +179,12 @@ export class PostSaleService {
     actorIds(actor);
     const order = await this.db.order.findUnique({
       where: { id: orderId },
-      select: { id: true, customerId: true },
+      select: { id: true, customerId: true, anonymizedAt: true },
     });
     if (!order) throw new PostSaleError("NOT_FOUND", "Order not found.");
+    if (order.anonymizedAt) {
+      throw new PostSaleError("FORBIDDEN", "This order is no longer available for post-sale.");
+    }
     const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]!.now;
     if (actor.kind === "CUSTOMER") {
@@ -213,9 +226,17 @@ export class PostSaleService {
               include: {
                 product: {
                   include: {
+                    brand: { select: { deletedAt: true } },
+                    category: { select: { deletedAt: true } },
                     variants: {
                       where: { status: "ACTIVE", deletedAt: null },
                       omit: { costCents: true },
+                      include: {
+                        stockLevels: {
+                          where: { location: { deletedAt: null, type: { not: "QUARANTINE" } } },
+                          select: { onHand: true, committed: true, safetyStock: true },
+                        },
+                      },
                     },
                   },
                 },
@@ -307,168 +328,250 @@ export class PostSaleService {
           throw new PostSaleError("VALIDATION", "Duplicate serialized units are not allowed.");
         }
         serials.forEach((id) => assertUuid(id, "serializedUnitId"));
-        return { ...item, replacementVariantId: item.replacementVariantId ?? null, serials };
+        return {
+          shipmentItemId: item.shipmentItemId,
+          quantity: item.quantity,
+          replacementVariantId: item.replacementVariantId ?? null,
+          serializedUnitIds: serials,
+          serials,
+        };
       })
       .sort((left, right) => compareStrings(left.shipmentItemId, right.shipmentItemId));
+    const requestedSerials = new Set<string>();
+    for (const item of items) {
+      for (const serial of item.serials) {
+        if (requestedSerials.has(serial)) {
+          throw new PostSaleError(
+            "VALIDATION",
+            "A serialized unit cannot appear in multiple delivery items.",
+          );
+        }
+        requestedSerials.add(serial);
+      }
+    }
     const expectedHash = digest({
       actor: actorHash(actor),
       input: { ...input, reason, idempotencyKey, items },
     });
-    return inInventoryTransaction(this.db, async (tx) => {
-      const { order, now } = await this.lockOrderActor(tx, input.orderId, actor);
-      const existing = await tx.returnRequest.findUnique({ where: { idempotencyKey } });
-      if (existing) {
-        if (existing.orderId !== order.id || !sameHash(existing.requestHash, expectedHash)) {
+    try {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        const { order, now } = await this.lockOrderActor(tx, input.orderId, actor);
+        const existing = await tx.returnRequest.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          if (existing.orderId !== order.id || !sameHash(existing.requestHash, expectedHash)) {
+            throw new PostSaleError(
+              "CONFLICT",
+              "The return idempotency key belongs to another request.",
+            );
+          }
+          return { id: existing.id, status: existing.status, replayed: true };
+        }
+        const createdItems: Array<{
+          shipmentItemId: string;
+          orderItemId: string;
+          quantity: number;
+          replacementVariantId: string | null;
+          deliveredAt: Date;
+          retractDueAt: Date;
+          serials: string[];
+        }> = [];
+        for (const requested of items) {
+          const delivery = await tx.shipmentItem.findFirst({
+            where: { id: requested.shipmentItemId, orderItem: { orderId: order.id } },
+            include: {
+              shipment: true,
+              orderItem: { include: { variant: { include: { product: true } } } },
+            },
+          });
+          if (
+            !delivery ||
+            delivery.shipment.status !== "DELIVERED" ||
+            !delivery.shipment.deliveredAt
+          ) {
+            throw new PostSaleError(
+              "CONFLICT",
+              "A requested delivery item has not been delivered.",
+            );
+          }
+          const window = evaluateRetractWindow(delivery.shipment.deliveredAt, now);
+          if (!window.isOpen) {
+            throw new PostSaleError("EXPIRED", `The retract window closed on ${window.dueDate}.`);
+          }
+          const available = await this.availableShipmentQuantity(tx, requested.shipmentItemId);
+          if (requested.quantity > available) {
+            throw new PostSaleError(
+              "CONFLICT",
+              "The return quantity exceeds the remaining delivered units.",
+            );
+          }
+          if (requested.quantity > delivery.quantity) {
+            throw new PostSaleError(
+              "VALIDATION",
+              "The return quantity exceeds this delivery batch.",
+            );
+          }
+          const tracksSerial = delivery.orderItem.variant.product.trackSerial;
+          if (
+            (tracksSerial && requested.serials.length !== requested.quantity) ||
+            (!tracksSerial && requested.serials.length > 0)
+          ) {
+            throw new PostSaleError(
+              "VALIDATION",
+              "Serialized units must exactly match the returned quantity.",
+            );
+          }
+          if (tracksSerial) {
+            const units = await tx.serializedUnit.findMany({
+              where: {
+                id: { in: requested.serials },
+                orderId: order.id,
+                variantId: delivery.orderItem.variantId,
+                shipmentId: delivery.shipmentId,
+                status: "SOLD",
+              },
+            });
+            if (units.length !== requested.quantity) {
+              throw new PostSaleError(
+                "CONFLICT",
+                "A serialized unit is not available for this return.",
+              );
+            }
+            const [warranty, activeReturnUnit] = await Promise.all([
+              tx.warrantyClaim.findFirst({
+                where: {
+                  serializedUnitId: { in: requested.serials },
+                  status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
+                },
+                select: { id: true },
+              }),
+              tx.returnRequestUnit.findFirst({
+                where: {
+                  serializedUnitId: { in: requested.serials },
+                  returnRequestItem: {
+                    returnRequest: { status: { in: [...activeReturnStatuses] } },
+                  },
+                },
+                select: { id: true },
+              }),
+            ]);
+            if (warranty || activeReturnUnit) {
+              throw new PostSaleError(
+                "CONFLICT",
+                "A serialized unit already has an active post-sale case.",
+              );
+            }
+          }
+          if (input.kind === "EXCHANGE") {
+            if (
+              !requested.replacementVariantId ||
+              requested.replacementVariantId === delivery.orderItem.variantId
+            ) {
+              throw new PostSaleError(
+                "VALIDATION",
+                "An exchange requires a different replacement variant.",
+              );
+            }
+            const replacement = await tx.productVariant.findFirst({
+              where: {
+                id: requested.replacementVariantId,
+                productId: delivery.orderItem.variant.productId,
+                status: "ACTIVE",
+                deletedAt: null,
+                priceCents: delivery.orderItem.variant.priceCents,
+                product: {
+                  status: "ACTIVE",
+                  deletedAt: null,
+                  brand: { deletedAt: null },
+                  category: { deletedAt: null },
+                },
+              },
+              include: {
+                stockLevels: {
+                  where: { location: { deletedAt: null, type: { not: "QUARANTINE" } } },
+                  select: { onHand: true, committed: true, safetyStock: true },
+                },
+              },
+            });
+            if (!replacement) {
+              throw new PostSaleError(
+                "VALIDATION",
+                "The replacement variant must be active, sellable and match the original variant price.",
+              );
+            }
+            const sellableReplacement = replacement.stockLevels.reduce(
+              (sum, level) => sum + Math.max(0, level.onHand - level.committed - level.safetyStock),
+              0,
+            );
+            if (sellableReplacement < requested.quantity) {
+              throw new PostSaleError(
+                "CONFLICT",
+                "The replacement variant does not have enough sellable inventory.",
+              );
+            }
+          } else if (requested.replacementVariantId) {
+            throw new PostSaleError("VALIDATION", "A refund cannot include a replacement variant.");
+          }
+          createdItems.push({
+            shipmentItemId: delivery.id,
+            orderItemId: delivery.orderItemId,
+            quantity: requested.quantity,
+            replacementVariantId: input.kind === "EXCHANGE" ? requested.replacementVariantId : null,
+            deliveredAt: delivery.shipment.deliveredAt,
+            retractDueAt: endOfColombianDate(window.dueDate),
+            serials: requested.serials,
+          });
+        }
+        const requester = actorIds(actor);
+        const created = await tx.returnRequest.create({
+          data: {
+            orderId: order.id,
+            requesterCustomerId: requester.customerId,
+            requesterGuestSessionId: requester.guestSessionId,
+            idempotencyKey,
+            requestHash: expectedHash,
+            kind: input.kind,
+            reason,
+            retractRefundDueAt:
+              input.kind === "REFUND" ? calculateRetractRefundDeadline(now) : null,
+            items: {
+              create: createdItems.map((item) => ({
+                shipmentItemId: item.shipmentItemId,
+                orderItemId: item.orderItemId,
+                quantity: item.quantity,
+                replacementVariantId: item.replacementVariantId,
+                deliveredAt: item.deliveredAt,
+                retractDueAt: item.retractDueAt,
+                units: { create: item.serials.map((serializedUnitId) => ({ serializedUnitId })) },
+              })),
+            },
+          },
+        });
+        await tx.domainOutbox.create({
+          data: {
+            eventType: "postsale.return.requested.v1",
+            aggregateType: "ReturnRequest",
+            aggregateId: created.id,
+            deduplicationKey: `return:${created.id}:requested:v1`,
+            payload: { orderId: order.id, returnRequestId: created.id, kind: created.kind },
+          },
+        });
+        return { id: created.id, status: created.status, replayed: false };
+      });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        const existing = await this.db.returnRequest.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          if (existing.orderId === input.orderId && sameHash(existing.requestHash, expectedHash)) {
+            return { id: existing.id, status: existing.status, replayed: true };
+          }
           throw new PostSaleError(
             "CONFLICT",
             "The return idempotency key belongs to another request.",
           );
         }
-        return { id: existing.id, status: existing.status, replayed: true };
       }
-      const createdItems: Array<{
-        shipmentItemId: string;
-        orderItemId: string;
-        quantity: number;
-        replacementVariantId: string | null;
-        deliveredAt: Date;
-        retractDueAt: Date;
-        serials: string[];
-      }> = [];
-      for (const requested of items) {
-        const delivery = await tx.shipmentItem.findFirst({
-          where: { id: requested.shipmentItemId, orderItem: { orderId: order.id } },
-          include: {
-            shipment: true,
-            orderItem: { include: { variant: { include: { product: true } } } },
-          },
-        });
-        if (
-          !delivery ||
-          delivery.shipment.status !== "DELIVERED" ||
-          !delivery.shipment.deliveredAt
-        ) {
-          throw new PostSaleError("CONFLICT", "A requested delivery item has not been delivered.");
-        }
-        const window = evaluateRetractWindow(delivery.shipment.deliveredAt, now);
-        if (!window.isOpen) {
-          throw new PostSaleError("EXPIRED", `The retract window closed on ${window.dueDate}.`);
-        }
-        const available = await this.availableShipmentQuantity(tx, requested.shipmentItemId);
-        if (requested.quantity > available) {
-          throw new PostSaleError(
-            "CONFLICT",
-            "The return quantity exceeds the remaining delivered units.",
-          );
-        }
-        if (requested.quantity > delivery.quantity) {
-          throw new PostSaleError("VALIDATION", "The return quantity exceeds this delivery batch.");
-        }
-        const tracksSerial = delivery.orderItem.variant.product.trackSerial;
-        if (
-          (tracksSerial && requested.serials.length !== requested.quantity) ||
-          (!tracksSerial && requested.serials.length > 0)
-        ) {
-          throw new PostSaleError(
-            "VALIDATION",
-            "Serialized units must exactly match the returned quantity.",
-          );
-        }
-        if (tracksSerial) {
-          const units = await tx.serializedUnit.findMany({
-            where: {
-              id: { in: requested.serials },
-              orderId: order.id,
-              variantId: delivery.orderItem.variantId,
-              shipmentId: delivery.shipmentId,
-              status: "SOLD",
-            },
-          });
-          if (units.length !== requested.quantity) {
-            throw new PostSaleError(
-              "CONFLICT",
-              "A serialized unit is not available for this return.",
-            );
-          }
-          const warranty = await tx.warrantyClaim.findFirst({
-            where: {
-              serializedUnitId: { in: requested.serials },
-              status: { notIn: ["REJECTED", "CANCELLED"] },
-            },
-            select: { id: true },
-          });
-          if (warranty)
-            throw new PostSaleError("CONFLICT", "A serialized unit already has a warranty claim.");
-        }
-        if (input.kind === "EXCHANGE") {
-          if (
-            !requested.replacementVariantId ||
-            requested.replacementVariantId === delivery.orderItem.variantId
-          ) {
-            throw new PostSaleError(
-              "VALIDATION",
-              "An exchange requires a different replacement variant.",
-            );
-          }
-          const replacement = await tx.productVariant.findFirst({
-            where: {
-              id: requested.replacementVariantId,
-              productId: delivery.orderItem.variant.productId,
-              status: "ACTIVE",
-              deletedAt: null,
-              product: { deletedAt: null },
-            },
-          });
-          if (!replacement)
-            throw new PostSaleError("VALIDATION", "The replacement variant is not available.");
-        } else if (requested.replacementVariantId) {
-          throw new PostSaleError("VALIDATION", "A refund cannot include a replacement variant.");
-        }
-        createdItems.push({
-          shipmentItemId: delivery.id,
-          orderItemId: delivery.orderItemId,
-          quantity: requested.quantity,
-          replacementVariantId: input.kind === "EXCHANGE" ? requested.replacementVariantId : null,
-          deliveredAt: delivery.shipment.deliveredAt,
-          retractDueAt: endOfColombianDate(window.dueDate),
-          serials: requested.serials,
-        });
-      }
-      const requester = actorIds(actor);
-      const created = await tx.returnRequest.create({
-        data: {
-          orderId: order.id,
-          requesterCustomerId: requester.customerId,
-          requesterGuestSessionId: requester.guestSessionId,
-          idempotencyKey,
-          requestHash: expectedHash,
-          kind: input.kind,
-          reason,
-          retractRefundDueAt: input.kind === "REFUND" ? calculateRetractRefundDeadline(now) : null,
-          items: {
-            create: createdItems.map((item) => ({
-              shipmentItemId: item.shipmentItemId,
-              orderItemId: item.orderItemId,
-              quantity: item.quantity,
-              replacementVariantId: item.replacementVariantId,
-              deliveredAt: item.deliveredAt,
-              retractDueAt: item.retractDueAt,
-              units: { create: item.serials.map((serializedUnitId) => ({ serializedUnitId })) },
-            })),
-          },
-        },
-      });
-      await tx.domainOutbox.create({
-        data: {
-          eventType: "postsale.return.requested.v1",
-          aggregateType: "ReturnRequest",
-          aggregateId: created.id,
-          deduplicationKey: `return:${created.id}:requested:v1`,
-          payload: { orderId: order.id, returnRequestId: created.id, kind: created.kind },
-        },
-      });
-      return { id: created.id, status: created.status, replayed: false };
-    });
+      throw error;
+    }
   }
 
   async requestWarranty(actor: PostSaleActor, input: WarrantyClaimInput) {
@@ -482,105 +585,128 @@ export class PostSaleService {
       actor: actorHash(actor),
       input: { ...input, issueDescription, idempotencyKey },
     });
-    return inInventoryTransaction(this.db, async (tx) => {
-      const { order, now } = await this.lockOrderActor(tx, input.orderId, actor);
-      const existing = await tx.warrantyClaim.findUnique({ where: { idempotencyKey } });
-      if (existing) {
-        if (existing.orderId !== order.id || !sameHash(existing.requestHash, expectedHash)) {
+    try {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        const { order, now } = await this.lockOrderActor(tx, input.orderId, actor);
+        const existing = await tx.warrantyClaim.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          if (existing.orderId !== order.id || !sameHash(existing.requestHash, expectedHash)) {
+            throw new PostSaleError(
+              "CONFLICT",
+              "The warranty idempotency key belongs to another request.",
+            );
+          }
+          return { id: existing.id, status: existing.status, replayed: true };
+        }
+        const unit = await tx.serializedUnit.findFirst({
+          where: { id: input.serializedUnitId, orderId: order.id, status: "SOLD" },
+          include: { shipment: true, variant: { include: { product: true } } },
+        });
+        if (!unit?.shipment || unit.shipment.status !== "DELIVERED" || !unit.shipment.deliveredAt) {
+          throw new PostSaleError("CONFLICT", "The serialized unit has not been delivered.");
+        }
+        const candidates = await tx.shipmentItem.findMany({
+          where: {
+            shipmentId: unit.shipmentId!,
+            orderItem: { variantId: unit.variantId, orderId: order.id },
+          },
+          include: { orderItem: true },
+        });
+        if (candidates.length !== 1) {
+          throw new PostSaleError(
+            "CONFLICT",
+            "The serialized unit cannot be mapped to one order item.",
+          );
+        }
+        const orderItem = candidates[0]!.orderItem;
+        if (unit.variant.product.warrantyMonths < 1) {
+          throw new PostSaleError("EXPIRED", "This product has no configured warranty period.");
+        }
+        const warrantyDueAt = addColombianCalendarMonths(
+          unit.shipment.deliveredAt,
+          unit.variant.product.warrantyMonths,
+        );
+        if (now.getTime() > warrantyDueAt.getTime()) {
+          throw new PostSaleError("EXPIRED", "The product warranty period has ended.");
+        }
+        const [existingClaim, existingReturn] = await Promise.all([
+          tx.warrantyClaim.findFirst({
+            where: {
+              serializedUnitId: unit.id,
+              status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
+            },
+            select: { id: true },
+          }),
+          tx.returnRequestUnit.findFirst({
+            where: {
+              serializedUnitId: unit.id,
+              returnRequestItem: {
+                returnRequest: {
+                  status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED", "COMPLETED"] },
+                },
+              },
+            },
+            select: { id: true },
+          }),
+        ]);
+        if (existingClaim || existingReturn) {
+          throw new PostSaleError(
+            "CONFLICT",
+            "The serialized unit already has an active post-sale case.",
+          );
+        }
+        const requester = actorIds(actor);
+        const created = await tx.warrantyClaim.create({
+          data: {
+            orderId: order.id,
+            orderItemId: orderItem.id,
+            serializedUnitId: unit.id,
+            requesterCustomerId: requester.customerId,
+            requesterGuestSessionId: requester.guestSessionId,
+            idempotencyKey,
+            requestHash: expectedHash,
+            issueDescription,
+            remedy: input.remedy,
+            warrantyDueAt,
+          },
+        });
+        await tx.domainOutbox.create({
+          data: {
+            eventType: "postsale.warranty.requested.v1",
+            aggregateType: "WarrantyClaim",
+            aggregateId: created.id,
+            deduplicationKey: `warranty:${created.id}:requested:v1`,
+            payload: { orderId: order.id, warrantyClaimId: created.id },
+          },
+        });
+        return { id: created.id, status: created.status, replayed: false };
+      });
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
+        const existing = await this.db.warrantyClaim.findUnique({ where: { idempotencyKey } });
+        if (existing) {
+          if (existing.orderId === input.orderId && sameHash(existing.requestHash, expectedHash)) {
+            return { id: existing.id, status: existing.status, replayed: true };
+          }
           throw new PostSaleError(
             "CONFLICT",
             "The warranty idempotency key belongs to another request.",
           );
         }
-        return { id: existing.id, status: existing.status, replayed: true };
-      }
-      const unit = await tx.serializedUnit.findFirst({
-        where: { id: input.serializedUnitId, orderId: order.id, status: "SOLD" },
-        include: { shipment: true, variant: { include: { product: true } } },
-      });
-      if (!unit?.shipment || unit.shipment.status !== "DELIVERED" || !unit.shipment.deliveredAt) {
-        throw new PostSaleError("CONFLICT", "The serialized unit has not been delivered.");
-      }
-      const candidates = await tx.shipmentItem.findMany({
-        where: {
-          shipmentId: unit.shipmentId!,
-          orderItem: { variantId: unit.variantId, orderId: order.id },
-        },
-        include: { orderItem: true },
-      });
-      if (candidates.length !== 1) {
-        throw new PostSaleError(
-          "CONFLICT",
-          "The serialized unit cannot be mapped to one order item.",
-        );
-      }
-      const orderItem = candidates[0]!.orderItem;
-      if (unit.variant.product.warrantyMonths < 1) {
-        throw new PostSaleError("EXPIRED", "This product has no configured warranty period.");
-      }
-      const warrantyDueAt = addColombianCalendarMonths(
-        unit.shipment.deliveredAt,
-        unit.variant.product.warrantyMonths,
-      );
-      if (now.getTime() > warrantyDueAt.getTime()) {
-        throw new PostSaleError("EXPIRED", "The product warranty period has ended.");
-      }
-      const [existingClaim, existingReturn] = await Promise.all([
-        tx.warrantyClaim.findFirst({
-          where: { serializedUnitId: unit.id, status: { notIn: ["REJECTED", "CANCELLED"] } },
-          select: { id: true },
-        }),
-        tx.returnRequestUnit.findFirst({
-          where: {
-            serializedUnitId: unit.id,
-            returnRequestItem: {
-              returnRequest: {
-                status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED", "COMPLETED"] },
-              },
-            },
-          },
-          select: { id: true },
-        }),
-      ]);
-      if (existingClaim || existingReturn) {
         throw new PostSaleError(
           "CONFLICT",
           "The serialized unit already has an active post-sale case.",
         );
       }
-      const requester = actorIds(actor);
-      const created = await tx.warrantyClaim.create({
-        data: {
-          orderId: order.id,
-          orderItemId: orderItem.id,
-          serializedUnitId: unit.id,
-          requesterCustomerId: requester.customerId,
-          requesterGuestSessionId: requester.guestSessionId,
-          idempotencyKey,
-          requestHash: expectedHash,
-          issueDescription,
-          remedy: input.remedy,
-          warrantyDueAt,
-        },
-      });
-      await tx.domainOutbox.create({
-        data: {
-          eventType: "postsale.warranty.requested.v1",
-          aggregateType: "WarrantyClaim",
-          aggregateId: created.id,
-          deduplicationKey: `warranty:${created.id}:requested:v1`,
-          payload: { orderId: order.id, warrantyClaimId: created.id },
-        },
-      });
-      return { id: created.id, status: created.status, replayed: false };
-    });
+      throw error;
+    }
   }
 
   async createSupportTicket(actor: PostSaleActor, input: SupportTicketInput) {
     if (!["QUERY", "COMPLAINT", "CLAIM", "APPEAL", "SUGGESTION"].includes(input.kind)) {
       throw new PostSaleError("VALIDATION", "Support ticket kind is invalid.");
     }
-    const subject = printable(input.subject, "subject", 5, 200);
+    const subject = printable(input.subject, "subject", 5, 200, { singleLine: true });
     const message = printable(input.message, "message", 2, 5000);
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
     const expectedHash = digest({
@@ -643,7 +769,7 @@ export class PostSaleService {
         await tx.supportTicketMessage.create({
           data: {
             ticketId: id,
-            idempotencyKey: `${idempotencyKey}:initial`.slice(0, 128),
+            idempotencyKey: `support:${id}:initial`,
             authorType: actor.kind,
             authorCustomerId: ids.customerId,
             authorGuestSessionId: ids.guestSessionId,
@@ -698,7 +824,15 @@ export class PostSaleService {
         if (actor.kind !== "CUSTOMER" || peek.requesterCustomerId !== actor.customerId) {
           throw new PostSaleError("FORBIDDEN", "The customer does not own this ticket.");
         }
-        await acquireOperationLocks(tx, [`support:${peek.id}`]);
+        await acquireOperationLocks(tx, [
+          `customer-account:${actor.customerId}`,
+          `support:${peek.id}`,
+        ]);
+        const customer = await tx.customer.findFirst({
+          where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+          select: { id: true },
+        });
+        if (!customer) throw new PostSaleError("FORBIDDEN", "The customer account is not active.");
       } else {
         await this.lockOrderActor(tx, peek.orderId, actor);
         await acquireOperationLocks(tx, [`support:${peek.id}`]);
@@ -768,6 +902,11 @@ export class PostSaleService {
     if (actor.kind !== "CUSTOMER")
       throw new PostSaleError("VALIDATION", "Guest tickets require an order.");
     assertUuid(actor.customerId, "customerId");
+    const customer = await this.db.customer.findFirst({
+      where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+      select: { id: true },
+    });
+    if (!customer) throw new PostSaleError("FORBIDDEN", "The customer account is not active.");
     return this.db.supportTicket.findMany({
       where: { requesterCustomerId: actor.customerId },
       include: {
@@ -784,9 +923,11 @@ export class PostSaleService {
     if (!Number.isInteger(input.rating) || input.rating < 1 || input.rating > 5) {
       throw new PostSaleError("VALIDATION", "rating must be an integer between 1 and 5.");
     }
-    const title = printable(input.title, "title", 3, 120);
+    const title = printable(input.title, "title", 3, 120, { singleLine: true });
     const body = printable(input.body, "body", 20, 2000);
-    const authorDisplayName = printable(input.authorDisplayName, "authorDisplayName", 2, 80);
+    const authorDisplayName = printable(input.authorDisplayName, "authorDisplayName", 2, 80, {
+      singleLine: true,
+    });
     const idempotencyKey = normalizeOperationKey(input.idempotencyKey, "idempotencyKey");
     const expectedHash = digest({
       actor: actorHash(actor),
@@ -852,9 +993,18 @@ export class PostSaleService {
       select: { id: true },
     });
     if (!product) throw new PostSaleError("NOT_FOUND", "Product not found.");
+    const publishedDeliveredWhere = {
+      productId: product.id,
+      status: "PUBLISHED" as const,
+      orderItem: {
+        shipmentItems: {
+          some: { shipment: { status: "DELIVERED" as const, deliveredAt: { not: null } } },
+        },
+      },
+    };
     const cursor = options.cursor
       ? await this.db.review.findFirst({
-          where: { id: options.cursor, productId: product.id, status: "PUBLISHED" },
+          where: { id: options.cursor, ...publishedDeliveredWhere },
           select: { id: true, createdAt: true },
         })
       : null;
@@ -862,8 +1012,7 @@ export class PostSaleService {
     const [items, aggregate] = await Promise.all([
       this.db.review.findMany({
         where: {
-          productId: product.id,
-          status: "PUBLISHED",
+          ...publishedDeliveredWhere,
           ...(cursor
             ? {
                 OR: [
@@ -885,7 +1034,7 @@ export class PostSaleService {
         take: limit + 1,
       }),
       this.db.review.aggregate({
-        where: { productId: product.id, status: "PUBLISHED" },
+        where: publishedDeliveredWhere,
         _count: { _all: true },
         _avg: { rating: true },
       }),

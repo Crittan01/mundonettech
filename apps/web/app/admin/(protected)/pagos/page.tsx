@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { formatCopCents, hasAdminPermission, maskEmail } from "@mundonettech/core";
+import { assertAdminActorInTransaction, inInventoryTransaction } from "@mundonettech/db";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { EmptyState as Empty } from "@/components/admin/empty-state";
@@ -58,90 +59,97 @@ const bogotaDateFormatter = new Intl.DateTimeFormat("es-CO", {
 export default async function PaymentsPage() {
   const session = await requireAdminPage("payments:read");
   const db = getDatabase();
-  const [bankAttempts, codAttempts, refunds, compensations, successfulAttempts, blocked] =
-    await Promise.all([
-      db.paymentAttempt.findMany({
-        where: { provider: "BANK_TRANSFER", status: { in: ["PENDING", "PROCESSING"] } },
-        select: {
-          id: true,
-          amountCents: true,
-          reference: true,
-          order: { select: { orderNumber: true, emailSnapshot: true } },
-        },
-        orderBy: { createdAt: "asc" },
-        take: 100,
-      }),
-      db.paymentAttempt.findMany({
-        where: { provider: "COD", status: { in: ["PENDING", "PROCESSING"] } },
-        select: {
-          id: true,
-          amountCents: true,
-          order: { select: { orderNumber: true, emailSnapshot: true } },
-          codReconciliation: { select: { status: true } },
-        },
-        orderBy: { createdAt: "asc" },
-        take: 100,
-      }),
-      db.orderRefund.findMany({
-        where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] } },
-        select: {
-          id: true,
-          reason: true,
-          status: true,
-          totalCents: true,
-          order: { select: { orderNumber: true, emailSnapshot: true } },
-        },
-        orderBy: { createdAt: "asc" },
-        take: 100,
-      }),
-      db.paymentTransaction.findMany({
-        where: { kind: { in: ["REFUND", "VOID"] }, status: { in: ["PENDING", "PROCESSING"] } },
-        select: {
-          id: true,
-          kind: true,
-          provider: true,
-          amountCents: true,
-          status: true,
-          attempt: { select: { order: { select: { orderNumber: true } } } },
-        },
-        orderBy: { createdAt: "asc" },
-        take: 100,
-      }),
-      db.paymentAttempt.findMany({
-        where: {
-          status: "SUCCEEDED",
-          provider: { not: "STORE_CREDIT" },
-          AND: [
-            {
-              transactions: {
-                none: {
-                  kind: "REFUND",
-                  status: { not: "CANCELLED" },
+  const [bankAttempts, codAttempts, refunds, compensations, successfulAttempts] =
+    await inInventoryTransaction(db, async (tx) => {
+      await assertAdminActorInTransaction(tx, session.profile.id, "payments:read");
+      return Promise.all([
+        tx.paymentAttempt.findMany({
+          where: { provider: "BANK_TRANSFER", status: { in: ["PENDING", "PROCESSING"] } },
+          select: {
+            id: true,
+            amountCents: true,
+            reference: true,
+            order: { select: { orderNumber: true, emailSnapshot: true } },
+          },
+          orderBy: { createdAt: "asc" },
+          take: 100,
+        }),
+        tx.paymentAttempt.findMany({
+          where: { provider: "COD", status: { in: ["PENDING", "PROCESSING"] } },
+          select: {
+            id: true,
+            amountCents: true,
+            order: { select: { orderNumber: true, emailSnapshot: true } },
+            codReconciliation: { select: { status: true } },
+          },
+          orderBy: { createdAt: "asc" },
+          take: 100,
+        }),
+        tx.orderRefund.findMany({
+          where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] } },
+          select: {
+            id: true,
+            reason: true,
+            status: true,
+            totalCents: true,
+            order: { select: { orderNumber: true, emailSnapshot: true } },
+          },
+          orderBy: { createdAt: "asc" },
+          take: 100,
+        }),
+        tx.paymentTransaction.findMany({
+          where: {
+            kind: { in: ["REFUND", "VOID"] },
+            status: { in: ["PENDING", "PROCESSING"] },
+            provider: { not: "STORE_CREDIT" },
+          },
+          select: {
+            id: true,
+            kind: true,
+            provider: true,
+            amountCents: true,
+            status: true,
+            attempt: { select: { order: { select: { orderNumber: true } } } },
+          },
+          orderBy: { createdAt: "asc" },
+          take: 100,
+        }),
+        tx.paymentAttempt.findMany({
+          where: {
+            status: "SUCCEEDED",
+            provider: { not: "STORE_CREDIT" },
+            AND: [
+              {
+                transactions: {
+                  none: {
+                    kind: "REFUND",
+                    status: { not: "CANCELLED" },
+                  },
                 },
               },
-            },
-            {
-              transactions: {
-                none: {
-                  kind: "VOID",
-                  status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+              {
+                transactions: {
+                  none: {
+                    kind: "VOID",
+                    status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+                  },
                 },
               },
-            },
-          ],
-        },
-        select: {
-          id: true,
-          provider: true,
-          reference: true,
-          amountCents: true,
-          order: { select: { orderNumber: true } },
-        },
-        orderBy: { createdAt: "desc" },
-        take: 100,
-      }),
-      blockedIdentityService().list(100),
-    ]);
+            ],
+          },
+          select: {
+            id: true,
+            provider: true,
+            reference: true,
+            amountCents: true,
+            order: { select: { orderNumber: true } },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        }),
+      ]);
+    });
+  const blocked = await blockedIdentityService().list(100, session.profile.id);
   const canWrite = hasAdminPermission(session.profile.role, "payments:write");
   const creditOperationKey = `admin-credit:${randomUUID()}`;
   return (
@@ -243,7 +251,7 @@ export default async function PaymentsPage() {
                   </div>
                   <p className="font-semibold">{formatCopCents(refund.totalCents)}</p>
                 </div>
-                {canWrite && refund.status !== "COMPLETED" ? (
+                {canWrite && ["REQUESTED", "APPROVED", "FAILED"].includes(refund.status) ? (
                   <RefundExecutionForm
                     refundId={refund.id}
                     requiresApproval={refund.status === "REQUESTED"}

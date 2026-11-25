@@ -60,16 +60,20 @@ export function ReturnRequestForm({
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [replacements, setReplacements] = useState<Record<string, string>>({});
   const [serials, setSerials] = useState<Record<string, string[]>>({});
-  const selected = deliveries
-    .filter((item) => (quantities[item.shipmentItemId] ?? 0) > 0)
-    .map((item) => ({
-      shipmentItemId: item.shipmentItemId,
-      quantity: quantities[item.shipmentItemId]!,
-      ...(kind === "EXCHANGE"
-        ? { replacementVariantId: replacements[item.shipmentItemId] ?? item.replacements[0]?.id }
-        : {}),
-      serializedUnitIds: serials[item.shipmentItemId] ?? [],
-    }));
+  const selected = deliveries.flatMap((item) => {
+    const quantity = quantities[item.shipmentItemId] ?? 0;
+    if (quantity <= 0 || (kind === "EXCHANGE" && item.replacements.length === 0)) return [];
+    return [
+      {
+        shipmentItemId: item.shipmentItemId,
+        quantity,
+        ...(kind === "EXCHANGE"
+          ? { replacementVariantId: replacements[item.shipmentItemId] ?? item.replacements[0]?.id }
+          : {}),
+        serializedUnitIds: serials[item.shipmentItemId] ?? [],
+      },
+    ];
+  });
   const invalid = selected.some((selectedItem) => {
     const delivery = deliveries.find(
       (item) => item.shipmentItemId === selectedItem.shipmentItemId,
@@ -146,6 +150,11 @@ export function ReturnRequestForm({
                           )
                         : 0;
                       setQuantities((current) => ({ ...current, [delivery.shipmentItemId]: next }));
+                      setSerials((current) => {
+                        const existing = current[delivery.shipmentItemId] ?? [];
+                        if (existing.length <= next) return current;
+                        return { ...current, [delivery.shipmentItemId]: existing.slice(0, next) };
+                      });
                     }}
                     disabled={pending || (kind === "EXCHANGE" && !canExchange)}
                   />
@@ -253,7 +262,9 @@ export function WarrantyClaimForm({
           <Label htmlFor={`warranty-unit-${units[0]?.id ?? "none"}`}>Serial o IMEI</Label>
           <Select
             id={`warranty-unit-${units[0]?.id ?? "none"}`}
+            key={`warranty-unit-${state.values?.serializedUnitId ?? ""}`}
             name="serializedUnitId"
+            defaultValue={state.values?.serializedUnitId ?? units[0]?.id ?? ""}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -269,7 +280,9 @@ export function WarrantyClaimForm({
           <Label htmlFor={`warranty-remedy-${channel.orderId}`}>Remedio solicitado</Label>
           <Select
             id={`warranty-remedy-${channel.orderId}`}
+            key={`warranty-remedy-${state.values?.remedy ?? ""}`}
             name="remedy"
+            defaultValue={state.values?.remedy ?? "REPAIR"}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -322,8 +335,9 @@ export function ReviewForm({
           <Label htmlFor={`rating-${orderItemId}`}>Calificación</Label>
           <Select
             id={`rating-${orderItemId}`}
+            key={`rating-${state.values?.rating ?? "5"}`}
             name="rating"
-            defaultValue="5"
+            defaultValue={state.values?.rating ?? "5"}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -397,7 +411,9 @@ export function SupportTicketForm({
           <Label htmlFor={`support-kind-${channel.orderId}`}>Tipo de PQR</Label>
           <Select
             id={`support-kind-${channel.orderId}`}
+            key={`support-kind-${state.values?.kind ?? "QUERY"}`}
             name="kind"
+            defaultValue={state.values?.kind ?? "QUERY"}
             className="disabled:opacity-50"
             required
             disabled={pending}

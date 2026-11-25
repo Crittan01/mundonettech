@@ -355,7 +355,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                           <CompensationForm key={transaction.id} transactionId={transaction.id} />
                         ))
                     : null}
-                  {canRefund && refund.status === "REQUESTED" ? (
+                  {canRefund && !refund.hasPostSaleLink && refund.status === "REQUESTED" ? (
                     <div className="mt-3 grid gap-3 sm:grid-cols-2">
                       <RefundTransitionForm
                         orderId={order.id}
@@ -369,7 +369,9 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                       />
                     </div>
                   ) : null}
-                  {canRefund && ["APPROVED", "FAILED"].includes(refund.status) ? (
+                  {canRefund &&
+                  !refund.hasPostSaleLink &&
+                  ["APPROVED", "FAILED"].includes(refund.status) ? (
                     <div className="mt-3">
                       <RefundTransitionForm
                         orderId={order.id}
@@ -377,6 +379,16 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                         transition="cancel"
                       />
                     </div>
+                  ) : null}
+                  {refund.hasPostSaleLink &&
+                  ["REQUESTED", "APPROVED", "FAILED"].includes(refund.status) ? (
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      Reembolso vinculado a posventa: gestiona su cancelación desde{" "}
+                      <Link href="/admin/posventa" className="underline">
+                        /admin/posventa
+                      </Link>
+                      .
+                    </p>
                   ) : null}
                 </li>
               ))}

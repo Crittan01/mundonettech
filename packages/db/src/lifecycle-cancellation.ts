@@ -155,9 +155,31 @@ export async function suppressLifecycleCustomerInTransaction(
     ORDER BY "id"
     FOR UPDATE
   `;
+  await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id" FROM "LifecycleMessage"
+    WHERE "customerId" = ${customerId}::uuid AND "status" IN ('SCHEDULED', 'DISPATCHING', 'QUEUED')
+    ORDER BY "id"
+    FOR UPDATE
+  `;
   for (const enrollment of enrollments) {
     await cancelLifecycleEnrollment(tx, enrollment.id, now, "ANONYMIZED");
   }
+  await tx.lifecycleMessage.updateMany({
+    where: {
+      customerId,
+      status: { in: ["DISPATCHING", "QUEUED"] },
+      emailEvent: { status: { in: ["QUEUED", "SENDING", "SUPPRESSED", "BOUNCED", "COMPLAINED"] } },
+    },
+    data: { status: "SUPPRESSED", processedAt: now, lastError: null },
+  });
+  await tx.emailEvent.updateMany({
+    where: {
+      customerId,
+      templateKey: "lifecycle.campaign",
+      status: { in: ["QUEUED", "SENDING"] },
+    },
+    data: { status: "SUPPRESSED", statusRank: 70, finalAt: now, nextAttemptAt: null },
+  });
   await tx.$executeRaw`
     WITH latest AS (
       SELECT DISTINCT ON (membership."segmentId", membership."customerId") membership.*

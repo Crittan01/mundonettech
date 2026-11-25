@@ -141,6 +141,10 @@ class CookieJar {
     }
     this.values.set(name, { name, value, ...options });
   }
+
+  toString() {
+    return [...this.values.values()].map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  }
 }
 
 class FakeNextResponse {
@@ -411,6 +415,10 @@ describe("A2 proxy security behavior", () => {
     assert.equal(activity.maxAge, 43_200);
     assert.equal(response.cookies.get("sb-project-auth-token").value, "rotated-auth");
     assert.equal(response.cookies.get("sb-project-auth-token").httpOnly, true);
+    assert.equal(
+      response.request.headers.get("cookie"),
+      "sb-project-auth-token=rotated-auth; admin_activity=activity",
+    );
   });
 
   it("expires invalid activity with complete attributes and does not refresh prefetches", async () => {
@@ -613,6 +621,81 @@ describe("A2 admin session, AAL2 and recent MFA", () => {
       assert.equal(error.location, "/admin/login/mfa");
       return true;
     });
+  });
+});
+
+function customerSessionHarness(options = {}) {
+  const activityToken = core.createTimeoutToken({
+    kind: "customer",
+    subject: authUserId,
+    secret: hmacSecret,
+    idleSeconds: 2_592_000,
+    absoluteSeconds: 2_592_000,
+  });
+  const profile =
+    options.profile === undefined
+      ? { id: targetId, authUserId, status: "ACTIVE", deletedAt: null }
+      : options.profile;
+  const findFirst = spy(async () =>
+    profile?.status === "ACTIVE" && profile.deletedAt === null ? profile : null,
+  );
+  const getUser = spy(async () => ({
+    data: { user: options.userError ? null : { id: authUserId } },
+    error: options.userError ? new Error("invalid") : null,
+  }));
+  const mocks = {
+    "server-only": {},
+    "@mundonettech/core": { verifyTimeoutToken: core.verifyTimeoutToken },
+    "next/headers": {
+      cookies: async () => ({
+        get: () => (options.missingActivity ? undefined : { value: activityToken }),
+      }),
+    },
+    "next/navigation": {
+      redirect: (location) => {
+        throw new RedirectSignal(location);
+      },
+    },
+    "next/server": { connection: async () => undefined },
+    "@/lib/db": { getDatabase: () => ({ customer: { findFirst } }) },
+    "@/lib/env": { getSessionHmacSecret: () => hmacSecret },
+    "@/lib/security/session-policy": {
+      customerActivityCookie: "customer_activity",
+      customerIdleSeconds: 2_592_000,
+      customerAbsoluteSeconds: 2_592_000,
+    },
+    "@/lib/supabase/server": {
+      createSupabaseServerClient: async () => ({ auth: { getUser } }),
+    },
+  };
+  return { ...loadTypeScriptModule("apps/web/lib/security/customer-auth.ts", mocks), findFirst };
+}
+
+describe("A6 customer active-session authorization", () => {
+  it("requires a verified Auth user, matching HMAC activity and an active owned profile", async () => {
+    const auth = customerSessionHarness();
+    const session = await auth.requireCustomerPage();
+    assert.equal(session.user.id, authUserId);
+    assert.equal(session.profile.id, targetId);
+    assert.deepEqual(auth.findFirst.calls[0][0], {
+      where: { authUserId, deletedAt: null, status: "ACTIVE" },
+    });
+  });
+
+  it("rejects missing Auth, missing activity and inactive or anonymized profiles", async () => {
+    for (const [options, reason] of [
+      [{ userError: true }, "security"],
+      [{ missingActivity: true }, "timeout"],
+      [{ profile: null }, "security"],
+      [{ profile: { id: targetId, status: "ANONYMIZED", deletedAt: new Date() } }, "security"],
+    ]) {
+      const auth = customerSessionHarness(options);
+      await assert.rejects(auth.requireCustomerPage(), (error) => {
+        assert.ok(error instanceof RedirectSignal);
+        assert.equal(error.location, `/ingresar?reason=${reason}`);
+        return true;
+      });
+    }
   });
 });
 

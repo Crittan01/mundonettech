@@ -42,6 +42,9 @@ function validated(counters: FunnelCounters, publicBatch: boolean): Required<Fun
     if (typeof value !== "bigint" || value < 0n) {
       throw new TypeError(`${field} must be a non-negative BigInt.`);
     }
+    if (publicBatch && (field === "ordersConfirmed" || field === "ordersPaid") && value > 0n) {
+      throw new TypeError(`${field} cannot be incremented from public batches.`);
+    }
     assertMoney(value, field);
     if (publicBatch && value > 1000n) throw new RangeError(`${field} exceeds the batch limit.`);
     total += value;
@@ -104,7 +107,7 @@ export class FunnelService {
     }
     const [days, unreadNotifications] = await Promise.all([
       this.db.$queryRaw<Array<DailyFunnelPoint & { total: bigint }>>`
-        SELECT day."metricDate"::text AS "metricDate",
+        SELECT day."metricDate"::date::text AS "metricDate",
           COALESCE(metric."pageViews", 0) AS "pageViews",
           COALESCE(metric."productViews", 0) AS "productViews",
           COALESCE(metric."cartAdditions", 0) AS "cartAdditions",
@@ -149,7 +152,7 @@ export class FunnelService {
     );
     return {
       days: days.map((day) => ({
-        metricDate: new Date(day.metricDate).toISOString().slice(0, 10),
+        metricDate: day.metricDate.slice(0, 10),
         pageViews: day.pageViews.toString(),
         productViews: day.productViews.toString(),
         cartAdditions: day.cartAdditions.toString(),

@@ -430,6 +430,18 @@ export async function suppressCustomerCrmLineageInTransaction(
   await redactCrmMergeHistoryInTransaction(tx, lineageIds);
   await tx.identityMergeCandidate.updateMany({
     where: {
+      status: "PENDING",
+      OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
+    },
+    data: {
+      status: "REJECTED",
+      rejectedAt: now,
+      resolutionNote: "[contenido suprimido por retención]",
+      version: { increment: 1 },
+    },
+  });
+  await tx.identityMergeCandidate.updateMany({
+    where: {
       status: "REJECTED",
       OR: [{ sourceContactId: { in: lineageIds } }, { targetContactId: { in: lineageIds } }],
     },

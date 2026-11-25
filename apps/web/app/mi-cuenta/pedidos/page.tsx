@@ -62,7 +62,7 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
           El cursor de paginación no es válido. Vuelve al inicio del historial.
         </p>
       ) : null}
-      {orders.length === 0 ? (
+      {!cursorError && orders.length === 0 ? (
         <p className="rounded-xl border border-border bg-card p-6 text-muted-foreground">
           No hay pedidos en esta página.{" "}
           <Link href="/productos" className="underline">
@@ -70,7 +70,8 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
           </Link>
           .
         </p>
-      ) : (
+      ) : null}
+      {orders.length > 0 ? (
         <ol className="space-y-4">
           {orders.map((order) => (
             <li key={order.id}>
@@ -93,7 +94,7 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
             </li>
           ))}
         </ol>
-      )}
+      ) : null}
       <div className="flex gap-4">
         {nextCursor ? (
           <Link

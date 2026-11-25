@@ -43,7 +43,7 @@ export const logisticsTables = [
 
 export async function seedCheckoutFixture(
   client,
-  { catalog, inventory, pricing, adminId, receiptAccessTokenHash },
+  { catalog, inventory, pricing, adminId, receiptAccessTokenHash, taxRegime = "RESPONSABLE_IVA" },
 ) {
   const orderId = randomUUID();
   const orderItemId = randomUUID();
@@ -75,7 +75,7 @@ export async function seedCheckoutFixture(
       "reservationExpiresAt", "deliveryPromiseAt", "termsVersion", "privacyPolicyVersion",
       "acceptanceProofHash", "acceptedAt", "confirmedAt"
     ) VALUES (
-      $1, $2, $3, $4, $5, 'CONFIRMED', 'PAID', 'HOME_DELIVERY', 'RESPONSABLE_IVA', 5237400, 2026,
+      $1, $2, $3, $4, $5, 'CONFIRMED', 'PAID', 'HOME_DELIVERY', $9::"StoreTaxRegime", 5237400, 2026,
       'rls-checkout@example.test', 'Matriz Cliente', '+573001234567', '13', '1020304050', 'NO_RESPONSABLE_IVA', '11', 'BOGOTÁ, D.C.',
       '11001', 'BOGOTÁ, D.C.', 'Carrera 7 # 71-21', $6, 200000, 5000, 5000, 195000, $7,
       CURRENT_TIMESTAMP + INTERVAL '2 hours', CURRENT_TIMESTAMP + INTERVAL '30 days',
@@ -90,6 +90,7 @@ export async function seedCheckoutFixture(
       `RLS-${suffix.slice(0, 12)}`,
       `order-reservation:${orderId}`,
       randomBytes(32),
+      taxRegime,
     ],
   );
   await client.query(
@@ -123,8 +124,14 @@ export async function seedCheckoutFixture(
     `INSERT INTO "OrderReceipt" (
       "orderId", "receiptNumber", "accessTokenHash", "taxRegime", "currency", "subtotalCents",
       "discountCents", "taxCents", "shippingCents", "totalCents", "contentHash"
-    ) VALUES ($1, $2, $3, 'RESPONSABLE_IVA', 'COP', 200000, 5000, 0, 0, 195000, $4)`,
-    [orderId, `R-${orderNumber}`, receiptAccessTokenHash ?? randomBytes(32), randomBytes(32)],
+    ) VALUES ($1, $2, $3, $5::"StoreTaxRegime", 'COP', 200000, 5000, 0, 0, 195000, $4)`,
+    [
+      orderId,
+      `R-${orderNumber}`,
+      receiptAccessTokenHash ?? randomBytes(32),
+      randomBytes(32),
+      taxRegime,
+    ],
   );
   await client.query(
     `INSERT INTO "OrderStatusEvent" ("orderId", "orderStatus", "paymentStatus", "fulfillmentStatus", "reason")

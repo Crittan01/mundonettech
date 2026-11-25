@@ -77,7 +77,7 @@ async function createCredential() {
   }
 }
 
-async function makePaidOrder() {
+async function makePaidOrder(options = {}) {
   await admin.query("BEGIN");
   try {
     await admin.query(
@@ -94,6 +94,7 @@ async function makePaidOrder() {
       inventory,
       pricing,
       adminId: actor.id,
+      ...(options.taxRegime ? { taxRegime: options.taxRegime } : {}),
     });
     await admin.query("COMMIT");
     return { catalog, checkout, paidAt: new Date() };
@@ -823,7 +824,7 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
   });
 
   it("preserves profile consent flags past 20 DATA_PROCESSING rows and purges UNCERTAIN hashes on anonymization", async () => {
-    const { catalog, checkout, paidAt } = await makePaidOrder();
+    const { catalog, checkout, paidAt } = await makePaidOrder({ taxRegime: "NO_RESPONSABLE_IVA" });
     await grantConsent(catalog);
     await db.consent.create({
       data: {

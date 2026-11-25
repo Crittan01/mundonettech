@@ -178,7 +178,11 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
     .click();
 
   const variant = await db.productVariant.findFirstOrThrow({
-    where: { status: "ACTIVE", deletedAt: null, product: { status: "ACTIVE", deletedAt: null } },
+    where: {
+      status: "ACTIVE",
+      deletedAt: null,
+      product: { status: "ACTIVE", deletedAt: null, variants: { none: { isDefault: false } } },
+    },
     select: {
       sku: true,
       priceCents: true,

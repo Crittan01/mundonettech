@@ -5,6 +5,8 @@ import { GuestOrderAccessError } from "../../packages/integrations/dist/index.js
 import {
   actionError,
   actionSuccess,
+  closedFormObject,
+  formSnapshot,
   formString,
   type ActionState,
 } from "../../apps/web/lib/action-state";
@@ -36,7 +38,7 @@ const actions = loadActionModule<Record<string, ServerAction>>("postsale", {
   "@mundonettech/integrations": { GuestOrderAccessError },
   "next/cache": { revalidatePath: mocks.revalidatePath },
   "next/navigation": { redirect: mocks.redirect },
-  "@/lib/action-state": { actionError, actionSuccess, formString },
+  "@/lib/action-state": { actionError, actionSuccess, closedFormObject, formSnapshot, formString },
   "@/lib/account": {
     postSaleService: () => ({
       requestReturn: mocks.requestReturn,
@@ -140,8 +142,12 @@ describe("A2 — titularidad y validación de acciones de posventa", () => {
       items: [{ shipmentItemId, quantity: 1, replacementVariantId: null, serializedUnitIds: [] }],
     });
     expect(result.status).toBe("error");
+    expect(result.values).toEqual({
+      kind: "REFUND",
+      reason: "Producto recibido con fallas",
+    });
     expect(result.values?.token).toBeUndefined();
-    expect(result.values?.orderId).toBe(otherOrderId);
+    expect(result.values?.orderId).toBeUndefined();
   });
 
   it("fuerza el pedido de PQR de invitado aunque el campo oculto se altere o se omita", async () => {

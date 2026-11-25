@@ -1,4 +1,6 @@
 import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
   hasUniqueViolation,
   inInventoryTransaction,
   type BlockedIdentityKind,
@@ -14,6 +16,7 @@ import {
   writePaymentAudit,
 } from "./payment-shared.js";
 import {
+  PaymentAuthorizationError,
   PaymentConflictError,
   PaymentNotFoundError,
   type PaymentAuditContext,
@@ -186,9 +189,34 @@ export class BlockedIdentityService {
     });
   }
 
-  async list(limit = 100): Promise<BlockedIdentityDescriptor[]> {
+  async list(limit = 100, actorAdminUserId?: string): Promise<BlockedIdentityDescriptor[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new PaymentConflictError("limit must be an integer between 1 and 100.");
+    }
+    if (actorAdminUserId !== undefined) {
+      assertPaymentUuid(actorAdminUserId, "actorAdminUserId");
+      return inInventoryTransaction(this.db, async (tx) => {
+        try {
+          await assertAdminActorInTransaction(tx, actorAdminUserId, "payments:read");
+        } catch (error) {
+          if (error instanceof AdminActorAuthorizationError) throw new PaymentAuthorizationError();
+          throw error;
+        }
+        const records = await tx.blockedIdentity.findMany({
+          orderBy: [{ blockedAt: "desc" }, { id: "desc" }],
+          take: limit,
+          select: {
+            id: true,
+            kind: true,
+            reason: true,
+            active: true,
+            expiresAt: true,
+            blockedAt: true,
+            unblockedAt: true,
+          },
+        });
+        return records.map(descriptor);
+      });
     }
     const records = await this.db.blockedIdentity.findMany({
       orderBy: [{ blockedAt: "desc" }, { id: "desc" }],

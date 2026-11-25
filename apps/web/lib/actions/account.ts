@@ -9,16 +9,42 @@ import { accountService } from "@/lib/account";
 import {
   actionError,
   actionSuccess,
+  closedFormObject,
   formSnapshot,
-  formString,
   type ActionState,
 } from "@/lib/action-state";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { clearActivityCookies, clearCustomerCartCookie } from "@/lib/security/activity-cookies";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
+import { clearCustomerAuthRequest } from "@/lib/security/customer-auth-request";
 import { clearGuestOrderSession } from "@/lib/security/guest-order-access";
 import { clearReferralCode } from "@/lib/security/referral";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+
+const profileFields = [
+  "expectedUpdatedAt",
+  "givenName",
+  "familyName",
+  "phoneE164",
+  "marketingEmail",
+  "advertising",
+] as const;
+const addressFields = [
+  "addressId",
+  "expectedUpdatedAt",
+  "label",
+  "recipientName",
+  "phoneE164",
+  "departmentCode",
+  "municipalityCode",
+  "addressLine1",
+  "addressLine2",
+  "neighborhood",
+  "postalCode",
+  "deliveryNotes",
+  "isDefault",
+] as const;
 
 const profileSchema = z.object({
   expectedUpdatedAt: z.string().max(64),
@@ -87,16 +113,18 @@ export async function updateProfileAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = formSnapshot(formData, profileFields);
   try {
     const { profile } = await requireCustomerPage();
+    const raw = closedFormObject(formData, profileFields);
+    if (!raw) throw new z.ZodError([]);
     const input = profileSchema.parse({
-      expectedUpdatedAt: formString(formData, "expectedUpdatedAt"),
-      givenName: formString(formData, "givenName"),
-      familyName: formString(formData, "familyName"),
-      phoneE164: formString(formData, "phoneE164"),
-      marketingEmail: formData.get("marketingEmail") === "on",
-      advertising: formData.get("advertising") === "on",
+      expectedUpdatedAt: raw.expectedUpdatedAt,
+      givenName: raw.givenName,
+      familyName: raw.familyName,
+      phoneE164: raw.phoneE164,
+      marketingEmail: raw.marketingEmail === "on",
+      advertising: raw.advertising === "on",
     });
     const expectedUpdatedAt = new Date(input.expectedUpdatedAt);
     if (Number.isNaN(expectedUpdatedAt.getTime())) throw new z.ZodError([]);
@@ -132,23 +160,25 @@ export async function saveAddressAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = formSnapshot(formData, addressFields);
   try {
     const { profile } = await requireCustomerPage();
+    const raw = closedFormObject(formData, addressFields);
+    if (!raw) throw new z.ZodError([]);
     const input = addressSchema.parse({
-      addressId: formString(formData, "addressId"),
-      expectedUpdatedAt: formString(formData, "expectedUpdatedAt"),
-      label: formString(formData, "label"),
-      recipientName: formString(formData, "recipientName"),
-      phoneE164: formString(formData, "phoneE164"),
-      departmentCode: formString(formData, "departmentCode"),
-      municipalityCode: formString(formData, "municipalityCode"),
-      addressLine1: formString(formData, "addressLine1"),
-      addressLine2: formString(formData, "addressLine2"),
-      neighborhood: formString(formData, "neighborhood"),
-      postalCode: formString(formData, "postalCode"),
-      deliveryNotes: formString(formData, "deliveryNotes"),
-      isDefault: formData.get("isDefault") === "on",
+      addressId: raw.addressId,
+      expectedUpdatedAt: raw.expectedUpdatedAt,
+      label: raw.label,
+      recipientName: raw.recipientName,
+      phoneE164: raw.phoneE164,
+      departmentCode: raw.departmentCode,
+      municipalityCode: raw.municipalityCode,
+      addressLine1: raw.addressLine1,
+      addressLine2: raw.addressLine2,
+      neighborhood: raw.neighborhood,
+      postalCode: raw.postalCode,
+      deliveryNotes: raw.deliveryNotes,
+      isDefault: raw.isDefault === "on",
     });
     const address = {
       label: input.label,
@@ -183,10 +213,11 @@ export async function deleteAddressAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = formSnapshot(formData, ["addressId"]);
   try {
     const { profile } = await requireCustomerPage();
-    const addressId = z.string().uuid().parse(formString(formData, "addressId"));
+    const raw = closedFormObject(formData, ["addressId"]);
+    const addressId = z.string().uuid().parse(raw?.addressId);
     await accountService().deleteAddress(profile.id, addressId);
     revalidateAccount();
     return actionSuccess("Dirección eliminada de forma permanente.");
@@ -199,27 +230,43 @@ export async function anonymizeAccountAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const values = formSnapshot(formData);
+  const values = formSnapshot(formData, ["confirmation"]);
+  let authUserId: string | null = null;
+  let affectedReviewProductSlugs: string[];
   try {
-    const { profile } = await requireCustomerPage();
-    const confirmation = z
-      .literal("ELIMINAR MI CUENTA")
-      .parse(formString(formData, "confirmation"));
+    const { user, profile } = await requireCustomerPage();
+    authUserId = user?.id ?? null;
+    const raw = closedFormObject(formData, ["confirmation"]);
+    const confirmation = z.literal("ELIMINAR MI CUENTA").parse(raw?.confirmation);
     const context = await getRequestSecurityContext();
     const result = await accountService().anonymize(profile.id, confirmation, context);
-    updateTag("reviews");
-    for (const slug of result.affectedReviewProductSlugs) {
-      updateTag(`reviews:${slug}`);
-      revalidatePath(`/producto/${slug}`);
-    }
+    affectedReviewProductSlugs = result.affectedReviewProductSlugs;
+  } catch (error) {
+    return failure(error, values);
+  }
+  updateTag("reviews");
+  for (const slug of affectedReviewProductSlugs) {
+    updateTag(`reviews:${slug}`);
+    revalidatePath(`/producto/${slug}`);
+  }
+  try {
     const supabase = await createSupabaseServerClient();
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "global" });
+  } catch {
+    // DB anonymization already committed; DomainOutbox guarantees Supabase Auth erasure.
+  } finally {
+    if (authUserId) {
+      try {
+        await createSupabaseAdminClient().auth.admin.deleteUser(authUserId);
+      } catch {
+        // DomainOutbox customer.auth-erasure.requested.v1 retries deletion asynchronously.
+      }
+    }
     await clearActivityCookies();
     await clearCustomerCartCookie();
     await clearGuestOrderSession();
     await clearReferralCode();
-  } catch (error) {
-    return failure(error, values);
+    await clearCustomerAuthRequest();
   }
   redirect("/ingresar?reason=anonymized");
 }

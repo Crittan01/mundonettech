@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { PostSaleError } from "@mundonettech/db";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
@@ -13,25 +14,37 @@ export const metadata = {
   robots: { index: false, follow: false, nocache: true },
 };
 
+function GuestOrderGate({ token }: { readonly token: string }) {
+  return (
+    <main className="min-h-screen px-6 py-12 sm:px-8">
+      <div className="mx-auto mb-8 max-w-4xl">
+        <h1 className="text-3xl font-bold">Acceso seguro a tu pedido</h1>
+        <p className="mt-2 text-muted-foreground">
+          Verifica el enlace de compra y un código temporal para consultar entregas y realizar
+          solicitudes de posventa.
+        </p>
+      </div>
+      <GuestOrderAccessForms token={token} idempotencyKey={randomUUID()} />
+    </main>
+  );
+}
+
 async function GuestOrderContent({ params }: PageProps<"/pedido/[token]">) {
   const { token } = await params;
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(token)) notFound();
   const access = await getGuestOrderAccess(token);
   if (!access) {
-    return (
-      <main className="min-h-screen px-6 py-12 sm:px-8">
-        <div className="mx-auto mb-8 max-w-4xl">
-          <h1 className="text-3xl font-bold">Acceso seguro a tu pedido</h1>
-          <p className="mt-2 text-muted-foreground">
-            Verifica el enlace de compra y un código temporal para consultar entregas y realizar
-            solicitudes de posventa.
-          </p>
-        </div>
-        <GuestOrderAccessForms token={token} idempotencyKey={randomUUID()} />
-      </main>
-    );
+    return <GuestOrderGate token={token} />;
   }
-  const order = await postSaleService().getOrder(access.actor, access.orderId);
+  let order: Awaited<ReturnType<ReturnType<typeof postSaleService>["getOrder"]>>;
+  try {
+    order = await postSaleService().getOrder(access.actor, access.orderId);
+  } catch (error) {
+    if (error instanceof PostSaleError && error.code === "FORBIDDEN") {
+      return <GuestOrderGate token={token} />;
+    }
+    throw error;
+  }
   return (
     <main className="mx-auto max-w-6xl px-6 py-12 sm:px-8">
       <OrderPostSaleView

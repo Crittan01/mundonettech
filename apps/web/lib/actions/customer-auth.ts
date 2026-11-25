@@ -4,7 +4,7 @@ import { normalizeEmail, validatePasswordPolicy } from "@mundonettech/core";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
-import { actionError, actionSuccess, type ActionState } from "@/lib/action-state";
+import { actionError, actionSuccess, closedFormObject, type ActionState } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
 import {
   clearActivityCookies,
@@ -20,6 +20,7 @@ import {
 import { synchronizeCustomerProfile } from "@/lib/security/customer-profile";
 import { isPasswordCompromised } from "@/lib/security/hibp";
 import { isServerOutboundEmailDisabled } from "@/lib/security/outbound-email";
+import { clearGuestOrderSession } from "@/lib/security/guest-order-access";
 import { getRequestSecurityContext, recordSecurityEvent } from "@/lib/security/request-context";
 import { clearReferralCode, consumeReferralPath } from "@/lib/security/referral";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
@@ -93,6 +94,7 @@ export async function registerCustomerAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  const fields = ["email", "password", "confirmation", "turnstileToken"] as const;
   const parsed = z
     .object({
       email: emailSchema,
@@ -100,8 +102,11 @@ export async function registerCustomerAction(
       confirmation: passwordSchema,
       turnstileToken: z.string().max(2048),
     })
-    .safeParse(Object.fromEntries(formData));
-  if (!parsed.success) return emailFieldError();
+    .safeParse(closedFormObject(formData, fields));
+  if (!parsed.success) {
+    const emailFailed = parsed.error.issues.some((issue) => issue.path[0] === "email");
+    return emailFailed ? emailFieldError() : actionError("Revisa los datos ingresados.");
+  }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_register");
   if (captchaError) return captchaError;
   const invalidPassword = await passwordError(parsed.data.password, parsed.data.confirmation);
@@ -125,14 +130,18 @@ export async function requestCustomerOtpAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  const fields = ["email", "turnstileToken", "next"] as const;
   const parsed = z
     .object({
       email: emailSchema,
       turnstileToken: z.string().max(2048),
       next: z.string().max(512).optional(),
     })
-    .safeParse(Object.fromEntries(formData));
-  if (!parsed.success) return emailFieldError();
+    .safeParse(closedFormObject(formData, fields));
+  if (!parsed.success) {
+    const emailFailed = parsed.error.issues.some((issue) => issue.path[0] === "email");
+    return emailFailed ? emailFieldError() : actionError("Revisa los datos ingresados.");
+  }
   const next = normalizeInternalNextPath(parsed.data.next);
   if (parsed.data.next && next === null) {
     return actionError("El destino de regreso no es válido.");
@@ -153,10 +162,14 @@ export async function requestCustomerRecoveryAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  const fields = ["email", "turnstileToken"] as const;
   const parsed = z
     .object({ email: emailSchema, turnstileToken: z.string().max(2048) })
-    .safeParse(Object.fromEntries(formData));
-  if (!parsed.success) return emailFieldError();
+    .safeParse(closedFormObject(formData, fields));
+  if (!parsed.success) {
+    const emailFailed = parsed.error.issues.some((issue) => issue.path[0] === "email");
+    return emailFailed ? emailFieldError() : actionError("Revisa los datos ingresados.");
+  }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_recovery");
   if (captchaError) return captchaError;
   const email = normalizeEmail(parsed.data.email);
@@ -174,9 +187,10 @@ export async function verifyCustomerOtpAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  const fields = ["code", "turnstileToken"] as const;
   const parsed = z
     .object({ code: otpSchema, turnstileToken: z.string().max(2048) })
-    .safeParse({ code: formData.get("code"), turnstileToken: formData.get("turnstileToken") });
+    .safeParse(closedFormObject(formData, fields));
   if (!parsed.success) return actionError("El código no tiene un formato válido.");
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_verify");
   if (captchaError) return captchaError;
@@ -200,17 +214,23 @@ export async function verifyCustomerOtpAction(
     await synchronizeCustomerProfile(data.user.id, request.email);
     await establishCustomerActivity(data.user.id);
   } catch {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
     return actionError("No pudimos activar tu cuenta. Inténtalo de nuevo o contacta soporte.");
   }
   const referralPath = await consumeReferralPath();
-  redirect(request.next ?? referralPath ?? "/mi-cuenta");
+  const destination =
+    referralPath && (!request.next || request.next === "/mi-cuenta/beneficios")
+      ? referralPath
+      : (request.next ?? "/mi-cuenta");
+  redirect(destination);
 }
 
 export async function resetCustomerPasswordAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
+  const fields = ["code", "password", "confirmation", "turnstileToken"] as const;
   const parsed = z
     .object({
       code: otpSchema,
@@ -218,12 +238,7 @@ export async function resetCustomerPasswordAction(
       confirmation: passwordSchema,
       turnstileToken: z.string().max(2048),
     })
-    .safeParse({
-      code: formData.get("code"),
-      password: formData.get("password"),
-      confirmation: formData.get("confirmation"),
-      turnstileToken: formData.get("turnstileToken"),
-    });
+    .safeParse(closedFormObject(formData, fields));
   if (!parsed.success) return actionError("Revisa el código y la contraseña.");
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_reset");
   if (captchaError) return captchaError;
@@ -247,14 +262,26 @@ export async function resetCustomerPasswordAction(
   await clearCustomerAuthRequest();
   const updated = await supabase.auth.updateUser({ password: parsed.data.password });
   if (updated.error) {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
     return actionError("No pudimos actualizar la contraseña. Solicita un código nuevo.");
+  }
+  try {
+    const revoked = await supabase.auth.signOut({ scope: "others" });
+    if (revoked.error) throw new Error("Other session revocation failed.");
+  } catch {
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
+    return actionError(
+      "La contraseña se actualizó, pero no pudimos confirmar el cierre de otras sesiones. Vuelve a ingresar.",
+    );
   }
   try {
     await synchronizeCustomerProfile(data.user.id, request.email);
     await establishCustomerActivity(data.user.id);
   } catch {
-    await supabase.auth.signOut();
+    await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+    await clearActivityCookies();
     return actionError("No pudimos activar tu cuenta. Contacta soporte.");
   }
   redirect((await consumeReferralPath()) ?? "/mi-cuenta");
@@ -276,10 +303,19 @@ export async function cancelCustomerAuthRequestAction(): Promise<void> {
 
 export async function signOutCustomerAction(): Promise<void> {
   const supabase = await createSupabaseServerClient();
-  await supabase.auth.signOut();
-  await clearActivityCookies();
-  await clearCustomerCartCookie();
-  await clearCustomerAuthRequest();
-  await clearReferralCode();
+  let revocationFailed = false;
+  try {
+    const result = await supabase.auth.signOut({ scope: "local" });
+    revocationFailed = result.error !== null;
+  } catch {
+    revocationFailed = true;
+  } finally {
+    await clearActivityCookies();
+    await clearCustomerCartCookie();
+    await clearGuestOrderSession();
+    await clearCustomerAuthRequest();
+    await clearReferralCode();
+  }
+  if (revocationFailed) throw new Error("Unable to revoke the local customer session.");
   redirect("/");
 }

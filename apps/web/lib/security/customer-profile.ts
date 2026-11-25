@@ -1,7 +1,13 @@
 import "server-only";
 
 import { normalizeEmail } from "@mundonettech/core";
-import type { Customer, Prisma, PrismaClient } from "@mundonettech/db";
+import {
+  acquireOperationLocks,
+  inInventoryTransaction,
+  type Customer,
+  type Prisma,
+  type PrismaClient,
+} from "@mundonettech/db";
 
 import { getDatabase } from "@/lib/db";
 
@@ -12,8 +18,21 @@ async function syncCustomerProfileWithDb(
 ): Promise<Customer> {
   const normalizedEmail = normalizeEmail(email);
 
-  return db.$transaction(async (tx: Prisma.TransactionClient) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`customer-sync:${normalizedEmail}`}))`;
+  return inInventoryTransaction(db, async (tx: Prisma.TransactionClient) => {
+    await acquireOperationLocks(tx, [
+      `customer-sync:auth:${authUserId}`,
+      `customer-sync:email:${normalizedEmail}`,
+    ]);
+
+    const erasureRequested = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id" FROM "DomainOutbox"
+      WHERE "eventType" = 'customer.auth-erasure.requested.v1'
+        AND "payload"->>'authUserId' = ${authUserId}
+      LIMIT 1
+    `;
+    if (erasureRequested.length > 0) {
+      throw new Error("La cuenta no está disponible.");
+    }
 
     const byAuthUser = await tx.customer.findFirst({
       where: { authUserId, deletedAt: null },
