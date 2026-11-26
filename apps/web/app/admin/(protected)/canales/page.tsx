@@ -1,4 +1,5 @@
 import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
+import Link from "next/link";
 
 import { ChannelAccountActions } from "@/components/admin/channel-account-actions";
 import {
@@ -112,11 +113,32 @@ function maskedSeller(value: string): string {
   return `${value.slice(0, 2)}••••${value.slice(-2)}`;
 }
 
+const jobFailureShortLabels: Record<string, string> = {
+  FULL_STOCK_DIVERGENCE: "Divergencia de inventario en Mercado Libre Full",
+  REMOTE_DIVERGENCE: "Divergencia frente al estado remoto",
+  REMOTE_STATUS_DIVERGENCE: "Divergencia de estado remoto",
+  VERSION_DIVERGENCE: "Cambios locales pendientes de sincronización",
+  PROVIDER_UNCERTAIN: "Resultado incierto del proveedor",
+  VERSION_CONFLICT: "Conflicto de versión de inventario remoto",
+  ACCOUNT_DISCONNECTED: "Cuenta desvinculada",
+  UNAUTHORIZED: "Token rechazado por Mercado Libre",
+  REMOTE_REVOCATION_UNCERTAIN: "Revocación remota sin confirmar",
+  REFRESH_GRANT_INVALID: "Autorización invalidada",
+  PROVIDER_REJECTED: "Datos rechazados por Mercado Libre",
+  RATE_LIMITED: "Límite de solicitudes del proveedor",
+  CLAIM_EXPIRED: "Reclamo de trabajo expirado",
+};
+
 function providerErrorMessage(code: string): string {
   return (
     providerErrorLabels[code] ??
     "La última operación no terminó correctamente. Revisa el job y concilia antes de reintentar."
   );
+}
+
+function formatJobFailureCode(code: string): string {
+  const label = jobFailureShortLabels[code];
+  return label ? `${label} (${code})` : `Fallo registrado (${code})`;
 }
 
 export default async function ChannelsPage({
@@ -168,11 +190,18 @@ export default async function ChannelsPage({
           precios con trabajos persistentes. Ningún secreto aparece en descriptores, jobs ni
           auditoría.
         </p>
+        {hasAdminPermission(session.profile.role, "integrations:read") ? (
+          <div className="mt-4 flex flex-wrap gap-4 text-sm">
+            <Link className="text-primary underline" href="/admin/integraciones">
+              Ir a integraciones y bóveda
+            </Link>
+          </div>
+        ) : null}
       </div>
       {outcome ? (
         <p
           role={outcome.error ? "alert" : "status"}
-          className={`rounded-xl border p-4 text-sm ${outcome.error ? "border-destructive text-destructive" : "border-success"}`}
+          className={`rounded-xl border bg-card p-4 text-sm ${outcome.error ? "border-destructive text-destructive" : "border-success"}`}
         >
           {outcome.message}
         </p>
@@ -473,7 +502,9 @@ export default async function ChannelsPage({
                             </span>{" "}
                             · {jobStatusLabels[job.status] ?? job.status} · intento {job.attempts}
                             {job.failureCode ? (
-                              <span className="ml-1 font-mono">· {job.failureCode}</span>
+                              <span className="mt-1 block text-destructive">
+                                {formatJobFailureCode(job.failureCode)}
+                              </span>
                             ) : null}
                             <span className="mt-1 block text-muted-foreground">
                               {dateFormatter.format(job.createdAt)}

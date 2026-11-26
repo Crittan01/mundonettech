@@ -2,6 +2,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 
 import { storeConfig } from "@mundonettech/config/store";
+import { StoreNavLink } from "@/components/layout/store-nav-link";
 
 export async function StoreHeader() {
   "use cache";
@@ -14,30 +15,36 @@ export async function StoreHeader() {
       <div className="mx-auto flex min-h-18 w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-6 py-3 sm:px-8">
         <Link
           href="/"
-          className="text-lg font-bold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="rounded-sm text-lg font-bold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           aria-label={`${storeConfig.name}, inicio`}
         >
           {storeConfig.name}
         </Link>
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-3">
           <nav
             aria-label="Navegación principal"
-            className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm font-medium"
+            className="flex flex-wrap items-center gap-1 text-sm font-medium"
           >
-            <Link href="/productos" className="hover:text-primary">
-              Catálogo
-            </Link>
-            <Link href="/comparar" prefetch={false} className="hover:text-primary">
+            <StoreNavLink href="/productos">Catálogo</StoreNavLink>
+            <StoreNavLink href="/comparar" prefetch={false}>
               Comparar
-            </Link>
-            <Link href="/ayuda" className="hover:text-primary">
+            </StoreNavLink>
+            {storeConfig.modules.wholesale ? (
+              <StoreNavLink href="/empresas" prefetch={false}>
+                Empresas
+              </StoreNavLink>
+            ) : null}
+            <StoreNavLink href="/ayuda" prefetch={false}>
               Ayuda
-            </Link>
-            <Link href="/carrito" prefetch={false} className="hover:text-primary">
+            </StoreNavLink>
+            <StoreNavLink href="/mi-cuenta" prefetch={false}>
+              Mi cuenta
+            </StoreNavLink>
+            <StoreNavLink href="/carrito" prefetch={false}>
               Carrito
-            </Link>
+            </StoreNavLink>
           </nav>
-          <span className="hidden text-sm text-muted-foreground sm:inline">
+          <span className="hidden text-sm text-muted-foreground lg:inline">
             {storeConfig.domain}
           </span>
         </div>

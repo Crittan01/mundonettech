@@ -129,23 +129,27 @@ export function ReceiptPaymentPanel({
         </div>
       ) : null}
       {resumableWompiAttemptId ? (
-        <form action={resumeAction} className="space-y-3 border-t border-border pt-5">
+        <form
+          action={resumeAction}
+          aria-busy={resuming}
+          className="space-y-3 border-t border-border pt-5"
+        >
           <input type="hidden" name="token" value={token} />
           <input type="hidden" name="paymentAttemptId" value={resumableWompiAttemptId} />
           <p className="text-sm text-muted-foreground">
             Tienes un intento Wompi vigente pendiente de completar en el checkout seguro.
           </p>
-          <Button type="submit" disabled={resuming}>
+          <Button type="submit" disabled={resuming} aria-busy={resuming}>
             {resuming ? "Abriendo Wompi…" : "Continuar pago en Wompi"}
           </Button>
           <FormMessage state={resumeState} />
         </form>
       ) : null}
       {allowNewPayment ? (
-        <form action={action} className="space-y-4 border-t border-border pt-5">
+        <form action={action} aria-busy={pending} className="space-y-4 border-t border-border pt-5">
           <input type="hidden" name="token" value={token} />
           <input type="hidden" name="operationId" value={operationId} />
-          <fieldset className="space-y-3">
+          <fieldset className="space-y-3" disabled={pending}>
             <legend className="font-medium">
               {paymentStatus === "PARTIALLY_PAID"
                 ? `Completa el saldo pendiente (${formatCopCents(uncommittedCents)})`
@@ -159,7 +163,7 @@ export function ReceiptPaymentPanel({
                   value="WOMPI"
                   checked={paymentMethod === "WOMPI"}
                   onChange={() => setPaymentMethod("WOMPI")}
-                  className="size-4 accent-primary"
+                  className="size-4 shrink-0 accent-primary"
                   required
                 />
                 Wompi · Web Checkout seguro
@@ -172,7 +176,7 @@ export function ReceiptPaymentPanel({
                 value="COD"
                 checked={paymentMethod === "COD"}
                 onChange={() => setPaymentMethod("COD")}
-                className="size-4 accent-primary"
+                className="size-4 shrink-0 accent-primary"
                 required
               />
               Pago contraentrega · pendiente de recaudo y remesa
@@ -185,7 +189,7 @@ export function ReceiptPaymentPanel({
                   value="BANK_TRANSFER"
                   checked={paymentMethod === "BANK_TRANSFER"}
                   onChange={() => setPaymentMethod("BANK_TRANSFER")}
-                  className="size-4 accent-primary"
+                  className="size-4 shrink-0 accent-primary"
                   required
                 />
                 Transferencia bancaria · requiere confirmación de Finanzas
@@ -199,7 +203,7 @@ export function ReceiptPaymentPanel({
                   value="STORE_CREDIT"
                   checked={paymentMethod === "STORE_CREDIT"}
                   onChange={() => setPaymentMethod("STORE_CREDIT")}
-                  className="size-4 accent-primary"
+                  className="size-4 shrink-0 accent-primary"
                   required
                 />
                 Crédito de tienda · disponible {formatCopCents(storeCreditAvailableCents)}
@@ -215,6 +219,7 @@ export function ReceiptPaymentPanel({
                 value={credentialId}
                 onChange={(event) => setCredentialId(event.target.value)}
                 className="flex py-2"
+                disabled={pending}
                 required
               >
                 {wompiAccounts.map((account) => (
@@ -239,14 +244,18 @@ export function ReceiptPaymentPanel({
               </p>
             </div>
           ) : null}
-          <Button type="submit" disabled={pending}>
+          <Button type="submit" disabled={pending} aria-busy={pending}>
             {pending ? "Iniciando…" : "Iniciar pago"}
           </Button>
           <FormMessage state={state} />
         </form>
       ) : null}
       {hasWompi ? (
-        <form action={verificationAction} className="space-y-3 border-t border-border pt-5">
+        <form
+          action={verificationAction}
+          aria-busy={verifying}
+          className="space-y-3 border-t border-border pt-5"
+        >
           <input type="hidden" name="token" value={token} />
           <div className="space-y-2">
             <Label htmlFor="wompi-transaction-id">ID de transacción Wompi</Label>
@@ -256,6 +265,7 @@ export function ReceiptPaymentPanel({
               defaultValue={externalId}
               minLength={3}
               maxLength={128}
+              disabled={verifying}
               required
             />
             <p className="text-xs text-muted-foreground">
@@ -263,7 +273,7 @@ export function ReceiptPaymentPanel({
               llave privada únicamente desde el servidor.
             </p>
           </div>
-          <Button type="submit" variant="outline" disabled={verifying}>
+          <Button type="submit" variant="outline" disabled={verifying} aria-busy={verifying}>
             {verifying ? "Verificando…" : "Verificar estado con Wompi"}
           </Button>
           <FormMessage state={verificationState} />

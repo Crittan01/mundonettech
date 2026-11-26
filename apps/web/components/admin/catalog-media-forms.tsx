@@ -224,8 +224,8 @@ export function CatalogMediaUploadForm({
         <div role="alert" className="space-y-2 text-sm text-destructive">
           <p>{status.message}</p>
           {status.code === "mfa_stale" ? (
-            <a href="/admin/seguridad" className="font-medium text-primary underline">
-              Confirmar autenticador en seguridad
+            <a href="#admin-step-up-prompt" className="font-medium text-primary underline">
+              Confirmar autenticador arriba
             </a>
           ) : null}
           {status.code === "unauthorized" ? (
@@ -293,15 +293,24 @@ export function CatalogMediaEditForm({
         </div>
         <Button type="submit" variant="outline" size="sm" disabled={pending}>
           {pending ? "Guardando…" : "Guardar texto y orden"}
+          <span className="sr-only"> ({altText})</span>
         </Button>
         <FormMessage state={state} />
       </form>
-      <ArchiveCatalogMediaForm productId={productId} mediaId={mediaId} />
+      <ArchiveCatalogMediaForm productId={productId} mediaId={mediaId} altText={altText} />
     </div>
   );
 }
 
-function ArchiveCatalogMediaForm({ productId, mediaId }: { productId: string; mediaId: string }) {
+function ArchiveCatalogMediaForm({
+  productId,
+  mediaId,
+  altText,
+}: {
+  productId: string;
+  mediaId: string;
+  altText: string;
+}) {
   const [state, action, pending] = useActionState(archiveCatalogMediaAction, initialActionState);
   return (
     <form action={action} aria-busy={pending} className="space-y-2">
@@ -309,6 +318,7 @@ function ArchiveCatalogMediaForm({ productId, mediaId }: { productId: string; me
       <input type="hidden" name="mediaId" value={mediaId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Archivando…" : "Archivar medio"}
+        <span className="sr-only"> ({altText})</span>
       </Button>
       <FormMessage state={state} />
     </form>

@@ -4,6 +4,7 @@ import {
   referralRejectionReasonLabels,
   referralStatusLabels,
 } from "@mundonettech/core";
+import Link from "next/link";
 import { z } from "zod";
 
 import { AttributeReferralForm, CreateReferralCodeForm } from "@/components/account/growth-forms";
@@ -14,15 +15,26 @@ import { readReferralCode } from "@/lib/security/referral";
 
 export const metadata = { title: "Puntos y referidos", robots: { index: false, follow: false } };
 
+const pageSize = 10;
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "medium",
   timeStyle: "short",
 });
 const codeSchema = z.string().regex(/^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{12}$/i);
+const pageSchema = z.coerce.number().int().min(1).max(1000).catch(1);
 
 function single(value: string | string[] | undefined): string {
   return Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
+}
+
+function buildBenefitsHref(params: { codigo?: string; page?: number; refPage?: number }): string {
+  const query = new URLSearchParams();
+  if (params.codigo) query.set("codigo", params.codigo);
+  if (params.page && params.page > 1) query.set("page", String(params.page));
+  if (params.refPage && params.refPage > 1) query.set("refPage", String(params.refPage));
+  const serialized = query.toString();
+  return serialized ? `/mi-cuenta/beneficios?${serialized}` : "/mi-cuenta/beneficios";
 }
 
 export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuenta/beneficios">) {
@@ -35,8 +47,24 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
   const shareUrl = overview.referralCode
     ? `${getPublicSiteUrl()}/referido/${encodeURIComponent(overview.referralCode)}`
     : null;
+  const preservedCode = parsedCode.success ? parsedCode.data.toUpperCase() : undefined;
+
+  const totalReferralPages = Math.max(1, Math.ceil(overview.referralsMade.length / pageSize));
+  const currentRefPage = Math.min(pageSchema.parse(single(raw.refPage) || "1"), totalReferralPages);
+  const pagedReferrals = overview.referralsMade.slice(
+    (currentRefPage - 1) * pageSize,
+    currentRefPage * pageSize,
+  );
+
+  const totalLedgerPages = Math.max(1, Math.ceil(overview.ledger.length / pageSize));
+  const currentLedgerPage = Math.min(pageSchema.parse(single(raw.page) || "1"), totalLedgerPages);
+  const pagedLedger = overview.ledger.slice(
+    (currentLedgerPage - 1) * pageSize,
+    currentLedgerPage * pageSize,
+  );
+
   return (
-    <main className="space-y-8">
+    <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold">Puntos y referidos</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
@@ -50,11 +78,9 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
           El enlace de referido no contiene un código válido. Puedes ingresarlo manualmente.
         </p>
       ) : null}
-      <section aria-labelledby="balance-title" className="grid gap-4 sm:grid-cols-3">
+      <section aria-label="Resumen de puntos y referidos" className="grid gap-4 sm:grid-cols-3">
         <div className="rounded-xl border border-border bg-card p-5">
-          <h2 id="balance-title" className="text-sm text-muted-foreground">
-            Puntos disponibles
-          </h2>
+          <h2 className="text-sm text-muted-foreground">Puntos disponibles</h2>
           <p className="mt-2 text-3xl font-bold">{overview.loyaltyPoints}</p>
         </div>
         <div className="rounded-xl border border-border bg-card p-5">
@@ -130,16 +156,57 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
             Todavía no hay cuentas con tu código atribuido.
           </p>
         ) : (
-          <ul className="space-y-3">
-            {overview.referralsMade.map((referral) => (
-              <li key={referral.id} className="rounded-xl border border-border bg-card p-4 text-sm">
-                <strong>{referralStatusLabels[referral.status]}</strong>
-                <span className="ml-2 text-muted-foreground">
-                  {dateFormatter.format(referral.createdAt)}
+          <>
+            <ul className="space-y-3">
+              {pagedReferrals.map((referral) => (
+                <li
+                  key={referral.id}
+                  className="rounded-xl border border-border bg-card p-4 text-sm"
+                >
+                  <strong>{referralStatusLabels[referral.status]}</strong>
+                  <span className="ml-2 text-muted-foreground">
+                    {dateFormatter.format(referral.createdAt)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            {totalReferralPages > 1 ? (
+              <nav
+                aria-label="Paginación de referidos"
+                className="flex flex-wrap items-center justify-between gap-3 text-sm"
+              >
+                <span className="text-muted-foreground">
+                  Página {currentRefPage} de {totalReferralPages}
                 </span>
-              </li>
-            ))}
-          </ul>
+                <div className="flex flex-wrap gap-3">
+                  {currentRefPage > 1 ? (
+                    <Link
+                      href={buildBenefitsHref({
+                        ...(preservedCode ? { codigo: preservedCode } : {}),
+                        page: currentLedgerPage,
+                        refPage: currentRefPage - 1,
+                      })}
+                      className="rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
+                    >
+                      Página anterior
+                    </Link>
+                  ) : null}
+                  {currentRefPage < totalReferralPages ? (
+                    <Link
+                      href={buildBenefitsHref({
+                        ...(preservedCode ? { codigo: preservedCode } : {}),
+                        page: currentLedgerPage,
+                        refPage: currentRefPage + 1,
+                      })}
+                      className="rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
+                    >
+                      Siguiente página
+                    </Link>
+                  ) : null}
+                </div>
+              </nav>
+            ) : null}
+          </>
         )}
       </section>
       <section aria-labelledby="ledger-title" className="space-y-4">
@@ -152,46 +219,89 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
             una compra elegible.
           </p>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border bg-card">
-            <table className="w-full min-w-[42rem] text-left text-sm">
-              <caption className="sr-only">Historial de puntos y reversas</caption>
-              <thead className="border-b border-border">
-                <tr>
-                  <th scope="col" className="p-4">
-                    Fecha
-                  </th>
-                  <th scope="col" className="p-4">
-                    Movimiento
-                  </th>
-                  <th scope="col" className="p-4">
-                    Pedido
-                  </th>
-                  <th scope="col" className="p-4 text-right">
-                    Puntos
-                  </th>
-                  <th scope="col" className="p-4 text-right">
-                    Saldo
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {overview.ledger.map((entry) => (
-                  <tr key={entry.id} className="border-b border-border last:border-0">
-                    <td className="p-4">{dateFormatter.format(entry.createdAt)}</td>
-                    <td className="p-4">{loyaltyTxnTypeLabels[entry.type]}</td>
-                    <td className="p-4">{entry.orderNumber ?? "—"}</td>
-                    <td className="p-4 text-right font-medium">
-                      {entry.points > 0 ? "+" : ""}
-                      {entry.points}
-                    </td>
-                    <td className="p-4 text-right">{entry.balanceAfter}</td>
+          <>
+            <div
+              role="region"
+              aria-label="Tabla de historial de puntos y reversas"
+              tabIndex={0}
+              className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            >
+              <table className="w-full min-w-[42rem] text-left text-sm">
+                <caption className="sr-only">Historial de puntos y reversas</caption>
+                <thead className="border-b border-border">
+                  <tr>
+                    <th scope="col" className="p-4">
+                      Fecha
+                    </th>
+                    <th scope="col" className="p-4">
+                      Movimiento
+                    </th>
+                    <th scope="col" className="p-4">
+                      Pedido
+                    </th>
+                    <th scope="col" className="p-4 text-right">
+                      Puntos
+                    </th>
+                    <th scope="col" className="p-4 text-right">
+                      Saldo
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {pagedLedger.map((entry) => (
+                    <tr key={entry.id} className="border-b border-border last:border-0">
+                      <td className="p-4">{dateFormatter.format(entry.createdAt)}</td>
+                      <td className="p-4">{loyaltyTxnTypeLabels[entry.type]}</td>
+                      <td className="p-4">{entry.orderNumber ?? "—"}</td>
+                      <td className="p-4 text-right font-medium">
+                        {entry.points > 0 ? "+" : ""}
+                        {entry.points}
+                      </td>
+                      <td className="p-4 text-right">{entry.balanceAfter}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {totalLedgerPages > 1 ? (
+              <nav
+                aria-label="Paginación de movimientos de puntos"
+                className="flex flex-wrap items-center justify-between gap-3 text-sm"
+              >
+                <span className="text-muted-foreground">
+                  Página {currentLedgerPage} de {totalLedgerPages}
+                </span>
+                <div className="flex flex-wrap gap-3">
+                  {currentLedgerPage > 1 ? (
+                    <Link
+                      href={buildBenefitsHref({
+                        ...(preservedCode ? { codigo: preservedCode } : {}),
+                        page: currentLedgerPage - 1,
+                        refPage: currentRefPage,
+                      })}
+                      className="rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
+                    >
+                      Página anterior
+                    </Link>
+                  ) : null}
+                  {currentLedgerPage < totalLedgerPages ? (
+                    <Link
+                      href={buildBenefitsHref({
+                        ...(preservedCode ? { codigo: preservedCode } : {}),
+                        page: currentLedgerPage + 1,
+                        refPage: currentRefPage,
+                      })}
+                      className="rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
+                    >
+                      Siguiente página
+                    </Link>
+                  ) : null}
+                </div>
+              </nav>
+            ) : null}
+          </>
         )}
       </section>
-    </main>
+    </div>
   );
 }

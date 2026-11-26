@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 
+import * as adminPresenters from "../../apps/web/lib/admin-presenters.js";
 import * as core from "../../packages/core/dist/index.js";
 import * as integrations from "../../packages/integrations/dist/index.js";
 
@@ -41,6 +42,7 @@ function loadPage(mocks: Record<string, unknown>): PageModule {
   const localRequire = (id: string): unknown => {
     if (Object.hasOwn(mocks, id)) return mocks[id];
     if (id === "@mundonettech/integrations") return integrations;
+    if (id === "@/lib/admin-presenters") return adminPresenters;
     return webRequire(id) as unknown;
   };
   const context = createContext({
@@ -267,7 +269,7 @@ describe("A5 — DIAN trust anchor wizard", () => {
     expect(source).toContain("multiline: true");
     expect(source).toContain('field.name === "signatureTrustAnchorPem"');
     expect(source).toContain('environment === "PRD"');
-    expect(source).toContain("<textarea");
+    expect(source).toMatch(/<Textarea|<textarea/);
   });
 });
 

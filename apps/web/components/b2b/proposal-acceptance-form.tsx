@@ -70,7 +70,7 @@ export function ProposalAcceptanceForm({
       <input type="hidden" name="token" value={token} />
       <input type="hidden" name="reviewFingerprint" value={reviewFingerprint} />
       <input type="hidden" name="submissionId" value={submissionId} />
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Recepción y firma</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -181,7 +181,7 @@ export function ProposalAcceptanceForm({
           </div>
         </div>
       </fieldset>
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Dirección de entrega</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -280,7 +280,8 @@ export function ProposalAcceptanceForm({
           </div>
         </div>
       </fieldset>
-      <div className="space-y-3 text-sm">
+      <fieldset className="space-y-3 text-sm" disabled={pending}>
+        <legend className="sr-only">Declaraciones y consentimientos</legend>
         <label className="flex items-start gap-3">
           <input
             type="checkbox"
@@ -349,9 +350,9 @@ export function ProposalAcceptanceForm({
             firma registrada es veraz.
           </span>
         </label>
-      </div>
+      </fieldset>
       <FormMessage state={state} />
-      <Button type="submit" size="lg" disabled={pending || !municipalityCode}>
+      <Button type="submit" size="lg" disabled={pending || !municipalityCode} aria-busy={pending}>
         {pending ? "Validando y creando el pedido…" : "Firmar propuesta y crear pedido"}
       </Button>
       <p className="text-xs text-muted-foreground">

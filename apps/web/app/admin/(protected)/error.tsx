@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { Button } from "@/components/ui/button";
 
 export default function AdminError({
@@ -14,9 +16,16 @@ export default function AdminError({
       <p className="mt-3 text-muted-foreground">
         La consulta no se completó. Reintenta; si persiste, contacta al equipo de seguridad.
       </p>
-      <Button className="mt-5" onClick={reset}>
-        Reintentar
-      </Button>
+      <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+        <Button type="button" onClick={reset}>
+          Reintentar
+        </Button>
+        <Button asChild variant="outline">
+          <Link href="/admin" prefetch={false}>
+            Volver al resumen
+          </Link>
+        </Button>
+      </div>
     </section>
   );
 }

@@ -1,3 +1,4 @@
+import { hasAdminPermission } from "@mundonettech/core";
 import { OperationalHealthService } from "@mundonettech/db";
 import Link from "next/link";
 
@@ -83,6 +84,8 @@ export default async function HealthPage() {
     ["Respaldo ≤ 36 h", snapshot.backupFresh ? "Vigente" : "Requiere acción"],
     ["DR mensual", snapshot.drillCurrent ? "Vigente" : "Requiere acción"],
   ] as const;
+  const canReadUsers = hasAdminPermission(session.profile.role, "users:read");
+  const canReadOwnSecurity = hasAdminPermission(session.profile.role, "security:read_own");
   return (
     <div className="space-y-10">
       <div>
@@ -92,6 +95,21 @@ export default async function HealthPage() {
           Sondas, contadores agregados y evidencia inmutable de respaldos cifrados y restauraciones.
           Las alertas operativas se gestionan desde la bandeja de hoy con permisos de auditoría.
         </p>
+        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+          <Link className="text-primary underline" href="/admin/auditoria">
+            Consultar registros de auditoría
+          </Link>
+          {canReadUsers ? (
+            <Link className="text-primary underline" href="/admin/usuarios">
+              Administrar usuarios
+            </Link>
+          ) : null}
+          {canReadOwnSecurity ? (
+            <Link className="text-primary underline" href="/admin/seguridad">
+              Configurar mi seguridad y MFA
+            </Link>
+          ) : null}
+        </div>
       </div>
       <section
         role={snapshot.status === "HEALTHY" ? "status" : "alert"}
@@ -244,7 +262,12 @@ export default async function HealthPage() {
                   </p>
                 ) : null}
                 {drill.buckets.length > 0 ? (
-                  <div className="mt-4 overflow-x-auto">
+                  <div
+                    role="region"
+                    aria-label="Tabla de verificación de buckets"
+                    tabIndex={0}
+                    className="mt-4 overflow-x-auto rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  >
                     <table className="w-full min-w-[560px] text-left text-sm">
                       <caption className="sr-only">Verificación del 100 % de los buckets</caption>
                       <thead className="bg-secondary">
@@ -301,38 +324,47 @@ export default async function HealthPage() {
         <h2 id="health-history" className="text-xl font-semibold">
           Capturas agregadas recientes
         </h2>
-        <div className="overflow-x-auto rounded-xl border border-border">
-          <table className="w-full min-w-[720px] text-left text-sm">
-            <caption className="sr-only">
-              Historial de salud sin eventos individuales ni PII
-            </caption>
-            <thead className="bg-secondary">
-              <tr>
-                {(["Captura", "Estado", "Pendientes", "Fallidos", "Respaldo", "DR"] as const).map(
-                  (heading) => (
-                    <th key={heading} scope="col" className="p-3">
-                      {heading}
-                    </th>
-                  ),
-                )}
-              </tr>
-            </thead>
-            <tbody>
-              {dashboard.recentSnapshots.map((record) => (
-                <tr key={record.id} className="border-t border-border">
-                  <th scope="row" className="p-3">
-                    {date(record.capturedAt)}
-                  </th>
-                  <td className="p-3">{statusLabels[record.status]}</td>
-                  <td className="p-3">{record.pendingOutbox}</td>
-                  <td className="p-3">{record.failedOutbox}</td>
-                  <td className="p-3">{record.backupFresh ? "Vigente" : "Vencido"}</td>
-                  <td className="p-3">{record.drillCurrent ? "Vigente" : "Pendiente"}</td>
+        {dashboard.recentSnapshots.length === 0 ? (
+          <Empty>Todavía no hay capturas agregadas de salud registradas.</Empty>
+        ) : (
+          <div
+            role="region"
+            aria-label="Tabla de capturas agregadas de salud"
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <caption className="sr-only">
+                Historial de salud sin eventos individuales ni PII
+              </caption>
+              <thead className="bg-secondary">
+                <tr>
+                  {(["Captura", "Estado", "Pendientes", "Fallidos", "Respaldo", "DR"] as const).map(
+                    (heading) => (
+                      <th key={heading} scope="col" className="p-3">
+                        {heading}
+                      </th>
+                    ),
+                  )}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {dashboard.recentSnapshots.map((record) => (
+                  <tr key={record.id} className="border-t border-border">
+                    <th scope="row" className="p-3">
+                      {date(record.capturedAt)}
+                    </th>
+                    <td className="p-3">{statusLabels[record.status]}</td>
+                    <td className="p-3">{record.pendingOutbox}</td>
+                    <td className="p-3">{record.failedOutbox}</td>
+                    <td className="p-3">{record.backupFresh ? "Vigente" : "Vencido"}</td>
+                    <td className="p-3">{record.drillCurrent ? "Vigente" : "Pendiente"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </div>
   );

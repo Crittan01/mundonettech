@@ -32,30 +32,40 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const querySchema = z.object({
-  q: z.string().trim().max(320).optional(),
-  status: z.enum(["ACTIVE", "MERGED", "ANONYMIZED"]).optional(),
-  tasks: z.enum(["all", "mine"]).optional(),
-  cursor: z.string().uuid().optional(),
-});
+const qSchema = z.string().trim().max(320).optional();
+const statusSchema = z.enum(["ACTIVE", "MERGED", "ANONYMIZED"]).optional();
+const tasksSchema = z.enum(["all", "mine"]).optional();
+const cursorSchema = z.string().uuid().optional();
 
 export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">) {
   const session = await requireAdminPage("crm:read");
   const raw = await searchParams;
-  const parsed = querySchema.safeParse({
-    q: single(raw.q)?.trim() || undefined,
-    status: single(raw.status) || undefined,
-    tasks: single(raw.tasks) || undefined,
-    cursor: single(raw.cursor) || undefined,
-  });
-  const query = parsed.success ? parsed.data : {};
+  const rawQ = single(raw.q)?.trim() || undefined;
+  const rawStatus = single(raw.status) || undefined;
+  const rawTasks = single(raw.tasks) || undefined;
+  const rawCursor = single(raw.cursor) || undefined;
+
+  const parsedQ = qSchema.safeParse(rawQ);
+  const parsedStatus = statusSchema.safeParse(rawStatus);
+  const parsedTasks = tasksSchema.safeParse(rawTasks);
+  const parsedCursor = cursorSchema.safeParse(rawCursor);
+
+  const paramsValid =
+    parsedQ.success && parsedStatus.success && parsedTasks.success && parsedCursor.success;
+  const query = {
+    q: parsedQ.success ? parsedQ.data : undefined,
+    status: parsedStatus.success ? parsedStatus.data : undefined,
+    tasks: parsedTasks.success ? parsedTasks.data : undefined,
+    cursor: parsedCursor.success ? parsedCursor.data : undefined,
+  };
   const db = getDatabase();
   const service = crmService(db);
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
   const canMerge = hasAdminPermission(session.profile.role, "crm:merge");
+  const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
   let cursorNotFound = false;
   const [contacts, openTasks, organizations, pending, merged] = await Promise.all([
-    parsed.success
+    paramsValid
       ? service
           .listContacts({
             ...(query.q ? { query: query.q } : {}),
@@ -84,12 +94,22 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
       ? crmMergeService(db).listCandidates(session.profile.id, "MERGED")
       : Promise.resolve([]),
   ]);
-  const filterValid = parsed.success && !cursorNotFound;
-  const nextParams = new URLSearchParams();
-  if (query.q) nextParams.set("q", query.q);
-  if (query.status) nextParams.set("status", query.status);
-  if (query.tasks) nextParams.set("tasks", query.tasks);
+  const filterValid = paramsValid && !cursorNotFound;
+  const baseFilterParams = new URLSearchParams();
+  if (query.q) baseFilterParams.set("q", query.q);
+  if (query.status) baseFilterParams.set("status", query.status);
+  if (query.tasks) baseFilterParams.set("tasks", query.tasks);
+  const firstPageHref = baseFilterParams.size
+    ? `/admin/crm?${baseFilterParams.toString()}`
+    : "/admin/crm";
+  const nextParams = new URLSearchParams(baseFilterParams);
   if (contacts.nextCursor) nextParams.set("cursor", contacts.nextCursor);
+  const hasActiveFilters =
+    Boolean(query.q) ||
+    (query.status !== undefined && query.status !== "ACTIVE") ||
+    (query.tasks !== undefined && query.tasks !== "all") ||
+    Boolean(rawCursor) ||
+    !filterValid;
   return (
     <div className="space-y-10">
       <div>
@@ -98,6 +118,22 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
           Identidades, compradores, organizaciones, actividades y tareas con PII enmascarada, fusión
           humana reversible y retención Hábeas Data.
         </p>
+        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+          <Link className="text-primary underline" href="/admin/fidelizacion">
+            Ver fidelización y referidos
+          </Link>
+          <Link className="text-primary underline" href="/admin/segmentos">
+            Administrar segmentos
+          </Link>
+          <Link className="text-primary underline" href="/admin/lifecycle">
+            Administrar journeys
+          </Link>
+          {canReadFinance ? (
+            <Link className="text-primary underline" href="/admin/analitica-rfm">
+              Ver analítica RFM/LTV
+            </Link>
+          ) : null}
+        </div>
       </div>
       {canWrite || canMerge ? (
         <CmsStepUp session={session} />
@@ -111,7 +147,7 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
           Contactos
         </h2>
         <form className="flex flex-wrap items-end gap-3" action="/admin/crm">
-          <div className="space-y-2">
+          <div className="w-full space-y-2 sm:w-auto sm:min-w-64">
             <Label htmlFor="crm-q">Buscar</Label>
             <Input
               id="crm-q"
@@ -149,6 +185,14 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
           <Button type="submit" variant="outline">
             Filtrar
           </Button>
+          {hasActiveFilters ? (
+            <Link
+              href="/admin/crm"
+              className="inline-flex h-11 items-center px-2 text-sm text-primary underline"
+            >
+              Limpiar filtros
+            </Link>
+          ) : null}
         </form>
         {!filterValid ? (
           <p role="alert" className="text-sm text-destructive">
@@ -168,7 +212,7 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
                   {contact.givenName} {contact.familyName}
                 </Link>
               </h3>
-              <p className="mt-1 text-sm text-muted-foreground">
+              <p className="mt-1 text-sm break-all text-muted-foreground">
                 {contact.email} · {contact.phoneE164}
               </p>
               <p className="mt-2 text-sm">
@@ -182,10 +226,25 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
             </article>
           ))}
         </div>
-        {contacts.nextCursor ? (
-          <Link className="inline-flex underline" href={`/admin/crm?${nextParams.toString()}`}>
-            Página siguiente
-          </Link>
+        {rawCursor || contacts.nextCursor ? (
+          <nav
+            aria-label="Paginación de contactos CRM"
+            className="flex flex-wrap items-center gap-4"
+          >
+            {rawCursor ? (
+              <Link className="text-sm text-primary underline" href={firstPageHref}>
+                Primera página
+              </Link>
+            ) : null}
+            {contacts.nextCursor ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={`/admin/crm?${nextParams.toString()}`}
+              >
+                Página siguiente
+              </Link>
+            ) : null}
+          </nav>
         ) : null}
       </section>
       <section aria-labelledby="crm-task-queue" className="space-y-4">

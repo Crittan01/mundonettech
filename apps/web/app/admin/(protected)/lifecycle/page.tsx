@@ -24,10 +24,7 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const querySchema = z.object({
-  journey: z.string().uuid().optional(),
-  cursor: z.string().uuid().optional(),
-});
+const uuidParamSchema = z.string().uuid().optional();
 const emailStatusLabels: Record<string, string> = {
   QUEUED: "Correo en cola",
   SENDING: "Enviando",
@@ -44,35 +41,69 @@ const emailStatusLabels: Record<string, string> = {
 export default async function LifecyclePage({ searchParams }: PageProps<"/admin/lifecycle">) {
   const session = await requireAdminPage("crm:read");
   const raw = await searchParams;
-  const parsed = querySchema.safeParse({
-    journey: single(raw.journey),
-    cursor: single(raw.cursor),
-  });
+  const rawJourney = single(raw.journey) || undefined;
+  const rawCursor = single(raw.cursor) || undefined;
+  const parsedJourney = uuidParamSchema.safeParse(rawJourney);
+  const parsedCursor = uuidParamSchema.safeParse(rawCursor);
+  const paramsValid = parsedJourney.success && parsedCursor.success;
+  const validJourney = parsedJourney.success ? parsedJourney.data : undefined;
+  const validCursor = parsedCursor.success ? parsedCursor.data : undefined;
+
   const lifecycle = lifecycleService();
+  let invalidCursorFromDb = false;
   const [journeys, segments] = await Promise.all([
-    lifecycle.listJourneys(session.profile.id, {
-      ...(parsed.success && parsed.data.cursor ? { cursor: parsed.data.cursor } : {}),
-    }),
-    segmentationService().listSegments(session.profile.id, { limit: 100 }),
-  ]);
-  const detailResult =
-    parsed.success && parsed.data.journey
-      ? await lifecycle.getJourneyDetail(session.profile.id, parsed.data.journey).then(
-          (record) => ({ record, notFound: false }),
-          (error: unknown) => {
-            if (error instanceof LifecycleError && error.code === "NOT_FOUND") {
-              return { record: null, notFound: true };
+    parsedCursor.success
+      ? lifecycle
+          .listJourneys(session.profile.id, {
+            ...(validCursor ? { cursor: validCursor } : {}),
+          })
+          .catch((error: unknown) => {
+            if (
+              error instanceof LifecycleError &&
+              (error.code === "NOT_FOUND" || error.code === "VALIDATION")
+            ) {
+              invalidCursorFromDb = true;
+              return { items: [], nextCursor: null };
             }
             throw error;
-          },
-        )
-      : null;
+          })
+      : Promise.resolve({ items: [], nextCursor: null }),
+    segmentationService().listSegments(session.profile.id, { limit: 100 }),
+  ]);
+  const detailResult = validJourney
+    ? await lifecycle.getJourneyDetail(session.profile.id, validJourney).then(
+        (record) => ({ record, notFound: false }),
+        (error: unknown) => {
+          if (error instanceof LifecycleError && error.code === "NOT_FOUND") {
+            return { record: null, notFound: true };
+          }
+          throw error;
+        },
+      )
+    : null;
   const detail = detailResult?.record ?? null;
   const detailNotFound = detailResult?.notFound ?? false;
+  const queryInvalid = !paramsValid || invalidCursorFromDb;
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
-  const nextParams = new URLSearchParams();
-  if (parsed.success && parsed.data.journey) nextParams.set("journey", parsed.data.journey);
+  const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
+
+  const firstPageParams = new URLSearchParams();
+  if (validJourney && !detailNotFound) firstPageParams.set("journey", validJourney);
+  const firstPageHref = firstPageParams.size
+    ? `/admin/lifecycle?${firstPageParams.toString()}`
+    : "/admin/lifecycle";
+
+  const nextParams = new URLSearchParams(firstPageParams);
   if (journeys.nextCursor) nextParams.set("cursor", journeys.nextCursor);
+
+  const openJourneyHref = (journeyId: string) => {
+    const params = new URLSearchParams();
+    params.set("journey", journeyId);
+    if (validCursor && !invalidCursorFromDb) params.set("cursor", validCursor);
+    return `/admin/lifecycle?${params.toString()}`;
+  };
+  const showClearFilters =
+    Boolean(rawJourney) || Boolean(rawCursor) || queryInvalid || detailNotFound;
   return (
     <div className="space-y-10">
       <div>
@@ -81,9 +112,22 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
           Secuencias persistentes e idempotentes. Cada despacho vuelve a validar journey,
           inscripción, membresía, consentimiento y supresión antes de crear o enviar el correo.
         </p>
-        <Link className="mt-4 inline-flex text-sm underline" href="/admin/segmentos">
-          Administrar segmentos y evidencia
-        </Link>
+        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+          <Link className="text-primary underline" href="/admin/crm">
+            Abrir consola CRM 360°
+          </Link>
+          <Link className="text-primary underline" href="/admin/fidelizacion">
+            Ver fidelización y referidos
+          </Link>
+          <Link className="text-primary underline" href="/admin/segmentos">
+            Administrar segmentos y evidencia
+          </Link>
+          {canReadFinance ? (
+            <Link className="text-primary underline" href="/admin/analitica-rfm">
+              Ver analítica RFM/LTV
+            </Link>
+          ) : null}
+        </div>
       </div>
       {canWrite ? (
         <CmsStepUp session={session} />
@@ -105,10 +149,17 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
         </section>
       ) : null}
       <section aria-labelledby="journey-list" className="space-y-4">
-        <h2 id="journey-list" className="text-2xl font-semibold">
-          Journeys persistidos
-        </h2>
-        {!parsed.success ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 id="journey-list" className="text-2xl font-semibold">
+            Journeys persistidos
+          </h2>
+          {showClearFilters ? (
+            <Link href="/admin/lifecycle" className="text-sm text-primary underline">
+              Limpiar filtros
+            </Link>
+          ) : null}
+        </div>
+        {queryInvalid ? (
           <p role="alert" className="text-sm text-destructive">
             El journey o cursor no es válido.
           </p>
@@ -134,7 +185,7 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
                     </p>
                   </div>
                   <Button asChild variant="outline" size="sm">
-                    <Link href={`/admin/lifecycle?journey=${journey.id}`}>Abrir</Link>
+                    <Link href={openJourneyHref(journey.id)}>Abrir</Link>
                   </Button>
                 </div>
                 <p className="mt-3 text-sm">{journey.description ?? "Sin descripción."}</p>
@@ -146,13 +197,22 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
             ))}
           </div>
         )}
-        {journeys.nextCursor ? (
-          <Link
-            className="inline-flex underline"
-            href={`/admin/lifecycle?${nextParams.toString()}`}
-          >
-            Página siguiente
-          </Link>
+        {rawCursor || journeys.nextCursor ? (
+          <nav aria-label="Paginación de journeys" className="flex flex-wrap items-center gap-4">
+            {rawCursor ? (
+              <Link className="text-sm text-primary underline" href={firstPageHref}>
+                Primera página
+              </Link>
+            ) : null}
+            {journeys.nextCursor ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={`/admin/lifecycle?${nextParams.toString()}`}
+              >
+                Página siguiente
+              </Link>
+            ) : null}
+          </nav>
         ) : null}
       </section>
       {detail ? (

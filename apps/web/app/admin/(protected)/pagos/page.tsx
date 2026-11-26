@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { formatCopCents, hasAdminPermission, maskEmail } from "@mundonettech/core";
 import { assertAdminActorInTransaction, inInventoryTransaction } from "@mundonettech/db";
+import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { EmptyState as Empty } from "@/components/admin/empty-state";
@@ -15,143 +16,282 @@ import {
   UnblockIdentityForm,
   VoidPaymentForm,
 } from "@/components/admin/payment-operations-forms";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import {
+  paymentAttemptStatusLabels,
+  paymentProviderLabels,
+  paymentTransactionKindLabels,
+  paymentTransactionStatusLabels,
+  refundReasonLabels,
+  refundStatusLabels,
+} from "@/lib/admin-presenters";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { blockedIdentityService } from "@/lib/integrations";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Operación de pagos" };
 
-const providerLabels = {
-  WOMPI: "Wompi",
-  COD: "Contraentrega",
-  BANK_TRANSFER: "Transferencia",
-  STORE_CREDIT: "Crédito",
-} as const;
-
-const statusLabels: Record<string, string> = {
-  PENDING: "Pendiente",
-  PROCESSING: "En proceso",
-  REQUIRES_ACTION: "Requiere acción",
-  SUCCEEDED: "Exitoso",
-  FAILED: "Fallido",
-  REQUESTED: "Solicitado",
-  APPROVED: "Aprobado",
+const codStatusLabels: Record<string, string> = {
   PENDING_COLLECTION: "Pendiente de recaudo",
   DISCREPANCY: "Con discrepancia",
-  PARTIALLY_REFUNDED: "Reembolso parcial",
+  RECONCILED: "Conciliado",
 };
-const refundReasonLabels: Record<string, string> = {
-  CUSTOMER_SUPPORT: "Servicio al cliente",
-  RETRACT: "Retracto",
-  WARRANTY: "Garantía",
-  ADJUSTMENT: "Ajuste comercial",
-};
+
 const identityKindLabels: Record<string, string> = {
   EMAIL: "Correo",
   PHONE: "Teléfono",
   DOCUMENT: "Documento",
 };
+
 const bogotaDateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "medium",
 });
 
-export default async function PaymentsPage() {
+const allowedSectionFilters = [
+  "ALL",
+  "BANK_TRANSFER",
+  "COD",
+  "REFUNDS",
+  "COMPENSATIONS",
+  "VOIDS",
+] as const;
+type SectionFilter = (typeof allowedSectionFilters)[number];
+
+function labelFor<T extends string>(map: Record<T, string>, value: string): string {
+  return (
+    (map as Record<string, string | undefined>)[value] ??
+    (value === "PROCESSING" ? "En proceso" : value)
+  );
+}
+
+function paymentsHref(q: string, estado: SectionFilter, page: number): string {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (estado !== "ALL") params.set("estado", estado);
+  if (page > 1) params.set("page", String(page));
+  const qs = params.toString();
+  return qs ? `/admin/pagos?${qs}` : "/admin/pagos";
+}
+
+function OrderNumberHeading({
+  orderId,
+  orderNumber,
+  canReadOrders,
+  suffix,
+}: {
+  orderId: string;
+  orderNumber: string;
+  canReadOrders: boolean;
+  suffix?: string;
+}) {
+  return (
+    <h3 className="font-semibold">
+      {canReadOrders ? (
+        <Link href={`/admin/pedidos/${orderId}`} className="underline">
+          {orderNumber}
+        </Link>
+      ) : (
+        orderNumber
+      )}
+      {suffix ? ` · ${suffix}` : ""}
+    </h3>
+  );
+}
+
+export default async function PaymentsPage({ searchParams }: PageProps<"/admin/pagos">) {
   const session = await requireAdminPage("payments:read");
+  const raw = await searchParams;
+  const q = (single(raw.q) ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 100);
+  const rawEstado = single(raw.estado) ?? "ALL";
+  const estado: SectionFilter = allowedSectionFilters.includes(rawEstado as SectionFilter)
+    ? (rawEstado as SectionFilter)
+    : "ALL";
+  const requestedPage = Number.parseInt(single(raw.page) ?? "1", 10) || 1;
+  const page = Math.max(1, Math.min(10_000, requestedPage));
+  const pageSize = 20;
+  const skip = (page - 1) * pageSize;
+  const take = pageSize + 1;
+
+  const showBank = estado === "ALL" || estado === "BANK_TRANSFER";
+  const showCod = estado === "ALL" || estado === "COD";
+  const showRefunds = estado === "ALL" || estado === "REFUNDS";
+  const showCompensations = estado === "ALL" || estado === "COMPENSATIONS";
+  const showVoids = estado === "ALL" || estado === "VOIDS";
+
   const db = getDatabase();
-  const [bankAttempts, codAttempts, refunds, compensations, successfulAttempts] =
-    await inInventoryTransaction(db, async (tx) => {
+  const [rawBank, rawCod, rawRefunds, rawCompensations, rawVoids] = await inInventoryTransaction(
+    db,
+    async (tx) => {
       await assertAdminActorInTransaction(tx, session.profile.id, "payments:read");
       return Promise.all([
-        tx.paymentAttempt.findMany({
-          where: { provider: "BANK_TRANSFER", status: { in: ["PENDING", "PROCESSING"] } },
-          select: {
-            id: true,
-            amountCents: true,
-            reference: true,
-            order: { select: { orderNumber: true, emailSnapshot: true } },
-          },
-          orderBy: { createdAt: "asc" },
-          take: 100,
-        }),
-        tx.paymentAttempt.findMany({
-          where: { provider: "COD", status: { in: ["PENDING", "PROCESSING"] } },
-          select: {
-            id: true,
-            amountCents: true,
-            order: { select: { orderNumber: true, emailSnapshot: true } },
-            codReconciliation: { select: { status: true } },
-          },
-          orderBy: { createdAt: "asc" },
-          take: 100,
-        }),
-        tx.orderRefund.findMany({
-          where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] } },
-          select: {
-            id: true,
-            reason: true,
-            status: true,
-            totalCents: true,
-            order: { select: { orderNumber: true, emailSnapshot: true } },
-          },
-          orderBy: { createdAt: "asc" },
-          take: 100,
-        }),
-        tx.paymentTransaction.findMany({
-          where: {
-            kind: { in: ["REFUND", "VOID"] },
-            status: { in: ["PENDING", "PROCESSING"] },
-            provider: { not: "STORE_CREDIT" },
-          },
-          select: {
-            id: true,
-            kind: true,
-            provider: true,
-            amountCents: true,
-            status: true,
-            attempt: { select: { order: { select: { orderNumber: true } } } },
-          },
-          orderBy: { createdAt: "asc" },
-          take: 100,
-        }),
-        tx.paymentAttempt.findMany({
-          where: {
-            status: "SUCCEEDED",
-            provider: { not: "STORE_CREDIT" },
-            AND: [
-              {
-                transactions: {
-                  none: {
-                    kind: "REFUND",
-                    status: { not: "CANCELLED" },
-                  },
-                },
+        showBank
+          ? tx.paymentAttempt.findMany({
+              where: {
+                provider: "BANK_TRANSFER",
+                status: { in: ["PENDING", "PROCESSING", "REQUIRES_ACTION"] },
+                ...(q
+                  ? {
+                      OR: [
+                        { order: { orderNumber: { contains: q, mode: "insensitive" } } },
+                        { reference: { contains: q, mode: "insensitive" } },
+                      ],
+                    }
+                  : {}),
               },
-              {
-                transactions: {
-                  none: {
-                    kind: "VOID",
-                    status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
-                  },
-                },
+              select: {
+                id: true,
+                amountCents: true,
+                reference: true,
+                order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
               },
-            ],
-          },
-          select: {
-            id: true,
-            provider: true,
-            reference: true,
-            amountCents: true,
-            order: { select: { orderNumber: true } },
-          },
-          orderBy: { createdAt: "desc" },
-          take: 100,
-        }),
+              orderBy: { createdAt: "asc" },
+              skip,
+              take,
+            })
+          : [],
+        showCod
+          ? tx.paymentAttempt.findMany({
+              where: {
+                provider: "COD",
+                status: { in: ["PENDING", "PROCESSING", "REQUIRES_ACTION"] },
+                ...(q
+                  ? {
+                      OR: [
+                        { order: { orderNumber: { contains: q, mode: "insensitive" } } },
+                        { reference: { contains: q, mode: "insensitive" } },
+                      ],
+                    }
+                  : {}),
+              },
+              select: {
+                id: true,
+                amountCents: true,
+                order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+                codReconciliation: { select: { status: true } },
+              },
+              orderBy: { createdAt: "asc" },
+              skip,
+              take,
+            })
+          : [],
+        showRefunds
+          ? tx.orderRefund.findMany({
+              where: {
+                status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
+                ...(q ? { order: { orderNumber: { contains: q, mode: "insensitive" } } } : {}),
+              },
+              select: {
+                id: true,
+                reason: true,
+                status: true,
+                totalCents: true,
+                order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+              },
+              orderBy: { createdAt: "asc" },
+              skip,
+              take,
+            })
+          : [],
+        showCompensations
+          ? tx.paymentTransaction.findMany({
+              where: {
+                kind: { in: ["REFUND", "VOID"] },
+                status: { in: ["PENDING", "PROCESSING"] },
+                provider: { not: "STORE_CREDIT" },
+                ...(q
+                  ? {
+                      attempt: {
+                        order: { orderNumber: { contains: q, mode: "insensitive" } },
+                      },
+                    }
+                  : {}),
+              },
+              select: {
+                id: true,
+                kind: true,
+                provider: true,
+                amountCents: true,
+                status: true,
+                attempt: { select: { order: { select: { id: true, orderNumber: true } } } },
+              },
+              orderBy: { createdAt: "asc" },
+              skip,
+              take,
+            })
+          : [],
+        showVoids
+          ? tx.paymentAttempt.findMany({
+              where: {
+                status: "SUCCEEDED",
+                provider: { not: "STORE_CREDIT" },
+                ...(q
+                  ? {
+                      OR: [
+                        { order: { orderNumber: { contains: q, mode: "insensitive" } } },
+                        { reference: { contains: q, mode: "insensitive" } },
+                      ],
+                    }
+                  : {}),
+                AND: [
+                  {
+                    transactions: {
+                      none: {
+                        kind: "REFUND",
+                        status: { not: "CANCELLED" },
+                      },
+                    },
+                  },
+                  {
+                    transactions: {
+                      none: {
+                        kind: "VOID",
+                        status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+                      },
+                    },
+                  },
+                ],
+              },
+              select: {
+                id: true,
+                provider: true,
+                reference: true,
+                amountCents: true,
+                order: { select: { id: true, orderNumber: true } },
+              },
+              orderBy: { createdAt: "desc" },
+              skip,
+              take,
+            })
+          : [],
       ]);
-    });
+    },
+  );
+
+  const hasMore =
+    rawBank.length > pageSize ||
+    rawCod.length > pageSize ||
+    rawRefunds.length > pageSize ||
+    rawCompensations.length > pageSize ||
+    rawVoids.length > pageSize;
+  const bankAttempts = rawBank.slice(0, pageSize);
+  const codAttempts = rawCod.slice(0, pageSize);
+  const refunds = rawRefunds.slice(0, pageSize);
+  const compensations = rawCompensations.slice(0, pageSize);
+  const successfulAttempts = rawVoids.slice(0, pageSize);
+
   const blocked = await blockedIdentityService().list(100, session.profile.id);
   const canWrite = hasAdminPermission(session.profile.role, "payments:write");
+  const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
   const creditOperationKey = `admin-credit:${randomUUID()}`;
+  const hasFilters = Boolean(q || estado !== "ALL");
+
   return (
     <div className="space-y-10">
       <div>
@@ -163,151 +303,240 @@ export default async function PaymentsPage() {
         </p>
       </div>
       {canWrite ? <CmsStepUp session={session} /> : null}
-      <section aria-labelledby="bank-transfers" className="space-y-4">
-        <h2 id="bank-transfers" className="text-xl font-semibold">
-          Transferencias por confirmar
-        </h2>
-        {bankAttempts.length === 0 ? (
-          <Empty>No hay transferencias pendientes.</Empty>
-        ) : (
-          <ul className="space-y-3">
-            {bankAttempts.map((attempt) => (
-              <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
-                <div className="flex flex-wrap justify-between gap-3">
-                  <div>
-                    <h3 className="font-semibold">{attempt.order.orderNumber}</h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {attempt.order.emailSnapshot
-                        ? maskEmail(attempt.order.emailSnapshot)
-                        : "Sin correo"}
-                    </p>
+      <form
+        key={`${q}|${estado}`}
+        action="/admin/pagos"
+        className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
+      >
+        <label htmlFor="payments-q" className="sr-only">
+          Buscar pagos por pedido o referencia
+        </label>
+        <Input
+          id="payments-q"
+          name="q"
+          defaultValue={q}
+          maxLength={100}
+          placeholder="Número de pedido o referencia"
+          className="min-w-60 flex-1"
+        />
+        <Select
+          name="estado"
+          defaultValue={estado}
+          aria-label="Filtrar cola operativa"
+          fullWidth={false}
+        >
+          <option value="ALL">Todas las colas</option>
+          <option value="BANK_TRANSFER">Transferencias pendientes</option>
+          <option value="COD">Remesas COD pendientes</option>
+          <option value="REFUNDS">Reembolsos activos</option>
+          <option value="COMPENSATIONS">Compensaciones por conciliar</option>
+          <option value="VOIDS">Capturas anulables</option>
+        </Select>
+        <Button type="submit" variant="outline">
+          Filtrar
+        </Button>
+        {hasFilters ? (
+          <Link
+            href="/admin/pagos"
+            className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+          >
+            Limpiar
+          </Link>
+        ) : null}
+      </form>
+      {showBank ? (
+        <section aria-labelledby="bank-transfers" className="space-y-4">
+          <h2 id="bank-transfers" className="text-xl font-semibold">
+            Transferencias por confirmar
+          </h2>
+          {bankAttempts.length === 0 ? (
+            <Empty>No hay transferencias pendientes.</Empty>
+          ) : (
+            <ul className="space-y-3">
+              {bankAttempts.map((attempt) => (
+                <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
+                  <div className="flex flex-wrap justify-between gap-3">
+                    <div>
+                      <OrderNumberHeading
+                        orderId={attempt.order.id}
+                        orderNumber={attempt.order.orderNumber}
+                        canReadOrders={canReadOrders}
+                      />
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {attempt.order.emailSnapshot
+                          ? maskEmail(attempt.order.emailSnapshot)
+                          : "Sin correo"}
+                      </p>
+                    </div>
+                    <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
                   </div>
-                  <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
-                </div>
-                <p className="mt-2 font-mono text-xs text-muted-foreground">{attempt.reference}</p>
-                {canWrite ? <BankTransferConfirmationForm paymentAttemptId={attempt.id} /> : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      <section aria-labelledby="cod-remittances" className="space-y-4">
-        <h2 id="cod-remittances" className="text-xl font-semibold">
-          Recaudo y remesas COD
-        </h2>
-        {codAttempts.length === 0 ? (
-          <Empty>No hay pagos contraentrega pendientes de conciliación.</Empty>
-        ) : (
-          <ul className="space-y-3">
-            {codAttempts.map((attempt) => (
-              <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
-                <div className="flex flex-wrap justify-between gap-3">
-                  <div>
-                    <h3 className="font-semibold">{attempt.order.orderNumber}</h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {attempt.order.emailSnapshot
-                        ? maskEmail(attempt.order.emailSnapshot)
-                        : "Sin correo"}{" "}
-                      ·{" "}
-                      {statusLabels[attempt.codReconciliation?.status ?? "PENDING_COLLECTION"] ??
-                        attempt.codReconciliation?.status}
-                    </p>
+                  <p className="mt-2 font-mono text-xs break-all text-muted-foreground">
+                    {attempt.reference}
+                  </p>
+                  {canWrite ? <BankTransferConfirmationForm paymentAttemptId={attempt.id} /> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      {showCod ? (
+        <section aria-labelledby="cod-remittances" className="space-y-4">
+          <h2 id="cod-remittances" className="text-xl font-semibold">
+            Recaudo y remesas COD
+          </h2>
+          {codAttempts.length === 0 ? (
+            <Empty>No hay pagos contraentrega pendientes de conciliación.</Empty>
+          ) : (
+            <ul className="space-y-3">
+              {codAttempts.map((attempt) => (
+                <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
+                  <div className="flex flex-wrap justify-between gap-3">
+                    <div>
+                      <OrderNumberHeading
+                        orderId={attempt.order.id}
+                        orderNumber={attempt.order.orderNumber}
+                        canReadOrders={canReadOrders}
+                      />
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {attempt.order.emailSnapshot
+                          ? maskEmail(attempt.order.emailSnapshot)
+                          : "Sin correo"}{" "}
+                        ·{" "}
+                        {codStatusLabels[
+                          attempt.codReconciliation?.status ?? "PENDING_COLLECTION"
+                        ] ??
+                          attempt.codReconciliation?.status ??
+                          paymentAttemptStatusLabels.PENDING}
+                      </p>
+                    </div>
+                    <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
                   </div>
-                  <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
-                </div>
-                {canWrite && attempt.codReconciliation ? (
-                  <CodRemittanceForm
-                    paymentAttemptId={attempt.id}
-                    expectedCents={attempt.amountCents.toString()}
+                  {canWrite && attempt.codReconciliation ? (
+                    <CodRemittanceForm
+                      paymentAttemptId={attempt.id}
+                      expectedCents={attempt.amountCents.toString()}
+                    />
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      {showRefunds ? (
+        <section id="refunds" aria-labelledby="refunds-title" className="space-y-4">
+          <h2 id="refunds-title" className="text-xl font-semibold">
+            Reembolsos
+          </h2>
+          {refunds.length === 0 ? (
+            <Empty>No hay reembolsos por ejecutar o conciliar.</Empty>
+          ) : (
+            <ul className="space-y-3">
+              {refunds.map((refund) => (
+                <li key={refund.id} className="rounded-xl border border-border bg-card p-5">
+                  <div className="flex flex-wrap justify-between gap-3">
+                    <div>
+                      <OrderNumberHeading
+                        orderId={refund.order.id}
+                        orderNumber={refund.order.orderNumber}
+                        canReadOrders={canReadOrders}
+                        suffix={labelFor(refundReasonLabels, refund.reason)}
+                      />
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {refund.order.emailSnapshot
+                          ? maskEmail(refund.order.emailSnapshot)
+                          : "Sin correo"}{" "}
+                        · {labelFor(refundStatusLabels, refund.status)}
+                      </p>
+                    </div>
+                    <p className="font-semibold">{formatCopCents(refund.totalCents)}</p>
+                  </div>
+                  {canWrite && ["REQUESTED", "APPROVED", "FAILED"].includes(refund.status) ? (
+                    <RefundExecutionForm
+                      refundId={refund.id}
+                      requiresApproval={refund.status === "REQUESTED"}
+                    />
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      {showCompensations ? (
+        <section aria-labelledby="compensations" className="space-y-4">
+          <h2 id="compensations" className="text-xl font-semibold">
+            Compensaciones por conciliar
+          </h2>
+          {compensations.length === 0 ? (
+            <Empty>No hay reembolsos o anulaciones con resultado pendiente.</Empty>
+          ) : (
+            <ul className="space-y-3">
+              {compensations.map((transaction) => (
+                <li key={transaction.id} className="rounded-xl border border-border bg-card p-5">
+                  <OrderNumberHeading
+                    orderId={transaction.attempt.order.id}
+                    orderNumber={transaction.attempt.order.orderNumber}
+                    canReadOrders={canReadOrders}
+                    suffix={labelFor(paymentTransactionKindLabels, transaction.kind)}
                   />
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      <section aria-labelledby="refunds" className="space-y-4">
-        <h2 id="refunds" className="text-xl font-semibold">
-          Reembolsos
-        </h2>
-        {refunds.length === 0 ? (
-          <Empty>No hay reembolsos por ejecutar o conciliar.</Empty>
-        ) : (
-          <ul className="space-y-3">
-            {refunds.map((refund) => (
-              <li key={refund.id} className="rounded-xl border border-border bg-card p-5">
-                <div className="flex flex-wrap justify-between gap-3">
-                  <div>
-                    <h3 className="font-semibold">
-                      {refund.order.orderNumber} ·{" "}
-                      {refundReasonLabels[refund.reason] ?? refund.reason}
-                    </h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {refund.order.emailSnapshot
-                        ? maskEmail(refund.order.emailSnapshot)
-                        : "Sin correo"}{" "}
-                      · {statusLabels[refund.status] ?? refund.status}
-                    </p>
-                  </div>
-                  <p className="font-semibold">{formatCopCents(refund.totalCents)}</p>
-                </div>
-                {canWrite && ["REQUESTED", "APPROVED", "FAILED"].includes(refund.status) ? (
-                  <RefundExecutionForm
-                    refundId={refund.id}
-                    requiresApproval={refund.status === "REQUESTED"}
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {labelFor(paymentProviderLabels, transaction.provider)} ·{" "}
+                    {formatCopCents(transaction.amountCents)} ·{" "}
+                    {labelFor(paymentTransactionStatusLabels, transaction.status)}
+                  </p>
+                  {canWrite ? <CompensationForm transactionId={transaction.id} /> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      {showVoids ? (
+        <section aria-labelledby="voids" className="space-y-4">
+          <h2 id="voids" className="text-xl font-semibold">
+            Anulaciones de pagos
+          </h2>
+          {successfulAttempts.length === 0 ? (
+            <Empty>No hay capturas disponibles para anular.</Empty>
+          ) : (
+            <ul className="grid gap-3 md:grid-cols-2">
+              {successfulAttempts.map((attempt) => (
+                <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
+                  <OrderNumberHeading
+                    orderId={attempt.order.id}
+                    orderNumber={attempt.order.orderNumber}
+                    canReadOrders={canReadOrders}
+                    suffix={labelFor(paymentProviderLabels, attempt.provider)}
                   />
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      <section aria-labelledby="compensations" className="space-y-4">
-        <h2 id="compensations" className="text-xl font-semibold">
-          Compensaciones por conciliar
-        </h2>
-        {compensations.length === 0 ? (
-          <Empty>No hay reembolsos o anulaciones con resultado pendiente.</Empty>
-        ) : (
-          <ul className="space-y-3">
-            {compensations.map((transaction) => (
-              <li key={transaction.id} className="rounded-xl border border-border bg-card p-5">
-                <h3 className="font-semibold">
-                  {transaction.attempt.order.orderNumber} ·{" "}
-                  {transaction.kind === "REFUND" ? "Reembolso" : "Anulación"}
-                </h3>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {providerLabels[transaction.provider]} · {formatCopCents(transaction.amountCents)}{" "}
-                  · {statusLabels[transaction.status] ?? transaction.status}
-                </p>
-                {canWrite ? <CompensationForm transactionId={transaction.id} /> : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-      <section aria-labelledby="voids" className="space-y-4">
-        <h2 id="voids" className="text-xl font-semibold">
-          Anulaciones de pagos
-        </h2>
-        {successfulAttempts.length === 0 ? (
-          <Empty>No hay capturas disponibles para anular.</Empty>
-        ) : (
-          <ul className="grid gap-3 md:grid-cols-2">
-            {successfulAttempts.map((attempt) => (
-              <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
-                <h3 className="font-semibold">
-                  {attempt.order.orderNumber} · {providerLabels[attempt.provider]}
-                </h3>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {formatCopCents(attempt.amountCents)} · {attempt.reference}
-                </p>
-                {canWrite ? <VoidPaymentForm paymentAttemptId={attempt.id} /> : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+                  <p className="mt-1 text-sm break-all text-muted-foreground">
+                    {formatCopCents(attempt.amountCents)} · {attempt.reference}
+                  </p>
+                  {canWrite ? <VoidPaymentForm paymentAttemptId={attempt.id} /> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      {page > 1 || hasMore ? (
+        <nav aria-label="Paginación de pagos" className="flex items-center justify-between">
+          <span className="text-sm text-muted-foreground">Página {page}</span>
+          <div className="flex gap-2">
+            {page > 1 ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={paymentsHref(q, estado, page - 1)}>Anterior</Link>
+              </Button>
+            ) : null}
+            {hasMore ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={paymentsHref(q, estado, page + 1)}>Siguiente</Link>
+              </Button>
+            ) : null}
+          </div>
+        </nav>
+      ) : null}
       {canWrite ? (
         <section
           aria-labelledby="credit-adjustment"

@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useActionState, useRef, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -234,7 +234,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
         >
           Anterior
         </Button>
-        <Button type="button" onClick={advanceOrEncrypt} disabled={pending}>
+        <Button type="submit" disabled={pending}>
           {step < 3 ? "Continuar" : pending ? "Cifrando…" : "Cifrar y guardar credencial"}
         </Button>
       </div>
@@ -244,9 +244,26 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
 
 export function CredentialRotationForm({ credential }: { credential: IntegrationCredentialView }) {
   const [state, action, pending] = useActionState(rotateWompiCredentialAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
   const values = state.values;
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
-    <form action={action} className="space-y-4" aria-busy={pending}>
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-4"
+      aria-busy={pending}
+    >
       <input type="hidden" name="credentialId" value={credential.id} />
       <div className="space-y-2">
         <Label htmlFor={`public-${credential.id}`}>Nueva llave pública</Label>
@@ -291,7 +308,15 @@ export function CredentialRotationForm({ credential }: { credential: Integration
 export function ReencryptCredentialForm({ credentialId }: { credentialId: string }) {
   const [state, action, pending] = useActionState(reencryptCredentialAction, initialActionState);
   return (
-    <form action={action} className="space-y-3" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="credentialId" value={credentialId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Recifrando…" : "Recifrar con clave activa"}
@@ -303,8 +328,25 @@ export function ReencryptCredentialForm({ credentialId }: { credentialId: string
 
 export function RevokeCredentialForm({ credentialId }: { credentialId: string }) {
   const [state, action, pending] = useActionState(revokeCredentialAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
-    <form action={action} className="space-y-3" aria-busy={pending}>
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="credentialId" value={credentialId} />
       <div className="space-y-2">
         <Label htmlFor={`confirmation-${credentialId}`}>Confirmación irreversible</Label>

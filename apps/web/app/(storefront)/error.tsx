@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { Button } from "@/components/ui/button";
 
 export default function StorefrontError({
@@ -17,9 +19,17 @@ export default function StorefrontError({
       <p className="mt-3 text-muted-foreground">
         La consulta no se completó. Inténtalo de nuevo; no se realizó ninguna modificación.
       </p>
-      <Button type="button" className="mt-6" onClick={reset}>
-        Reintentar
-      </Button>
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+        <Button type="button" onClick={reset}>
+          Reintentar
+        </Button>
+        <Button asChild variant="outline">
+          <Link href="/">Volver al inicio</Link>
+        </Button>
+        <Button asChild variant="ghost">
+          <Link href="/ayuda">Centro de ayuda</Link>
+        </Button>
+      </div>
     </section>
   );
 }

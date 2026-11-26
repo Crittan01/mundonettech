@@ -76,12 +76,14 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
           Detectamos una discrepancia en la verificación de integridad del comprobante y generamos
           una alerta operativa automática para revisar tu pedido.
         </p>
-        <Link
-          href="/legal/pqrs"
-          className="mt-6 inline-flex font-medium text-primary hover:underline"
-        >
-          Consultar canales de atención
-        </Link>
+        <div className="mt-6 flex flex-wrap gap-4 text-sm font-medium">
+          <Link href="/legal/pqrs" className="text-primary hover:underline">
+            Consultar canales de atención
+          </Link>
+          <Link href="/ayuda" className="text-primary hover:underline">
+            Ir al Centro de ayuda
+          </Link>
+        </div>
       </section>
     );
   }
@@ -425,18 +427,28 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
         <p className="mt-2">
           Documento emitido como constancia de la orden y sus condiciones comerciales. No es factura
           electrónica de venta ni documento equivalente de facturación DIAN. Los valores fueron
-          verificados contra snapshots inmutables y el hash de emisión.
+          verificados contra registros inmutables y el hash de emisión.
         </p>
         {receipt.deliveryNotesSnapshot ? (
           <p className="mt-2">Notas registradas: {receipt.deliveryNotesSnapshot}</p>
         ) : null}
       </section>
-      <Link
-        href="/productos"
-        className="inline-flex font-medium text-primary hover:underline print:hidden"
-      >
-        Seguir comprando
-      </Link>
+      <div className="flex flex-wrap items-center gap-5 text-sm font-medium print:hidden">
+        {customerId && order?.customerId === customerId ? (
+          <Link
+            href={`/mi-cuenta/pedidos/${receipt.orderId}`}
+            className="text-primary hover:underline"
+          >
+            Ver seguimiento y posventa del pedido
+          </Link>
+        ) : null}
+        <Link href="/productos" className="text-primary hover:underline">
+          Seguir comprando
+        </Link>
+        <Link href="/ayuda" className="text-primary hover:underline">
+          Centro de ayuda
+        </Link>
+      </div>
     </div>
   );
 }

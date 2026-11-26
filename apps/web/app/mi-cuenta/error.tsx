@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { Button } from "@/components/ui/button";
 
 export default function AccountErrorBoundary({
@@ -13,11 +15,16 @@ export default function AccountErrorBoundary({
       <h1 className="text-2xl font-bold">No pudimos cargar tu cuenta</h1>
       <p className="mt-3 text-muted-foreground">
         La consulta no se completó. Intenta recargar esta sección; si el problema persiste,
-        escríbenos por PQR o soporte.
+        escríbenos por PQR o consulta el Centro de ayuda.
       </p>
-      <Button className="mt-5" onClick={reset}>
-        Reintentar
-      </Button>
+      <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+        <Button type="button" onClick={reset}>
+          Reintentar
+        </Button>
+        <Button asChild variant="outline">
+          <Link href="/ayuda">Centro de ayuda</Link>
+        </Button>
+      </div>
     </section>
   );
 }

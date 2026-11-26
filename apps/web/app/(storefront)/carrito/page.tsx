@@ -95,7 +95,10 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
             </section>
           ) : null}
           <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
-            <section aria-label="Productos del carrito" className="space-y-4">
+            <section aria-labelledby="cart-items-title" className="space-y-4">
+              <h2 id="cart-items-title" className="sr-only">
+                Productos del carrito
+              </h2>
               {cart.items.map((line, index) => {
                 const firstBundleLine =
                   line.bundle !== null &&
@@ -105,7 +108,7 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                     {line.bundle && firstBundleLine ? (
                       <div className="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-border pb-4">
                         <div>
-                          <h2 className="font-semibold">{line.bundle.name}</h2>
+                          <h3 className="font-semibold">{line.bundle.name}</h3>
                           <p className="text-sm text-muted-foreground">
                             Paquete con {line.bundle.quantity}{" "}
                             {line.bundle.quantity === 1 ? "unidad" : "unidades"} del conjunto
@@ -116,8 +119,9 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                             itemId={line.id}
                             bundleId={line.bundle.id}
                             quantity={line.bundle.quantity}
+                            itemName={line.bundle.name}
                           />
-                          <RemoveCartItemForm itemId={line.id} bundle />
+                          <RemoveCartItemForm itemId={line.id} bundle itemName={line.bundle.name} />
                         </div>
                       </div>
                     ) : null}
@@ -161,8 +165,12 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                         <p className="text-lg font-bold">{linePrice(line)}</p>
                         {!line.bundle ? (
                           <div className="mt-4 space-y-2 sm:justify-items-end">
-                            <CartQuantityForm itemId={line.id} quantity={line.quantity} />
-                            <RemoveCartItemForm itemId={line.id} />
+                            <CartQuantityForm
+                              itemId={line.id}
+                              quantity={line.quantity}
+                              itemName={line.productName}
+                            />
+                            <RemoveCartItemForm itemId={line.id} itemName={line.productName} />
                           </div>
                         ) : null}
                       </div>

@@ -1,5 +1,5 @@
 import { formatCopCents } from "@mundonettech/core";
-import { AccountError } from "@mundonettech/db";
+import { AccountError, type FulfillmentStatus, type OrderStatus } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -11,16 +11,17 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "medium",
 });
-const orderStatusLabels: Record<string, string> = {
+const orderStatusLabels: Record<OrderStatus, string> = {
   PENDING: "Pendiente",
   CONFIRMED: "Confirmado",
   CANCELLED: "Cancelado",
   COMPLETED: "Completado",
 };
-const fulfillmentStatusLabels: Record<string, string> = {
+const fulfillmentStatusLabels: Record<FulfillmentStatus, string> = {
   UNFULFILLED: "Sin despachar",
   PARTIALLY_FULFILLED: "Despacho parcial",
   FULFILLED: "Despachado",
+  CANCELLED: "Cancelado",
 };
 
 export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi-cuenta/pedidos">) {
@@ -50,7 +51,7 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
   const orders = result.slice(0, 10);
   const nextCursor = result.length > 10 ? orders.at(-1)?.id : null;
   return (
-    <main className="space-y-8">
+    <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold">Pedidos y posventa</h1>
         <p className="mt-2 text-muted-foreground">
@@ -64,9 +65,11 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
       ) : null}
       {!cursorError && orders.length === 0 ? (
         <p className="rounded-xl border border-border bg-card p-6 text-muted-foreground">
-          No hay pedidos en esta página.{" "}
-          <Link href="/productos" className="underline">
-            Explora el catálogo
+          {!cursorValue
+            ? "Aún no tienes pedidos registrados."
+            : "No hay más pedidos en esta página."}{" "}
+          <Link href="/productos" className="font-medium text-primary underline">
+            Explorar catálogo
           </Link>
           .
         </p>
@@ -86,8 +89,8 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
                 <span className="mt-2 block text-sm text-muted-foreground">
                   {dateFormatter.format(order.createdAt)} ·{" "}
                   {order.items.reduce((sum, item) => sum + item.quantity, 0)} unidades ·{" "}
-                  {orderStatusLabels[order.orderStatus] ?? order.orderStatus} ·{" "}
-                  {fulfillmentStatusLabels[order.fulfillmentStatus] ?? order.fulfillmentStatus}
+                  {orderStatusLabels[order.orderStatus]} ·{" "}
+                  {fulfillmentStatusLabels[order.fulfillmentStatus]}
                 </span>
                 <span className="mt-3 block text-sm font-medium">Ver entregas y posventa →</span>
               </Link>
@@ -95,19 +98,23 @@ export default async function AccountOrdersPage({ searchParams }: PageProps<"/mi
           ))}
         </ol>
       ) : null}
-      <div className="flex gap-4">
-        {nextCursor ? (
-          <Link
-            href={`/mi-cuenta/pedidos?cursor=${nextCursor}`}
-            className="rounded-md border border-input px-4 py-2 text-sm font-medium"
-          >
-            Siguiente página
-          </Link>
-        ) : null}
-        <Link href="/mi-cuenta/pedidos" className="text-sm font-medium underline">
-          Primera página
-        </Link>
-      </div>
-    </main>
+      {nextCursor || cursorValue ? (
+        <nav aria-label="Paginación de pedidos" className="flex flex-wrap items-center gap-4">
+          {nextCursor ? (
+            <Link
+              href={`/mi-cuenta/pedidos?cursor=${nextCursor}`}
+              className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+            >
+              Siguiente página
+            </Link>
+          ) : null}
+          {cursorValue ? (
+            <Link href="/mi-cuenta/pedidos" className="text-sm font-medium text-primary underline">
+              Primera página
+            </Link>
+          ) : null}
+        </nav>
+      ) : null}
+    </div>
   );
 }

@@ -83,8 +83,9 @@ async function ProductReviewsSlot({
     .string()
     .uuid()
     .safeParse(typeof rawReviewCursor === "string" ? rawReviewCursor : undefined);
+  const hasActiveCursor = parsedReviewCursor.success;
   let reviews = initialReviews;
-  if (parsedReviewCursor.success) {
+  if (hasActiveCursor) {
     try {
       reviews = await getPublicReviews(slug, parsedReviewCursor.data);
     } catch (error) {
@@ -92,7 +93,14 @@ async function ProductReviewsSlot({
       throw error;
     }
   }
-  return <ProductReviews slug={slug} reviews={reviews} variantId={variantId} />;
+  return (
+    <ProductReviews
+      slug={slug}
+      reviews={reviews}
+      variantId={variantId}
+      hasActiveCursor={hasActiveCursor}
+    />
+  );
 }
 
 export default async function ProductPage({ params, searchParams }: PageProps<"/producto/[slug]">) {
@@ -126,21 +134,29 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
       <nav aria-label="Migas de pan" className="text-sm text-muted-foreground">
         <ol className="flex flex-wrap gap-2">
           <li>
-            <Link href="/productos" className="hover:text-foreground">
+            <Link
+              href="/productos"
+              className="rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
               Catálogo
             </Link>
           </li>
           {product.categoryBreadcrumbs.map((crumb) => (
             <li key={crumb.slug} className="flex gap-2">
               <span aria-hidden="true">/</span>
-              <Link href={`/categoria/${crumb.slug}`} className="hover:text-foreground">
+              <Link
+                href={`/categoria/${crumb.slug}`}
+                className="rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
                 {crumb.name}
               </Link>
             </li>
           ))}
           <li className="flex gap-2">
             <span aria-hidden="true">/</span>
-            <span aria-current="page">{product.name}</span>
+            <span aria-current="page" className="text-foreground">
+              {product.name}
+            </span>
           </li>
         </ol>
       </nav>
@@ -156,14 +172,14 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
             <div>
               <Link
                 href={`/marca/${product.brand.slug}`}
-                className="text-sm font-semibold text-primary"
+                className="rounded-sm text-sm font-semibold text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {product.brand.name}
               </Link>
               <h1 className="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">{product.name}</h1>
               <p className="mt-3 text-muted-foreground">
                 {authenticityLabels[product.authenticity]} · Garantía: {product.warrantyMonths}{" "}
-                meses
+                {product.warrantyMonths === 1 ? "mes" : "meses"}
                 {" · "}
                 {retractLabels[product.retractPolicy]}
                 {product.trackSerial ? " · Control por serial/IMEI" : ""}
@@ -181,7 +197,12 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
         <h2 id="variants-title" className="text-2xl font-bold">
           Variantes y disponibilidad
         </h2>
-        <div className="mt-4 overflow-x-auto rounded-xl border border-border">
+        <div
+          role="region"
+          aria-label="Tabla de variantes y disponibilidad"
+          tabIndex={0}
+          className="mt-4 overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
           <table className="w-full min-w-[720px] text-left text-sm">
             <caption className="sr-only">
               Variantes activas, identificadores, precio y unidades disponibles
@@ -218,7 +239,9 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
                   </td>
                   <td className="p-4 font-semibold">{formatCopCents(variant.priceCents)}</td>
                   <td className="p-4">
-                    {variant.available > 0 ? `${variant.available} disponibles` : "Agotada"}
+                    {variant.available > 0
+                      ? `${variant.available} ${variant.available === 1 ? "disponible" : "disponibles"}`
+                      : "Agotada"}
                   </td>
                 </tr>
               ))}
@@ -329,7 +352,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
                   {bundle.available}{" "}
                   {bundle.available === 1 ? "paquete disponible" : "paquetes disponibles"}
                 </p>
-                <AddBundleToCartForm bundleId={bundle.id} />
+                <AddBundleToCartForm bundleId={bundle.id} bundleName={bundle.name} />
               </article>
             ))}
           </div>

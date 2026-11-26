@@ -282,6 +282,8 @@ export function adminNavigation(role: AdminRoleValue): readonly {
     | "/admin/comunicaciones"
     | "/admin/facturacion"
     | "/admin/contenido"
+    | "/admin/contenido/medios"
+    | "/admin/contenido/redirecciones"
     | "/admin/configuracion"
     | "/admin/usuarios"
     | "/admin/seguridad"
@@ -304,7 +306,7 @@ export function adminNavigation(role: AdminRoleValue): readonly {
           { href: "/admin/crm" as const, label: "CRM 360" },
           { href: "/admin/fidelizacion" as const, label: "Fidelización" },
           { href: "/admin/segmentos" as const, label: "Segmentos" },
-          { href: "/admin/lifecycle" as const, label: "Lifecycle" },
+          { href: "/admin/lifecycle" as const, label: "Ciclo de vida" },
         ]
       : []),
     ...(hasAdminPermission(role, "b2b:read")
@@ -347,7 +349,13 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       ? [{ href: "/admin/facturacion" as const, label: "Facturación" }]
       : []),
     ...(hasAdminPermission(role, "content:read")
-      ? [{ href: "/admin/contenido" as const, label: "Contenido" }]
+      ? [
+          { href: "/admin/contenido" as const, label: "Contenido" },
+          { href: "/admin/contenido/medios" as const, label: "Mediateca" },
+        ]
+      : []),
+    ...(hasAdminPermission(role, "content:write")
+      ? [{ href: "/admin/contenido/redirecciones" as const, label: "Redirecciones" }]
       : []),
     ...(hasAdminPermission(role, "settings:read")
       ? [{ href: "/admin/configuracion" as const, label: "Configuración" }]

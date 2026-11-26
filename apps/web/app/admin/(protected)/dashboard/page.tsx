@@ -56,7 +56,7 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
               key={period}
               href={`/admin/dashboard?days=${period}`}
               aria-current={days === period ? "page" : undefined}
-              className="rounded-md border border-border px-3 py-2 text-sm aria-current:bg-secondary"
+              className="rounded-md border border-border px-3 py-2 text-sm font-medium aria-[current=page]:bg-primary aria-[current=page]:text-primary-foreground"
             >
               {period} días
             </Link>
@@ -117,7 +117,12 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
         <h2 id="daily-title" className="text-xl font-semibold">
           Serie diaria
         </h2>
-        <div className="overflow-x-auto rounded-xl border border-border">
+        <div
+          role="region"
+          aria-label="Tabla de serie diaria del embudo"
+          tabIndex={0}
+          className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
           <table className="w-full min-w-[760px] text-left text-sm">
             <caption className="sr-only">
               Contadores agregados por día en el periodo seleccionado

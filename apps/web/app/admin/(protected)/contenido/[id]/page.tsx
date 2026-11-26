@@ -73,18 +73,26 @@ export default async function CmsPageDetail({
     <div className="space-y-8">
       <div>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <Link
-            href="/admin/contenido"
-            className="text-sm text-primary underline underline-offset-4"
-          >
-            Volver al contenido
-          </Link>
+          <div className="flex flex-wrap items-center gap-4">
+            <Link
+              href="/admin/contenido"
+              className="text-sm text-primary underline underline-offset-4"
+            >
+              Volver al contenido
+            </Link>
+            <Link
+              href="/admin/contenido/medios"
+              className="text-sm text-primary underline underline-offset-4"
+            >
+              Mediateca
+            </Link>
+          </div>
           {canWrite ? (
             <Link
               href={`/pagina/${page.slug}?liveEdit=1`}
               className="text-sm font-medium text-primary underline underline-offset-4"
             >
-              Abrir Live Edit
+              Abrir edición en vivo
             </Link>
           ) : null}
         </div>
@@ -141,6 +149,7 @@ export default async function CmsPageDetail({
           const latest = block.versions[0];
           const blockLabel =
             blockTypeLabels[block.blockType as CmsBlockType] ?? String(block.blockType);
+          const blockSuffix = ` (${blockLabel}, posición ${block.position + 1})`;
           return (
             <article
               key={block.id}
@@ -167,6 +176,7 @@ export default async function CmsPageDetail({
                           ...ids.slice(index + 1),
                         ]}
                         label="Subir"
+                        srSuffix={blockSuffix}
                       />
                     ) : null}
                     {index < ids.length - 1 ? (
@@ -179,12 +189,29 @@ export default async function CmsPageDetail({
                           ...ids.slice(index + 2),
                         ]}
                         label="Bajar"
+                        srSuffix={blockSuffix}
                       />
                     ) : null}
-                    <CmsVisibilityForm blockId={block.id} isVisible={block.isVisible} />
+                    <CmsVisibilityForm
+                      blockId={block.id}
+                      isVisible={block.isVisible}
+                      srSuffix={blockSuffix}
+                    />
                   </div>
                 ) : null}
               </div>
+              {block.blockType === "HERO" || block.blockType === "IMAGE" ? (
+                <p className="text-xs text-muted-foreground">
+                  Para asociar una imagen, copia su identificador desde la{" "}
+                  <Link
+                    href="/admin/contenido/medios"
+                    className="font-medium text-primary underline underline-offset-4"
+                  >
+                    Mediateca
+                  </Link>
+                  .
+                </p>
+              ) : null}
               {latest ? (
                 <div className="space-y-4">
                   <p className="text-sm font-medium">
@@ -201,11 +228,12 @@ export default async function CmsPageDetail({
                       <CmsNewVersionForm
                         blockId={block.id}
                         content={JSON.stringify(latest.content, null, 2)}
+                        srSuffix={blockSuffix}
                       />
                       {latest.status !== "PUBLISHED" ? (
                         <div className="flex flex-wrap items-end gap-4">
-                          <CmsPublishVersionForm versionId={latest.id} />
-                          <CmsScheduleVersionForm versionId={latest.id} />
+                          <CmsPublishVersionForm versionId={latest.id} srSuffix={blockSuffix} />
+                          <CmsScheduleVersionForm versionId={latest.id} srSuffix={blockSuffix} />
                         </div>
                       ) : null}
                     </>

@@ -7,6 +7,7 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   archiveUrlRedirectAction,
   createUrlRedirectAction,
@@ -62,31 +63,29 @@ function Fields({
       </div>
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-status`}>Estado HTTP</Label>
-        <select
+        <Select
           key={`${prefix}-status-${statusCode}`}
           id={`${prefix}-status`}
           name="statusCode"
           defaultValue={statusCode}
-          className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
         >
           <option value="308">308 · Permanente</option>
-          <option value="301">301 · Permanente legacy</option>
+          <option value="301">301 · Permanente clásico</option>
           <option value="307">307 · Temporal</option>
-          <option value="302">302 · Temporal legacy</option>
-        </select>
+          <option value="302">302 · Temporal clásico</option>
+        </Select>
       </div>
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-active`}>Estado editorial</Label>
-        <select
+        <Select
           key={`${prefix}-active-${String(active)}`}
           id={`${prefix}-active`}
           name="active"
           defaultValue={String(active)}
-          className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
         >
           <option value="true">Activa</option>
           <option value="false">Inactiva</option>
-        </select>
+        </Select>
       </div>
     </div>
   );

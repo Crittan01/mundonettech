@@ -13,6 +13,7 @@ import {
   WompiCredentialWizard,
   type IntegrationCredentialView,
 } from "@/components/admin/integration-credential-forms";
+import { integrationProviderLabels } from "@/lib/admin-presenters";
 import {
   getIntegrationCredentialVault,
   getIntegrationEnvironment,
@@ -131,6 +132,13 @@ export default async function IntegrationsPage({
           auditoría. Los descriptores nunca contienen nonce, texto cifrado, etiquetas de
           autenticación ni secretos.
         </p>
+        {hasAdminPermission(recentSession.profile.role, "integrations:read") ? (
+          <div className="mt-4 flex flex-wrap gap-4 text-sm">
+            <Link className="text-primary underline" href="/admin/canales">
+              Administrar canales de venta
+            </Link>
+          </div>
+        ) : null}
       </div>
       <section
         aria-labelledby="vault-environment"
@@ -256,7 +264,7 @@ export default async function IntegrationsPage({
         {invalidCursor ? (
           <p
             role="alert"
-            className="rounded-lg border border-destructive p-3 text-sm text-destructive"
+            className="rounded-lg border border-destructive bg-card p-3 text-sm text-destructive"
           >
             El cursor de paginación ya no es válido; mostramos la primera página.
           </p>
@@ -271,84 +279,94 @@ export default async function IntegrationsPage({
           </div>
         ) : (
           <ul className="space-y-4">
-            {items.map((credential) => (
-              <li key={credential.id} className="rounded-xl border border-border bg-card p-5">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <h3 className="text-lg font-semibold">Credencial {credential.id}</h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {credential.provider} · {credential.environment} · versión de clave{" "}
-                      {credential.keyVersion}
-                    </p>
-                  </div>
-                  <span className="rounded-md border border-border px-2 py-1 text-xs font-medium">
-                    {credential.revokedAt ? "Revocada" : "Activa"}
-                  </span>
-                </div>
-                <dl className="mt-4 grid gap-3 text-xs text-muted-foreground sm:grid-cols-2">
-                  <div>
-                    <dt>Creada</dt>
-                    <dd className="mt-1">{dateFormatter.format(new Date(credential.createdAt))}</dd>
-                  </div>
-                  <div>
-                    <dt>{credential.revokedAt ? "Revocada" : "Actualizada"}</dt>
-                    <dd className="mt-1">
-                      {dateFormatter.format(new Date(credential.revokedAt ?? credential.updatedAt))}
-                    </dd>
-                  </div>
-                </dl>
-                {canWrite && !credential.revokedAt ? (
-                  <div className="mt-5 space-y-4 border-t border-border pt-4">
-                    <div className="flex flex-wrap gap-3">
-                      <ReencryptCredentialForm credentialId={credential.id} />
-                    </div>
-                    <details>
-                      <summary className="cursor-pointer text-sm font-medium">
-                        Rotar secretos de {credential.provider}
-                      </summary>
-                      <div className="mt-4">
-                        {credential.provider === "wompi" ? (
-                          <CredentialRotationForm credential={credential} />
-                        ) : credential.provider === "aveonline" ||
-                          credential.provider === "resend" ||
-                          credential.provider === "dian" ||
-                          credential.provider === "gemini" ||
-                          credential.provider === "meta" ? (
-                          <OperationalCredentialForm
-                            environment={environment}
-                            credential={{ id: credential.id, provider: credential.provider }}
-                          />
-                        ) : (
-                          <p className="text-sm text-muted-foreground">
-                            Este proveedor usa un contrato de rotación administrado por su
-                            integración.
-                          </p>
-                        )}
-                      </div>
-                    </details>
-                    {credential.provider === "mercado-libre" ? (
-                      <p className="text-sm text-muted-foreground">
-                        Para desvincular o reconectar Mercado Libre de forma segura, administra la
-                        cuenta en{" "}
-                        <Link className="underline" href="/admin/canales">
-                          Canales de venta
-                        </Link>
-                        .
+            {items.map((credential) => {
+              const providerLabel =
+                integrationProviderLabels[credential.provider] ?? credential.provider;
+              return (
+                <li key={credential.id} className="rounded-xl border border-border bg-card p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <h3 className="text-lg font-semibold break-all">
+                        Credencial {credential.id}
+                      </h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {providerLabel} · {credential.provider} · {credential.environment} · versión
+                        de clave {credential.keyVersion}
                       </p>
-                    ) : (
+                    </div>
+                    <span className="rounded-md border border-border px-2 py-1 text-xs font-medium">
+                      {credential.revokedAt ? "Revocada" : "Activa"}
+                    </span>
+                  </div>
+                  <dl className="mt-4 grid gap-3 text-xs text-muted-foreground sm:grid-cols-2">
+                    <div>
+                      <dt>Creada</dt>
+                      <dd className="mt-1">
+                        {dateFormatter.format(new Date(credential.createdAt))}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{credential.revokedAt ? "Revocada" : "Actualizada"}</dt>
+                      <dd className="mt-1">
+                        {dateFormatter.format(
+                          new Date(credential.revokedAt ?? credential.updatedAt),
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+                  {canWrite && !credential.revokedAt ? (
+                    <div className="mt-5 space-y-4 border-t border-border pt-4">
+                      <div className="flex flex-wrap gap-3">
+                        <ReencryptCredentialForm credentialId={credential.id} />
+                      </div>
                       <details>
-                        <summary className="cursor-pointer text-sm font-medium text-destructive">
-                          Revocar acceso
+                        <summary className="cursor-pointer text-sm font-medium">
+                          Rotar secretos de {providerLabel}
                         </summary>
-                        <div className="mt-4 max-w-sm">
-                          <RevokeCredentialForm credentialId={credential.id} />
+                        <div className="mt-4">
+                          {credential.provider === "wompi" ? (
+                            <CredentialRotationForm credential={credential} />
+                          ) : credential.provider === "aveonline" ||
+                            credential.provider === "resend" ||
+                            credential.provider === "dian" ||
+                            credential.provider === "gemini" ||
+                            credential.provider === "meta" ? (
+                            <OperationalCredentialForm
+                              environment={environment}
+                              credential={{ id: credential.id, provider: credential.provider }}
+                            />
+                          ) : (
+                            <p className="text-sm text-muted-foreground">
+                              Este proveedor usa un contrato de rotación administrado por su
+                              integración.
+                            </p>
+                          )}
                         </div>
                       </details>
-                    )}
-                  </div>
-                ) : null}
-              </li>
-            ))}
+                      {credential.provider === "mercado-libre" ? (
+                        <p className="text-sm text-muted-foreground">
+                          Para desvincular o reconectar Mercado Libre de forma segura, administra la
+                          cuenta en{" "}
+                          <Link className="underline" href="/admin/canales">
+                            Canales de venta
+                          </Link>
+                          .
+                        </p>
+                      ) : (
+                        <details>
+                          <summary className="cursor-pointer text-sm font-medium text-destructive">
+                            Revocar acceso
+                          </summary>
+                          <div className="mt-4 max-w-sm">
+                            <RevokeCredentialForm credentialId={credential.id} />
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         )}
         {cursor || credentials.nextCursor ? (

@@ -1,14 +1,14 @@
 "use client";
 
 import type { CatalogProductBaseInput, CatalogVariantInput } from "@mundonettech/db";
-import { useActionState } from "react";
+import { startTransition, useActionState, useEffect, useRef } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 import {
   createCatalogProductAction,
   removeCatalogAttributeAction,
@@ -42,6 +42,15 @@ type ProductDefaults = Omit<CatalogProductBaseInput, "trackSerial"> & {
   id: string;
   trackSerial: boolean;
   hasInventoryHistory?: boolean;
+};
+
+const attributeValueTypeLabels: Record<string, string> = {
+  TEXT: "Texto",
+  INTEGER: "Entero",
+  DECIMAL: "Decimal",
+  BOOLEAN: "Sí / No",
+  URL: "Enlace URL",
+  JSON: "Estructura JSON",
 };
 
 const textareaClass =
@@ -126,7 +135,7 @@ function VariantFields({
         id={`${idPrefix}-cost`}
         name="costCents"
         label="Costo (centavos COP)"
-        defaultValue={values?.costCents ?? variant?.costCents}
+        defaultValue={variant?.costCents}
         inputMode="numeric"
         required
       />
@@ -199,7 +208,6 @@ function VariantFields({
           id={`${idPrefix}-status`}
           name={statusName}
           defaultValue={statusDefault}
-          focusRing={false}
         >
           <option value="ACTIVE">Activa</option>
           <option value="INACTIVE">Inactiva</option>
@@ -234,7 +242,15 @@ export function CatalogProductForm({
   );
   const values = state.status === "error" ? state.values : undefined;
   return (
-    <form action={action} className="space-y-6 rounded-xl border border-border bg-card p-5">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-6 rounded-xl border border-border bg-card p-5"
+    >
       {product ? <input type="hidden" name="productId" value={product.id} /> : null}
       <ProductBaseFields references={references} product={product} values={values} />
       {mode === "create" ? (
@@ -326,7 +342,6 @@ function ProductBaseFields({
           name="brandId"
           defaultValue={brandDefault}
           required
-          focusRing={false}
         >
           <option value="" disabled>
             Selecciona una marca
@@ -346,7 +361,6 @@ function ProductBaseFields({
           name="categoryId"
           defaultValue={categoryDefault}
           required
-          focusRing={false}
         >
           <option value="" disabled>
             Selecciona una categoría
@@ -367,7 +381,6 @@ function ProductBaseFields({
           name="taxGroupId"
           defaultValue={taxDefault}
           required
-          focusRing={false}
         >
           <option value="" disabled>
             Selecciona un grupo
@@ -386,7 +399,6 @@ function ProductBaseFields({
           id="product-status"
           name="status"
           defaultValue={statusDefault}
-          focusRing={false}
         >
           <option value="DRAFT">Borrador</option>
           <option value="ACTIVE">Activo</option>
@@ -400,7 +412,6 @@ function ProductBaseFields({
           id="product-authenticity"
           name="authenticity"
           defaultValue={authenticityDefault}
-          focusRing={false}
         >
           <option value="ORIGINAL">Original</option>
           <option value="CERTIFIED_COMPATIBLE">Compatible certificado</option>
@@ -414,7 +425,6 @@ function ProductBaseFields({
           id="product-retract"
           name="retractPolicy"
           defaultValue={retractDefault}
-          focusRing={false}
         >
           <option value="STANDARD">Estándar</option>
           <option value="LEGAL_EXCEPTION_REVIEW">Revisión de excepción legal</option>
@@ -474,9 +484,26 @@ export function CatalogVariantForm({
   variant?: CatalogVariantInput;
 }) {
   const [state, action, pending] = useActionState(upsertCatalogVariantAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (!variant && state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state, variant]);
   const values = state.status === "error" ? state.values : undefined;
   return (
-    <form action={action} className="space-y-4 rounded-xl border border-border bg-card p-5">
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-4 rounded-xl border border-border bg-card p-5"
+    >
       <input type="hidden" name="productId" value={productId} />
       {variant?.id ? <input type="hidden" name="variantId" value={variant.id} /> : null}
       <VariantFields variant={variant} values={values} idPrefix={variant?.id ?? "new-variant"} />
@@ -515,7 +542,6 @@ export function CatalogAttributeForm({
             name="attributeId"
             defaultValue={selectedAttribute}
             required
-            focusRing={false}
           >
             <option value="" disabled>
               Selecciona un atributo
@@ -523,7 +549,8 @@ export function CatalogAttributeForm({
             {attributes.map((attribute) => (
               <option key={attribute.id} value={attribute.id}>
                 {attribute.name}
-                {attribute.unit ? ` (${attribute.unit})` : ""} · {attribute.valueType}
+                {attribute.unit ? ` (${attribute.unit})` : ""} ·{" "}
+                {attributeValueTypeLabels[attribute.valueType] ?? attribute.valueType}
               </option>
             ))}
           </Select>
@@ -605,7 +632,6 @@ export function CatalogCompatibilityForm({
             name="deviceId"
             defaultValue={deviceDefault}
             required
-            focusRing={false}
           >
             <option value="" disabled>
               Selecciona un dispositivo
@@ -625,7 +651,6 @@ export function CatalogCompatibilityForm({
             id="compat-fit"
             name="fit"
             defaultValue={fitDefault}
-            focusRing={false}
           >
             <option value="EXACT">Compatibilidad directa</option>
             <option value="ADAPTER">Requiere adaptador</option>

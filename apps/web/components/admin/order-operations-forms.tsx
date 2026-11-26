@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
+import { refundReasonLabels } from "@/lib/admin-presenters";
 import {
   requestOrderRefundAction,
   transitionOrderRefundAction,
@@ -29,15 +30,33 @@ export function RequestRefundForm({
   readonly idempotencyKey: string;
   readonly items: readonly RefundableItem[];
 }) {
-  const [state, action, pending] = useActionState(requestOrderRefundAction, initialActionState);
   const [quantities, setQuantities] = useState<Record<string, number>>({});
+  const [reason, setReason] = useState("CUSTOMER_SUPPORT");
+  const [note, setNote] = useState("");
+  const [includeShipping, setIncludeShipping] = useState(false);
+  const [currentKey, setCurrentKey] = useState(idempotencyKey);
+  const [state, action, pending] = useActionState(async (prev: ActionState, formData: FormData) => {
+    const result = await requestOrderRefundAction(prev, formData);
+    if (result.status === "success") {
+      setQuantities({});
+      setReason("CUSTOMER_SUPPORT");
+      setNote("");
+      setIncludeShipping(false);
+      setCurrentKey(`admin-refund:${crypto.randomUUID()}`);
+    }
+    return result;
+  }, initialActionState);
   const selected = items
     .filter((item) => (quantities[item.id] ?? 0) > 0)
     .map((item) => ({ orderItemId: item.id, quantity: quantities[item.id]! }));
   return (
-    <form action={action} className="space-y-4 rounded-xl border border-border bg-card p-5">
+    <form
+      action={action}
+      aria-busy={pending}
+      className="space-y-4 rounded-xl border border-border bg-card p-5"
+    >
       <input type="hidden" name="orderId" value={orderId} />
-      <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
+      <input type="hidden" name="idempotencyKey" value={currentKey} />
       <input type="hidden" name="items" value={JSON.stringify(selected)} />
       <fieldset>
         <legend className="font-semibold">Unidades a reembolsar</legend>
@@ -76,13 +95,15 @@ export function RequestRefundForm({
           <Select
             id={`refund-reason-${orderId}`}
             name="reason"
-            defaultValue={state.values?.reason ?? "CUSTOMER_SUPPORT"}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            disabled={pending}
             required
           >
-            <option value="CUSTOMER_SUPPORT">Servicio al cliente</option>
-            <option value="RETRACT">Retracto</option>
-            <option value="WARRANTY">Garantía</option>
-            <option value="ADJUSTMENT">Ajuste comercial</option>
+            <option value="CUSTOMER_SUPPORT">{refundReasonLabels.CUSTOMER_SUPPORT}</option>
+            <option value="RETRACT">{refundReasonLabels.RETRACT}</option>
+            <option value="WARRANTY">{refundReasonLabels.WARRANTY}</option>
+            <option value="ADJUSTMENT">{refundReasonLabels.ADJUSTMENT}</option>
           </Select>
         </div>
         <div className="space-y-2">
@@ -90,9 +111,11 @@ export function RequestRefundForm({
           <Input
             id={`refund-note-${orderId}`}
             name="note"
-            defaultValue={state.values?.note ?? ""}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
             minLength={noteMinimum}
             maxLength={500}
+            disabled={pending}
           />
         </div>
       </div>
@@ -100,8 +123,10 @@ export function RequestRefundForm({
         <input
           type="checkbox"
           name="includeShipping"
-          defaultChecked={state.values?.includeShipping === "on"}
-          className="mt-1"
+          checked={includeShipping}
+          onChange={(event) => setIncludeShipping(event.target.checked)}
+          disabled={pending}
+          className="mt-1 size-4 shrink-0 accent-primary"
         />
         Incluir el flete restante; solo se permite al reembolsar todas las unidades pendientes.
       </label>
@@ -124,9 +149,14 @@ export function RefundTransitionForm({
   readonly refundId: string;
   readonly transition: "reject" | "cancel";
 }) {
-  const [state, action, pending] = useActionState(transitionOrderRefundAction, initialActionState);
+  const [note, setNote] = useState("");
+  const [state, action, pending] = useActionState(async (prev: ActionState, formData: FormData) => {
+    const result = await transitionOrderRefundAction(prev, formData);
+    if (result.status === "success") setNote("");
+    return result;
+  }, initialActionState);
   return (
-    <form action={action} className="space-y-2">
+    <form action={action} aria-busy={pending} className="space-y-2">
       <input type="hidden" name="orderId" value={orderId} />
       <input type="hidden" name="refundId" value={refundId} />
       <input type="hidden" name="transition" value={transition} />
@@ -137,8 +167,10 @@ export function RefundTransitionForm({
         <Input
           id={`refund-transition-note-${refundId}-${transition}`}
           name="note"
-          defaultValue={state.values?.note ?? ""}
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
           maxLength={500}
+          disabled={pending}
         />
       </div>
       <Button type="submit" variant="outline" size="sm" disabled={pending}>

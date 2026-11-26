@@ -116,20 +116,23 @@ const templateSet = new Set(Object.values(blockTemplates));
 function StatefulForm({
   action,
   submitLabel,
+  srSuffix,
   className = "space-y-4",
   children,
 }: {
   action: ServerAction;
   submitLabel: string;
+  srSuffix?: string | undefined;
   className?: string;
   children: (values: Record<string, string> | undefined) => ReactNode;
 }) {
   const [state, run, pending] = useActionState(action, initialActionState);
   return (
-    <form action={run} className={className}>
+    <form action={run} aria-busy={pending} className={className}>
       {children(state.values)}
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Procesando…" : submitLabel}
+        {srSuffix ? <span className="sr-only">{srSuffix}</span> : null}
       </Button>
       <FormMessage state={state} />
     </form>
@@ -294,6 +297,20 @@ function BlockFields({
           Se valida con esquema estricto según el tipo. Puedes usar tokens como {"{{store.name}}"} o{" "}
           {"{{store.domain}}"}; se bloquea cualquier etiqueta HTML o enlace inseguro.
         </p>
+        {selectedType === "HERO" || selectedType === "IMAGE" ? (
+          <p className="text-xs text-muted-foreground">
+            Consulta o sube imágenes y copia su <code className="font-mono">mediaId</code> en la{" "}
+            <a
+              href="/admin/contenido/medios"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-primary underline underline-offset-4"
+            >
+              Mediateca
+            </a>
+            .
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -356,11 +373,20 @@ export function CmsAddBlockForm({ pageId }: { pageId: string }) {
   );
 }
 
-export function CmsNewVersionForm({ blockId, content }: { blockId: string; content: string }) {
+export function CmsNewVersionForm({
+  blockId,
+  content,
+  srSuffix,
+}: {
+  blockId: string;
+  content: string;
+  srSuffix?: string;
+}) {
   return (
     <StatefulForm
       action={createCmsVersionAction}
       submitLabel="Crear nueva versión"
+      srSuffix={srSuffix}
       className="space-y-3"
     >
       {(values) => {
@@ -387,17 +413,33 @@ export function CmsNewVersionForm({ blockId, content }: { blockId: string; conte
   );
 }
 
-export function CmsPublishVersionForm({ versionId }: { versionId: string }) {
+export function CmsPublishVersionForm({
+  versionId,
+  srSuffix,
+}: {
+  versionId: string;
+  srSuffix?: string;
+}) {
   return (
-    <StatefulForm action={publishCmsVersionAction} submitLabel="Publicar ahora">
+    <StatefulForm action={publishCmsVersionAction} submitLabel="Publicar ahora" srSuffix={srSuffix}>
       {() => <input type="hidden" name="versionId" value={versionId} />}
     </StatefulForm>
   );
 }
 
-export function CmsScheduleVersionForm({ versionId }: { versionId: string }) {
+export function CmsScheduleVersionForm({
+  versionId,
+  srSuffix,
+}: {
+  versionId: string;
+  srSuffix?: string;
+}) {
   return (
-    <StatefulForm action={scheduleCmsVersionAction} submitLabel="Programar versión">
+    <StatefulForm
+      action={scheduleCmsVersionAction}
+      submitLabel="Programar versión"
+      srSuffix={srSuffix}
+    >
       {(values) => {
         const effectiveAtDefault = values?.effectiveAt ?? "";
         return (
@@ -467,13 +509,15 @@ export function CmsReorderForm({
   pageId,
   blockIds,
   label,
+  srSuffix,
 }: {
   pageId: string;
   blockIds: readonly string[];
   label: string;
+  srSuffix?: string;
 }) {
   return (
-    <StatefulForm action={reorderCmsBlocksAction} submitLabel={label}>
+    <StatefulForm action={reorderCmsBlocksAction} submitLabel={label} srSuffix={srSuffix}>
       {() => (
         <>
           <input type="hidden" name="pageId" value={pageId} />
@@ -484,11 +528,20 @@ export function CmsReorderForm({
   );
 }
 
-export function CmsVisibilityForm({ blockId, isVisible }: { blockId: string; isVisible: boolean }) {
+export function CmsVisibilityForm({
+  blockId,
+  isVisible,
+  srSuffix,
+}: {
+  blockId: string;
+  isVisible: boolean;
+  srSuffix?: string;
+}) {
   return (
     <StatefulForm
       action={setCmsBlockVisibilityAction}
       submitLabel={isVisible ? "Ocultar bloque" : "Mostrar bloque"}
+      srSuffix={srSuffix}
     >
       {() => (
         <>
@@ -797,8 +850,8 @@ export function CmsMediaUploadForm() {
         <div role="alert" className="space-y-2 text-sm text-destructive">
           <p>{status.message}</p>
           {status.code === "mfa_stale" ? (
-            <a href="/admin/seguridad" className="font-medium text-primary underline">
-              Confirmar autenticador en seguridad
+            <a href="#admin-step-up-prompt" className="font-medium text-primary underline">
+              Confirmar autenticador arriba
             </a>
           ) : null}
           {status.code === "unauthorized" ? (
@@ -812,10 +865,23 @@ export function CmsMediaUploadForm() {
   );
 }
 
-export function CmsMediaEditForm({ mediaId, altText }: { mediaId: string; altText: string }) {
+export function CmsMediaEditForm({
+  mediaId,
+  altText,
+  filename,
+}: {
+  mediaId: string;
+  altText: string;
+  filename?: string;
+}) {
+  const srSuffix = filename ? ` (${filename})` : undefined;
   return (
     <div className="space-y-3">
-      <StatefulForm action={updateCmsMediaAltAction} submitLabel="Guardar texto alternativo">
+      <StatefulForm
+        action={updateCmsMediaAltAction}
+        submitLabel="Guardar texto alternativo"
+        srSuffix={srSuffix}
+      >
         {(values) => {
           const currentAlt = values?.altText ?? altText;
           return (
@@ -836,7 +902,11 @@ export function CmsMediaEditForm({ mediaId, altText }: { mediaId: string; altTex
           );
         }}
       </StatefulForm>
-      <StatefulForm action={archiveCmsMediaAction} submitLabel="Archivar activo">
+      <StatefulForm
+        action={archiveCmsMediaAction}
+        submitLabel="Archivar activo"
+        srSuffix={srSuffix}
+      >
         {() => <input type="hidden" name="mediaId" value={mediaId} />}
       </StatefulForm>
     </div>

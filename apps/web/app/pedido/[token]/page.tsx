@@ -16,7 +16,7 @@ export const metadata = {
 
 function GuestOrderGate({ token }: { readonly token: string }) {
   return (
-    <main className="min-h-screen px-6 py-12 sm:px-8">
+    <div className="py-2">
       <div className="mx-auto mb-8 max-w-4xl">
         <h1 className="text-3xl font-bold">Acceso seguro a tu pedido</h1>
         <p className="mt-2 text-muted-foreground">
@@ -25,7 +25,7 @@ function GuestOrderGate({ token }: { readonly token: string }) {
         </p>
       </div>
       <GuestOrderAccessForms token={token} idempotencyKey={randomUUID()} />
-    </main>
+    </div>
   );
 }
 
@@ -46,13 +46,13 @@ async function GuestOrderContent({ params }: PageProps<"/pedido/[token]">) {
     throw error;
   }
   return (
-    <main className="mx-auto max-w-6xl px-6 py-12 sm:px-8">
+    <div>
       <OrderPostSaleView
         order={order}
         channel={{ channel: "guest", orderId: access.orderId, token }}
         idempotencySeed={randomUUID()}
       />
-    </main>
+    </div>
   );
 }
 
@@ -60,13 +60,11 @@ export default function GuestOrderPage(props: PageProps<"/pedido/[token]">) {
   return (
     <Suspense
       fallback={
-        <main
-          className="mx-auto min-h-screen max-w-4xl animate-pulse px-6 py-12"
-          aria-label="Cargando acceso al pedido"
-        >
-          <div className="h-10 w-80 rounded bg-muted" />
+        <div role="status" aria-live="polite" className="mx-auto max-w-4xl animate-pulse py-6">
+          <span className="sr-only">Cargando acceso al pedido…</span>
+          <div className="h-10 w-80 max-w-full rounded bg-muted" />
           <div className="mt-8 h-64 rounded-xl bg-muted" />
-        </main>
+        </div>
       }
     >
       <GuestOrderContent {...props} />

@@ -155,7 +155,7 @@ function ProductVariantPanel({
                         type="button"
                         aria-pressed={isSelected}
                         onClick={() => selectOptionValue(axis.key, choice.value)}
-                        className={`inline-flex min-h-10 items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium transition outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                        className={`inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium transition outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                           isSelected
                             ? "border-primary bg-primary text-primary-foreground"
                             : "border-border bg-background text-foreground hover:bg-accent"
@@ -192,7 +192,7 @@ function ProductVariantPanel({
                   type="button"
                   aria-pressed={isSelected}
                   onClick={() => setSelectedId(variant.id)}
-                  className={`inline-flex min-h-10 items-center rounded-md border px-3 py-1.5 font-mono text-xs transition outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  className={`inline-flex min-h-11 items-center rounded-md border px-3 py-1.5 font-mono text-xs transition outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     isSelected
                       ? "border-primary bg-primary text-primary-foreground"
                       : "border-border bg-background text-foreground hover:bg-accent"
@@ -265,7 +265,7 @@ function ProductVariantPanel({
       <Link
         href={`/comparar?productos=${encodeURIComponent(productSlug)}`}
         prefetch={false}
-        className="inline-flex min-h-10 items-center font-medium text-primary underline-offset-4 hover:underline"
+        className="inline-flex min-h-11 items-center rounded-sm font-medium text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
       >
         Comparar este producto
       </Link>

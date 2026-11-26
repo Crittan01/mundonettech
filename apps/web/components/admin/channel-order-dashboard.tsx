@@ -227,6 +227,7 @@ export function ChannelOrderDashboardView({
                 ) : null}
                 {canWrite ? (
                   <ChannelOrderActions
+                    key={order.id}
                     order={order}
                     canReconcile={canReconcile}
                     locations={locations[order.id] ?? []}

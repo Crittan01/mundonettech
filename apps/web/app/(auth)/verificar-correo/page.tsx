@@ -19,7 +19,7 @@ async function VerifyEmailContent() {
     return (
       <AuthShell
         title="Solicitud de verificación no disponible"
-        description="El enlace no contiene datos personales y la solicitud cifrada venció o no existe."
+        description="El enlace no contiene datos personales y la solicitud venció o no existe."
       >
         <div className="space-y-4">
           <p role="alert" className="text-sm text-destructive">

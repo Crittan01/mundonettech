@@ -95,18 +95,23 @@ export async function registerCustomerAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const fields = ["email", "password", "confirmation", "turnstileToken"] as const;
+  const fields = ["email", "password", "confirmation", "turnstileToken", "next"] as const;
   const parsed = z
     .object({
       email: emailSchema,
       password: passwordSchema,
       confirmation: passwordSchema,
       turnstileToken: z.string().max(2048),
+      next: z.string().max(512).optional(),
     })
     .safeParse(closedFormObject(formData, fields));
   if (!parsed.success) {
     const emailFailed = parsed.error.issues.some((issue) => issue.path[0] === "email");
     return emailFailed ? emailFieldError() : actionError("Revisa los datos ingresados.");
+  }
+  const next = normalizeInternalNextPath(parsed.data.next);
+  if (parsed.data.next && next === null) {
+    return actionError("El destino de regreso no es válido.");
   }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_register");
   if (captchaError) return captchaError;
@@ -123,7 +128,7 @@ export async function registerCustomerAction(
       },
     });
   }
-  await establishCustomerAuthRequest("signup", email);
+  await establishCustomerAuthRequest("signup", email, next ?? undefined);
   return actionSuccess(genericRequestMessage);
 }
 
@@ -293,7 +298,9 @@ export async function cancelCustomerAuthRequestAction(): Promise<void> {
   await clearCustomerAuthRequest();
   redirect(
     request?.purpose === "signup"
-      ? "/registro"
+      ? request.next
+        ? `/registro?next=${encodeURIComponent(request.next)}`
+        : "/registro"
       : request?.purpose === "recovery"
         ? "/recuperar"
         : request?.next

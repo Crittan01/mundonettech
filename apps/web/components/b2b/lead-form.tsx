@@ -56,7 +56,7 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
         <label htmlFor="b2b-website">No completes este campo</label>
         <input id="b2b-website" name="website" type="text" tabIndex={-1} autoComplete="off" />
       </div>
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Datos de la empresa</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -108,7 +108,7 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
           </div>
         </div>
       </fieldset>
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Contacto comercial</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -185,6 +185,7 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
           maxLength={5000}
           rows={5}
           placeholder="Cuéntanos productos, cantidades, referencias y fecha estimada de compra."
+          disabled={pending}
           required
           aria-invalid={state.fieldErrors?.requirements ? true : undefined}
           aria-describedby={state.fieldErrors?.requirements ? "b2b-requirements-error" : undefined}
@@ -202,6 +203,7 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
           checked={dataProcessingAccepted}
           onChange={(event) => setDataProcessingAccepted(event.target.checked)}
           className="mt-1 size-4 shrink-0 accent-primary"
+          disabled={pending}
           required
         />
         <span>
@@ -222,7 +224,7 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
       </label>
       <TurnstileField siteKey={siteKey} nonce={nonce} action="b2b_lead" state={state} />
       <FormMessage state={state} />
-      <Button type="submit" size="lg" disabled={pending}>
+      <Button type="submit" size="lg" disabled={pending} aria-busy={pending}>
         {pending ? "Registrando solicitud…" : "Solicitar propuesta comercial"}
       </Button>
     </form>

@@ -1,5 +1,6 @@
 import {
   formatSignedCopCents,
+  hasAdminPermission,
   parseWholeCopToCents,
   rfmClasses,
   rfmClassLabels,
@@ -23,38 +24,45 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const querySchema = z.object({
-  rfmClass: z.enum(rfmClasses).optional(),
-  minLtvCop: z
-    .string()
-    .regex(/^[0-9]+$/)
-    .optional(),
-  cursor: z.string().max(500).optional(),
-});
+const rfmClassSchema = z.enum(rfmClasses).optional();
+const minLtvCopSchema = z
+  .string()
+  .regex(/^[0-9]+$/)
+  .optional();
+const cursorSchema = z.string().max(500).optional();
 
 export default async function RfmAnalyticsPage({
   searchParams,
 }: PageProps<"/admin/analitica-rfm">) {
   const session = await requireAdminPage("finance:read");
+  const canReadCrm = hasAdminPermission(session.profile.role, "crm:read");
   const raw = await searchParams;
-  const parsed = querySchema.safeParse({
-    rfmClass: single(raw.rfmClass) || undefined,
-    minLtvCop: single(raw.minLtvCop) || undefined,
-    cursor: single(raw.cursor) || undefined,
-  });
+  const rawRfmClass = single(raw.rfmClass) || undefined;
+  const rawMinLtvCop = single(raw.minLtvCop)?.trim() || undefined;
+  const rawCursor = single(raw.cursor) || undefined;
+
+  const parsedRfmClass = rfmClassSchema.safeParse(rawRfmClass);
+  const parsedMinLtvCop = minLtvCopSchema.safeParse(rawMinLtvCop);
+  const parsedCursor = cursorSchema.safeParse(rawCursor);
+
+  const validRfmClass = parsedRfmClass.success ? parsedRfmClass.data : undefined;
+  const validMinLtvCop = parsedMinLtvCop.success ? parsedMinLtvCop.data : undefined;
+  const validCursor = parsedCursor.success ? parsedCursor.data : undefined;
+  const paramsValid = parsedRfmClass.success && parsedMinLtvCop.success && parsedCursor.success;
+
   const service = rfmAnalyticsService();
   const [summary, reportResult] = await Promise.all([
     service.summary(session.profile.id),
-    parsed.success
+    paramsValid
       ? (async () => {
           try {
-            const minNetLtvCents = parsed.data.minLtvCop
-              ? BigInt(parseWholeCopToCents(parsed.data.minLtvCop))
+            const minNetLtvCents = validMinLtvCop
+              ? BigInt(parseWholeCopToCents(validMinLtvCop))
               : undefined;
             const list = await service.list(session.profile.id, {
-              ...(parsed.data.cursor ? { cursor: parsed.data.cursor } : {}),
+              ...(validCursor ? { cursor: validCursor } : {}),
               filter: {
-                ...(parsed.data.rfmClass ? { rfmClass: parsed.data.rfmClass } : {}),
+                ...(validRfmClass ? { rfmClass: validRfmClass } : {}),
                 ...(minNetLtvCents !== undefined ? { minNetLtvCents } : {}),
               },
             });
@@ -74,14 +82,19 @@ export default async function RfmAnalyticsPage({
   ]);
   const invalidQuery = reportResult.invalid;
   const report = reportResult;
-  const nextParams = new URLSearchParams();
-  if (!invalidQuery && parsed.success && parsed.data.rfmClass) {
-    nextParams.set("rfmClass", parsed.data.rfmClass);
-  }
-  if (!invalidQuery && parsed.success && parsed.data.minLtvCop) {
-    nextParams.set("minLtvCop", parsed.data.minLtvCop);
-  }
+
+  const baseFilterParams = new URLSearchParams();
+  if (validRfmClass) baseFilterParams.set("rfmClass", validRfmClass);
+  if (validMinLtvCop) baseFilterParams.set("minLtvCop", validMinLtvCop);
+  const firstPageHref = baseFilterParams.size
+    ? `/admin/analitica-rfm?${baseFilterParams.toString()}`
+    : "/admin/analitica-rfm";
+
+  const nextParams = new URLSearchParams(baseFilterParams);
   if (report.nextCursor) nextParams.set("cursor", report.nextCursor);
+
+  const hasActiveFilters =
+    Boolean(validRfmClass) || Boolean(validMinLtvCop) || Boolean(rawCursor) || invalidQuery;
   return (
     <div className="space-y-10">
       <div>
@@ -91,9 +104,27 @@ export default async function RfmAnalyticsPage({
           neto de anulaciones y reembolsos completados. Los importes se calculan con precisión
           entera en centavos COP.
         </p>
-        <Link className="mt-4 inline-flex text-sm underline" href="/admin/finanzas">
-          Abrir informe financiero
-        </Link>
+        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+          <Link className="text-primary underline" href="/admin/finanzas">
+            Abrir informe financiero
+          </Link>
+          {canReadCrm ? (
+            <>
+              <Link className="text-primary underline" href="/admin/crm">
+                Abrir consola CRM 360°
+              </Link>
+              <Link className="text-primary underline" href="/admin/fidelizacion">
+                Ver fidelización y referidos
+              </Link>
+              <Link className="text-primary underline" href="/admin/segmentos">
+                Administrar segmentos
+              </Link>
+              <Link className="text-primary underline" href="/admin/lifecycle">
+                Administrar journeys
+              </Link>
+            </>
+          ) : null}
+        </div>
       </div>
       <section aria-labelledby="rfm-summary" className="space-y-4">
         <h2 id="rfm-summary" className="text-2xl font-semibold">
@@ -125,7 +156,7 @@ export default async function RfmAnalyticsPage({
               id="rfm-class-filter"
               name="rfmClass"
               fullWidth={false}
-              defaultValue={parsed.success ? (parsed.data.rfmClass ?? "") : ""}
+              defaultValue={validRfmClass ?? ""}
             >
               <option value="">Todas</option>
               {rfmClasses.map((rfmClass) => (
@@ -143,13 +174,21 @@ export default async function RfmAnalyticsPage({
               type="number"
               min={0}
               step={1}
-              defaultValue={parsed.success ? (parsed.data.minLtvCop ?? "") : ""}
+              defaultValue={validMinLtvCop ?? ""}
               placeholder="Sin mínimo"
             />
           </div>
           <Button type="submit" variant="outline">
             Filtrar
           </Button>
+          {hasActiveFilters ? (
+            <Link
+              href="/admin/analitica-rfm"
+              className="inline-flex h-11 items-center px-2 text-sm text-primary underline"
+            >
+              Limpiar filtros
+            </Link>
+          ) : null}
         </form>
         {invalidQuery ? (
           <p role="alert" className="text-sm text-destructive">
@@ -161,7 +200,12 @@ export default async function RfmAnalyticsPage({
             No hay clientes que coincidan con estos filtros.
           </p>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <div
+            role="region"
+            aria-label="Tabla de analítica RFM y valor de vida por cliente"
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
             <table className="w-full min-w-[72rem] text-left text-sm">
               <caption className="sr-only">Métricas RFM y valor de vida neto por cliente</caption>
               <thead className="border-b border-border">
@@ -211,13 +255,25 @@ export default async function RfmAnalyticsPage({
             </table>
           </div>
         )}
-        {report.nextCursor ? (
-          <Link
-            className="inline-flex underline"
-            href={`/admin/analitica-rfm?${nextParams.toString()}`}
+        {rawCursor || report.nextCursor ? (
+          <nav
+            aria-label="Paginación de clientes RFM"
+            className="flex flex-wrap items-center gap-4"
           >
-            Página siguiente
-          </Link>
+            {rawCursor ? (
+              <Link className="text-sm text-primary underline" href={firstPageHref}>
+                Primera página
+              </Link>
+            ) : null}
+            {report.nextCursor ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={`/admin/analitica-rfm?${nextParams.toString()}`}
+              >
+                Página siguiente
+              </Link>
+            ) : null}
+          </nav>
         ) : null}
       </section>
     </div>

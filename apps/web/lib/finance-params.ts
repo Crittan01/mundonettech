@@ -16,11 +16,18 @@ export function parseFinanceRange(
   },
   defaultYear: number,
 ): FinanceRange & { readonly fromDate: string; readonly toDate: string; readonly year: number } {
+  const parsedFrom = dateSchema.parse(input.from);
+  const parsedTo = dateSchema.parse(input.to);
+  const derivedYear = parsedFrom
+    ? z.coerce.number().int().min(2000).max(9998).parse(parsedFrom.slice(0, 4))
+    : parsedTo
+      ? z.coerce.number().int().min(2000).max(9998).parse(parsedTo.slice(0, 4))
+      : defaultYear;
   const year = input.year
     ? z.coerce.number().int().min(2000).max(9998).parse(input.year)
-    : defaultYear;
-  const fromDate = dateSchema.parse(input.from) ?? `${year}-01-01`;
-  const toDate = dateSchema.parse(input.to) ?? `${year}-12-31`;
+    : derivedYear;
+  const fromDate = parsedFrom ?? `${year}-01-01`;
+  const toDate = parsedTo ?? `${year}-12-31`;
   if (input.from || input.to) {
     return {
       from: bogotaDayStart(fromDate),

@@ -64,6 +64,7 @@ function MutationForm({
   operation,
   children,
   submit,
+  srSuffix,
   destructive = false,
   className = "",
 }: {
@@ -71,17 +72,19 @@ function MutationForm({
   operation: string;
   children?: React.ReactNode | ((state: ActionState) => React.ReactNode);
   submit: string;
+  srSuffix?: string | undefined;
   destructive?: boolean;
   className?: string;
 }) {
   const [state, action, pending] = useActionState(mutateAssistedCartAction, initialActionState);
   return (
-    <form action={action} className={`space-y-3 ${className}`}>
+    <form action={action} aria-busy={pending} className={`space-y-3 ${className}`}>
       <input type="hidden" name="cartId" value={cartId} />
       <input type="hidden" name="operation" value={operation} />
       {typeof children === "function" ? children(state) : children}
       <Button type="submit" variant={destructive ? "destructive" : "outline"} disabled={pending}>
         {pending ? "Procesando…" : submit}
+        {srSuffix ? <span className="sr-only"> ({srSuffix})</span> : null}
       </Button>
       <FormMessage state={state} />
     </form>
@@ -163,19 +166,24 @@ export function AssistedQuantityForm({
   itemId,
   bundleId,
   quantity,
+  itemLabel,
 }: {
   cartId: string;
   itemId: string;
   bundleId?: string;
   quantity: number;
+  itemLabel?: string;
 }) {
   const id = bundleId ?? itemId;
   return (
-    <MutationForm cartId={cartId} operation="set_quantity" submit="Actualizar">
+    <MutationForm cartId={cartId} operation="set_quantity" submit="Actualizar" srSuffix={itemLabel}>
       <input type="hidden" name="itemId" value={itemId} />
       <input type="hidden" name="bundleId" value={bundleId ?? ""} />
       <div className="space-y-2">
-        <Label htmlFor={`assisted-quantity-${id}`}>{bundleId ? "Paquetes" : "Cantidad"}</Label>
+        <Label htmlFor={`assisted-quantity-${id}`}>
+          {bundleId ? "Paquetes" : "Cantidad"}
+          {itemLabel ? <span className="sr-only"> de {itemLabel}</span> : null}
+        </Label>
         <Input
           key={`${id}-${quantity}`}
           id={`assisted-quantity-${id}`}
@@ -191,9 +199,17 @@ export function AssistedQuantityForm({
   );
 }
 
-export function AssistedRemoveItemForm({ cartId, itemId }: { cartId: string; itemId: string }) {
+export function AssistedRemoveItemForm({
+  cartId,
+  itemId,
+  itemLabel,
+}: {
+  cartId: string;
+  itemId: string;
+  itemLabel?: string;
+}) {
   return (
-    <MutationForm cartId={cartId} operation="remove_item" submit="Eliminar">
+    <MutationForm cartId={cartId} operation="remove_item" submit="Eliminar" srSuffix={itemLabel}>
       <input type="hidden" name="itemId" value={itemId} />
     </MutationForm>
   );
@@ -228,9 +244,28 @@ export function AssistedCouponForm({ cartId, code }: { cartId: string; code: str
 
 export function AssistedIssueLinkForm({ cartId, hasLink }: { cartId: string; hasLink: boolean }) {
   const initial: AssistedLinkState = initialActionState;
-  const [state, action, pending] = useActionState(issueAssistedLinkAction, initial);
+  const [copyMessage, setCopyMessage] = useState("");
+  const [state, action, pending] = useActionState(
+    async (prev: AssistedLinkState, formData: FormData) => {
+      setCopyMessage("");
+      return issueAssistedLinkAction(prev, formData);
+    },
+    initial,
+  );
+  async function copyPaymentUrl(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyMessage("Enlace copiado al portapapeles.");
+    } catch {
+      setCopyMessage("No pudimos copiarlo automáticamente. Selecciona el enlace y cópialo.");
+    }
+  }
   return (
-    <form action={action} className="space-y-3 rounded-xl border border-border bg-card p-5">
+    <form
+      action={action}
+      aria-busy={pending}
+      className="space-y-3 rounded-xl border border-border bg-card p-5"
+    >
       <input type="hidden" name="cartId" value={cartId} />
       <div className="space-y-2">
         <Label htmlFor="issue-expiration">Vigencia del enlace (horas)</Label>
@@ -242,6 +277,7 @@ export function AssistedIssueLinkForm({ cartId, hasLink }: { cartId: string; has
           max="720"
           defaultValue={state.values?.expirationHours ?? "72"}
           required
+          disabled={pending}
         />
       </div>
       <Button type="submit" disabled={pending}>
@@ -253,7 +289,7 @@ export function AssistedIssueLinkForm({ cartId, hasLink }: { cartId: string; has
       </Button>
       <FormMessage state={state} />
       {state.paymentUrl ? (
-        <div className="space-y-2 rounded-lg border border-warning bg-background p-4">
+        <div className="space-y-3 rounded-lg border border-warning bg-background p-4">
           <Label htmlFor="assisted-payment-url">Enlace visible solo esta vez</Label>
           <Input
             id="assisted-payment-url"
@@ -265,14 +301,29 @@ export function AssistedIssueLinkForm({ cartId, hasLink }: { cartId: string; has
             Guárdalo en un canal seguro con el cliente. Cualquier rotación o aceptación invalida
             este enlace.
           </p>
-          <a
-            href={state.paymentUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex text-sm font-medium text-primary hover:underline"
-          >
-            Abrir enlace emitido
-          </a>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void copyPaymentUrl(state.paymentUrl!)}
+            >
+              Copiar enlace
+            </Button>
+            <a
+              href={state.paymentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex text-sm font-medium text-primary hover:underline"
+            >
+              Abrir enlace emitido
+            </a>
+          </div>
+          {copyMessage ? (
+            <p role="status" className="text-sm font-medium">
+              {copyMessage}
+            </p>
+          ) : null}
         </div>
       ) : null}
     </form>

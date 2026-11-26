@@ -2,6 +2,8 @@ import { redirect } from "next/navigation";
 
 import { AdminMfaForm } from "@/components/admin/admin-auth-forms";
 import { AuthShell } from "@/components/auth/auth-shell";
+import { Button } from "@/components/ui/button";
+import { signOutAdminAction } from "@/lib/actions/admin-auth";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
 
@@ -29,6 +31,13 @@ export default async function AdminMfaPage() {
     <AuthShell
       title="Verifica tu identidad"
       description="El panel exige un segundo factor válido y una sesión reciente."
+      footer={
+        <form action={signOutAdminAction}>
+          <Button type="submit" variant="outline" size="sm">
+            Cerrar sesión
+          </Button>
+        </form>
+      }
     >
       <AdminMfaForm
         {...security}

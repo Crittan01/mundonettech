@@ -461,7 +461,6 @@ export interface DeliveryZoneView {
 }
 
 export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
-  const [state, action, pending] = useActionState(saveDeliveryZoneAction, initialActionState);
   const [code, setCode] = useState(zone?.code ?? "");
   const [name, setName] = useState(zone?.name ?? "");
   const [municipalityCodes, setMunicipalityCodes] = useState(
@@ -481,8 +480,26 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
     String(zone?.deliveryPromiseMinutes ?? 120),
   );
   const [active, setActive] = useState(zone?.active ?? true);
+  const [state, action, pending] = useActionState(
+    async (previous: ActionState, formData: FormData) => {
+      const result = await saveDeliveryZoneAction(previous, formData);
+      if (result.status === "success" && !zone) {
+        setCode("");
+        setName("");
+        setMunicipalityCodes("");
+        setPolygon("");
+        setBaseFeeCents("0");
+        setFreeShippingThresholdCents("");
+        setCutoffMinutes("720");
+        setDeliveryPromiseMinutes("120");
+        setActive(true);
+      }
+      return result;
+    },
+    initialActionState,
+  );
   return (
-    <form action={action} className="space-y-4">
+    <form action={action} aria-busy={pending} className="space-y-4">
       {zone ? <input type="hidden" name="zoneId" value={zone.id} /> : null}
       {zone ? <input type="hidden" name="expectedUpdatedAt" value={zone.updatedAt} /> : null}
       <div className="grid gap-4 sm:grid-cols-2">
@@ -496,6 +513,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             pattern="[A-Za-z0-9_-]{2,40}"
             maxLength={40}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -508,6 +526,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             minLength={2}
             maxLength={120}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2 sm:col-span-2">
@@ -520,6 +539,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             value={municipalityCodes}
             onChange={(event) => setMunicipalityCodes(event.target.value)}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2 sm:col-span-2">
@@ -532,8 +552,9 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             value={polygon}
             onChange={(event) => setPolygon(event.target.value)}
             rows={4}
-            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            className="flex min-h-28 w-full rounded-md border border-input bg-background px-3 py-2 text-base text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -546,6 +567,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             value={baseFeeCents}
             onChange={(event) => setBaseFeeCents(event.target.value)}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -557,6 +579,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             pattern="[0-9]+"
             value={freeShippingThresholdCents}
             onChange={(event) => setFreeShippingThresholdCents(event.target.value)}
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -572,6 +595,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             value={cutoffMinutes}
             onChange={(event) => setCutoffMinutes(event.target.value)}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -585,6 +609,7 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
             value={deliveryPromiseMinutes}
             onChange={(event) => setDeliveryPromiseMinutes(event.target.value)}
             required
+            disabled={pending}
           />
         </div>
       </div>
@@ -594,7 +619,8 @@ export function DeliveryZoneForm({ zone }: { zone?: DeliveryZoneView }) {
           name="active"
           checked={active}
           onChange={(event) => setActive(event.target.checked)}
-          className="size-4 accent-primary"
+          disabled={pending}
+          className="size-4 shrink-0 accent-primary"
         />
         Zona activa para nuevas cotizaciones
       </label>

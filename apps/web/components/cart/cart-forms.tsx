@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -20,17 +20,23 @@ export function CartQuantityForm({
   itemId,
   bundleId,
   quantity,
+  itemName,
 }: {
   itemId: string;
   bundleId?: string;
   quantity: number;
+  itemName: string;
 }) {
   const [state, action, pending] = useActionState(updateCartQuantityAction, initialActionState);
   const id = bundleId ? `bundle-${bundleId}` : `item-${itemId}`;
+  const contextId = `context-${id}`;
   return (
-    <form action={action} className="space-y-2">
+    <form action={action} className="space-y-2" aria-busy={pending}>
       <input type="hidden" name="itemId" value={itemId} />
       <input type="hidden" name="bundleId" value={bundleId ?? ""} />
+      <span id={contextId} className="sr-only">
+        {bundleId ? `Paquete ${itemName}` : `Producto ${itemName}`}
+      </span>
       <Label htmlFor={`quantity-${id}`}>{bundleId ? "Cantidad de paquetes" : "Cantidad"}</Label>
       <div className="flex gap-2">
         <Input
@@ -43,9 +49,18 @@ export function CartQuantityForm({
           step="1"
           defaultValue={quantity}
           required
+          disabled={pending}
+          aria-describedby={contextId}
           className="w-28"
         />
-        <Button type="submit" variant="outline" size="sm" disabled={pending}>
+        <Button
+          type="submit"
+          variant="outline"
+          size="sm"
+          disabled={pending}
+          aria-busy={pending}
+          aria-describedby={contextId}
+        >
           {pending ? "Actualizando…" : "Actualizar"}
         </Button>
       </div>
@@ -57,15 +72,30 @@ export function CartQuantityForm({
 export function RemoveCartItemForm({
   itemId,
   bundle = false,
+  itemName,
 }: {
   itemId: string;
   bundle?: boolean;
+  itemName: string;
 }) {
   const [state, action, pending] = useActionState(removeCartItemAction, initialActionState);
   return (
-    <form action={action} className="space-y-1">
+    <form action={action} className="space-y-1" aria-busy={pending}>
       <input type="hidden" name="itemId" value={itemId} />
-      <Button type="submit" variant="ghost" size="sm" disabled={pending}>
+      <Button
+        type="submit"
+        variant="ghost"
+        size="sm"
+        disabled={pending}
+        aria-busy={pending}
+        aria-label={
+          pending
+            ? `Eliminando ${itemName}`
+            : bundle
+              ? `Eliminar paquete ${itemName}`
+              : `Eliminar ${itemName}`
+        }
+      >
         {pending ? "Eliminando…" : bundle ? "Eliminar paquete" : "Eliminar"}
       </Button>
       <FormMessage state={state} />
@@ -76,8 +106,8 @@ export function RemoveCartItemForm({
 export function ClearCartForm() {
   const [state, action, pending] = useActionState(clearCartAction, initialActionState);
   return (
-    <form action={action} className="space-y-2">
-      <Button type="submit" variant="outline" disabled={pending}>
+    <form action={action} className="space-y-2" aria-busy={pending}>
+      <Button type="submit" variant="outline" disabled={pending} aria-busy={pending}>
         {pending ? "Vaciando…" : "Vaciar carrito"}
       </Button>
       <FormMessage state={state} />
@@ -94,34 +124,43 @@ export function CouponForm({ appliedCode }: { appliedCode: string | null }) {
     removeCartCouponAction,
     initialActionState,
   );
+  const [code, setCode] = useState(applyState.values?.code ?? "");
   return (
     <div className="space-y-3">
       {appliedCode ? (
-        <form action={removeAction} className="space-y-2">
+        <form action={removeAction} className="space-y-2" aria-busy={removing}>
           <p className="text-sm">
             Cupón aplicado: <span className="font-mono font-semibold">{appliedCode}</span>
           </p>
-          <Button type="submit" variant="outline" size="sm" disabled={removing}>
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            disabled={removing}
+            aria-busy={removing}
+          >
             {removing ? "Retirando…" : "Retirar cupón"}
           </Button>
           <FormMessage state={removeState} />
         </form>
       ) : (
-        <form action={applyAction} className="space-y-2">
+        <form action={applyAction} className="space-y-2" aria-busy={applying}>
           <Label htmlFor="coupon-code">Código de descuento</Label>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Input
               id="coupon-code"
               name="code"
-              defaultValue={applyState.values?.code ?? ""}
+              value={code}
+              onChange={(event) => setCode(event.target.value)}
               minLength={2}
               maxLength={64}
               autoCapitalize="characters"
               autoComplete="off"
               required
+              disabled={applying}
               placeholder="Ingresa tu cupón"
             />
-            <Button type="submit" variant="outline" disabled={applying}>
+            <Button type="submit" variant="outline" disabled={applying} aria-busy={applying}>
               {applying ? "Validando…" : "Aplicar"}
             </Button>
           </div>
@@ -135,9 +174,9 @@ export function CouponForm({ appliedCode }: { appliedCode: string | null }) {
 export function ClaimAssistedCartForm({ token, disabled }: { token: string; disabled: boolean }) {
   const [state, action, pending] = useActionState(claimAssistedCartAction, initialActionState);
   return (
-    <form action={action} className="space-y-3">
+    <form action={action} className="space-y-3" aria-busy={pending}>
       <input type="hidden" name="token" value={token} />
-      <Button type="submit" size="lg" disabled={pending || disabled}>
+      <Button type="submit" size="lg" disabled={pending || disabled} aria-busy={pending}>
         {pending ? "Validando venta…" : "Aceptar y llevar al carrito"}
       </Button>
       <FormMessage state={state} />

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useActionState, useState } from "react";
+import { useFormStatus } from "react-dom";
 
 import { FieldErrors, FormMessage } from "@/components/auth/form-message";
 import { TurnstileField } from "@/components/auth/turnstile-field";
@@ -28,11 +29,13 @@ function EmailInput({
   onChange,
   state,
   errorId,
+  disabled,
 }: {
   value: string;
   onChange: (value: string) => void;
   state: ActionState;
   errorId: string;
+  disabled?: boolean;
 }) {
   const errors = state.fieldErrors?.email;
   return (
@@ -45,6 +48,7 @@ function EmailInput({
         autoComplete="email"
         maxLength={320}
         required
+        disabled={disabled}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         aria-describedby={errors?.length ? errorId : undefined}
@@ -55,7 +59,15 @@ function EmailInput({
   );
 }
 
-function PasswordFields({ state, idPrefix }: { state: ActionState; idPrefix: string }) {
+function PasswordFields({
+  state,
+  idPrefix,
+  disabled,
+}: {
+  state: ActionState;
+  idPrefix: string;
+  disabled?: boolean;
+}) {
   const passwordErrors = state.fieldErrors?.password;
   const confirmationErrors = state.fieldErrors?.confirmation;
   const passwordHelpId = `${idPrefix}-password-help`;
@@ -73,6 +85,7 @@ function PasswordFields({ state, idPrefix }: { state: ActionState; idPrefix: str
           minLength={12}
           maxLength={128}
           required
+          disabled={disabled}
           aria-describedby={`${passwordHelpId}${passwordErrors?.length ? ` ${passwordErrorId}` : ""}`}
           aria-invalid={passwordErrors?.length ? true : undefined}
         />
@@ -91,6 +104,7 @@ function PasswordFields({ state, idPrefix }: { state: ActionState; idPrefix: str
           minLength={12}
           maxLength={128}
           required
+          disabled={disabled}
           aria-describedby={confirmationErrors?.length ? confirmationErrorId : undefined}
           aria-invalid={confirmationErrors?.length ? true : undefined}
         />
@@ -100,36 +114,55 @@ function PasswordFields({ state, idPrefix }: { state: ActionState; idPrefix: str
   );
 }
 
+function CancelRequestSubmitButton() {
+  const { pending } = useFormStatus();
+  return (
+    <Button
+      type="submit"
+      variant="outline"
+      className="w-full"
+      disabled={pending}
+      aria-busy={pending}
+    >
+      {pending ? "Cancelando…" : "Cancelar solicitud"}
+    </Button>
+  );
+}
+
 function CancelRequestForm() {
   return (
     <form action={cancelCustomerAuthRequestAction}>
-      <Button type="submit" variant="outline" className="w-full">
-        Cancelar solicitud
-      </Button>
+      <CancelRequestSubmitButton />
     </form>
   );
 }
 
-export function RegistrationForm({ siteKey, nonce }: SecurityProps) {
+export function RegistrationForm({
+  siteKey,
+  nonce,
+  next = null,
+}: SecurityProps & { next?: string | null }) {
   const [state, action, pending] = useActionState(registerCustomerAction, initialActionState);
   const [email, setEmail] = useState("");
   return (
-    <form action={action} className="space-y-5">
+    <form action={action} className="space-y-5" aria-busy={pending}>
+      {next ? <input type="hidden" name="next" value={next} /> : null}
       <EmailInput
         value={email}
         onChange={setEmail}
         state={state}
         errorId="registration-email-error"
+        disabled={pending}
       />
-      <PasswordFields state={state} idPrefix="registration" />
+      <PasswordFields state={state} idPrefix="registration" disabled={pending} />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_register" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
-        <Link className="block text-sm font-medium text-primary underline" href="/verificar-correo">
-          Ingresar el código
-        </Link>
+        <Button asChild variant="outline" className="w-full">
+          <Link href="/verificar-correo">Ingresar el código</Link>
+        </Button>
       ) : null}
-      <Button type="submit" className="w-full" disabled={pending}>
+      <Button type="submit" className="w-full" disabled={pending} aria-busy={pending}>
         {pending ? "Enviando solicitud…" : "Crear cuenta"}
       </Button>
     </form>
@@ -144,17 +177,23 @@ export function CustomerLoginForm({
   const [state, action, pending] = useActionState(requestCustomerOtpAction, initialActionState);
   const [email, setEmail] = useState("");
   return (
-    <form action={action} className="space-y-5">
+    <form action={action} className="space-y-5" aria-busy={pending}>
       {next ? <input type="hidden" name="next" value={next} /> : null}
-      <EmailInput value={email} onChange={setEmail} state={state} errorId="login-email-error" />
+      <EmailInput
+        value={email}
+        onChange={setEmail}
+        state={state}
+        errorId="login-email-error"
+        disabled={pending}
+      />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_login" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
-        <Link className="block text-sm font-medium text-primary underline" href="/verificar-correo">
-          Ingresar el código
-        </Link>
+        <Button asChild variant="outline" className="w-full">
+          <Link href="/verificar-correo">Ingresar el código</Link>
+        </Button>
       ) : null}
-      <Button type="submit" className="w-full" disabled={pending}>
+      <Button type="submit" className="w-full" disabled={pending} aria-busy={pending}>
         {pending ? "Enviando código…" : "Enviar código de acceso"}
       </Button>
     </form>
@@ -168,21 +207,22 @@ export function RecoveryRequestForm({ siteKey, nonce }: SecurityProps) {
   );
   const [email, setEmail] = useState("");
   return (
-    <form action={action} className="space-y-5">
+    <form action={action} className="space-y-5" aria-busy={pending}>
       <EmailInput
         value={email}
         onChange={setEmail}
         state={state}
         errorId="recovery-request-email-error"
+        disabled={pending}
       />
       <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_recovery" state={state} />
       <FormMessage state={state} />
       {state.status === "success" ? (
-        <Link className="block text-sm font-medium text-primary underline" href="/recuperar?code=1">
-          Ingresar código y nueva contraseña
-        </Link>
+        <Button asChild variant="outline" className="w-full">
+          <Link href="/recuperar?code=1">Ingresar código y nueva contraseña</Link>
+        </Button>
       ) : null}
-      <Button type="submit" className="w-full" disabled={pending}>
+      <Button type="submit" className="w-full" disabled={pending} aria-busy={pending}>
         {pending ? "Enviando solicitud…" : "Solicitar recuperación"}
       </Button>
     </form>
@@ -191,12 +231,13 @@ export function RecoveryRequestForm({ siteKey, nonce }: SecurityProps) {
 
 export function OtpVerificationForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(verifyCustomerOtpAction, initialActionState);
+  const [code, setCode] = useState("");
   return (
     <div className="space-y-3">
-      <form action={action} className="space-y-5">
+      <form action={action} className="space-y-5" aria-busy={pending}>
         <p className="text-sm text-muted-foreground">
-          Ingresa el código enviado al correo asociado a esta solicitud. El correo queda protegido
-          por una cookie cifrada y no se incluye en el enlace.
+          Ingresa el código enviado al correo asociado a esta solicitud. Tu correo permanece
+          protegido de forma privada y no se incluye en el enlace.
         </p>
         <div className="space-y-2">
           <Label htmlFor="code">Código de seis dígitos</Label>
@@ -208,12 +249,15 @@ export function OtpVerificationForm({ siteKey, nonce }: SecurityProps) {
             pattern="[0-9]{6}"
             maxLength={6}
             required
+            disabled={pending}
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
             className="text-center text-2xl tracking-[0.4em]"
           />
         </div>
         <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_verify" state={state} />
         <FormMessage state={state} />
-        <Button type="submit" className="w-full" disabled={pending}>
+        <Button type="submit" className="w-full" disabled={pending} aria-busy={pending}>
           {pending ? "Verificando…" : "Verificar código"}
         </Button>
       </form>
@@ -224,12 +268,13 @@ export function OtpVerificationForm({ siteKey, nonce }: SecurityProps) {
 
 export function PasswordResetForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(resetCustomerPasswordAction, initialActionState);
+  const [code, setCode] = useState("");
   return (
     <div className="space-y-3">
-      <form action={action} className="space-y-5">
+      <form action={action} className="space-y-5" aria-busy={pending}>
         <p className="text-sm text-muted-foreground">
-          El correo de recuperación permanece en una cookie cifrada, HttpOnly y con vencimiento de
-          diez minutos.
+          Tu correo de recuperación permanece protegido de forma privada y con vencimiento de diez
+          minutos mientras defines tu nueva contraseña.
         </p>
         <div className="space-y-2">
           <Label htmlFor="code">Código de recuperación</Label>
@@ -241,12 +286,15 @@ export function PasswordResetForm({ siteKey, nonce }: SecurityProps) {
             pattern="[0-9]{6}"
             maxLength={6}
             required
+            disabled={pending}
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
           />
         </div>
-        <PasswordFields state={state} idPrefix="recovery-reset" />
+        <PasswordFields state={state} idPrefix="recovery-reset" disabled={pending} />
         <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_reset" state={state} />
         <FormMessage state={state} />
-        <Button type="submit" className="w-full" disabled={pending}>
+        <Button type="submit" className="w-full" disabled={pending} aria-busy={pending}>
           {pending ? "Actualizando…" : "Actualizar contraseña e ingresar"}
         </Button>
       </form>

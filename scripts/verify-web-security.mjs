@@ -1091,8 +1091,12 @@ export async function verifyWebSecurity(
 
   for (const postOnlyPath of [
     "/api/jobs/orders",
+    "/api/jobs/cms-publish",
+    "/api/jobs/domain-events",
+    "/api/jobs/health",
     "/api/jobs/channels",
     "/api/webhooks/wompi",
+    "/api/webhooks/resend",
     "/api/webhooks/mercado-libre",
     "/api/metrics/funnel",
   ]) {

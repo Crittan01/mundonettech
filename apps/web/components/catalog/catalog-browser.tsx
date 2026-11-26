@@ -5,6 +5,7 @@ import { ProductCard } from "@/components/catalog/product-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 
 function pageHref(basePath: string, params: Record<string, string>, page: number): string {
   const query = new URLSearchParams(params);
@@ -35,6 +36,15 @@ export function CatalogBrowser({
   fixedFilter?: { kind: "categoria" | "marca"; value: string };
   showHeader?: boolean;
 }) {
+  const clearHref =
+    compareSlugs.length > 0
+      ? `${basePath}?comparar=${encodeURIComponent(compareSlugs.join(","))}`
+      : basePath;
+  const showCategoryLinks =
+    (!fixedFilter || fixedFilter.kind !== "categoria") && result.facets.categories.length > 0;
+  const showBrandLinks =
+    (!fixedFilter || fixedFilter.kind !== "marca") && result.facets.brands.length > 0;
+
   return (
     <div className="space-y-8">
       {showHeader ? (
@@ -43,14 +53,31 @@ export function CatalogBrowser({
           <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">{description}</p>
         </div>
       ) : null}
+      {compareSlugs.length > 0 ? (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3 text-sm"
+        >
+          <span>
+            Tienes {compareSlugs.length}{" "}
+            {compareSlugs.length === 1 ? "producto seleccionado" : "productos seleccionados"} para
+            comparar.
+          </span>
+          <Button asChild variant="outline" size="sm">
+            <Link
+              href={`/comparar?productos=${encodeURIComponent(compareSlugs.join(","))}`}
+              prefetch={false}
+            >
+              Ver comparación ({compareSlugs.length})
+            </Link>
+          </Button>
+        </div>
+      ) : null}
       <form
         key={new URLSearchParams(params).toString()}
         action={basePath}
         className="grid gap-4 rounded-2xl border border-border bg-card p-5"
       >
-        {fixedFilter ? (
-          <input type="hidden" name={fixedFilter.kind} value={fixedFilter.value} />
-        ) : null}
         {compareSlugs.length > 0 ? (
           <input type="hidden" name="comparar" value={compareSlugs.join(",")} />
         ) : null}
@@ -68,37 +95,27 @@ export function CatalogBrowser({
           {!fixedFilter || fixedFilter.kind !== "marca" ? (
             <div className="space-y-2">
               <Label htmlFor="catalog-brand">Marca</Label>
-              <select
-                id="catalog-brand"
-                name="marca"
-                defaultValue={params.marca ?? ""}
-                className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
-              >
+              <Select id="catalog-brand" name="marca" defaultValue={params.marca ?? ""}>
                 <option value="">Todas</option>
                 {result.facets.brands.map((brand) => (
                   <option key={brand.slug} value={brand.slug}>
                     {brand.name} ({brand.count})
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           ) : null}
           {!fixedFilter || fixedFilter.kind !== "categoria" ? (
             <div className="space-y-2">
               <Label htmlFor="catalog-category">Categoría</Label>
-              <select
-                id="catalog-category"
-                name="categoria"
-                defaultValue={params.categoria ?? ""}
-                className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
-              >
+              <Select id="catalog-category" name="categoria" defaultValue={params.categoria ?? ""}>
                 <option value="">Todas</option>
                 {result.facets.categories.map((category) => (
                   <option key={category.slug} value={category.slug}>
                     {category.name} ({category.count})
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           ) : null}
           <div className="space-y-2">
@@ -127,18 +144,14 @@ export function CatalogBrowser({
           </div>
           <div className="space-y-2">
             <Label htmlFor="catalog-sort">Ordenar por</Label>
-            <select
-              id="catalog-sort"
-              name="orden"
-              defaultValue={params.orden ?? "newest"}
-              className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
-            >
+            <Select id="catalog-sort" name="orden" defaultValue={params.orden ?? ""}>
+              <option value="">Automático (relevancia o recientes)</option>
               <option value="newest">Más recientes</option>
               <option value="relevance">Relevancia</option>
               <option value="price_asc">Menor precio</option>
               <option value="price_desc">Mayor precio</option>
               <option value="name">Nombre</option>
-            </select>
+            </Select>
           </div>
           <label className="flex min-h-11 items-center gap-3 self-end text-sm font-medium">
             <input
@@ -159,11 +172,10 @@ export function CatalogBrowser({
                   {facet.name}
                   {facet.unit ? ` (${facet.unit})` : ""}
                 </Label>
-                <select
+                <Select
                   id={`catalog-${facet.key}`}
                   name={`attr_${facet.key}`}
                   defaultValue={params[`attr_${facet.key}`] ?? ""}
-                  className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   <option value="">Todos</option>
                   {facet.values.map((option) => (
@@ -176,7 +188,7 @@ export function CatalogBrowser({
                       ({option.count})
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
             ))}
           </div>
@@ -184,60 +196,119 @@ export function CatalogBrowser({
         <div className="flex flex-wrap items-center gap-3">
           <Button type="submit">Aplicar filtros</Button>
           <Button asChild variant="ghost">
-            <Link href={basePath}>Limpiar filtros</Link>
+            <Link href={clearHref}>Limpiar filtros</Link>
           </Button>
         </div>
       </form>
-      {error ? (
-        <p
-          role="alert"
-          className="rounded-md border border-destructive bg-card p-4 text-destructive"
+      {!error && (showCategoryLinks || showBrandLinks) ? (
+        <nav
+          aria-label="Acceso directo a categorías y marcas"
+          className="flex flex-wrap items-center gap-2 text-xs"
         >
-          {error}
-        </p>
+          {showCategoryLinks ? (
+            <>
+              <span className="font-medium text-muted-foreground">Categorías:</span>
+              {result.facets.categories.slice(0, 8).map((category) => (
+                <Link
+                  key={`cat-${category.slug}`}
+                  href={
+                    compareSlugs.length > 0
+                      ? `/categoria/${category.slug}?comparar=${encodeURIComponent(compareSlugs.join(","))}`
+                      : `/categoria/${category.slug}`
+                  }
+                  className="inline-flex min-h-11 items-center rounded-full border border-input bg-card px-3.5 py-1.5 font-medium text-foreground transition outline-none hover:border-primary hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {category.name} ({category.count})
+                </Link>
+              ))}
+            </>
+          ) : null}
+          {showBrandLinks ? (
+            <>
+              <span className="ml-1 font-medium text-muted-foreground">Marcas:</span>
+              {result.facets.brands.slice(0, 8).map((brand) => (
+                <Link
+                  key={`brand-${brand.slug}`}
+                  href={
+                    compareSlugs.length > 0
+                      ? `/marca/${brand.slug}?comparar=${encodeURIComponent(compareSlugs.join(","))}`
+                      : `/marca/${brand.slug}`
+                  }
+                  className="inline-flex min-h-11 items-center rounded-full border border-input bg-card px-3.5 py-1.5 font-medium text-foreground transition outline-none hover:border-primary hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {brand.name} ({brand.count})
+                </Link>
+              ))}
+            </>
+          ) : null}
+        </nav>
       ) : null}
-      <p role="status" className="text-sm text-muted-foreground">
-        {result.total} {result.total === 1 ? "producto encontrado" : "productos encontrados"}
-      </p>
-      {result.items.length ? (
-        <section
-          aria-label="Resultados del catálogo"
-          className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"
+      {error ? (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
         >
-          {result.items.map((product) => (
-            <ProductCard
-              key={product.id}
-              product={product}
-              mediaOrigin={mediaOrigin}
-              compareSlugs={compareSlugs}
-            />
-          ))}
-        </section>
-      ) : (
-        <section className="rounded-2xl border border-border bg-card p-8 text-center">
-          <h2 className="text-xl font-semibold">No hay productos con estos criterios</h2>
-          <p className="mt-2 text-muted-foreground">
-            Ajusta la búsqueda o elimina algunos filtros para ver otras opciones.
-          </p>
-        </section>
-      )}
-      <nav className="flex items-center justify-between gap-4" aria-label="Paginación del catálogo">
-        <span className="text-sm text-muted-foreground">
-          Página {result.page} de {result.totalPages}
-        </span>
-        <div className="flex gap-2">
-          {result.page > 1 ? (
-            <Button asChild variant="outline" size="sm">
-              <Link href={pageHref(basePath, params, result.page - 1)}>Anterior</Link>
-            </Button>
-          ) : null}
-          {result.page < result.totalPages ? (
-            <Button asChild variant="outline" size="sm">
-              <Link href={pageHref(basePath, params, result.page + 1)}>Siguiente</Link>
-            </Button>
-          ) : null}
+          <p>{error}</p>
+          <Button asChild variant="outline" size="sm" className="text-foreground">
+            <Link href={clearHref}>Restablecer filtros</Link>
+          </Button>
         </div>
-      </nav>
+      ) : (
+        <>
+          <p role="status" className="text-sm text-muted-foreground">
+            {result.total} {result.total === 1 ? "producto encontrado" : "productos encontrados"}
+          </p>
+          {result.items.length ? (
+            <section
+              aria-label="Resultados del catálogo"
+              className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3"
+            >
+              {result.items.map((product) => (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  mediaOrigin={mediaOrigin}
+                  compareSlugs={compareSlugs}
+                />
+              ))}
+            </section>
+          ) : (
+            <section className="space-y-4 rounded-2xl border border-border bg-card p-8 text-center">
+              <h2 className="text-xl font-semibold">No hay productos con estos criterios</h2>
+              <p className="text-muted-foreground">
+                Ajusta la búsqueda o elimina algunos filtros para ver otras opciones.
+              </p>
+              <div>
+                <Button asChild variant="outline">
+                  <Link href={clearHref}>Ver todos los productos</Link>
+                </Button>
+              </div>
+            </section>
+          )}
+          {result.totalPages > 1 ? (
+            <nav
+              className="flex items-center justify-between gap-4"
+              aria-label="Paginación del catálogo"
+            >
+              <span className="text-sm text-muted-foreground">
+                Página {result.page} de {result.totalPages}
+              </span>
+              <div className="flex gap-2">
+                {result.page > 1 ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={pageHref(basePath, params, result.page - 1)}>Anterior</Link>
+                  </Button>
+                ) : null}
+                {result.page < result.totalPages ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link href={pageHref(basePath, params, result.page + 1)}>Siguiente</Link>
+                  </Button>
+                ) : null}
+              </div>
+            </nav>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }

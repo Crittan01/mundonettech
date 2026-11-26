@@ -409,7 +409,7 @@ test("checkout and reservation expiry refresh every inventory-tagged public surf
     const comparison = await read(
       `/comparar?productos=${encodeURIComponent(`${product.slug},sony-wh-1000xm5`)}`,
     );
-    expect(comparison).toContain(available > 0 ? "1 unidades" : "Sin unidades");
+    expect(comparison).toContain(available > 0 ? "1 unidad" : "Sin unidades");
 
     const merchant = await read("/api/feeds/google-merchant");
     const merchantItem = merchant

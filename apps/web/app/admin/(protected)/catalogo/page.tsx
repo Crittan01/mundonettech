@@ -4,6 +4,8 @@ import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { productStatusLabels } from "@/lib/admin-presenters";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -13,6 +15,19 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+
+const taxGroupCodeLabels: Record<string, string> = {
+  IVA_GENERAL: "IVA general 19 %",
+  IVA_REDUCIDO: "IVA reducido 5 %",
+  IVA_EXENTO: "Exento de IVA (0 %)",
+  IVA_EXCLUIDO: "Excluido de IVA",
+  COMPUTO_UVT: "Cómputo excluido hasta 50 UVT",
+  MOVIL_UVT: "Móviles excluidos hasta 22 UVT",
+};
+
+function labelFor<T extends string>(map: Record<T, string>, value: string): string {
+  return (map as Record<string, string | undefined>)[value] ?? value;
+}
 
 function pageHref(q: string, status: string, page: number): string {
   const params = new URLSearchParams();
@@ -74,23 +89,31 @@ export default async function AdminCatalogPage({ searchParams }: PageProps<"/adm
           placeholder="Nombre, SKU, GTIN o MPN"
           className="min-w-64 flex-1"
         />
-        <select
+        <Select
           name="status"
           defaultValue={status ?? ""}
           aria-label="Filtrar por estado"
-          className="h-11 rounded-md border border-input bg-background px-3 text-sm"
+          fullWidth={false}
         >
           <option value="">Todos los estados</option>
           <option value="ACTIVE">Activos</option>
           <option value="DRAFT">Borradores</option>
           <option value="ARCHIVED">Archivados</option>
-        </select>
+        </Select>
         <Button type="submit" variant="outline">
           Filtrar
         </Button>
+        {q || status ? (
+          <Link
+            href="/admin/catalogo"
+            className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+          >
+            Limpiar filtros
+          </Link>
+        ) : null}
       </form>
       <p role="status" className="text-sm text-muted-foreground">
-        {result.total} productos
+        {result.total} {result.total === 1 ? "producto" : "productos"}
       </p>
       {result.items.length ? (
         <section aria-label="Productos administrados" className="space-y-3">
@@ -104,18 +127,13 @@ export default async function AdminCatalogPage({ searchParams }: PageProps<"/adm
                     </Link>
                   </h2>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {product.brand} · {product.category} · {product.taxGroup}
+                    {product.brand} · {product.category} ·{" "}
+                    {taxGroupCodeLabels[product.taxGroup] ?? product.taxGroup}
                   </p>
                   <p className="mt-1 font-mono text-xs text-muted-foreground">{product.slug}</p>
                 </div>
                 <div className="text-sm sm:text-right">
-                  <p className="font-medium">
-                    {product.status === "ACTIVE"
-                      ? "Activo"
-                      : product.status === "DRAFT"
-                        ? "Borrador"
-                        : "Archivado"}
-                  </p>
+                  <p className="font-medium">{labelFor(productStatusLabels, product.status)}</p>
                   <p className="mt-1 text-muted-foreground">
                     {product.activeVariantCount}/{product.variantCount} variantes activas
                   </p>
@@ -135,26 +153,28 @@ export default async function AdminCatalogPage({ searchParams }: PageProps<"/adm
           </p>
         </section>
       )}
-      <nav
-        className="flex items-center justify-between"
-        aria-label="Paginación del catálogo administrativo"
-      >
-        <span className="text-sm text-muted-foreground">
-          Página {result.page} de {result.totalPages}
-        </span>
-        <div className="flex gap-2">
-          {result.page > 1 ? (
-            <Button asChild variant="outline" size="sm">
-              <Link href={pageHref(q, status ?? "", result.page - 1)}>Anterior</Link>
-            </Button>
-          ) : null}
-          {result.page < result.totalPages ? (
-            <Button asChild variant="outline" size="sm">
-              <Link href={pageHref(q, status ?? "", result.page + 1)}>Siguiente</Link>
-            </Button>
-          ) : null}
-        </div>
-      </nav>
+      {result.total > 0 ? (
+        <nav
+          className="flex items-center justify-between"
+          aria-label="Paginación del catálogo administrativo"
+        >
+          <span className="text-sm text-muted-foreground">
+            Página {result.page} de {result.totalPages}
+          </span>
+          <div className="flex gap-2">
+            {result.page > 1 ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={pageHref(q, status ?? "", result.page - 1)}>Anterior</Link>
+              </Button>
+            ) : null}
+            {result.page < result.totalPages ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={pageHref(q, status ?? "", result.page + 1)}>Siguiente</Link>
+              </Button>
+            ) : null}
+          </div>
+        </nav>
+      ) : null}
     </div>
   );
 }

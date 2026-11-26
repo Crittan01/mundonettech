@@ -116,12 +116,18 @@ async function HelpExplorer({
           </div>
         </form>
         {invalidQuery ? (
-          <p role="alert" className="mt-4 text-sm">
+          <p
+            role="alert"
+            className="mt-4 rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
+          >
             La búsqueda supera 120 caracteres. Redúcela e inténtalo de nuevo.
           </p>
         ) : null}
         {invalidCategory ? (
-          <p role="alert" className="mt-4 text-sm">
+          <p
+            role="alert"
+            className="mt-4 rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
+          >
             El tema solicitado no existe y no se aplicó ese filtro.
           </p>
         ) : null}
@@ -217,7 +223,8 @@ export default function HelpCenterPage({ searchParams }: PageProps<"/ayuda">) {
         fallback={
           <p
             role="status"
-            className="rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground"
+            aria-busy="true"
+            className="min-h-[70vh] rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground"
           >
             Cargando buscador y guías de ayuda…
           </p>

@@ -15,6 +15,7 @@ import {
   AssistedRemoveItemForm,
 } from "@/components/admin/assisted-sale-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -47,18 +48,21 @@ export default async function AssistedSaleDetailPage({
     throw error;
   });
   if (!cart || cart.kind !== "ASSISTED") notFound();
-  const record = await db.cart.findUnique({
-    where: { id },
-    select: {
-      assistedClaimedAt: true,
-      assistedTokenHash: true,
-      customer: { select: { email: true } },
-    },
-  });
+  const [now, record] = await Promise.all([
+    getDatabaseClock(db),
+    db.cart.findUnique({
+      where: { id },
+      select: {
+        assistedClaimedAt: true,
+        assistedTokenHash: true,
+        customer: { select: { email: true } },
+      },
+    }),
+  ]);
   if (!record) notFound();
   const canWrite = hasAdminPermission(session.profile.role, "sales:write");
-  const active =
-    cart.status === "ACTIVE" && new Date(cart.expiresAt) > new Date() && !record.assistedClaimedAt;
+  const effectiveExpiresAt = new Date(cart.assistedExpiresAt ?? cart.expiresAt);
+  const active = cart.status === "ACTIVE" && effectiveExpiresAt > now && !record.assistedClaimedAt;
   const manageable = canWrite && active;
   return (
     <div className="space-y-8">
@@ -108,15 +112,24 @@ export default async function AssistedSaleDetailPage({
                           itemId={line.id}
                           bundleId={line.bundle.id}
                           quantity={line.bundle.quantity}
+                          itemLabel={line.bundle.name}
                         />
-                        <AssistedRemoveItemForm cartId={id} itemId={line.id} />
+                        <AssistedRemoveItemForm
+                          cartId={id}
+                          itemId={line.id}
+                          itemLabel={line.bundle.name}
+                        />
                       </div>
                     ) : null}
                   </div>
                 ) : null}
                 <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
                   <div>
-                    <h4 className="font-medium">{line.productName}</h4>
+                    {line.bundle ? (
+                      <h4 className="font-medium">{line.productName}</h4>
+                    ) : (
+                      <h3 className="font-medium">{line.productName}</h3>
+                    )}
                     <p className="mt-1 font-mono text-xs text-muted-foreground">
                       {line.sku} · {line.available} disponibles
                     </p>
@@ -147,8 +160,13 @@ export default async function AssistedSaleDetailPage({
                           cartId={id}
                           itemId={line.id}
                           quantity={line.quantity}
+                          itemLabel={line.productName}
                         />
-                        <AssistedRemoveItemForm cartId={id} itemId={line.id} />
+                        <AssistedRemoveItemForm
+                          cartId={id}
+                          itemId={line.id}
+                          itemLabel={line.productName}
+                        />
                       </div>
                     ) : null}
                   </div>

@@ -44,6 +44,7 @@ export function Spin360({
   const [current, setCurrent] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
   const startX = useRef<number | null>(null);
   const lastStep = useRef(0);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -54,6 +55,7 @@ export function Spin360({
     setCurrent(0);
     setLoaded(false);
     setError(false);
+    setRetryCount(0);
   }
 
   useEffect(() => {
@@ -80,10 +82,17 @@ export function Spin360({
         setLoaded(false);
       }
     }
-  }, [frame, safeIndex]);
+  }, [frame, safeIndex, retryCount]);
 
   if (!validFrames || !frame) {
-    return <p role="alert">La secuencia 360° no está disponible.</p>;
+    return (
+      <div
+        className={`rounded-xl border border-border bg-background p-5 text-center text-foreground ${className}`.trim()}
+        role="alert"
+      >
+        La secuencia 360° no está disponible.
+      </div>
+    );
   }
 
   function selectFrame(nextIndex: number): void {
@@ -96,6 +105,12 @@ export function Spin360({
 
   function move(direction: number): void {
     selectFrame(safeIndex + direction);
+  }
+
+  function retryFrame(): void {
+    setError(false);
+    setLoaded(false);
+    setRetryCount((value) => value + 1);
   }
 
   function prefetchNeighbor(offset: number): void {
@@ -142,6 +157,10 @@ export function Spin360({
     }
   }
 
+  const pageStep = Math.max(1, Math.round(frames.length / 8));
+  const frameSrc =
+    retryCount === 0 ? frame.src : `${frame.src.replace(/#.*$/, "")}#spin-retry=${retryCount}`;
+
   return (
     <figure className={className}>
       <div className="relative overflow-hidden rounded-xl border border-border bg-secondary">
@@ -172,6 +191,14 @@ export function Spin360({
               event.preventDefault();
               move(1);
               prefetchAdjacent(1);
+            } else if (event.key === "PageDown") {
+              event.preventDefault();
+              move(-pageStep);
+              prefetchAdjacent(-1);
+            } else if (event.key === "PageUp") {
+              event.preventDefault();
+              move(pageStep);
+              prefetchAdjacent(1);
             } else if (event.key === "Home") {
               event.preventDefault();
               selectFrame(0);
@@ -183,7 +210,7 @@ export function Spin360({
             }
           }}
         >
-          <picture>
+          <picture key={retryCount}>
             {frame.sources?.map((source) => (
               <source
                 key={`${source.type ?? "default"}-${source.srcSet}`}
@@ -197,7 +224,7 @@ export function Spin360({
             ) : null}
             <Image
               ref={imageRef}
-              src={frame.src}
+              src={frameSrc}
               alt={`${alt}, vista ${safeIndex + 1}`}
               width={frame.width}
               height={frame.height}
@@ -226,12 +253,19 @@ export function Spin360({
           </p>
         ) : null}
         {error ? (
-          <p
-            className="absolute inset-0 flex items-center justify-center bg-background p-4 text-center text-foreground"
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background p-4 text-center text-foreground"
             role="alert"
           >
-            No pudimos cargar esta vista.
-          </p>
+            <p>No pudimos cargar esta vista.</p>
+            <button
+              type="button"
+              onClick={retryFrame}
+              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+            >
+              Reintentar
+            </button>
+          </div>
         ) : null}
       </div>
       <div className="mt-3 flex items-center justify-between gap-3">
@@ -241,7 +275,7 @@ export function Spin360({
             move(-1);
             prefetchAdjacent(-1);
           }}
-          className="min-h-11 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
           aria-label="Vista anterior"
         >
           Anterior
@@ -255,7 +289,7 @@ export function Spin360({
             move(1);
             prefetchAdjacent(1);
           }}
-          className="min-h-11 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
           aria-label="Vista siguiente"
         >
           Siguiente

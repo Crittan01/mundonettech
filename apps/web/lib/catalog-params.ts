@@ -134,8 +134,8 @@ export function parseCatalogParams(
   if (rawQuery) params.q = rawQuery;
   if (rawPage) params.page = rawPage;
   if (sortValue) params.orden = sortValue;
-  if (fixed.categoria ?? rawCategory) params.categoria = fixed.categoria ?? rawCategory;
-  if (fixed.marca ?? rawBrand) params.marca = fixed.marca ?? rawBrand;
+  if (!fixed.categoria && rawCategory) params.categoria = rawCategory;
+  if (!fixed.marca && rawBrand) params.marca = rawBrand;
   if (rawMinPrice) params.precioMin = rawMinPrice;
   if (rawMaxPrice) params.precioMax = rawMaxPrice;
   if (single(raw.stock) === "1") params.stock = "1";

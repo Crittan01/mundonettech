@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { startTransition, useActionState, useEffect, useRef } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 import {
   archiveCrmOrganizationAction,
   createCrmActivityAction,
@@ -26,6 +26,29 @@ import {
   verifyCrmContactAction,
 } from "@/lib/actions/admin-crm";
 
+function useResetOnSuccess(
+  state: ActionState,
+  formRef: React.RefObject<HTMLFormElement | null>,
+  enabled = true,
+) {
+  const handled = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (enabled && state.status === "success" && handled.current !== state) {
+      handled.current = state;
+      formRef.current?.reset();
+    }
+  }, [enabled, formRef, state]);
+}
+
+function submitWithTransition(
+  event: React.FormEvent<HTMLFormElement>,
+  action: (formData: FormData) => void,
+) {
+  event.preventDefault();
+  const formData = new FormData(event.currentTarget);
+  startTransition(() => action(formData));
+}
+
 function Field({
   id,
   name,
@@ -34,6 +57,7 @@ function Field({
   required = false,
   maxLength,
   type = "text",
+  disabled = false,
 }: {
   id: string;
   name: string;
@@ -42,6 +66,7 @@ function Field({
   required?: boolean;
   maxLength?: number;
   type?: "text" | "email" | "tel" | "datetime-local";
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-2">
@@ -54,6 +79,7 @@ function Field({
         required={required}
         maxLength={maxLength}
         autoComplete="off"
+        disabled={disabled}
       />
     </div>
   );
@@ -74,10 +100,14 @@ export function CrmOrganizationForm({
     createCrmOrganizationAction,
     initialActionState,
   );
+  const createFormRef = useRef<HTMLFormElement>(null);
+  useResetOnSuccess(createState, createFormRef);
   return (
     <div className="space-y-4">
       <form
-        action={createAction}
+        ref={createFormRef}
+        onSubmit={(event) => submitWithTransition(event, createAction)}
+        aria-busy={creating}
         className="grid gap-3 rounded-xl border border-border p-4 sm:grid-cols-3"
       >
         <Field
@@ -87,6 +117,7 @@ export function CrmOrganizationForm({
           value={createState.values?.legalName}
           required
           maxLength={200}
+          disabled={creating}
         />
         <Field
           id="org-commercial"
@@ -94,6 +125,7 @@ export function CrmOrganizationForm({
           label="Nombre comercial"
           value={createState.values?.commercialName}
           maxLength={200}
+          disabled={creating}
         />
         <Field
           id="org-tax"
@@ -101,6 +133,7 @@ export function CrmOrganizationForm({
           label="NIT o identificador"
           value={createState.values?.taxId}
           maxLength={30}
+          disabled={creating}
         />
         <div className="sm:col-span-3">
           <Button type="submit" disabled={creating}>
@@ -134,12 +167,18 @@ function OrganizationEditor({
     archiveCrmOrganizationAction,
     initialActionState,
   );
+  const updateFormRef = useRef<HTMLFormElement>(null);
   return (
     <details className="rounded-xl border border-border p-4">
       <summary className="cursor-pointer font-medium">
         {organization.legalName} · {organization.taxId}
       </summary>
-      <form action={action} className="mt-4 grid gap-3 sm:grid-cols-3">
+      <form
+        ref={updateFormRef}
+        onSubmit={(event) => submitWithTransition(event, action)}
+        aria-busy={pending}
+        className="mt-4 grid gap-3 sm:grid-cols-3"
+      >
         <input type="hidden" name="organizationId" value={organization.id} />
         <input type="hidden" name="expectedVersion" value={organization.version} />
         <Field
@@ -149,6 +188,7 @@ function OrganizationEditor({
           value={state.values?.legalName ?? organization.legalName}
           required
           maxLength={200}
+          disabled={pending}
         />
         <Field
           id={`commercial-${organization.id}`}
@@ -156,6 +196,7 @@ function OrganizationEditor({
           label="Nombre comercial"
           value={state.values?.commercialName ?? organization.commercialName ?? ""}
           maxLength={200}
+          disabled={pending}
         />
         <Field
           id={`tax-${organization.id}`}
@@ -163,6 +204,7 @@ function OrganizationEditor({
           label="Nuevo identificador (deja vacío para conservar el actual)"
           value={state.values?.taxId}
           maxLength={30}
+          disabled={pending}
         />
         <label className="flex items-center gap-2 text-xs text-muted-foreground sm:col-span-3">
           <input
@@ -183,7 +225,11 @@ function OrganizationEditor({
           <FormMessage state={state} />
         </div>
       </form>
-      <form action={archiveAction} className="mt-3">
+      <form
+        onSubmit={(event) => submitWithTransition(event, archiveAction)}
+        aria-busy={archiving}
+        className="mt-3"
+      >
         <input type="hidden" name="organizationId" value={organization.id} />
         <input type="hidden" name="expectedVersion" value={organization.version} />
         <Button type="submit" size="sm" variant="outline" disabled={archiving}>
@@ -206,9 +252,16 @@ export function CrmContactForm({
     contact ? updateCrmContactAction : createCrmContactAction,
     initialActionState,
   );
+  const formRef = useRef<HTMLFormElement>(null);
+  useResetOnSuccess(state, formRef);
   const prefix = contact ? `edit-${contact.id}` : "new-contact";
   return (
-    <form action={action} className="grid gap-3 sm:grid-cols-2">
+    <form
+      ref={formRef}
+      onSubmit={(event) => submitWithTransition(event, action)}
+      aria-busy={pending}
+      className="grid gap-3 sm:grid-cols-2"
+    >
       {contact ? (
         <>
           <input type="hidden" name="contactId" value={contact.id} />
@@ -238,6 +291,7 @@ export function CrmContactForm({
         value={state.values?.givenName}
         required
         maxLength={100}
+        disabled={pending}
       />
       <Field
         id={`${prefix}-family`}
@@ -246,6 +300,7 @@ export function CrmContactForm({
         value={state.values?.familyName}
         required
         maxLength={100}
+        disabled={pending}
       />
       <Field
         id={`${prefix}-email`}
@@ -254,6 +309,7 @@ export function CrmContactForm({
         value={state.values?.email}
         type="email"
         maxLength={320}
+        disabled={pending}
       />
       <Field
         id={`${prefix}-phone`}
@@ -262,6 +318,7 @@ export function CrmContactForm({
         value={state.values?.phoneE164}
         type="tel"
         maxLength={16}
+        disabled={pending}
       />
       <p className="text-xs text-muted-foreground sm:col-span-2">
         Debes ingresar correo o teléfono. Los valores actuales permanecen enmascarados y no se
@@ -287,8 +344,15 @@ export function CrmVerificationForm({
   version: number;
 }) {
   const [state, action, pending] = useActionState(verifyCrmContactAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  useResetOnSuccess(state, formRef);
   return (
-    <form action={action} className="grid gap-3 sm:grid-cols-2">
+    <form
+      ref={formRef}
+      onSubmit={(event) => submitWithTransition(event, action)}
+      aria-busy={pending}
+      className="grid gap-3 sm:grid-cols-2"
+    >
       <input type="hidden" name="contactId" value={contactId} />
       <input type="hidden" name="expectedVersion" value={version} />
       <div className="space-y-2">
@@ -323,6 +387,7 @@ export function CrmVerificationForm({
           label="Documento revisado, para nivel documental"
           value={state.values?.document}
           maxLength={30}
+          disabled={pending}
         />
       </div>
       <div className="sm:col-span-2">
@@ -340,7 +405,11 @@ export function CrmVerificationForm({
 export function CrmDetectDuplicatesForm({ contactId }: { contactId?: string }) {
   const [state, action, pending] = useActionState(detectCrmDuplicatesAction, initialActionState);
   return (
-    <form action={action} className="space-y-2">
+    <form
+      onSubmit={(event) => submitWithTransition(event, action)}
+      aria-busy={pending}
+      className="space-y-2"
+    >
       {contactId ? <input type="hidden" name="contactId" value={contactId} /> : null}
       <Button type="submit" variant="outline" disabled={pending}>
         {pending ? "Analizando…" : "Detectar duplicados"}
@@ -375,11 +444,33 @@ export function CrmMergeForm({
     reverseCrmMergeAction,
     initialActionState,
   );
+  const formRef = useRef<HTMLFormElement>(null);
   const state = status === "PENDING" ? mergeState : reverseState;
+  useResetOnSuccess(state, formRef);
+  useResetOnSuccess(rejectState, formRef);
   const busy = merging || rejecting || reversing;
   return (
     <div className="space-y-3">
-      <form action={status === "PENDING" ? mergeAction : reverseAction} className="space-y-3">
+      <form
+        ref={formRef}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const submitter = (event.nativeEvent as SubmitEvent).submitter;
+          const isReject = submitter?.getAttribute("data-intent") === "reject";
+          const formData = new FormData(event.currentTarget);
+          startTransition(() => {
+            if (isReject) {
+              rejectAction(formData);
+            } else if (status === "PENDING") {
+              mergeAction(formData);
+            } else {
+              reverseAction(formData);
+            }
+          });
+        }}
+        aria-busy={busy}
+        className="space-y-3"
+      >
         <input type="hidden" name="candidateId" value={candidateId} />
         <input type="hidden" name="expectedVersion" value={version} />
         <input type="hidden" name="expectedSourceVersion" value={sourceVersion} />
@@ -407,13 +498,7 @@ export function CrmMergeForm({
                   : "Revertir fusión con MFA"}
           </Button>
           {status === "PENDING" ? (
-            <Button
-              type="submit"
-              formAction={rejectAction}
-              size="sm"
-              variant="outline"
-              disabled={busy}
-            >
+            <Button type="submit" data-intent="reject" size="sm" variant="outline" disabled={busy}>
               {rejecting ? "Rechazando…" : "Rechazar candidata"}
             </Button>
           ) : null}
@@ -427,8 +512,15 @@ export function CrmMergeForm({
 
 export function CrmActivityForm({ contactId }: { contactId: string }) {
   const [state, action, pending] = useActionState(createCrmActivityAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  useResetOnSuccess(state, formRef);
   return (
-    <form action={action} className="space-y-3">
+    <form
+      ref={formRef}
+      onSubmit={(event) => submitWithTransition(event, action)}
+      aria-busy={pending}
+      className="space-y-3"
+    >
       <input type="hidden" name="contactId" value={contactId} />
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
@@ -451,6 +543,7 @@ export function CrmActivityForm({ contactId }: { contactId: string }) {
           label="Asunto"
           value={state.values?.subject}
           maxLength={200}
+          disabled={pending}
         />
       </div>
       <div className="space-y-2">
@@ -495,9 +588,16 @@ export function CrmTaskForm({
     task ? updateCrmTaskAction : createCrmTaskAction,
     initialActionState,
   );
+  const formRef = useRef<HTMLFormElement>(null);
+  useResetOnSuccess(state, formRef, !task);
   const prefix = task ? `task-${task.id}` : "new-task";
   return (
-    <form action={action} className="grid gap-3 sm:grid-cols-2">
+    <form
+      ref={formRef}
+      onSubmit={(event) => submitWithTransition(event, action)}
+      aria-busy={pending}
+      className="grid gap-3 sm:grid-cols-2"
+    >
       <input type="hidden" name="contactId" value={contactId} />
       {task ? (
         <>
@@ -513,6 +613,7 @@ export function CrmTaskForm({
           value={state.values?.title ?? task?.title}
           required
           maxLength={160}
+          disabled={pending}
         />
       </div>
       <div className="space-y-2 sm:col-span-2">
@@ -532,6 +633,7 @@ export function CrmTaskForm({
         value={state.values?.dueAt ?? task?.dueAt}
         type="datetime-local"
         required
+        disabled={pending}
       />
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-assignee`}>Responsable</Label>
@@ -593,8 +695,15 @@ export function CrmTaskForm({
 
 export function CrmSuppressionForm({ contactId, version }: { contactId: string; version: number }) {
   const [state, action, pending] = useActionState(suppressCrmContactAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  useResetOnSuccess(state, formRef);
   return (
-    <form action={action} className="space-y-3 rounded-xl border border-destructive p-4">
+    <form
+      ref={formRef}
+      onSubmit={(event) => submitWithTransition(event, action)}
+      aria-busy={pending}
+      className="space-y-3 rounded-xl border border-destructive p-4"
+    >
       <input type="hidden" name="contactId" value={contactId} />
       <input type="hidden" name="expectedVersion" value={version} />
       <div className="space-y-2">
@@ -617,6 +726,7 @@ export function CrmSuppressionForm({ contactId, version }: { contactId: string; 
         value={state.values?.confirmation}
         required
         maxLength={18}
+        disabled={pending}
       />
       <p className="text-sm text-muted-foreground">
         Se bloquea si existen tareas, fusiones u obligaciones abiertas. La anonimización es

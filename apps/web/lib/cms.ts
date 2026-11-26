@@ -4,11 +4,17 @@ import { buildCmsSeo, CmsService, type CmsPageView, type CmsSeoImage } from "@mu
 import { storeConfig } from "@mundonettech/config/store";
 import { cacheLife, cacheTag } from "next/cache";
 
+import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { getAdminSession } from "@/lib/security/admin-auth";
 
 const cmsLife = { stale: 30, revalidate: 60, expire: 3600 } as const;
 const safeSlugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+export interface CmsPublicPageLink {
+  readonly slug: string;
+  readonly title: string;
+}
 
 function cmsService(): CmsService {
   return new CmsService(getDatabase(), {
@@ -32,6 +38,30 @@ async function readPublishedCmsPage(slug: string): Promise<CmsPageView | null> {
 export async function getPublicCmsPage(slug: string): Promise<CmsPageView | null> {
   const normalized = normalizeCmsSlug(slug);
   return normalized ? readPublishedCmsPage(normalized) : null;
+}
+
+export async function getPublicCmsPageLinks(): Promise<readonly CmsPublicPageLink[]> {
+  "use cache";
+  cacheLife(cmsLife);
+  cacheTag("cms");
+  const db = getDatabase();
+  const now = await getDatabaseClock(db);
+  return db.cmsPage.findMany({
+    where: {
+      status: "PUBLISHED",
+      deletedAt: null,
+      publishedAt: { lte: now },
+      blocks: {
+        some: {
+          isVisible: true,
+          versions: { some: { status: "PUBLISHED", effectiveAt: { lte: now } } },
+        },
+      },
+    },
+    select: { slug: true, title: true },
+    orderBy: [{ title: "asc" }, { slug: "asc" }],
+    take: 24,
+  });
 }
 
 export async function getPreviewCmsPage(

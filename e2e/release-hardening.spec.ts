@@ -110,19 +110,26 @@ test("every administrative and customer surface redirects anonymous requests wit
     "/admin/finanzas",
     "/admin/posventa",
     "/admin/crm",
+    "/admin/fidelizacion",
+    "/admin/segmentos",
+    "/admin/lifecycle",
+    "/admin/analitica-rfm",
     "/admin/b2b",
     "/admin/resenas",
     "/admin/catalogo",
     "/admin/precios",
     "/admin/venta-asistida",
     "/admin/contenido",
+    "/admin/contenido/medios",
     "/admin/contenido/redirecciones",
     "/admin/configuracion",
     "/admin/integraciones",
+    "/admin/canales",
     "/admin/pagos",
     "/admin/logistica",
     "/admin/comunicaciones",
     "/admin/facturacion",
+    "/admin/salud",
   ];
   for (const route of adminRoutes) {
     await page.goto(`${route}?next=https%3A%2F%2Fevil.example`);
@@ -133,6 +140,7 @@ test("every administrative and customer surface redirects anonymous requests wit
     "/mi-cuenta",
     "/mi-cuenta/pedidos",
     "/mi-cuenta/direcciones",
+    "/mi-cuenta/beneficios",
     "/mi-cuenta/soporte",
     "/mi-cuenta/privacidad",
   ]) {
@@ -230,7 +238,15 @@ test("admin export/document endpoints enforce RBAC 403/401/404 and persisted red
       status: "ACTIVE",
     },
   });
-  const forgedRedirectIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+  const forgedRedirectIds = [
+    randomUUID(),
+    randomUUID(),
+    randomUUID(),
+    randomUUID(),
+    randomUUID(),
+    randomUUID(),
+    randomUUID(),
+  ];
   let variantTestProductId: string | null = null;
 
   function cookieHeader(
@@ -314,11 +330,13 @@ test("admin export/document endpoints enforce RBAC 403/401/404 and persisted red
     await db.$executeRaw`
       INSERT INTO "UrlRedirect" ("id", "fromPath", "toPath", "statusCode", "active")
       VALUES
-        (${forgedRedirectIds[0]}::uuid, '/carrito', '/productos', 308, true),
-        (${forgedRedirectIds[1]}::uuid, '/recibo/token-protegido', '/productos', 308, true),
-        (${forgedRedirectIds[2]}::uuid, '/email/baja/token-protegido', '/productos', 308, true),
-        (${forgedRedirectIds[3]}::uuid, '/propuesta/token-protegido', '/productos', 308, true),
-        (${forgedRedirectIds[4]}::uuid, '/empresas', '/productos', 308, true)
+        (${forgedRedirectIds[0]}::uuid, '/carrito', '/ayuda', 308, true),
+        (${forgedRedirectIds[1]}::uuid, '/recibo/token-protegido', '/ayuda', 308, true),
+        (${forgedRedirectIds[2]}::uuid, '/email/baja/token-protegido', '/ayuda', 308, true),
+        (${forgedRedirectIds[3]}::uuid, '/propuesta/token-protegido', '/ayuda', 308, true),
+        (${forgedRedirectIds[4]}::uuid, '/empresas', '/ayuda', 308, true),
+        (${forgedRedirectIds[5]}::uuid, '/productos', '/ayuda', 308, true),
+        (${forgedRedirectIds[6]}::uuid, '/comparar', '/ayuda', 308, true)
     `;
     for (const protectedPath of [
       "/carrito",
@@ -326,6 +344,8 @@ test("admin export/document endpoints enforce RBAC 403/401/404 and persisted red
       "/email/baja/token-protegido",
       "/propuesta/token-protegido",
       "/empresas",
+      "/productos",
+      "/comparar",
     ]) {
       const response = await request.get(protectedPath, { maxRedirects: 0 });
       expect([301, 302, 307, 308]).not.toContain(response.status());

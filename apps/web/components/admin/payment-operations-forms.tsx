@@ -17,22 +17,32 @@ import {
   unblockIdentityAction,
   voidPaymentAction,
 } from "@/lib/actions/admin-payments";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 export function BankTransferConfirmationForm({ paymentAttemptId }: { paymentAttemptId: string }) {
-  const [state, action, pending] = useActionState(confirmBankTransferAction, initialActionState);
+  const [externalReference, setExternalReference] = useState("");
+  const [state, action, pending] = useActionState(
+    async (previous: ActionState, formData: FormData) => {
+      const result = await confirmBankTransferAction(previous, formData);
+      if (result.status === "success") setExternalReference("");
+      return result;
+    },
+    initialActionState,
+  );
   return (
-    <form action={action} className="mt-4 space-y-3">
+    <form action={action} aria-busy={pending} className="mt-4 space-y-3">
       <input type="hidden" name="paymentAttemptId" value={paymentAttemptId} />
       <div className="space-y-2">
         <Label htmlFor={`bank-reference-${paymentAttemptId}`}>Referencia bancaria verificada</Label>
         <Input
           id={`bank-reference-${paymentAttemptId}`}
           name="externalReference"
-          defaultValue={state.values?.externalReference ?? ""}
+          value={externalReference}
+          onChange={(event) => setExternalReference(event.target.value)}
           minLength={6}
           maxLength={120}
           required
+          disabled={pending}
         />
       </div>
       <Button type="submit" disabled={pending}>
@@ -50,9 +60,27 @@ export function CodRemittanceForm({
   paymentAttemptId: string;
   expectedCents: string;
 }) {
-  const [state, action, pending] = useActionState(reconcileCodAction, initialActionState);
+  const [carrier, setCarrier] = useState("");
+  const [reference, setReference] = useState("");
+  const [collectedCents, setCollectedCents] = useState(expectedCents);
+  const [remittedCents, setRemittedCents] = useState(expectedCents);
+  const [carrierReference, setCarrierReference] = useState("");
+  const [state, action, pending] = useActionState(
+    async (previous: ActionState, formData: FormData) => {
+      const result = await reconcileCodAction(previous, formData);
+      if (result.status === "success") {
+        setCarrier("");
+        setReference("");
+        setCollectedCents(expectedCents);
+        setRemittedCents(expectedCents);
+        setCarrierReference("");
+      }
+      return result;
+    },
+    initialActionState,
+  );
   return (
-    <form action={action} className="mt-4 space-y-3">
+    <form action={action} aria-busy={pending} className="mt-4 space-y-3">
       <input type="hidden" name="paymentAttemptId" value={paymentAttemptId} />
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
@@ -60,9 +88,11 @@ export function CodRemittanceForm({
           <Input
             id={`carrier-${paymentAttemptId}`}
             name="carrier"
-            defaultValue={state.values?.carrier ?? ""}
+            value={carrier}
+            onChange={(event) => setCarrier(event.target.value)}
             maxLength={120}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -70,9 +100,11 @@ export function CodRemittanceForm({
           <Input
             id={`batch-${paymentAttemptId}`}
             name="reference"
-            defaultValue={state.values?.reference ?? ""}
+            value={reference}
+            onChange={(event) => setReference(event.target.value)}
             maxLength={128}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -80,10 +112,12 @@ export function CodRemittanceForm({
           <Input
             id={`collected-${paymentAttemptId}`}
             name="collectedCents"
-            defaultValue={state.values?.collectedCents ?? expectedCents}
+            value={collectedCents}
+            onChange={(event) => setCollectedCents(event.target.value)}
             inputMode="numeric"
             pattern="[0-9]+"
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -91,10 +125,12 @@ export function CodRemittanceForm({
           <Input
             id={`remitted-${paymentAttemptId}`}
             name="remittedCents"
-            defaultValue={state.values?.remittedCents ?? expectedCents}
+            value={remittedCents}
+            onChange={(event) => setRemittedCents(event.target.value)}
             inputMode="numeric"
             pattern="[0-9]+"
             required
+            disabled={pending}
           />
         </div>
       </div>
@@ -103,10 +139,12 @@ export function CodRemittanceForm({
         <Input
           id={`carrier-ref-${paymentAttemptId}`}
           name="carrierReference"
-          defaultValue={state.values?.carrierReference ?? ""}
+          value={carrierReference}
+          onChange={(event) => setCarrierReference(event.target.value)}
           minLength={3}
           maxLength={120}
           required
+          disabled={pending}
         />
       </div>
       <Button type="submit" disabled={pending}>
@@ -126,7 +164,7 @@ export function RefundExecutionForm({
 }) {
   const [state, action, pending] = useActionState(executeRefundAction, initialActionState);
   return (
-    <form action={action} className="mt-4 space-y-3">
+    <form action={action} aria-busy={pending} className="mt-4 space-y-3">
       <input type="hidden" name="refundId" value={refundId} />
       <Button type="submit" disabled={pending}>
         {pending
@@ -141,19 +179,29 @@ export function RefundExecutionForm({
 }
 
 export function CompensationForm({ transactionId }: { transactionId: string }) {
-  const [state, action, pending] = useActionState(completeCompensationAction, initialActionState);
+  const [externalId, setExternalId] = useState("");
+  const [state, action, pending] = useActionState(
+    async (previous: ActionState, formData: FormData) => {
+      const result = await completeCompensationAction(previous, formData);
+      if (result.status === "success") setExternalId("");
+      return result;
+    },
+    initialActionState,
+  );
   return (
-    <form action={action} className="mt-3 flex flex-wrap items-end gap-3">
+    <form action={action} aria-busy={pending} className="mt-3 flex flex-wrap items-end gap-3">
       <input type="hidden" name="transactionId" value={transactionId} />
       <div className="min-w-56 flex-1 space-y-2">
         <Label htmlFor={`external-${transactionId}`}>ID externo verificado</Label>
         <Input
           id={`external-${transactionId}`}
           name="externalId"
-          defaultValue={state.values?.externalId ?? ""}
+          value={externalId}
+          onChange={(event) => setExternalId(event.target.value)}
           minLength={3}
           maxLength={128}
           required
+          disabled={pending}
         />
       </div>
       <Button type="submit" variant="outline" disabled={pending}>
@@ -169,7 +217,7 @@ export function CompensationForm({ transactionId }: { transactionId: string }) {
 export function VoidPaymentForm({ paymentAttemptId }: { paymentAttemptId: string }) {
   const [state, action, pending] = useActionState(voidPaymentAction, initialActionState);
   return (
-    <form action={action} className="mt-3 space-y-2">
+    <form action={action} aria-busy={pending} className="mt-3 space-y-2">
       <input type="hidden" name="paymentAttemptId" value={paymentAttemptId} />
       <Button type="submit" variant="destructive" size="sm" disabled={pending}>
         {pending ? "Solicitando…" : "Solicitar anulación"}
@@ -181,18 +229,26 @@ export function VoidPaymentForm({ paymentAttemptId }: { paymentAttemptId: string
 
 export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: string }) {
   const [currentKey, setCurrentKey] = useState(operationKey);
+  const [customerEmail, setCustomerEmail] = useState("");
+  const [type, setType] = useState("GRANT");
+  const [amountCents, setAmountCents] = useState("");
+  const [reason, setReason] = useState("");
   const [state, action, pending] = useActionState(
-    async (previous: typeof initialActionState, formData: FormData) => {
+    async (previous: ActionState, formData: FormData) => {
       const result = await adjustStoreCreditAction(previous, formData);
       if (result.status === "success") {
         setCurrentKey(`admin-credit:${crypto.randomUUID()}`);
+        setCustomerEmail("");
+        setType("GRANT");
+        setAmountCents("");
+        setReason("");
       }
       return result;
     },
     initialActionState,
   );
   return (
-    <form action={action} className="space-y-4">
+    <form action={action} aria-busy={pending} className="space-y-4">
       <input type="hidden" name="operationKey" value={currentKey} />
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
@@ -201,14 +257,22 @@ export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: stri
             id="credit-customer"
             name="customerEmail"
             type="email"
-            defaultValue={state.values?.customerEmail ?? ""}
+            value={customerEmail}
+            onChange={(event) => setCustomerEmail(event.target.value)}
             maxLength={320}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
           <Label htmlFor="credit-type">Movimiento</Label>
-          <Select id="credit-type" name="type" defaultValue={state.values?.type ?? "GRANT"}>
+          <Select
+            id="credit-type"
+            name="type"
+            value={type}
+            onChange={(event) => setType(event.target.value)}
+            disabled={pending}
+          >
             <option value="GRANT">Abonar saldo</option>
             <option value="WITHDRAWAL">Retirar saldo disponible</option>
           </Select>
@@ -218,10 +282,12 @@ export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: stri
           <Input
             id="credit-amount"
             name="amountCents"
-            defaultValue={state.values?.amountCents ?? ""}
+            value={amountCents}
+            onChange={(event) => setAmountCents(event.target.value)}
             inputMode="numeric"
             pattern="[0-9]+"
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -229,9 +295,11 @@ export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: stri
           <Input
             id="credit-reason"
             name="reason"
-            defaultValue={state.values?.reason ?? ""}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
             maxLength={500}
             required
+            disabled={pending}
           />
         </div>
       </div>
@@ -247,13 +315,35 @@ export function StoreCreditAdjustmentForm({ operationKey }: { operationKey: stri
 }
 
 export function BlockIdentityForm() {
-  const [state, action, pending] = useActionState(blockIdentityAction, initialActionState);
+  const [kind, setKind] = useState("EMAIL");
+  const [identity, setIdentity] = useState("");
+  const [reason, setReason] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [state, action, pending] = useActionState(
+    async (previous: ActionState, formData: FormData) => {
+      const result = await blockIdentityAction(previous, formData);
+      if (result.status === "success") {
+        setKind("EMAIL");
+        setIdentity("");
+        setReason("");
+        setExpiresAt("");
+      }
+      return result;
+    },
+    initialActionState,
+  );
   return (
-    <form action={action} className="space-y-4">
+    <form action={action} aria-busy={pending} className="space-y-4">
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="blocked-kind">Tipo de identidad</Label>
-          <Select id="blocked-kind" name="kind" defaultValue={state.values?.kind ?? "EMAIL"}>
+          <Select
+            id="blocked-kind"
+            name="kind"
+            value={kind}
+            onChange={(event) => setKind(event.target.value)}
+            disabled={pending}
+          >
             <option value="EMAIL">Correo</option>
             <option value="PHONE">Teléfono</option>
             <option value="DOCUMENT">Documento</option>
@@ -264,9 +354,11 @@ export function BlockIdentityForm() {
           <Input
             id="blocked-identity"
             name="identity"
-            defaultValue={state.values?.identity ?? ""}
+            value={identity}
+            onChange={(event) => setIdentity(event.target.value)}
             maxLength={320}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -274,9 +366,11 @@ export function BlockIdentityForm() {
           <Input
             id="blocked-reason"
             name="reason"
-            defaultValue={state.values?.reason ?? ""}
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
             maxLength={500}
             required
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -285,7 +379,9 @@ export function BlockIdentityForm() {
             id="blocked-expiration"
             name="expiresAt"
             type="date"
-            defaultValue={state.values?.expiresAt ?? ""}
+            value={expiresAt}
+            onChange={(event) => setExpiresAt(event.target.value)}
+            disabled={pending}
           />
         </div>
       </div>
@@ -303,7 +399,7 @@ export function BlockIdentityForm() {
 export function UnblockIdentityForm({ blockedIdentityId }: { blockedIdentityId: string }) {
   const [state, action, pending] = useActionState(unblockIdentityAction, initialActionState);
   return (
-    <form action={action} className="mt-3 space-y-2">
+    <form action={action} aria-busy={pending} className="mt-3 space-y-2">
       <input type="hidden" name="blockedIdentityId" value={blockedIdentityId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Desactivando…" : "Desactivar bloqueo"}

@@ -17,7 +17,27 @@ import {
   BankTransferConfirmationForm,
   CompensationForm,
   RefundExecutionForm,
+  VoidPaymentForm,
 } from "@/components/admin/payment-operations-forms";
+import {
+  formatOrderEventReason,
+  fulfillmentMethodLabels,
+  fulfillmentStatusLabels,
+  orderFulfillmentStatusLabels,
+  orderStatusLabels,
+  paymentAttemptStatusLabels,
+  paymentProviderLabels,
+  paymentStatusLabels,
+  paymentTransactionKindLabels,
+  paymentTransactionStatusLabels,
+  refundReasonLabels,
+  refundStatusLabels,
+  serializedUnitStatusLabels,
+  shipmentPackageStatusLabels,
+  shipmentStatusLabels,
+  shippingProviderLabels,
+  taxRuleLabels,
+} from "@/lib/admin-presenters";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -29,6 +49,28 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 
+const extraPackageStatusLabels: Record<string, string> = {
+  RECONCILING: "Requiere conciliación",
+  RECONCILE_REQUIRED: "Requiere conciliación",
+  SHIPPED: "Despachado",
+  DELIVERED: "Entregado",
+};
+
+function labelFor<T extends string>(map: Record<T, string>, value: string): string {
+  return (
+    (map as Record<string, string | undefined>)[value] ??
+    (value === "PROCESSING" ? "En proceso" : value)
+  );
+}
+
+function formatPackageStatus(status: string): string {
+  return (
+    (shipmentPackageStatusLabels as Record<string, string | undefined>)[status] ??
+    extraPackageStatusLabels[status] ??
+    status
+  );
+}
+
 export default async function OrderDetailPage({ params }: PageProps<"/admin/pedidos/[id]">) {
   const [{ id }, session] = await Promise.all([params, requireAdminPage("orders:read")]);
   if (!z.string().uuid().safeParse(id).success) notFound();
@@ -36,10 +78,14 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
   if (!order) notFound();
   const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
   const canReadPayments = hasAdminPermission(session.profile.role, "payments:read");
+  const canReadFulfillment = hasAdminPermission(session.profile.role, "fulfillment:read");
+  const canReadInvoices = hasAdminPermission(session.profile.role, "invoices:read");
+  const canReadPostSale = hasAdminPermission(session.profile.role, "postsale:read");
   const canDispatch = hasAdminPermission(session.profile.role, "fulfillment:write");
   const canRefund = canReadPayments && hasAdminPermission(session.profile.role, "payments:write");
   const refundable = ["PARTIALLY_PAID", "PAID", "PARTIALLY_REFUNDED"].includes(order.paymentStatus);
   const hasRemainingItems = order.items.some((item) => item.refundedQuantity < item.quantity);
+  const encodedOrderNumber = encodeURIComponent(order.orderNumber);
   return (
     <div className="space-y-10">
       <div>
@@ -51,13 +97,52 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
           Vista 360° creada el {dateFormatter.format(new Date(order.createdAt))}. Los datos
           personales, bancarios y de contacto permanecen enmascarados.
         </p>
+        {canReadFulfillment || canReadPayments || canReadInvoices || canReadPostSale ? (
+          <nav
+            aria-label="Módulos relacionados del pedido"
+            className="mt-4 flex flex-wrap gap-2 text-sm"
+          >
+            {canReadFulfillment ? (
+              <Link
+                href={`/admin/logistica?q=${encodedOrderNumber}`}
+                className="rounded-md border border-border bg-card px-3 py-1.5 font-medium hover:bg-accent"
+              >
+                Operación logística
+              </Link>
+            ) : null}
+            {canReadPayments ? (
+              <Link
+                href={`/admin/pagos?q=${encodedOrderNumber}`}
+                className="rounded-md border border-border bg-card px-3 py-1.5 font-medium hover:bg-accent"
+              >
+                Operación de pagos
+              </Link>
+            ) : null}
+            {canReadInvoices ? (
+              <Link
+                href={`/admin/facturacion?q=${encodedOrderNumber}`}
+                className="rounded-md border border-border bg-card px-3 py-1.5 font-medium hover:bg-accent"
+              >
+                Facturación DIAN
+              </Link>
+            ) : null}
+            {canReadPostSale ? (
+              <Link
+                href={`/admin/posventa?q=${encodedOrderNumber}`}
+                className="rounded-md border border-border bg-card px-3 py-1.5 font-medium hover:bg-accent"
+              >
+                Posventa, RMA y PQR
+              </Link>
+            ) : null}
+          </nav>
+        ) : null}
       </div>
       {canDispatch || canRefund ? <CmsStepUp session={session} /> : null}
       <section aria-label="Estado y totales" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          ["Estado comercial", order.orderStatus],
-          ["Estado de pago", order.paymentStatus],
-          ["Estado logístico", order.fulfillmentStatus],
+          ["Estado comercial", labelFor(orderStatusLabels, order.orderStatus)],
+          ["Estado de pago", labelFor(paymentStatusLabels, order.paymentStatus)],
+          ["Estado logístico", labelFor(fulfillmentStatusLabels, order.fulfillmentStatus)],
           ["Total", formatCopCents(order.totalCents)],
         ].map(([label, value]) => (
           <article key={label} className="rounded-xl border border-border bg-card p-5">
@@ -80,7 +165,9 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
             Teléfono: order.contact.phone,
             Documento: order.contact.document,
             Dirección: order.contact.address,
-            "Método de entrega": order.fulfillmentMethod ?? "No disponible",
+            "Método de entrega": order.fulfillmentMethod
+              ? labelFor(fulfillmentMethodLabels, order.fulfillmentMethod)
+              : "No disponible",
           }).map(([label, value]) => (
             <div key={label}>
               <dt className="text-muted-foreground">{label}</dt>
@@ -93,10 +180,15 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
         <h2 id="order-items" className="text-xl font-semibold">
           {canReadFinance ? "Líneas, impuestos y WAC" : "Líneas e impuestos"}
         </h2>
-        <div className="overflow-x-auto rounded-xl border border-border">
+        <div
+          role="region"
+          aria-label="Tabla de líneas e impuestos del pedido"
+          tabIndex={0}
+          className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
           <table className="w-full min-w-[980px] text-left text-sm">
             <caption className="sr-only">
-              Snapshots de las líneas del pedido y cantidades reembolsadas
+              Instantáneas de las líneas del pedido y cantidades reembolsadas
             </caption>
             <thead className="bg-secondary">
               <tr>
@@ -132,7 +224,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                         key={`${tax.code}-${tax.rule}`}
                         className="block text-xs font-normal text-muted-foreground"
                       >
-                        {tax.code} · {tax.rule} · {tax.rateBps} bps
+                        {tax.code} · {taxRuleLabels[tax.rule] ?? tax.rule} · {tax.rateBps / 100} %
                       </span>
                     ))}
                   </th>
@@ -183,11 +275,16 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                   <div className="flex flex-wrap justify-between gap-3">
                     <div>
                       <h3 className="font-semibold">
-                        {shipment.provider ?? "Envío"} · {shipment.status}
+                        {shipment.provider
+                          ? labelFor(shippingProviderLabels, shipment.provider)
+                          : "Envío"}{" "}
+                        · {labelFor(shipmentStatusLabels, shipment.status)}
                       </h3>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {shipment.fulfillmentStatus ?? "Sin fulfillment"} · Promesa{" "}
-                        {dateFormatter.format(new Date(shipment.promisedAt))}
+                        {shipment.fulfillmentStatus
+                          ? labelFor(orderFulfillmentStatusLabels, shipment.fulfillmentStatus)
+                          : "Sin alistamiento"}{" "}
+                        · Promesa {dateFormatter.format(new Date(shipment.promisedAt))}
                       </p>
                     </div>
                     <p className="text-sm">{shipment.trackingCode ?? "Sin guía"}</p>
@@ -205,7 +302,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                       {shipment.packages
                         .map(
                           (record) =>
-                            `Bulto ${record.packageNumber}: ${record.status}${record.trackingCode ? ` · ${record.trackingCode}` : ""}`,
+                            `Bulto ${record.packageNumber}: ${formatPackageStatus(record.status)}${record.trackingCode ? ` · ${record.trackingCode}` : ""}`,
                         )
                         .join(" | ")}
                     </p>
@@ -236,7 +333,12 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
         {order.serialUnits.length === 0 ? (
           <Empty>El pedido no tiene unidades serializadas asociadas.</Empty>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border">
+          <div
+            role="region"
+            aria-label="Tabla de unidades serializadas del pedido"
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
             <table className="w-full min-w-[680px] text-left text-sm">
               <caption className="sr-only">
                 Serial, IMEI, estado y envío de cada unidad vendida
@@ -257,7 +359,7 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                       {unit.serial}
                     </th>
                     <td className="p-3 font-mono">{unit.imei ?? "No aplica"}</td>
-                    <td className="p-3">{unit.status}</td>
+                    <td className="p-3">{labelFor(serializedUnitStatusLabels, unit.status)}</td>
                     <td className="p-3 font-mono text-xs">
                       {unit.shipmentId ?? "Pendiente de asignación"}
                     </td>
@@ -277,35 +379,50 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
             <Empty>No hay intentos de pago registrados.</Empty>
           ) : (
             <ul className="space-y-3">
-              {order.payments.map((attempt) => (
-                <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
-                  <div className="flex flex-wrap justify-between gap-3">
-                    <h3 className="font-semibold">
-                      {attempt.provider} · {attempt.status}
-                    </h3>
-                    <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
-                  </div>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {attempt.reference} · {dateFormatter.format(new Date(attempt.createdAt))}
-                  </p>
-                  {attempt.transactions.length ? (
-                    <ul className="mt-3 space-y-1 text-sm">
-                      {attempt.transactions.map((transaction) => (
-                        <li key={transaction.id}>
-                          {transaction.kind} · {transaction.status} ·{" "}
-                          {formatCopCents(transaction.amountCents)} ·{" "}
-                          {transaction.externalId ?? "Sin ID externo"}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {canRefund &&
-                  attempt.provider === "BANK_TRANSFER" &&
-                  ["PENDING", "PROCESSING"].includes(attempt.status) ? (
-                    <BankTransferConfirmationForm paymentAttemptId={attempt.id} />
-                  ) : null}
-                </li>
-              ))}
+              {order.payments.map((attempt) => {
+                const canVoidAttempt =
+                  canRefund &&
+                  attempt.status === "SUCCEEDED" &&
+                  attempt.provider !== "STORE_CREDIT" &&
+                  !attempt.transactions.some(
+                    (tx) =>
+                      (tx.kind === "REFUND" && tx.status !== "CANCELLED") ||
+                      (tx.kind === "VOID" &&
+                        ["PENDING", "PROCESSING", "SUCCEEDED"].includes(tx.status)),
+                  );
+                return (
+                  <li key={attempt.id} className="rounded-xl border border-border bg-card p-5">
+                    <div className="flex flex-wrap justify-between gap-3">
+                      <h3 className="font-semibold">
+                        {labelFor(paymentProviderLabels, attempt.provider)} ·{" "}
+                        {labelFor(paymentAttemptStatusLabels, attempt.status)}
+                      </h3>
+                      <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
+                    </div>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {attempt.reference} · {dateFormatter.format(new Date(attempt.createdAt))}
+                    </p>
+                    {attempt.transactions.length ? (
+                      <ul className="mt-3 space-y-1 text-sm">
+                        {attempt.transactions.map((transaction) => (
+                          <li key={transaction.id}>
+                            {labelFor(paymentTransactionKindLabels, transaction.kind)} ·{" "}
+                            {labelFor(paymentTransactionStatusLabels, transaction.status)} ·{" "}
+                            {formatCopCents(transaction.amountCents)} ·{" "}
+                            {transaction.externalId ?? "Sin ID externo"}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {canRefund &&
+                    attempt.provider === "BANK_TRANSFER" &&
+                    ["PENDING", "PROCESSING", "REQUIRES_ACTION"].includes(attempt.status) ? (
+                      <BankTransferConfirmationForm paymentAttemptId={attempt.id} />
+                    ) : null}
+                    {canVoidAttempt ? <VoidPaymentForm paymentAttemptId={attempt.id} /> : null}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
@@ -324,7 +441,8 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                   <div className="flex flex-wrap justify-between gap-3">
                     <div>
                       <h3 className="font-semibold">
-                        {refund.reason} · {refund.status}
+                        {labelFor(refundReasonLabels, refund.reason)} ·{" "}
+                        {labelFor(refundStatusLabels, refund.status)}
                       </h3>
                       <p className="mt-1 text-sm text-muted-foreground">
                         {refund.items.map((item) => `${item.quantity} unidades`).join(" · ")} ·{" "}
@@ -384,8 +502,8 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                   ["REQUESTED", "APPROVED", "FAILED"].includes(refund.status) ? (
                     <p className="mt-3 text-xs text-muted-foreground">
                       Reembolso vinculado a posventa: gestiona su cancelación desde{" "}
-                      <Link href="/admin/posventa" className="underline">
-                        /admin/posventa
+                      <Link href={`/admin/posventa?q=${encodedOrderNumber}`} className="underline">
+                        Posventa, RMA y PQR
                       </Link>
                       .
                     </p>
@@ -423,9 +541,15 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                   {dateFormatter.format(new Date(event.occurredAt))}
                 </time>
                 <p className="mt-1 font-medium">
-                  {event.orderStatus} · {event.paymentStatus} · {event.fulfillmentStatus}
+                  {labelFor(orderStatusLabels, event.orderStatus)} ·{" "}
+                  {labelFor(paymentStatusLabels, event.paymentStatus)} ·{" "}
+                  {labelFor(fulfillmentStatusLabels, event.fulfillmentStatus)}
                 </p>
-                {event.reason ? <p className="mt-1 text-muted-foreground">{event.reason}</p> : null}
+                {event.reason ? (
+                  <p className="mt-1 text-muted-foreground">
+                    {formatOrderEventReason(event.reason)}
+                  </p>
+                ) : null}
               </li>
             ))}
           </ol>

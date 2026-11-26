@@ -15,6 +15,20 @@ import {
 } from "@/lib/integrations";
 
 export interface StorefrontCheckoutPreview extends CheckoutPreview {
+  readonly savedAddresses: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly recipientName: string;
+    readonly phoneE164: string;
+    readonly departmentCode: string;
+    readonly municipalityCode: string;
+    readonly addressLine1: string;
+    readonly addressLine2: string | null;
+    readonly neighborhood: string | null;
+    readonly postalCode: string | null;
+    readonly deliveryNotes: string | null;
+    readonly isDefault: boolean;
+  }[];
   readonly paymentMethods: {
     readonly wompiAccounts: readonly { id: string; accountName: string }[];
     readonly bankTransferEnabled: boolean;
@@ -47,14 +61,43 @@ export async function readCheckoutPreview(): Promise<StorefrontCheckoutPreview |
   if (!reference) return null;
   const preview = await orderService().preview(reference);
   if (!preview) return null;
-  const [credentials, credit] = await Promise.all([
+  const [credentials, credit, savedAddresses] = await Promise.all([
     getIntegrationCredentialVault().forSystemProvider("wompi").list({ limit: 100 }),
     preview.customer?.authenticated
       ? storeCreditService().get(preview.customer.id)
       : Promise.resolve(null),
+    preview.customer?.authenticated
+      ? getDatabase()
+          .customer.findFirst({
+            where: { id: preview.customer.id, status: "ACTIVE", deletedAt: null },
+            select: {
+              addresses: {
+                where: { deletedAt: null },
+                orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+                take: 20,
+                select: {
+                  id: true,
+                  label: true,
+                  recipientName: true,
+                  phoneE164: true,
+                  departmentCode: true,
+                  municipalityCode: true,
+                  addressLine1: true,
+                  addressLine2: true,
+                  neighborhood: true,
+                  postalCode: true,
+                  deliveryNotes: true,
+                  isDefault: true,
+                },
+              },
+            },
+          })
+          .then((record) => record?.addresses ?? [])
+      : Promise.resolve([]),
   ]);
   return {
     ...preview,
+    savedAddresses,
     paymentMethods: {
       wompiAccounts: credentials.items
         .filter((credential) => credential.provider === "wompi" && !credential.revokedAt)

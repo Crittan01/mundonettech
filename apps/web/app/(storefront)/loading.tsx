@@ -1,7 +1,7 @@
 export default function StorefrontLoading() {
   return (
     <section
-      className="flex min-h-[50vh] items-center justify-center"
+      className="flex min-h-[90vh] items-center justify-center"
       role="status"
       aria-live="polite"
     >

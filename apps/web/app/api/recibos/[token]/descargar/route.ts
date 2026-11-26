@@ -27,6 +27,37 @@ const paymentStatusLabels: Record<PaymentStatus, string> = {
   FAILED: "Pago fallido",
 };
 
+const taxRegimeLabels: Record<string, string> = {
+  NO_RESPONSABLE_IVA: "No responsable de IVA",
+  RESPONSABLE_IVA: "Responsable de IVA",
+};
+
+const taxRuleLabels: Record<string, string> = {
+  NOT_RESPONSABLE: "Régimen no responsable de IVA",
+  STANDARD: "Tarifa general",
+  EXEMPT: "Exento (0 %)",
+  EXCLUDED: "Excluido",
+  UVT_EXCLUDED_WITHIN_LIMIT: "Excluido por tope UVT",
+  UVT_STANDARD_ABOVE_LIMIT: "Gravado sobre tope UVT",
+};
+
+const bogotaDateTimeFormatter = new Intl.DateTimeFormat("es-CO", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "America/Bogota",
+});
+
+function formatBogotaTimestamp(value: string | Date): string {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return singleLine(String(value));
+  return `${bogotaDateTimeFormatter.format(parsed)} (hora de Colombia)`;
+}
+
+function formatRatePercent(bps: number): string {
+  const percent = bps / 100;
+  return Number.isInteger(percent) ? `${percent} %` : `${percent.toFixed(2)} %`;
+}
+
 function singleLine(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, " ");
 }
@@ -70,19 +101,20 @@ export async function GET(
       { status: 404, headers: privateNoIndexHeaders },
     );
   }
+  const regimeLabel = taxRegimeLabels[receipt.taxRegime] ?? singleLine(receipt.taxRegime);
   const lines = [
     "COMPROBANTE DE COMPRA NO FISCAL",
     `${singleLine(receipt.receiptNumber)} · Pedido ${singleLine(receipt.orderNumber)}`,
-    `Emitido: ${singleLine(receipt.issuedAt)}`,
+    `Emitido: ${formatBogotaTimestamp(receipt.issuedAt)}`,
     `Estado del pedido: ${orderStatusLabels[receipt.orderStatus]}`,
     `Estado del pago: ${paymentStatusLabels[receipt.paymentStatus]}`,
-    `Régimen: ${singleLine(receipt.taxRegime)}`,
+    `Régimen tributario: ${regimeLabel}`,
     "",
     `Cliente: ${singleLine(receipt.recipientNameSnapshot)}`,
     `Correo: ${singleLine(receipt.emailSnapshot)}`,
     `Teléfono: ${singleLine(receipt.phoneE164Snapshot)}`,
     `Destino: ${singleLine(receipt.addressLine1Snapshot)}, ${singleLine(receipt.municipalityNameSnapshot)}, ${singleLine(receipt.departmentNameSnapshot)}`,
-    `Promesa de entrega: ${singleLine(receipt.deliveryPromiseAt)}`,
+    `Promesa de entrega: ${formatBogotaTimestamp(receipt.deliveryPromiseAt)}`,
     "",
     "PRODUCTOS",
     ...receipt.items.flatMap((item) => [
@@ -90,7 +122,7 @@ export async function GET(
       `${item.quantity} x ${formatCopCents(item.unitPriceCents)} · descuento ${formatCopCents(item.discountCents)} · IVA ${formatCopCents(item.taxCents)} · total ${formatCopCents(item.totalCents)}`,
       ...item.taxLines.map(
         (tax) =>
-          `  ${singleLine(tax.taxGroupCode)} · regla ${singleLine(tax.rule)} · tarifa ${tax.appliedRateBps} bps · base ${formatCopCents(tax.taxableBaseCents)} · IVA ${formatCopCents(tax.taxCents)}`,
+          `  ${singleLine(tax.taxGroupName || tax.taxGroupCode)} · regla ${taxRuleLabels[tax.rule] ?? singleLine(tax.rule)} · tarifa ${formatRatePercent(tax.appliedRateBps)} · base ${formatCopCents(tax.taxableBaseCents)} · IVA ${formatCopCents(tax.taxCents)}`,
       ),
     ]),
     "",
@@ -100,7 +132,7 @@ export async function GET(
     `Entrega: ${formatCopCents(receipt.shippingCents)}`,
     `TOTAL: ${formatCopCents(receipt.totalCents)}`,
     "",
-    "Este documento no es factura electrónica ni acredita pago cuando el estado financiero es UNPAID.",
+    "Este documento no es factura electrónica ni acredita recaudo cuando el estado del pago figura pendiente.",
   ];
   const safeFilename =
     receipt.receiptNumber.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "comprobante";

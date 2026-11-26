@@ -5,11 +5,24 @@ import { PostSaleAdminService } from "@mundonettech/db";
 import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import {
   ReturnModerationForm,
   SupportAdminForm,
   WarrantyModerationForm,
 } from "@/components/admin/postsale-moderation-forms";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import {
+  refundStatusLabels,
+  returnKindLabels,
+  returnStatusLabels,
+  supportTicketStatusLabels,
+  warrantyRemedyLabels,
+  warrantyStatusLabels,
+} from "@/lib/admin-presenters";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -20,12 +33,54 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 
-export default async function PostSaleAdminPage() {
+const allowedStates = ["ALL", "OPEN", "CLOSED"] as const;
+type QueueState = (typeof allowedStates)[number];
+
+function postSaleHref(q: string, estado: QueueState, page: number): string {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (estado !== "ALL") params.set("estado", estado);
+  if (page > 1) params.set("page", String(page));
+  const qs = params.toString();
+  return qs ? `/admin/posventa?${qs}` : "/admin/posventa";
+}
+
+export default async function PostSaleAdminPage({ searchParams }: PageProps<"/admin/posventa">) {
   const session = await requireAdminPage("postsale:read");
-  const queue = await new PostSaleAdminService(getDatabase()).queue(session.profile.id);
+  const raw = await searchParams;
+  const q = (single(raw.q) ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 120);
+  const rawEstado = single(raw.estado) ?? "ALL";
+  const estado: QueueState = allowedStates.includes(rawEstado as QueueState)
+    ? (rawEstado as QueueState)
+    : "ALL";
+  const requestedPage = Number.parseInt(single(raw.page) ?? "1", 10) || 1;
+  const page = Math.max(1, Math.min(10_000, requestedPage));
+  const pageSize = 20;
+
+  const rawQueue = await new PostSaleAdminService(getDatabase()).queue(session.profile.id, {
+    ...(q ? { q } : {}),
+    status: estado,
+    skip: (page - 1) * pageSize,
+    take: pageSize + 1,
+  });
+  const hasMore =
+    rawQueue.returns.length > pageSize ||
+    rawQueue.warranties.length > pageSize ||
+    rawQueue.tickets.length > pageSize;
+  const queue = {
+    returns: rawQueue.returns.slice(0, pageSize),
+    warranties: rawQueue.warranties.slice(0, pageSize),
+    tickets: rawQueue.tickets.slice(0, pageSize),
+  };
+
   const canWrite = hasAdminPermission(session.profile.role, "postsale:write");
   const canRefund = hasAdminPermission(session.profile.role, "payments:write");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
+  const hasFilters = Boolean(q || estado !== "ALL");
+
   return (
     <div className="space-y-10">
       <div>
@@ -42,14 +97,54 @@ export default async function PostSaleAdminPage() {
           Vista de solo lectura para tu rol actual.
         </p>
       )}
+      <form
+        key={`${q}|${estado}`}
+        action="/admin/posventa"
+        className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
+      >
+        <label htmlFor="postsale-q" className="sr-only">
+          Buscar casos de posventa
+        </label>
+        <Input
+          id="postsale-q"
+          name="q"
+          defaultValue={q}
+          maxLength={120}
+          placeholder="Pedido, radicado PQR, serial, producto o motivo"
+          className="min-w-60 flex-1"
+        />
+        <Select
+          name="estado"
+          defaultValue={estado}
+          aria-label="Filtrar por estado"
+          fullWidth={false}
+        >
+          <option value="ALL">Todos los casos (abiertos primero)</option>
+          <option value="OPEN">Abiertos</option>
+          <option value="CLOSED">Cerrados</option>
+        </Select>
+        <Button type="submit" variant="outline">
+          Filtrar
+        </Button>
+        {hasFilters ? (
+          <Link
+            href="/admin/posventa"
+            className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+          >
+            Limpiar
+          </Link>
+        ) : null}
+      </form>
       <section aria-labelledby="admin-returns" className="space-y-4">
         <h2 id="admin-returns" className="text-2xl font-semibold">
           Devoluciones y cambios
         </h2>
         {queue.returns.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
-            No hay devoluciones registradas.
-          </p>
+          <Empty>
+            {hasFilters
+              ? "No hay devoluciones con estos criterios."
+              : "No hay devoluciones registradas."}
+          </Empty>
         ) : (
           queue.returns.map((request) => {
             const canCancelLinked =
@@ -79,7 +174,8 @@ export default async function PostSaleAdminPage() {
                     ) : (
                       request.order.orderNumber
                     )}{" "}
-                    · {request.kind} · {request.status}
+                    · {returnKindLabels[request.kind] ?? request.kind} ·{" "}
+                    {returnStatusLabels[request.status] ?? request.status}
                   </h3>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {request.order.emailSnapshot} · {dateFormatter.format(request.createdAt)} ·
@@ -115,7 +211,8 @@ export default async function PostSaleAdminPage() {
                 </ul>
                 {request.refund ? (
                   <p className="text-sm">
-                    Reembolso {request.refund.status} · {formatCopCents(request.refund.totalCents)}
+                    Reembolso: {refundStatusLabels[request.refund.status] ?? request.refund.status}{" "}
+                    · {formatCopCents(request.refund.totalCents)}
                   </p>
                 ) : null}
                 {canWrite ? (
@@ -138,9 +235,9 @@ export default async function PostSaleAdminPage() {
           Garantías por serial
         </h2>
         {queue.warranties.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
-            No hay garantías registradas.
-          </p>
+          <Empty>
+            {hasFilters ? "No hay garantías con estos criterios." : "No hay garantías registradas."}
+          </Empty>
         ) : (
           queue.warranties.map((claim) => {
             const canCancelLinked =
@@ -172,7 +269,8 @@ export default async function PostSaleAdminPage() {
                     ) : (
                       claim.order.orderNumber
                     )}{" "}
-                    · {claim.remedy} · {claim.status}
+                    · {warrantyRemedyLabels[claim.remedy] ?? claim.remedy} ·{" "}
+                    {warrantyStatusLabels[claim.status] ?? claim.status}
                   </h3>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {claim.orderItem.titleSnapshot} · Serial {claim.serializedUnit.serial}
@@ -183,7 +281,8 @@ export default async function PostSaleAdminPage() {
                 <p className="text-sm whitespace-pre-wrap">{claim.issueDescription}</p>
                 {claim.refund ? (
                   <p className="text-sm">
-                    Reembolso {claim.refund.status} · {formatCopCents(claim.refund.totalCents)}
+                    Reembolso: {refundStatusLabels[claim.refund.status] ?? claim.refund.status} ·{" "}
+                    {formatCopCents(claim.refund.totalCents)}
                   </p>
                 ) : null}
                 {canWrite ? (
@@ -206,9 +305,9 @@ export default async function PostSaleAdminPage() {
           PQR y SLA
         </h2>
         {queue.tickets.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
-            No hay PQR registradas.
-          </p>
+          <Empty>
+            {hasFilters ? "No hay PQR con estos criterios." : "No hay PQR registradas."}
+          </Empty>
         ) : (
           queue.tickets.map((ticket) => (
             <article
@@ -217,7 +316,21 @@ export default async function PostSaleAdminPage() {
             >
               <div>
                 <h3 className="font-semibold">
-                  {ticket.ticketNumber} · {ticket.status}
+                  {ticket.ticketNumber} ·{" "}
+                  {supportTicketStatusLabels[ticket.status] ?? ticket.status}
+                  {ticket.order ? (
+                    <>
+                      {" "}
+                      ·{" "}
+                      {canReadOrders ? (
+                        <Link href={`/admin/pedidos/${ticket.order.id}`} className="underline">
+                          {ticket.order.orderNumber}
+                        </Link>
+                      ) : (
+                        ticket.order.orderNumber
+                      )}
+                    </>
+                  ) : null}
                 </h3>
                 <p className="mt-1 text-sm text-muted-foreground">
                   {ticket.subject} · {ticket.contactEmailSnapshot} · SLA{" "}
@@ -248,6 +361,23 @@ export default async function PostSaleAdminPage() {
           ))
         )}
       </section>
+      {page > 1 || hasMore ? (
+        <nav aria-label="Paginación de posventa" className="flex items-center justify-between">
+          <span className="text-sm text-muted-foreground">Página {page}</span>
+          <div className="flex gap-2">
+            {page > 1 ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={postSaleHref(q, estado, page - 1)}>Anterior</Link>
+              </Button>
+            ) : null}
+            {hasMore ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={postSaleHref(q, estado, page + 1)}>Siguiente</Link>
+              </Button>
+            ) : null}
+          </div>
+        </nav>
+      ) : null}
     </div>
   );
 }

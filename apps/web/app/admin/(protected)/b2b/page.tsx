@@ -20,6 +20,7 @@ import {
 } from "@/components/admin/b2b-price-list-forms";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { bogotaInputValue } from "@/lib/admin-pricing-presenters";
 import { single } from "@/lib/admin-search-params";
 import { b2bService } from "@/lib/b2b";
@@ -29,11 +30,11 @@ import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Canal B2B" };
 
-const querySchema = z.object({
-  status: z.enum(["NEW", "QUALIFYING", "PROPOSAL_SENT", "WON", "LOST", "CANCELLED"]).optional(),
-  page: z.coerce.number().int().min(1).max(100_000).default(1),
-  lista: z.string().uuid().optional(),
-});
+const statusSchema = z
+  .enum(["NEW", "QUALIFYING", "PROPOSAL_SENT", "WON", "LOST", "CANCELLED"])
+  .optional();
+const pageSchema = z.coerce.number().int().min(1).max(100_000);
+const listaSchema = z.string().uuid().optional();
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "medium",
@@ -65,46 +66,79 @@ function formView(record: {
 export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">) {
   const session = await requireAdminPage("b2b:read");
   const raw = await searchParams;
-  const parsed = querySchema.safeParse({
-    status: single(raw.status) || undefined,
-    page: single(raw.page) || 1,
-    lista: single(raw.lista) || undefined,
-  });
-  const query = parsed.success ? parsed.data : { page: 1 as const };
+  const rawStatus = single(raw.status) || undefined;
+  const rawPage = single(raw.page);
+  const rawLista = single(raw.lista) || undefined;
+
+  const parsedStatus = statusSchema.safeParse(rawStatus);
+  const parsedPage = rawPage
+    ? pageSchema.safeParse(rawPage)
+    : ({ success: true, data: 1 } as const);
+  const parsedLista = listaSchema.safeParse(rawLista);
+  const paramsValid = parsedStatus.success && parsedPage.success && parsedLista.success;
+
+  const validStatus = parsedStatus.success ? parsedStatus.data : undefined;
+  const requestedPage = parsedPage.success ? parsedPage.data : 1;
+  const validLista = parsedLista.success ? parsedLista.data : undefined;
+
   const db = getDatabase();
   const service = b2bService(db);
   const canWrite = hasAdminPermission(session.profile.role, "b2b:write");
-  const [opportunities, lists, organizations] = await Promise.all([
+  const [initialOpportunities, lists, organizations] = await Promise.all([
     service.listOpportunities({
-      page: query.page,
+      page: requestedPage,
       pageSize: 25,
-      ...(query.status ? { status: query.status } : {}),
+      ...(validStatus ? { status: validStatus } : {}),
     }),
     service.listPriceLists(),
     crmService(db).listOrganizations(),
   ]);
-  const selectedResult =
-    parsed.success && query.lista
-      ? await service.getPriceList(query.lista).then(
-          (record) => ({ record, notFound: false }),
-          (error: unknown) => {
-            if (error instanceof B2bError && error.code === "NOT_FOUND") {
-              return { record: null, notFound: true };
-            }
-            throw error;
-          },
-        )
-      : null;
+  const totalPages = Math.max(
+    1,
+    Math.ceil(initialOpportunities.total / initialOpportunities.pageSize),
+  );
+  const clampedPage = Math.min(requestedPage, totalPages);
+  const opportunities =
+    clampedPage !== initialOpportunities.page
+      ? await service.listOpportunities({
+          page: clampedPage,
+          pageSize: 25,
+          ...(validStatus ? { status: validStatus } : {}),
+        })
+      : initialOpportunities;
+  const selectedResult = validLista
+    ? await service.getPriceList(validLista).then(
+        (record) => ({ record, notFound: false }),
+        (error: unknown) => {
+          if (error instanceof B2bError && error.code === "NOT_FOUND") {
+            return { record: null, notFound: true };
+          }
+          throw error;
+        },
+      )
+    : null;
   const selected = selectedResult?.record ?? null;
   const selectedNotFound = selectedResult?.notFound ?? false;
   const activeLists = lists.filter((list) => list.status === "ACTIVE").map(formView);
-  const totalPages = Math.max(1, Math.ceil(opportunities.total / opportunities.pageSize));
   const pageHref = (page: number) => {
     const params = new URLSearchParams();
-    if (query.status) params.set("status", query.status);
+    if (validStatus) params.set("status", validStatus);
     params.set("page", String(page));
+    if (validLista) params.set("lista", validLista);
     return `/admin/b2b?${params.toString()}`;
   };
+  const listHref = (listId: string) => {
+    const params = new URLSearchParams();
+    if (validStatus) params.set("status", validStatus);
+    if (opportunities.page > 1) params.set("page", String(opportunities.page));
+    params.set("lista", listId);
+    return `/admin/b2b?${params.toString()}`;
+  };
+  const clearFilterParams = new URLSearchParams();
+  if (validLista) clearFilterParams.set("lista", validLista);
+  const clearFilterHref = clearFilterParams.size
+    ? `/admin/b2b?${clearFilterParams.toString()}`
+    : "/admin/b2b";
   return (
     <div className="space-y-10">
       <div>
@@ -131,14 +165,15 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
               Página {opportunities.page} de {totalPages}.
             </p>
           </div>
-          <form className="flex items-end gap-2" action="/admin/b2b">
+          <form className="flex flex-wrap items-end gap-2" action="/admin/b2b">
+            {validLista ? <input type="hidden" name="lista" value={validLista} /> : null}
             <div className="space-y-2">
               <Label htmlFor="b2b-status">Estado</Label>
-              <select
+              <Select
                 id="b2b-status"
                 name="status"
-                defaultValue={query.status ?? ""}
-                className="h-11 rounded-md border border-input bg-background px-3 text-sm"
+                fullWidth={false}
+                defaultValue={validStatus ?? ""}
               >
                 <option value="">Todos</option>
                 {Object.entries(opportunityStatusLabels).map(([value, label]) => (
@@ -146,14 +181,22 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
                     {label}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
             <Button type="submit" variant="outline">
               Filtrar
             </Button>
+            {validStatus || !paramsValid ? (
+              <Link
+                href={clearFilterHref}
+                className="inline-flex h-11 items-center px-2 text-sm text-primary underline"
+              >
+                Limpiar filtro
+              </Link>
+            ) : null}
           </form>
         </div>
-        {!parsed.success ? (
+        {!paramsValid ? (
           <p role="alert" className="text-sm text-destructive">
             Los filtros o la página no son válidos.
           </p>
@@ -180,7 +223,7 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
                     {opportunityStatusLabels[opportunity.status]}
                   </span>
                 </div>
-                <p className="mt-2 text-sm text-muted-foreground">
+                <p className="mt-2 text-sm break-all text-muted-foreground">
                   {opportunity.contact.givenName} {opportunity.contact.familyName} ·{" "}
                   {opportunity.contact.email}
                 </p>
@@ -198,24 +241,29 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
             ))}
           </div>
         )}
-        <div className="flex gap-4">
-          {opportunities.page > 1 ? (
-            <Link
-              className="text-sm text-primary underline"
-              href={pageHref(opportunities.page - 1)}
-            >
-              Página anterior
-            </Link>
-          ) : null}
-          {opportunities.page < totalPages ? (
-            <Link
-              className="text-sm text-primary underline"
-              href={pageHref(opportunities.page + 1)}
-            >
-              Página siguiente
-            </Link>
-          ) : null}
-        </div>
+        {opportunities.page > 1 || opportunities.page < totalPages ? (
+          <nav
+            aria-label="Paginación de oportunidades B2B"
+            className="flex flex-wrap items-center gap-4"
+          >
+            {opportunities.page > 1 ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={pageHref(opportunities.page - 1)}
+              >
+                Página anterior
+              </Link>
+            ) : null}
+            {opportunities.page < totalPages ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={pageHref(opportunities.page + 1)}
+              >
+                Página siguiente
+              </Link>
+            ) : null}
+          </nav>
+        ) : null}
       </section>
       <section aria-labelledby="b2b-price-lists" className="space-y-4">
         <div>
@@ -236,7 +284,7 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
             {lists.map((list) => (
               <Link
                 key={list.id}
-                href={`/admin/b2b?lista=${list.id}`}
+                href={listHref(list.id)}
                 className="rounded-xl border border-border bg-card p-4 hover:border-primary"
               >
                 <div className="flex items-center justify-between gap-2">

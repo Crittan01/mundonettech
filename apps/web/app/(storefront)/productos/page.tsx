@@ -17,6 +17,11 @@ export const metadata: Metadata = {
     title: "Catálogo de tecnología",
     description: "Explora computadores, audio, energía y accesorios con disponibilidad real.",
   },
+  twitter: {
+    card: "summary",
+    title: "Catálogo de tecnología",
+    description: "Explora computadores, audio, energía y accesorios con disponibilidad real.",
+  },
 };
 
 const title = "Catálogo de tecnología";

@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { AdminLoginForm } from "@/components/admin/admin-auth-forms";
 import { AuthShell } from "@/components/auth/auth-shell";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
@@ -35,6 +37,17 @@ export default async function AdminLoginPage({ searchParams }: PageProps<"/admin
     <AuthShell
       title="Acceso administrativo"
       description="Ingresa con tu cuenta autorizada. Después verificaremos tu autenticador."
+      footer={
+        <p>
+          ¿Recibiste un código de invitación?{" "}
+          <Link
+            href="/admin/invitacion"
+            className="font-medium text-primary underline underline-offset-4"
+          >
+            Activa tu invitación
+          </Link>
+        </p>
+      }
     >
       {notice ? (
         <p

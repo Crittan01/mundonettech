@@ -66,6 +66,7 @@ function Field({
   type = "text",
   maxLength,
   min,
+  inputMode,
 }: {
   id: string;
   name: string;
@@ -76,6 +77,7 @@ function Field({
   type?: string;
   maxLength?: number;
   min?: string;
+  inputMode?: "numeric" | "text";
 }) {
   return (
     <div className="space-y-2">
@@ -90,6 +92,7 @@ function Field({
         disabled={disabled}
         maxLength={maxLength}
         min={min}
+        inputMode={inputMode}
       />
     </div>
   );
@@ -151,6 +154,7 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
           value={values?.unitPriceCents ?? defaults.unitPriceCents}
           required
           maxLength={19}
+          inputMode="numeric"
         />
       </div>
       <label className="flex min-h-11 items-center gap-3 text-sm font-medium">
@@ -254,6 +258,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           required={isPercentage}
           disabled={!isPercentage}
           maxLength={5}
+          inputMode="numeric"
         />
         <Field
           id="coupon-amount"
@@ -263,6 +268,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           required={!isPercentage}
           disabled={isPercentage}
           maxLength={19}
+          inputMode="numeric"
         />
         <Field
           id="coupon-cap"
@@ -270,6 +276,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           label="Tope de descuento (centavos COP)"
           value={get("maximumDiscountCents")}
           maxLength={19}
+          inputMode="numeric"
         />
         <Field
           id="coupon-minimum"
@@ -277,6 +284,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           label="Subtotal mínimo (centavos COP)"
           value={get("minimumSubtotalCents")}
           maxLength={19}
+          inputMode="numeric"
         />
         <Field
           id="coupon-total-limit"
@@ -372,6 +380,7 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           label="Precio base (centavos COP; vacío usa suma de componentes y descuento 0)"
           value={get("priceCents")}
           maxLength={19}
+          inputMode="numeric"
         />
         <Field
           id="bundle-discount"
@@ -379,6 +388,7 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           label="Descuento sobre el precio base (requiere definir precio base)"
           value={get("discountCents")}
           maxLength={19}
+          inputMode="numeric"
         />
       </div>
       <div className="space-y-2">

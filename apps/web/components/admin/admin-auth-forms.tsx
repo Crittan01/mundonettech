@@ -26,8 +26,9 @@ interface SecurityProps {
 
 export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(loginAdminAction, initialActionState);
+  const [email, setEmail] = useState("");
   return (
-    <form action={action} className="space-y-5">
+    <form action={action} aria-busy={pending} className="space-y-5">
       <div className="space-y-2">
         <Label htmlFor="email">Correo corporativo</Label>
         <Input
@@ -37,6 +38,9 @@ export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
           autoComplete="username"
           required
           maxLength={320}
+          value={email}
+          onChange={(event) => setEmail(event.target.value)}
+          disabled={pending}
         />
       </div>
       <div className="space-y-2">
@@ -48,6 +52,7 @@ export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
           autoComplete="current-password"
           required
           maxLength={128}
+          disabled={pending}
         />
       </div>
       <TurnstileField siteKey={siteKey} nonce={nonce} action="admin_login" state={state} />
@@ -59,7 +64,13 @@ export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
   );
 }
 
-export function RecoveryCodes({ codes }: { codes: string[] }) {
+export function RecoveryCodes({
+  codes,
+  returnHref = "/admin",
+}: {
+  codes: readonly string[];
+  returnHref?: string;
+}) {
   const [confirmed, setConfirmed] = useState(false);
   const [copyMessage, setCopyMessage] = useState("");
   async function copy() {
@@ -105,21 +116,23 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
       <label className="flex items-start gap-2 text-sm">
         <input
           type="checkbox"
-          className="mt-1"
+          className="mt-1 size-4 shrink-0 accent-primary"
           checked={confirmed}
           onChange={(event) => setConfirmed(event.target.checked)}
         />
         Guardé los códigos en un lugar seguro.
       </label>
-      <Button asChild disabled={!confirmed}>
-        <Link
-          aria-disabled={!confirmed}
-          tabIndex={confirmed ? 0 : -1}
-          href={confirmed ? "/admin" : "#"}
-        >
+      {confirmed ? (
+        <Button asChild>
+          <Link href={returnHref} prefetch={false}>
+            Continuar al panel
+          </Link>
+        </Button>
+      ) : (
+        <Button type="button" disabled>
           Continuar al panel
-        </Link>
-      </Button>
+        </Button>
+      )}
     </section>
   );
 }

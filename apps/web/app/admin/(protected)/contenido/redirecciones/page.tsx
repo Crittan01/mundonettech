@@ -7,6 +7,7 @@ import { CreateRedirectForm, EditRedirectForm } from "@/components/admin/redirec
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -17,6 +18,15 @@ const bogotaFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
   timeZone: "America/Bogota",
 });
+
+function redirectHref(q: string, active: boolean | undefined, page: number): string {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (active !== undefined) params.set("active", String(active));
+  if (page > 1) params.set("page", String(page));
+  const qs = params.toString();
+  return qs ? `/admin/contenido/redirecciones?${qs}` : "/admin/contenido/redirecciones";
+}
 
 export default async function RedirectsPage({
   searchParams,
@@ -65,8 +75,9 @@ export default async function RedirectsPage({
         </p>
       )}
       <form
+        key={`${q}|${active === undefined ? "" : String(active)}`}
         action="/admin/contenido/redirecciones"
-        className="flex flex-wrap gap-3 rounded-xl border border-border bg-card p-4"
+        className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
       >
         <label htmlFor="redirect-search" className="sr-only">
           Buscar redirecciones
@@ -77,23 +88,32 @@ export default async function RedirectsPage({
           defaultValue={q}
           maxLength={200}
           placeholder="Ruta de origen o destino"
+          className="min-w-60 flex-1"
         />
-        <select
+        <Select
           name="active"
           defaultValue={active === undefined ? "" : String(active)}
           aria-label="Filtrar por estado"
-          className="h-11 rounded-md border border-input bg-background px-3 text-sm"
+          fullWidth={false}
         >
           <option value="">Todos los estados</option>
           <option value="true">Activas</option>
           <option value="false">Inactivas</option>
-        </select>
+        </Select>
         <Button type="submit" variant="outline">
           Filtrar
         </Button>
+        {q || active !== undefined ? (
+          <Link
+            href="/admin/contenido/redirecciones"
+            className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+          >
+            Limpiar
+          </Link>
+        ) : null}
       </form>
       <p role="status" className="text-sm text-muted-foreground">
-        {result.total} redirecciones
+        {result.total} {result.total === 1 ? "redirección" : "redirecciones"}
       </p>
       {result.items.length ? (
         <section aria-label="Redirecciones registradas" className="space-y-4">
@@ -137,31 +157,25 @@ export default async function RedirectsPage({
           </p>
         </section>
       )}
-      <nav aria-label="Paginación de redirecciones" className="flex items-center justify-between">
-        <span className="text-sm text-muted-foreground">
-          Página {result.page} de {result.totalPages}
-        </span>
-        <div className="flex gap-2">
-          {result.page > 1 ? (
-            <Button asChild variant="outline" size="sm">
-              <Link
-                href={`/admin/contenido/redirecciones?q=${encodeURIComponent(q)}&active=${active ?? ""}&page=${result.page - 1}`}
-              >
-                Anterior
-              </Link>
-            </Button>
-          ) : null}
-          {result.page < result.totalPages ? (
-            <Button asChild variant="outline" size="sm">
-              <Link
-                href={`/admin/contenido/redirecciones?q=${encodeURIComponent(q)}&active=${active ?? ""}&page=${result.page + 1}`}
-              >
-                Siguiente
-              </Link>
-            </Button>
-          ) : null}
-        </div>
-      </nav>
+      {result.total > 0 ? (
+        <nav aria-label="Paginación de redirecciones" className="flex items-center justify-between">
+          <span className="text-sm text-muted-foreground">
+            Página {result.page} de {result.totalPages}
+          </span>
+          <div className="flex gap-2">
+            {result.page > 1 ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={redirectHref(q, active, result.page - 1)}>Anterior</Link>
+              </Button>
+            ) : null}
+            {result.page < result.totalPages ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={redirectHref(q, active, result.page + 1)}>Siguiente</Link>
+              </Button>
+            ) : null}
+          </div>
+        </nav>
+      ) : null}
     </div>
   );
 }

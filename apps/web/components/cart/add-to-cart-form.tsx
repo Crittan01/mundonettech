@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState, useEffect, useSyncExternalStore } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
@@ -25,12 +26,30 @@ function useCartMetric(state: ActionState) {
   }, [state]);
 }
 
+function CartFeedback({ state }: { state: ActionState }) {
+  if (state.status === "success") {
+    return (
+      <div className="flex flex-wrap items-center gap-3">
+        <FormMessage state={state} />
+        <Link
+          href="/carrito"
+          prefetch={false}
+          className="inline-flex min-h-11 items-center rounded-sm text-sm font-semibold text-primary underline underline-offset-4 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          Ver carrito
+        </Link>
+      </div>
+    );
+  }
+  return <FormMessage state={state} />;
+}
+
 export function AddToCartForm({ variantId, available }: { variantId: string; available: number }) {
   const [state, action, pending] = useActionState(addCartVariantAction, initialActionState);
   const hydrated = useHydrated();
   useCartMetric(state);
   return (
-    <form action={action} className="space-y-3 border-t border-border pt-4">
+    <form action={action} aria-busy={pending} className="space-y-3 border-t border-border pt-4">
       <input type="hidden" name="variantId" value={variantId} />
       <div className="flex flex-wrap items-end gap-3">
         <div className="w-28 space-y-2">
@@ -52,23 +71,36 @@ export function AddToCartForm({ variantId, available }: { variantId: string; ava
           {pending ? "Añadiendo…" : "Añadir al carrito"}
         </Button>
       </div>
-      <FormMessage state={state} />
+      <CartFeedback state={state} />
     </form>
   );
 }
 
-export function AddBundleToCartForm({ bundleId }: { bundleId: string }) {
+export function AddBundleToCartForm({
+  bundleId,
+  bundleName,
+}: {
+  bundleId: string;
+  bundleName?: string;
+}) {
   const [state, action, pending] = useActionState(addCartBundleAction, initialActionState);
   const hydrated = useHydrated();
   useCartMetric(state);
   return (
-    <form action={action} className="mt-4 space-y-2">
+    <form action={action} aria-busy={pending} className="mt-4 space-y-2">
       <input type="hidden" name="bundleId" value={bundleId} />
       <input type="hidden" name="quantity" value="1" />
       <Button type="submit" variant="outline" disabled={!hydrated || pending}>
-        {pending ? "Añadiendo…" : "Añadir paquete"}
+        {pending ? (
+          "Añadiendo…"
+        ) : (
+          <>
+            Añadir paquete
+            {bundleName ? <span className="sr-only">: {bundleName}</span> : null}
+          </>
+        )}
       </Button>
-      <FormMessage state={state} />
+      <CartFeedback state={state} />
     </form>
   );
 }

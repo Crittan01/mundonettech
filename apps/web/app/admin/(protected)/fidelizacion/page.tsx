@@ -1,10 +1,12 @@
 import {
   abandonedCartReminderOutcomeLabels,
   formatCopCents,
+  hasAdminPermission,
   loyaltyTxnTypeLabels,
   referralRejectionReasonLabels,
   referralStatusLabels,
 } from "@mundonettech/core";
+import Link from "next/link";
 
 import { EmptyState } from "@/components/admin/empty-state";
 import { growthService } from "@/lib/growth";
@@ -26,6 +28,7 @@ const abandonedStatusLabels = {
 
 export default async function GrowthAdminPage() {
   const session = await requireAdminPage("crm:read");
+  const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
   const overview = await growthService().getAdminOverview(session.profile.id);
   return (
     <div className="space-y-10">
@@ -35,6 +38,22 @@ export default async function GrowthAdminPage() {
           Libro de puntos, referidos verificados y recuperación de carritos. Vista protegida por MFA
           y permisos CRM; los correos permanecen enmascarados en el DTO de servidor.
         </p>
+        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+          <Link className="text-primary underline" href="/admin/crm">
+            Abrir consola CRM 360°
+          </Link>
+          <Link className="text-primary underline" href="/admin/segmentos">
+            Administrar segmentos
+          </Link>
+          <Link className="text-primary underline" href="/admin/lifecycle">
+            Administrar journeys
+          </Link>
+          {canReadFinance ? (
+            <Link className="text-primary underline" href="/admin/analitica-rfm">
+              Ver analítica RFM/LTV
+            </Link>
+          ) : null}
+        </div>
       </div>
       <dl className="grid gap-4 sm:grid-cols-3">
         <div className="rounded-xl border border-border bg-card p-5">
@@ -63,7 +82,12 @@ export default async function GrowthAdminPage() {
         {overview.ledger.length === 0 ? (
           <EmptyState>No hay movimientos de lealtad registrados todavía.</EmptyState>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <div
+            role="region"
+            aria-label="Tabla de movimientos recientes de lealtad"
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
             <table className="w-full min-w-[58rem] text-left text-sm">
               <caption className="sr-only">Últimos movimientos del libro de lealtad</caption>
               <thead className="border-b border-border">
@@ -114,7 +138,12 @@ export default async function GrowthAdminPage() {
         {overview.referrals.length === 0 ? (
           <EmptyState>No hay atribuciones de referidos registradas.</EmptyState>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <div
+            role="region"
+            aria-label="Tabla de referidos verificables"
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
             <table className="w-full min-w-[58rem] text-left text-sm">
               <caption className="sr-only">
                 Atribuciones y recompensas del programa de referidos
@@ -169,7 +198,12 @@ export default async function GrowthAdminPage() {
         {overview.abandonedCarts.length === 0 ? (
           <EmptyState>No hay carritos abandonados o recuperados registrados.</EmptyState>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <div
+            role="region"
+            aria-label="Tabla de carritos y recordatorios"
+            tabIndex={0}
+            className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
             <table className="w-full min-w-[62rem] text-left text-sm">
               <caption className="sr-only">Estado de carritos y recuperación por correo</caption>
               <thead className="border-b border-border">

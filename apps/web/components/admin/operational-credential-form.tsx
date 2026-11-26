@@ -1,11 +1,13 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import {
   createOperationalCredentialAction,
   rotateOperationalCredentialAction,
@@ -134,7 +136,15 @@ export function OperationalCredentialForm({
     credential ? rotateOperationalCredentialAction : createOperationalCredentialAction,
     initialActionState,
   );
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
   const [dismissedState, setDismissedState] = useState<ActionState | null>(null);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   if (!pending && state.status === "success" && dismissedState !== state) {
     return (
       <div className="space-y-3 rounded-lg border border-success bg-card p-4">
@@ -153,26 +163,34 @@ export function OperationalCredentialForm({
   );
   const values = state.values?.provider === provider ? state.values : undefined;
   return (
-    <form action={action} className="space-y-5" aria-busy={pending}>
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-5"
+      aria-busy={pending}
+    >
       {credential ? <input type="hidden" name="credentialId" value={credential.id} /> : null}
       <input type="hidden" name="provider" value={provider} />
       <div className="grid gap-4 sm:grid-cols-2">
         {!credential ? (
           <div className="space-y-2">
             <Label htmlFor="operational-provider">Proveedor</Label>
-            <select
+            <Select
               id="operational-provider"
               value={provider}
               onChange={(event) => setProvider(event.target.value as Provider)}
               disabled={pending}
-              className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
             >
               <option value="aveonline">Aveonline</option>
               <option value="resend">Resend</option>
               <option value="dian">Proveedor autorizado DIAN</option>
               <option value="gemini">Gemini para Copiloto B2B</option>
               <option value="meta">Meta Conversions API</option>
-            </select>
+            </Select>
           </div>
         ) : null}
         {!credential ? (
@@ -203,12 +221,16 @@ export function OperationalCredentialForm({
         return (
           <div key={`${provider}-${field.name}`}>
             {heading ? (
-              <h3 className="border-t border-border pt-4 font-semibold">{field.section}</h3>
+              credential ? (
+                <h4 className="border-t border-border pt-4 font-semibold">{field.section}</h4>
+              ) : (
+                <h3 className="border-t border-border pt-4 font-semibold">{field.section}</h3>
+              )
             ) : null}
             <div className="mt-3 space-y-2">
               <Label htmlFor={id}>{field.label}</Label>
               {field.multiline ? (
-                <textarea
+                <Textarea
                   id={id}
                   name={field.name}
                   rows={8}
@@ -218,7 +240,7 @@ export function OperationalCredentialForm({
                   defaultValue={defaultValue}
                   disabled={pending}
                   required={required}
-                  className="min-h-32 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm"
+                  className="min-h-32 font-mono text-sm"
                 />
               ) : (
                 <Input

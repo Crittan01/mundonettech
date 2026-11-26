@@ -37,7 +37,7 @@ async function perform(
     revalidatePath("/carrito");
     return actionSuccess(success);
   } catch (error) {
-    return actionError(cartMutationMessage(error), values);
+    return actionError(cartMutationMessage(error, "customer"), values);
   }
 }
 
@@ -181,7 +181,7 @@ export async function claimAssistedCartAction(
   try {
     await claimAssistedCart(token);
   } catch (error) {
-    return actionError(cartMutationMessage(error), values);
+    return actionError(cartMutationMessage(error, "customer"), values);
   }
   redirect("/carrito?venta-asistida=aceptada");
 }

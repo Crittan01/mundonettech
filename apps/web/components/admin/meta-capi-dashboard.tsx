@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import type { MetaCapiEventStatus } from "@mundonettech/db";
 import type { MetaCapiEventView } from "@mundonettech/integrations";
@@ -9,8 +9,9 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { reconcileMetaCapiAction } from "@/lib/actions/admin-meta-capi";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 const statusLabels: Record<MetaCapiEventStatus, string> = {
   PENDING: "Pendiente",
@@ -53,12 +54,25 @@ function money(valueCents: string): string {
 
 function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
   const [state, action, pending] = useActionState(reconcileMetaCapiAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
   const defaultResolution =
     event.status === "UNCERTAIN" ? "CONFIRMED_SENT" : event.retryable ? "RETRY" : "DISCARD";
   const [resolution, setResolution] = useState<string>(defaultResolution);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
     <form
-      action={action}
+      ref={formRef}
+      onSubmit={(submitEvent) => {
+        submitEvent.preventDefault();
+        const formData = new FormData(submitEvent.currentTarget);
+        startTransition(() => action(formData));
+      }}
       className="mt-4 space-y-3 rounded-lg bg-secondary/40 p-4"
       aria-busy={pending}
     >
@@ -66,12 +80,11 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] sm:items-end">
         <div className="space-y-2">
           <Label htmlFor={`resolution-${event.id}`}>Resolución</Label>
-          <select
+          <Select
             id={`resolution-${event.id}`}
             name="resolution"
             value={resolution}
             onChange={(changeEvent) => setResolution(changeEvent.target.value)}
-            className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
             disabled={pending}
           >
             {event.status === "UNCERTAIN" ? (
@@ -79,7 +92,7 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
             ) : null}
             {event.retryable ? <option value="RETRY">Autorizar reintento idéntico</option> : null}
             <option value="DISCARD">Descartar sin reenvío</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`reference-${event.id}`}>Referencia de conciliación</Label>

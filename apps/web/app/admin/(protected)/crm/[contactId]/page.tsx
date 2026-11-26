@@ -24,6 +24,12 @@ import {
   CrmTaskForm,
   CrmVerificationForm,
 } from "@/components/admin/crm-forms";
+import {
+  crmSourceLabels,
+  fulfillmentStatusLabels,
+  orderStatusLabels,
+  paymentStatusLabels,
+} from "@/lib/admin-presenters";
 import { bogotaInputValue } from "@/lib/admin-pricing-presenters";
 import { crmService } from "@/lib/crm";
 import { getDatabase } from "@/lib/db";
@@ -41,26 +47,6 @@ const customerStatusLabels: Record<string, string> = {
   ACTIVE: "Activa",
   GUEST: "Invitado",
   ANONYMIZED: "Anonimizada",
-};
-
-const orderStatusLabels: Record<string, string> = {
-  PENDING: "Pendiente",
-  CONFIRMED: "Confirmado",
-  CANCELLED: "Cancelado",
-};
-
-const paymentStatusLabels: Record<string, string> = {
-  UNPAID: "Sin pago",
-  PARTIALLY_PAID: "Pago parcial",
-  PAID: "Pagado",
-  PARTIALLY_REFUNDED: "Reembolso parcial",
-  REFUNDED: "Reembolsado",
-};
-
-const fulfillmentStatusLabels: Record<string, string> = {
-  UNFULFILLED: "Sin despachar",
-  PARTIALLY_FULFILLED: "Despacho parcial",
-  FULFILLED: "Despachado",
 };
 
 export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[contactId]">) {
@@ -90,13 +76,13 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
         <h1 className="mt-3 text-3xl font-bold">
           {contact.givenName} {contact.familyName}
         </h1>
-        <p className="mt-2 text-muted-foreground">
+        <p className="mt-2 break-all text-muted-foreground">
           {contact.email} · {contact.phoneE164} · {crmContactStatusLabels[contact.status]} ·{" "}
           {crmVerificationLevelLabels[contact.verificationLevel]}
         </p>
         <p className="mt-1 text-sm">
-          {contact.organization?.legalName ?? "Sin organización"} · fuente {contact.source} ·
-          versión {contact.version}
+          {contact.organization?.legalName ?? "Sin organización"} · fuente{" "}
+          {crmSourceLabels[contact.source] ?? contact.source} · versión {contact.version}
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           Revisión de retención: {dateFormatter.format(contact.retentionReviewAt)}
@@ -130,7 +116,13 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
           </p>
         ) : null}
       </div>
-      {(canWrite || canSuppress) && active ? <CmsStepUp session={session} /> : null}
+      {(canWrite || canSuppress) && active ? (
+        <CmsStepUp session={session} />
+      ) : !canWrite && !canSuppress ? (
+        <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+          Vista de solo lectura para tu rol actual.
+        </p>
+      ) : null}
       <section aria-labelledby="contact-identities" className="space-y-3">
         <h2 id="contact-identities" className="text-2xl font-semibold">
           Identidades verificables
@@ -140,7 +132,10 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
         ) : (
           <ul className="grid gap-2 sm:grid-cols-2">
             {contact.identities.map((identity) => (
-              <li key={identity.id} className="rounded-lg border border-border bg-card p-3 text-sm">
+              <li
+                key={identity.id}
+                className="rounded-lg border border-border bg-card p-3 text-sm break-all"
+              >
                 {crmIdentityKindLabels[identity.kind]} · {identity.normalizedValue}
                 <br />
                 <span className="text-muted-foreground">
@@ -311,8 +306,8 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
           </p>
         ) : (
           <div className="space-y-4">
-            <p className="text-sm">
-              Comprador {contact.customer.id} ·{" "}
+            <p className="text-sm break-all">
+              Comprador <span className="font-mono">{contact.customer.id}</span> ·{" "}
               {customerStatusLabels[contact.customer.status] ?? contact.customer.status} ·{" "}
               {contact.customer.orders.length} pedidos recientes ·{" "}
               {contact.customer.returnRequests.length} devoluciones ·{" "}

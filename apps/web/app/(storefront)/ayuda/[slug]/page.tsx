@@ -59,16 +59,33 @@ export default async function HelpArticlePage({ params }: PageProps<"/ayuda/[slu
     <article className="mx-auto max-w-4xl space-y-10">
       <JsonLd data={breadcrumbs} />
       <nav aria-label="Migas de pan" className="text-sm text-muted-foreground">
-        <Link href="/ayuda" className="underline underline-offset-4">
-          Centro de ayuda
-        </Link>
-        <span aria-hidden="true"> / </span>
-        <Link
-          href={`/ayuda?categoria=${article.category}`}
-          className="underline underline-offset-4"
-        >
-          {category?.label}
-        </Link>
+        <ol className="flex flex-wrap items-center gap-2">
+          <li>
+            <Link
+              href="/ayuda"
+              className="rounded-sm underline underline-offset-4 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Centro de ayuda
+            </Link>
+          </li>
+          {category ? (
+            <>
+              <li aria-hidden="true">/</li>
+              <li>
+                <Link
+                  href={`/ayuda?categoria=${article.category}`}
+                  className="rounded-sm underline underline-offset-4 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {category.label}
+                </Link>
+              </li>
+            </>
+          ) : null}
+          <li aria-hidden="true">/</li>
+          <li aria-current="page" className="text-foreground">
+            {article.title}
+          </li>
+        </ol>
       </nav>
       <header className="space-y-4">
         <p className="text-sm font-semibold text-primary">{category?.label}</p>

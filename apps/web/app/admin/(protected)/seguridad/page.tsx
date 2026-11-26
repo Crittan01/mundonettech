@@ -1,4 +1,8 @@
+import { hasAdminPermission } from "@mundonettech/core";
+import Link from "next/link";
+
 import { SecurityManager } from "@/components/admin/security-manager";
+import { securityEventLabels } from "@/lib/admin-presenters";
 import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
@@ -12,6 +16,8 @@ const formatter = new Intl.DateTimeFormat("es-CO", {
 
 export default async function AdminSecurityPage() {
   const session = await requireAdminPage("security:read_own");
+  const canReadUsers = hasAdminPermission(session.profile.role, "users:read");
+  const canReadAudit = hasAdminPermission(session.profile.role, "audit:read");
   const db = getDatabase();
   const now = await getDatabaseClock(db);
   const [factors, remainingCodes, events] = await Promise.all([
@@ -36,6 +42,25 @@ export default async function AdminSecurityPage() {
         <p className="mt-2 text-muted-foreground">
           Administra tu segundo factor y revisa tu propia actividad.
         </p>
+        {canReadUsers || canReadAudit ? (
+          <div className="mt-4 flex flex-wrap gap-4 text-sm">
+            {canReadUsers ? (
+              <Link className="text-primary underline" href="/admin/usuarios">
+                Administrar usuarios
+              </Link>
+            ) : null}
+            {canReadAudit ? (
+              <>
+                <Link className="text-primary underline" href="/admin/auditoria">
+                  Consultar registros de auditoría
+                </Link>
+                <Link className="text-primary underline" href="/admin/salud">
+                  Ver estado de salud y respaldos
+                </Link>
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <section className="grid gap-4 sm:grid-cols-3">
         <article className="rounded-xl border border-border bg-card p-5">
@@ -56,7 +81,10 @@ export default async function AdminSecurityPage() {
       {factor ? (
         <SecurityManager factorId={factor.id} recent={recent} />
       ) : (
-        <p role="alert">
+        <p
+          role="alert"
+          className="rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
+        >
           No hay un autenticador verificado. Cierra sesión y completa el enrolamiento de nuevo.
         </p>
       )}
@@ -69,7 +97,9 @@ export default async function AdminSecurityPage() {
                 key={event.id}
                 className="flex flex-col gap-1 p-4 text-sm sm:flex-row sm:justify-between"
               >
-                <span className="font-medium">{event.eventType}</span>
+                <span className="font-medium">
+                  {securityEventLabels[event.eventType] ?? event.eventType}
+                </span>
                 <time className="text-muted-foreground" dateTime={event.occurredAt.toISOString()}>
                   {formatter.format(event.occurredAt)}
                 </time>

@@ -1,9 +1,13 @@
+import { storeConfig } from "@mundonettech/config/store";
+import { buildBreadcrumbJsonLd } from "@mundonettech/core";
 import type { CatalogBrand } from "@mundonettech/db";
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
 import { CatalogBrowser } from "@/components/catalog/catalog-browser";
+import { JsonLd } from "@/components/seo/json-ld";
 import { getCatalogBrand, searchCatalog } from "@/lib/catalog";
 import { parseCatalogParams } from "@/lib/catalog-params";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -66,8 +70,32 @@ export default async function BrandPage({ params, searchParams }: PageProps<"/ma
   const brand = await getCatalogBrand(slug);
   if (!brand) notFound();
   const description = brand.description ?? `Productos originales y compatibles de ${brand.name}.`;
+  const breadcrumbs = buildBreadcrumbJsonLd([
+    { name: "Inicio", url: storeConfig.url },
+    { name: "Catálogo", url: new URL("/productos", storeConfig.url).toString() },
+    { name: brand.name, url: new URL(`/marca/${brand.slug}`, storeConfig.url).toString() },
+  ]);
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
+      <JsonLd data={breadcrumbs} />
+      <nav aria-label="Migas de pan" className="text-sm text-muted-foreground">
+        <ol className="flex flex-wrap gap-2">
+          <li>
+            <Link
+              href="/productos"
+              className="rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Catálogo
+            </Link>
+          </li>
+          <li className="flex gap-2">
+            <span aria-hidden="true">/</span>
+            <span aria-current="page" className="text-foreground">
+              {brand.name}
+            </span>
+          </li>
+        </ol>
+      </nav>
       <header>
         <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">{brand.name}</h1>
         <p className="mt-3 max-w-3xl leading-7 text-muted-foreground">{description}</p>

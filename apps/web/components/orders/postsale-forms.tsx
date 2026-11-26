@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import { useFormStatus } from "react-dom";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,15 @@ export interface OrderActionChannel {
   readonly channel: "account" | "guest";
   readonly orderId: string;
   readonly token?: string;
+}
+
+export function GuestOrderSignOutButton() {
+  const { pending } = useFormStatus();
+  return (
+    <Button type="submit" variant="outline" size="sm" disabled={pending} aria-busy={pending}>
+      {pending ? "Cerrando acceso…" : "Cerrar acceso de invitado"}
+    </Button>
+  );
 }
 
 function ChannelFields({ channel }: { readonly channel: OrderActionChannel }) {
@@ -60,6 +70,19 @@ export function ReturnRequestForm({
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [replacements, setReplacements] = useState<Record<string, string>>({});
   const [serials, setSerials] = useState<Record<string, string[]>>({});
+  const [reason, setReason] = useState("");
+
+  const [prevState, setPrevState] = useState(state);
+  if (prevState !== state) {
+    setPrevState(state);
+    if (state.status === "success") {
+      setQuantities({});
+      setReplacements({});
+      setSerials({});
+      setReason("");
+    }
+  }
+
   const selected = deliveries.flatMap((item) => {
     const quantity = quantities[item.shipmentItemId] ?? 0;
     if (quantity <= 0 || (kind === "EXCHANGE" && item.replacements.length === 0)) return [];
@@ -85,7 +108,11 @@ export function ReturnRequestForm({
     );
   });
   return (
-    <form action={action} className="space-y-5 rounded-xl border border-border bg-card p-5">
+    <form
+      action={action}
+      aria-busy={pending}
+      className="space-y-5 rounded-xl border border-border bg-card p-5"
+    >
       <ChannelFields channel={channel} />
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <input type="hidden" name="items" value={JSON.stringify(selected)} />
@@ -209,6 +236,7 @@ export function ReturnRequestForm({
                             };
                           })
                         }
+                        className="size-4 shrink-0 accent-primary"
                         disabled={
                           pending ||
                           (!selectedSerials.includes(unit.id) && selectedSerials.length >= quantity)
@@ -228,14 +256,29 @@ export function ReturnRequestForm({
         <Textarea
           id={`return-reason-${channel.orderId}`}
           name="reason"
-          defaultValue={state.values?.reason ?? ""}
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
           minLength={10}
           maxLength={2000}
           required
           disabled={pending}
         />
       </div>
-      <Button type="submit" disabled={pending || selected.length === 0 || invalid}>
+      {selected.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Selecciona una cantidad mayor a cero en al menos una entrega para habilitar el envío.
+        </p>
+      ) : invalid ? (
+        <p className="text-xs text-muted-foreground">
+          Selecciona exactamente los seriales correspondientes a las unidades indicadas para
+          continuar.
+        </p>
+      ) : null}
+      <Button
+        type="submit"
+        disabled={pending || selected.length === 0 || invalid}
+        aria-busy={pending}
+      >
         {pending ? "Validando…" : "Radicar solicitud de posventa"}
       </Button>
       <FormMessage state={state} />
@@ -253,8 +296,24 @@ export function WarrantyClaimForm({
   readonly idempotencyKey: string;
 }) {
   const [state, action, pending] = useActionState(requestWarrantyAction, initialActionState);
+  const [serializedUnitId, setSerializedUnitId] = useState(units[0]?.id ?? "");
+  const [remedy, setRemedy] = useState("REPAIR");
+  const [issueDescription, setIssueDescription] = useState("");
+
+  const [prevState, setPrevState] = useState(state);
+  if (prevState !== state) {
+    setPrevState(state);
+    if (state.status === "success") {
+      setIssueDescription("");
+    }
+  }
+
   return (
-    <form action={action} className="space-y-4 rounded-xl border border-border bg-card p-5">
+    <form
+      action={action}
+      aria-busy={pending}
+      className="space-y-4 rounded-xl border border-border bg-card p-5"
+    >
       <ChannelFields channel={channel} />
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <div className="grid gap-4 sm:grid-cols-2">
@@ -262,9 +321,13 @@ export function WarrantyClaimForm({
           <Label htmlFor={`warranty-unit-${units[0]?.id ?? "none"}`}>Serial o IMEI</Label>
           <Select
             id={`warranty-unit-${units[0]?.id ?? "none"}`}
-            key={`warranty-unit-${state.values?.serializedUnitId ?? ""}`}
             name="serializedUnitId"
-            defaultValue={state.values?.serializedUnitId ?? units[0]?.id ?? ""}
+            value={
+              units.some((unit) => unit.id === serializedUnitId)
+                ? serializedUnitId
+                : (units[0]?.id ?? "")
+            }
+            onChange={(event) => setSerializedUnitId(event.target.value)}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -280,9 +343,9 @@ export function WarrantyClaimForm({
           <Label htmlFor={`warranty-remedy-${channel.orderId}`}>Remedio solicitado</Label>
           <Select
             id={`warranty-remedy-${channel.orderId}`}
-            key={`warranty-remedy-${state.values?.remedy ?? ""}`}
             name="remedy"
-            defaultValue={state.values?.remedy ?? "REPAIR"}
+            value={remedy}
+            onChange={(event) => setRemedy(event.target.value)}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -300,14 +363,15 @@ export function WarrantyClaimForm({
         <Textarea
           id={`warranty-issue-${channel.orderId}`}
           name="issueDescription"
-          defaultValue={state.values?.issueDescription ?? ""}
+          value={issueDescription}
+          onChange={(event) => setIssueDescription(event.target.value)}
           minLength={10}
           maxLength={2000}
           required
           disabled={pending}
         />
       </div>
-      <Button type="submit" disabled={pending || units.length === 0}>
+      <Button type="submit" disabled={pending || units.length === 0} aria-busy={pending}>
         {pending ? "Radicando…" : "Radicar garantía"}
       </Button>
       <FormMessage state={state} />
@@ -325,8 +389,29 @@ export function ReviewForm({
   readonly idempotencyKey: string;
 }) {
   const [state, action, pending] = useActionState(createReviewAction, initialActionState);
+  const [rating, setRating] = useState("5");
+  const [authorDisplayName, setAuthorDisplayName] = useState("");
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const helpId = `review-body-help-${orderItemId}`;
+
+  const [prevState, setPrevState] = useState(state);
+  if (prevState !== state) {
+    setPrevState(state);
+    if (state.status === "success") {
+      setRating("5");
+      setAuthorDisplayName("");
+      setTitle("");
+      setBody("");
+    }
+  }
+
   return (
-    <form action={action} className="space-y-4 rounded-xl border border-border bg-card p-5">
+    <form
+      action={action}
+      aria-busy={pending}
+      className="space-y-4 rounded-xl border border-border bg-card p-5"
+    >
       <ChannelFields channel={channel} />
       <input type="hidden" name="orderItemId" value={orderItemId} />
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
@@ -335,16 +420,16 @@ export function ReviewForm({
           <Label htmlFor={`rating-${orderItemId}`}>Calificación</Label>
           <Select
             id={`rating-${orderItemId}`}
-            key={`rating-${state.values?.rating ?? "5"}`}
             name="rating"
-            defaultValue={state.values?.rating ?? "5"}
+            value={rating}
+            onChange={(event) => setRating(event.target.value)}
             className="disabled:opacity-50"
             required
             disabled={pending}
           >
-            {[5, 4, 3, 2, 1].map((rating) => (
-              <option key={rating} value={rating}>
-                {rating} de 5
+            {[5, 4, 3, 2, 1].map((score) => (
+              <option key={score} value={score}>
+                {score} de 5
               </option>
             ))}
           </Select>
@@ -354,7 +439,8 @@ export function ReviewForm({
           <Input
             id={`display-name-${orderItemId}`}
             name="authorDisplayName"
-            defaultValue={state.values?.authorDisplayName ?? ""}
+            value={authorDisplayName}
+            onChange={(event) => setAuthorDisplayName(event.target.value)}
             minLength={2}
             maxLength={80}
             required
@@ -367,7 +453,8 @@ export function ReviewForm({
         <Input
           id={`review-title-${orderItemId}`}
           name="title"
-          defaultValue={state.values?.title ?? ""}
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
           minLength={3}
           maxLength={120}
           required
@@ -379,14 +466,19 @@ export function ReviewForm({
         <Textarea
           id={`review-body-${orderItemId}`}
           name="body"
-          defaultValue={state.values?.body ?? ""}
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
           minLength={20}
           maxLength={2000}
           required
           disabled={pending}
+          aria-describedby={helpId}
         />
+        <p id={helpId} className="text-xs text-muted-foreground">
+          Mínimo 20 caracteres sobre tu experiencia con el producto recibido.
+        </p>
       </div>
-      <Button type="submit" disabled={pending}>
+      <Button type="submit" disabled={pending} aria-busy={pending}>
         {pending ? "Enviando…" : "Enviar reseña a moderación"}
       </Button>
       <FormMessage state={state} />
@@ -402,8 +494,26 @@ export function SupportTicketForm({
   readonly idempotencyKey: string;
 }) {
   const [state, action, pending] = useActionState(createSupportTicketAction, initialActionState);
+  const [kind, setKind] = useState("QUERY");
+  const [subject, setSubject] = useState("");
+  const [message, setMessage] = useState("");
+
+  const [prevState, setPrevState] = useState(state);
+  if (prevState !== state) {
+    setPrevState(state);
+    if (state.status === "success") {
+      setKind("QUERY");
+      setSubject("");
+      setMessage("");
+    }
+  }
+
   return (
-    <form action={action} className="space-y-4 rounded-xl border border-border bg-card p-5">
+    <form
+      action={action}
+      aria-busy={pending}
+      className="space-y-4 rounded-xl border border-border bg-card p-5"
+    >
       <ChannelFields channel={channel} />
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <div className="grid gap-4 sm:grid-cols-2">
@@ -411,9 +521,9 @@ export function SupportTicketForm({
           <Label htmlFor={`support-kind-${channel.orderId}`}>Tipo de PQR</Label>
           <Select
             id={`support-kind-${channel.orderId}`}
-            key={`support-kind-${state.values?.kind ?? "QUERY"}`}
             name="kind"
-            defaultValue={state.values?.kind ?? "QUERY"}
+            value={kind}
+            onChange={(event) => setKind(event.target.value)}
             className="disabled:opacity-50"
             required
             disabled={pending}
@@ -430,7 +540,8 @@ export function SupportTicketForm({
           <Input
             id={`support-subject-${channel.orderId}`}
             name="subject"
-            defaultValue={state.values?.subject ?? ""}
+            value={subject}
+            onChange={(event) => setSubject(event.target.value)}
             minLength={5}
             maxLength={200}
             required
@@ -443,14 +554,15 @@ export function SupportTicketForm({
         <Textarea
           id={`support-message-${channel.orderId}`}
           name="message"
-          defaultValue={state.values?.message ?? ""}
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
           minLength={2}
           maxLength={5000}
           required
           disabled={pending}
         />
       </div>
-      <Button type="submit" disabled={pending}>
+      <Button type="submit" disabled={pending} aria-busy={pending}>
         {pending ? "Radicando…" : "Radicar PQR con constancia"}
       </Button>
       <FormMessage state={state} />
@@ -470,8 +582,18 @@ export function SupportReplyForm({
   readonly idempotencyKey: string;
 }) {
   const [state, action, pending] = useActionState(replySupportTicketAction, initialActionState);
+  const [body, setBody] = useState("");
+
+  const [prevState, setPrevState] = useState(state);
+  if (prevState !== state) {
+    setPrevState(state);
+    if (state.status === "success") {
+      setBody("");
+    }
+  }
+
   return (
-    <form action={action} className="space-y-3">
+    <form action={action} aria-busy={pending} className="space-y-3">
       <ChannelFields channel={channel} />
       <input type="hidden" name="ticketId" value={ticketId} />
       <input type="hidden" name="expectedVersion" value={expectedVersion} />
@@ -480,13 +602,14 @@ export function SupportReplyForm({
       <Textarea
         id={`reply-${ticketId}`}
         name="body"
-        defaultValue={state.values?.body ?? ""}
+        value={body}
+        onChange={(event) => setBody(event.target.value)}
         minLength={2}
         maxLength={5000}
         required
         disabled={pending}
       />
-      <Button type="submit" variant="outline" size="sm" disabled={pending}>
+      <Button type="submit" variant="outline" size="sm" disabled={pending} aria-busy={pending}>
         {pending ? "Enviando…" : "Responder PQR"}
       </Button>
       <FormMessage state={state} />
@@ -510,12 +633,14 @@ export function GuestOrderAccessForms({
     initialActionState,
   );
   const [requestKey, setRequestKey] = useState(idempotencyKey);
+  const [code, setCode] = useState("");
   const challengeId = requestState.values?.challengeId ?? verifyState.values?.challengeId ?? "";
   return (
     <div className="mx-auto grid w-full max-w-4xl gap-6 lg:grid-cols-2">
       <form
         action={requestAction}
         onSubmit={() => setRequestKey(crypto.randomUUID())}
+        aria-busy={requestPending}
         className="space-y-4 rounded-xl border border-border bg-card p-6"
       >
         <input type="hidden" name="token" value={token} />
@@ -525,12 +650,16 @@ export function GuestOrderAccessForms({
           Enviaremos un código al correo registrado en la compra. El enlace por sí solo no permite
           ver ni modificar la posventa.
         </p>
-        <Button type="submit" disabled={requestPending}>
+        <Button type="submit" disabled={requestPending} aria-busy={requestPending}>
           {requestPending ? "Solicitando…" : "Enviar código de acceso"}
         </Button>
         <FormMessage state={requestState} />
       </form>
-      <form action={verifyAction} className="space-y-4 rounded-xl border border-border bg-card p-6">
+      <form
+        action={verifyAction}
+        aria-busy={verifyPending}
+        className="space-y-4 rounded-xl border border-border bg-card p-6"
+      >
         <input type="hidden" name="token" value={token} />
         <input type="hidden" name="challengeId" value={challengeId} />
         <h2 className="text-xl font-semibold">2. Verifica el código</h2>
@@ -544,11 +673,18 @@ export function GuestOrderAccessForms({
             pattern="[0-9]{6}"
             minLength={6}
             maxLength={6}
+            value={code}
+            onChange={(event) => setCode(event.target.value)}
             required
             disabled={verifyPending || !challengeId}
           />
+          {!challengeId ? (
+            <p className="text-xs text-muted-foreground">
+              Solicita primero el código en el paso 1 para habilitar este campo.
+            </p>
+          ) : null}
         </div>
-        <Button type="submit" disabled={verifyPending || !challengeId}>
+        <Button type="submit" disabled={verifyPending || !challengeId} aria-busy={verifyPending}>
           {verifyPending ? "Verificando…" : "Acceder a posventa"}
         </Button>
         <FormMessage state={verifyState} />

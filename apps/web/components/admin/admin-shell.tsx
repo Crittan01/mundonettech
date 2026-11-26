@@ -3,9 +3,10 @@ import type { AdminUser } from "@mundonettech/db";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { AdminNav } from "@/components/admin/admin-nav";
+import { Button } from "@/components/ui/button";
 import { signOutAdminAction } from "@/lib/actions/admin-auth";
 import { roleLabels } from "@/lib/admin-presenters";
-import { Button } from "@/components/ui/button";
 
 export function AdminShell({
   profile,
@@ -18,14 +19,18 @@ export function AdminShell({
     <div className="min-h-screen bg-secondary/30">
       <a
         href="#admin-content"
-        className="sr-only focus:not-sr-only focus:absolute focus:bg-background focus:p-3"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:border focus:border-input focus:bg-background focus:px-4 focus:py-2.5 focus:text-sm focus:font-medium focus:text-foreground focus:shadow-md focus:ring-2 focus:ring-ring focus:outline-none"
       >
         Saltar al contenido
       </a>
       <header className="border-b border-border bg-background">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <Link href="/admin" prefetch={false} className="text-lg font-bold">
+        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+          <div className="min-w-0">
+            <Link
+              href="/admin"
+              prefetch={false}
+              className="rounded-sm text-lg font-bold outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
               Administración
             </Link>
             <p className="text-sm text-muted-foreground">
@@ -39,23 +44,13 @@ export function AdminShell({
             </Button>
           </form>
         </div>
-        <nav
-          aria-label="Navegación administrativa"
-          className="mx-auto flex max-w-7xl flex-wrap gap-1 px-4 pb-3"
-        >
-          {adminNavigation(profile.role).map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              prefetch={false}
-              className="rounded-md px-3 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {item.label}
-            </Link>
-          ))}
-        </nav>
+        <AdminNav items={adminNavigation(profile.role)} />
       </header>
-      <main id="admin-content" className="mx-auto max-w-7xl px-6 py-8">
+      <main
+        id="admin-content"
+        tabIndex={-1}
+        className="mx-auto max-w-7xl px-4 py-8 outline-none sm:px-6"
+      >
         {children}
       </main>
     </div>

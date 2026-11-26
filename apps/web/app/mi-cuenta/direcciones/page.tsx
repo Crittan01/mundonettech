@@ -21,7 +21,7 @@ export default async function AddressesPage() {
     })),
   }));
   return (
-    <main className="space-y-8">
+    <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold">Direcciones</h1>
         <p className="mt-2 text-muted-foreground">
@@ -78,14 +78,24 @@ export default async function AddressesPage() {
         <h2 id="new-address" className="text-2xl font-semibold">
           Nueva dirección
         </h2>
-        <AddressForm
-          departments={departments}
-          initial={{
-            recipientName: `${account.givenName ?? ""} ${account.familyName ?? ""}`.trim(),
-            phoneE164: account.phoneE164 ?? "",
-          }}
-        />
+        {account.addresses.length >= 20 ? (
+          <p
+            role="status"
+            className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground"
+          >
+            Ya alcanzaste el máximo de veinte direcciones guardadas. Elimina o edita una dirección
+            existente si necesitas registrar otra.
+          </p>
+        ) : (
+          <AddressForm
+            departments={departments}
+            initial={{
+              recipientName: `${account.givenName ?? ""} ${account.familyName ?? ""}`.trim(),
+              phoneE164: account.phoneE164 ?? "",
+            }}
+          />
+        )}
       </section>
-    </main>
+    </div>
   );
 }

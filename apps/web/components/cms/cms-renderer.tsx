@@ -287,8 +287,14 @@ function FaqBlock({
       <div className="mt-5 divide-y divide-border rounded-xl border border-border">
         {block.content.items.map((item, index) => (
           <details key={`${block.id}-question-${index}`} className="group p-5">
-            <summary className="min-h-11 cursor-pointer list-none py-2 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring">
-              {item.question}
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-4 py-2 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <span>{item.question}</span>
+              <span
+                aria-hidden="true"
+                className="text-muted-foreground transition-transform group-open:rotate-45"
+              >
+                +
+              </span>
             </summary>
             <p className="pt-3 leading-7 whitespace-pre-line text-muted-foreground">
               {item.answer}
@@ -355,9 +361,8 @@ export async function CmsPageRenderer({
   preview?: boolean;
 }) {
   const mediaOrigin = getPublicMediaOrigin();
-  const firstVisibleHeroId = page.blocks.find(
-    (block) => block.type === "HERO" && block.isVisible,
-  )?.id;
+  const firstVisibleBlock = page.blocks.find((block) => block.isVisible);
+  const firstVisibleHeroId = firstVisibleBlock?.type === "HERO" ? firstVisibleBlock.id : undefined;
   const firstVisibleMediaBlockId = page.blocks.find(
     (block) =>
       block.isVisible &&

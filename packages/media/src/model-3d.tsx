@@ -8,6 +8,7 @@ import {
   type ComponentType,
   type DetailedHTMLProps,
   type HTMLAttributes,
+  type KeyboardEvent,
 } from "react";
 
 import { isSafeMediaUrl } from "./responsive-sources.js";
@@ -26,6 +27,7 @@ type ModelViewerProps = DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLEleme
   ar?: boolean;
   "ar-modes"?: string;
   "camera-controls"?: boolean;
+  "interaction-prompt"?: "auto" | "none";
   "shadow-intensity"?: string;
   loading?: "eager" | "lazy";
 };
@@ -57,6 +59,10 @@ export function Model3d({
   const [attempt, setAttempt] = useState(0);
   const [failedAttempts, setFailedAttempts] = useState(0);
   const viewer = useRef<HTMLElement>(null);
+  const startButtonRef = useRef<HTMLButtonElement>(null);
+  const backButtonRef = useRef<HTMLButtonElement>(null);
+  const retryButtonRef = useRef<HTMLButtonElement>(null);
+  const pendingFocusRef = useRef<"viewer" | "idle" | null>(null);
 
   if (syncedSourceKey !== sourceKey) {
     setSyncedSourceKey(sourceKey);
@@ -109,6 +115,21 @@ export function Model3d({
     };
   }, [elementReady, status, attempt, modelSrc]);
 
+  useEffect(() => {
+    if (status === "idle" && pendingFocusRef.current === "idle") {
+      pendingFocusRef.current = null;
+      startButtonRef.current?.focus();
+    } else if (status === "loading" && pendingFocusRef.current === "viewer") {
+      backButtonRef.current?.focus();
+    } else if (status === "ready" && pendingFocusRef.current === "viewer") {
+      pendingFocusRef.current = null;
+      viewer.current?.focus();
+    } else if (status === "error" && pendingFocusRef.current === "viewer") {
+      pendingFocusRef.current = null;
+      retryButtonRef.current?.focus();
+    }
+  }, [status]);
+
   if (!safeSources) {
     return (
       <section className={className} aria-label={alt}>
@@ -123,6 +144,7 @@ export function Model3d({
   }
 
   function start(): void {
+    pendingFocusRef.current = "viewer";
     if (status === "error") setFailedAttempts((value) => value + 1);
     setElementReady(false);
     setAttempt((value) => value + 1);
@@ -130,7 +152,15 @@ export function Model3d({
   }
 
   function resetToPoster(): void {
+    pendingFocusRef.current = "idle";
     setStatus("idle");
+  }
+
+  function handleViewerKeyDown(event: KeyboardEvent<HTMLElement>): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      resetToPoster();
+    }
   }
 
   return (
@@ -154,9 +184,10 @@ export function Model3d({
             {usdzSrc ? " y realidad aumentada" : ""}.
           </p>
           <button
+            ref={startButtonRef}
             type="button"
             onClick={start}
-            className="min-h-11 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+            className="min-h-11 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
           >
             Explorar en 3D{usdzSrc ? " / AR" : ""}
           </button>
@@ -174,26 +205,45 @@ export function Model3d({
               ar
               ar-modes={usdzSrc ? "webxr scene-viewer quick-look" : "webxr scene-viewer"}
               camera-controls
+              interaction-prompt="none"
               shadow-intensity="1"
               loading="eager"
+              tabIndex={0}
               aria-label={alt}
-              style={{ width: "100%", minHeight: "320px" }}
+              onKeyDown={handleViewerKeyDown}
+              className="block min-h-80 w-full focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             />
-          ) : null}
-          <div className="flex items-center justify-between gap-3 border-t border-border bg-background px-4 py-2">
+          ) : posterSrc ? (
+            <div className="flex min-h-80 items-center justify-center p-6">
+              <Image
+                src={posterSrc}
+                alt={alt}
+                width={posterWidth}
+                height={posterHeight}
+                unoptimized
+                loading="eager"
+                decoding="async"
+                className="mx-auto max-h-72 w-auto opacity-80"
+              />
+            </div>
+          ) : (
+            <div className="min-h-80" />
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border bg-background px-4 py-2">
             {status === "loading" ? (
               <p className="text-sm text-muted-foreground" role="status">
                 Cargando modelo 3D…
               </p>
             ) : (
               <p className="text-sm text-muted-foreground">
-                Arrastra para girar o pellizca para acercar.
+                Arrastra o usa las flechas del teclado para girar; pulsa Escape para salir.
               </p>
             )}
             <button
+              ref={backButtonRef}
               type="button"
               onClick={resetToPoster}
-              className="min-h-11 rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
             >
               Volver a vista fija
             </button>
@@ -208,16 +258,17 @@ export function Model3d({
           <p>No pudimos cargar el modelo 3D. Revisa tu conexión.</p>
           <div className="flex flex-wrap justify-center gap-3">
             <button
+              ref={retryButtonRef}
               type="button"
               onClick={start}
-              className="min-h-11 rounded-md border border-border bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
             >
               Reintentar
             </button>
             <button
               type="button"
               onClick={resetToPoster}
-              className="min-h-11 rounded-md border border-border bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
             >
               Volver a vista fija
             </button>

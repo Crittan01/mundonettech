@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { startTransition, useActionState, useEffect, useRef } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -24,9 +24,15 @@ export function ChannelConnectionForm({
     status: "idle",
     message: "",
   } satisfies ChannelActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ChannelActionState | null>(null);
   useEffect(() => {
-    if (state.status === "success" && state.authorizationUrl) {
-      window.location.assign(state.authorizationUrl);
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+      if (state.authorizationUrl) {
+        window.location.assign(state.authorizationUrl);
+      }
     }
   }, [state]);
   const suffix = account?.id ?? "new";
@@ -45,7 +51,16 @@ export function ChannelConnectionForm({
     );
   }
   return (
-    <form action={action} className="space-y-4" aria-busy={pending}>
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-4"
+      aria-busy={pending}
+    >
       {account ? <input type="hidden" name="accountId" value={account.id} /> : null}
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">

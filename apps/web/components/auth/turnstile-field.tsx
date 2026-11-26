@@ -80,7 +80,7 @@ export function TurnstileField({
   }, [renderWidget]);
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" role="group" aria-label="Verificación de seguridad">
       <Script
         src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
         strategy="afterInteractive"

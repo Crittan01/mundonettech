@@ -166,10 +166,20 @@ export async function confirmCheckoutAction(
     advertisingAccepted: formData.get("advertisingAccepted") === "on",
   });
   if (!parsed.success) {
-    return actionError(
-      "Revisa los campos obligatorios, el formato de contacto, la dirección o sede y las dos aceptaciones.",
-      values,
-    );
+    const fieldErrors: Record<string, string[]> = {};
+    for (const issue of parsed.error.issues) {
+      const key = typeof issue.path[0] === "string" ? issue.path[0] : "_form";
+      fieldErrors[key] = [...(fieldErrors[key] ?? []), issue.message];
+    }
+    const customIssue = parsed.error.issues.find((issue) => issue.code === "custom");
+    return {
+      ...actionError(
+        customIssue?.message ??
+          "Revisa los campos obligatorios, el formato de contacto, la dirección o sede y las dos aceptaciones.",
+        values,
+      ),
+      fieldErrors,
+    };
   }
   const input = parsed.data;
   let receiptUrl: string;

@@ -1,10 +1,19 @@
-import { formatCopCents } from "@mundonettech/core";
+import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
 import { OperationsService } from "@mundonettech/db";
 import Link from "next/link";
 
 import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { NotificationReadForm } from "@/components/admin/notification-read-form";
+import {
+  fulfillmentStatusLabels,
+  orderFulfillmentStatusLabels,
+  paymentAttemptStatusLabels,
+  paymentProviderLabels,
+  paymentTransactionStatusLabels,
+  refundStatusLabels,
+  shipmentStatusLabels,
+} from "@/lib/admin-presenters";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -17,32 +26,37 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
 
-const statusLabels: Record<string, string> = {
-  UNFULFILLED: "Sin despachar",
-  PARTIALLY_FULFILLED: "Despacho parcial",
-  REQUESTED: "Solicitado",
-  APPROVED: "Aprobado",
-  PROCESSING: "En ejecución",
-  FAILED: "Fallido",
-  PENDING: "Pendiente",
-  PICKING: "En alistamiento",
-  PACKED: "Empacado",
-  LABELLED: "Con guía",
-  RECONCILING: "En conciliación",
-  READY: "Listo",
-  SHIPPED: "Despachado",
-};
-
 const severityLabels: Record<string, string> = {
   INFO: "Informativa",
   WARNING: "Atención",
   CRITICAL: "Crítica",
 };
 
-const providerLabels: Record<string, string> = {
-  BANK_TRANSFER: "Transferencia bancaria",
-  COD: "Contraentrega (discrepancia)",
-};
+function labelFor<T extends string>(map: Record<T, string>, value: string): string {
+  return (
+    (map as Record<string, string | undefined>)[value] ??
+    (value === "PROCESSING" ? "En proceso" : value)
+  );
+}
+
+function formatShipmentState(
+  fulfillmentStatus: string | null | undefined,
+  shipmentStatus: string,
+): string {
+  if (fulfillmentStatus) {
+    return labelFor(orderFulfillmentStatusLabels, fulfillmentStatus);
+  }
+  return labelFor(shipmentStatusLabels, shipmentStatus);
+}
+
+function formatPaymentState(status: string): string {
+  return (
+    (paymentAttemptStatusLabels as Record<string, string | undefined>)[status] ??
+    (paymentTransactionStatusLabels as Record<string, string | undefined>)[status] ??
+    (refundStatusLabels as Record<string, string | undefined>)[status] ??
+    (status === "PROCESSING" ? "En proceso" : status)
+  );
+}
 
 export default async function TodayPage() {
   const session = await requireAdminPage();
@@ -100,15 +114,28 @@ export default async function TodayPage() {
       {permissions.orders ? (
         <>
           <section aria-labelledby="today-orders" className="space-y-4">
-            <h2 id="today-orders" className="text-xl font-semibold">
-              Pedidos pagados por alistar
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 id="today-orders" className="text-xl font-semibold">
+                Pedidos pagados por alistar
+              </h2>
+              {hasAdminPermission(session.profile.role, "orders:read") ? (
+                <Link
+                  href="/admin/pedidos"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver todos los pedidos
+                </Link>
+              ) : null}
+            </div>
             {snapshot.pendingOrders.length === 0 ? (
               <Empty>No hay pedidos pagados pendientes de alistamiento.</Empty>
             ) : (
               <ul className="grid gap-3 lg:grid-cols-2">
                 {snapshot.pendingOrders.map((order) => (
-                  <li key={order.id} className="rounded-xl border border-border bg-card p-5">
+                  <li
+                    key={order.id}
+                    className="min-w-0 rounded-xl border border-border bg-card p-5"
+                  >
                     <div className="flex flex-wrap justify-between gap-3">
                       <div>
                         <Link
@@ -118,7 +145,8 @@ export default async function TodayPage() {
                           {order.orderNumber}
                         </Link>
                         <p className="mt-1 text-sm text-muted-foreground">
-                          {order.recipientName} · {statusLabels[order.fulfillmentStatus]} ·{" "}
+                          {order.recipientName} ·{" "}
+                          {labelFor(fulfillmentStatusLabels, order.fulfillmentStatus)} ·{" "}
                           {dateFormatter.format(new Date(order.createdAt))}
                         </p>
                       </div>
@@ -130,9 +158,19 @@ export default async function TodayPage() {
             )}
           </section>
           <section aria-labelledby="today-shipments" className="space-y-4">
-            <h2 id="today-shipments" className="text-xl font-semibold">
-              Promesas de entrega vencidas
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 id="today-shipments" className="text-xl font-semibold">
+                Promesas de entrega vencidas
+              </h2>
+              {hasAdminPermission(session.profile.role, "fulfillment:read") ? (
+                <Link
+                  href="/admin/logistica"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver logística
+                </Link>
+              ) : null}
+            </div>
             {snapshot.lateShipments.length === 0 ? (
               <Empty>No hay envíos fuera de su promesa de entrega.</Empty>
             ) : (
@@ -146,9 +184,8 @@ export default async function TodayPage() {
                       {shipment.orderNumber}
                     </Link>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {statusLabels[shipment.fulfillmentStatus ?? shipment.status] ??
-                        shipment.status}{" "}
-                      · Prometido para {dateFormatter.format(new Date(shipment.promisedAt))}
+                      {formatShipmentState(shipment.fulfillmentStatus, shipment.status)} · Prometido
+                      para {dateFormatter.format(new Date(shipment.promisedAt))}
                     </p>
                   </li>
                 ))}
@@ -160,9 +197,19 @@ export default async function TodayPage() {
       {permissions.payments ? (
         <>
           <section aria-labelledby="today-payments" className="space-y-4">
-            <h2 id="today-payments" className="text-xl font-semibold">
-              Pagos manuales por revisar
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 id="today-payments" className="text-xl font-semibold">
+                Pagos manuales por revisar
+              </h2>
+              {hasAdminPermission(session.profile.role, "payments:read") ? (
+                <Link
+                  href="/admin/pagos"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver todos los pagos
+                </Link>
+              ) : null}
+            </div>
             {snapshot.pendingPayments.length === 0 ? (
               <Empty>No hay transferencias ni remesas COD pendientes de validación.</Empty>
             ) : (
@@ -180,8 +227,12 @@ export default async function TodayPage() {
                         {payment.orderNumber}
                       </Link>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {providerLabels[payment.provider] ?? payment.provider} ·{" "}
-                        {statusLabels[payment.status] ?? payment.status} ·{" "}
+                        {payment.provider === "COD"
+                          ? "Contraentrega (discrepancia)"
+                          : (paymentProviderLabels[
+                              payment.provider as keyof typeof paymentProviderLabels
+                            ] ?? payment.provider)}{" "}
+                        · {formatPaymentState(payment.status)} ·{" "}
                         {dateFormatter.format(new Date(payment.createdAt))}
                       </p>
                     </div>
@@ -192,9 +243,19 @@ export default async function TodayPage() {
             )}
           </section>
           <section aria-labelledby="today-refunds" className="space-y-4">
-            <h2 id="today-refunds" className="text-xl font-semibold">
-              Reembolsos por revisar
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 id="today-refunds" className="text-xl font-semibold">
+                Reembolsos por revisar
+              </h2>
+              {hasAdminPermission(session.profile.role, "payments:read") ? (
+                <Link
+                  href="/admin/pagos#refunds"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver reembolsos
+                </Link>
+              ) : null}
+            </div>
             {snapshot.pendingRefunds.length === 0 ? (
               <Empty>No hay reembolsos pendientes de aprobación, ejecución o conciliación.</Empty>
             ) : (
@@ -212,7 +273,7 @@ export default async function TodayPage() {
                         {refund.orderNumber}
                       </Link>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {statusLabels[refund.status] ?? refund.status} ·{" "}
+                        {labelFor(refundStatusLabels, refund.status)} ·{" "}
                         {dateFormatter.format(new Date(refund.createdAt))}
                       </p>
                     </div>
@@ -235,11 +296,11 @@ export default async function TodayPage() {
             {snapshot.notifications.map((notification) => (
               <li
                 key={notification.id}
-                className="rounded-xl border border-border bg-card p-5 aria-[current=true]:bg-secondary/40"
-                aria-current={notification.readAt !== null}
+                data-read={notification.readAt !== null ? "true" : undefined}
+                className="rounded-xl border border-border bg-card p-5 data-[read=true]:bg-secondary/40"
               >
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="max-w-3xl">
+                  <div className="max-w-3xl min-w-0">
                     <p className="text-xs font-medium text-muted-foreground">
                       {severityLabels[notification.severity] ?? notification.severity} ·{" "}
                       {dateFormatter.format(new Date(notification.createdAt))}
@@ -254,7 +315,10 @@ export default async function TodayPage() {
                     <p className="mt-2 text-sm text-muted-foreground">{notification.message}</p>
                   </div>
                   {notification.readAt === null ? (
-                    <NotificationReadForm notificationId={notification.id} />
+                    <NotificationReadForm
+                      notificationId={notification.id}
+                      title={notification.title}
+                    />
                   ) : null}
                 </div>
               </li>
