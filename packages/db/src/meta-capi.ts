@@ -5,12 +5,12 @@ export async function cancelPendingMetaCapiForCustomerInTransaction(
   customerId: string,
   completedAt: Date,
 ): Promise<number> {
-  const pendingRows = await tx.metaCapiEvent.findMany({
-    where: { customerId, status: "PENDING" },
+  const cancellableRows = await tx.metaCapiEvent.findMany({
+    where: { customerId, status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] } },
     select: { id: true },
   });
   const result = await tx.metaCapiEvent.updateMany({
-    where: { customerId, status: "PENDING" },
+    where: { customerId, status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] } },
     data: {
       status: "SKIPPED",
       completedAt,
@@ -19,28 +19,17 @@ export async function cancelPendingMetaCapiForCustomerInTransaction(
       emailHash: null,
       phoneHash: null,
       availableAt: completedAt,
+      claimId: null,
+      claimedBy: null,
+      claimedAt: null,
+      claimExpiresAt: null,
+      requestStartedAt: null,
     },
   });
-  await tx.metaCapiEvent.updateMany({
-    where: {
-      customerId,
-      status: "UNCERTAIN",
-      OR: [
-        { externalIdHash: { not: null } },
-        { emailHash: { not: null } },
-        { phoneHash: { not: null } },
-      ],
-    },
-    data: {
-      externalIdHash: null,
-      emailHash: null,
-      phoneHash: null,
-    },
-  });
-  if (pendingRows.length > 0) {
+  if (cancellableRows.length > 0) {
     await tx.notification.updateMany({
       where: {
-        deduplicationKey: { in: pendingRows.map((row) => `meta-capi:${row.id}:review`) },
+        deduplicationKey: { in: cancellableRows.map((row) => `meta-capi:${row.id}:review`) },
         resolvedAt: null,
       },
       data: { resolvedAt: completedAt },

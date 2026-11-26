@@ -1261,8 +1261,12 @@ export class CatalogService {
         const candidate =
           (external as Prisma.JsonObject).googleProductCategory ??
           (external as Prisma.JsonObject).google;
-        if (typeof candidate === "string" && candidate.trim() && candidate.length <= 750) {
-          googleProductCategory = candidate.trim();
+        if (typeof candidate === "string" && candidate.length <= 750) {
+          const sanitized = candidate
+            .replace(/[\u0000-\u001f\u007f]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (sanitized) googleProductCategory = sanitized;
         }
       }
       return {

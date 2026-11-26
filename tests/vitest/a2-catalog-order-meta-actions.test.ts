@@ -8,6 +8,7 @@ import { MetaCapiServiceError } from "../../packages/integrations/dist/index.js"
 import {
   actionError,
   actionSuccess,
+  closedFormObject,
   formString,
   type ActionState,
 } from "../../apps/web/lib/action-state";
@@ -64,7 +65,7 @@ function baseMocks(role = "SUPERADMIN") {
       ChannelLedgerDirection: { CREDIT: "CREDIT", DEBIT: "DEBIT" },
       OperationsService: OperationsServiceMock,
     },
-    "@/lib/action-state": { actionError, actionSuccess, formString },
+    "@/lib/action-state": { actionError, actionSuccess, closedFormObject, formString },
     "@/lib/db": { getDatabase },
     "@/lib/security/admin-auth": { AdminAuthorizationError, getAdminSession },
     "@/lib/security/request-context": { getRequestSecurityContext },
@@ -346,6 +347,33 @@ describe("A2 — channel catalog action validation and RSC", () => {
     const batch = await actions.processChannelSyncJobsAction!(previous, form());
     expect(batch.status).toBe("success");
     expect(batch.message).toContain("No hay trabajos pendientes");
+
+    processSyncJobs.mockResolvedValue({
+      claimed: 1,
+      succeeded: 0,
+      failed: 0,
+      uncertain: 0,
+      retryScheduled: 1,
+      recoveredExpired: 0,
+      failures: [{ jobId: randomUUID(), code: "VERSION_CONFLICT" }],
+    });
+    const retry = await actions.processChannelSyncJobsAction!(previous, form());
+    expect(retry.status).toBe("error");
+    expect(retry.message).toContain("reintento acotado");
+    expect(retry.message).toContain("x-version");
+
+    processSyncJobs.mockResolvedValue({
+      claimed: 0,
+      succeeded: 0,
+      failed: 0,
+      uncertain: 0,
+      retryScheduled: 0,
+      recoveredExpired: 1,
+      failures: [],
+    });
+    const recovered = await actions.processChannelSyncJobsAction!(previous, form());
+    expect(recovered.status).toBe("error");
+    expect(recovered.message).toContain("resultados inciertos");
   });
 });
 
@@ -608,5 +636,25 @@ describe("A2 — Meta CAPI reconciliation and feed refresh", () => {
     expect(JSON.stringify(replay)).not.toContain(providerSecret);
     expect(JSON.stringify(replay)).not.toContain("raw response");
     expect(base.revalidatePath).not.toHaveBeenCalled();
+
+    const extraField = await actions.reconcileMetaCapiAction!(
+      previous,
+      form({
+        metaEventId,
+        resolution: "RETRY",
+        reference: "EM-REVIEW-403",
+        unexpected: "blocked",
+      }),
+    );
+    expect(extraField.status).toBe("error");
+    expect(extraField.values).toBeUndefined();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+
+    const extraRefresh = await actions.refreshMetaCatalogFeedAction!(
+      previous,
+      form({ unexpected: "blocked" }),
+    );
+    expect(extraRefresh.status).toBe("error");
+    expect(base.updateTag).not.toHaveBeenCalled();
   });
 });

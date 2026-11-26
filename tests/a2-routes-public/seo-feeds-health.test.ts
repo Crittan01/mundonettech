@@ -136,7 +136,11 @@ describe("public catalog feeds", () => {
     mocks.getMetaCatalogFeed.mockResolvedValue({
       csv: 'id,title,price\r\nvariant-1,"\'=formula",1000.00 COP\r\n',
       accepted: 1,
-      issues: [{ id: "internal-variant-id", code: "MISSING_IMAGE" }],
+      excluded: 1,
+      issues: [
+        { id: "internal-variant-id", code: "MISSING_IMAGE" },
+        { id: "variant-1", code: "INVALID_GTIN" },
+      ],
     });
     const response = await metaRoute.GET();
     expect(response.status).toBe(200);

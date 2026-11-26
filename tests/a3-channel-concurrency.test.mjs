@@ -633,6 +633,8 @@ describe("A3 — channel lock ordering, credential fencing and claim recovery", 
         allowLoopback: true,
         timeoutMs: 2_000,
       });
+      const sellerEntered = deferred();
+      const releaseSeller = deferred();
       tokenBehavior = async (body) => {
         if (body.get("grant_type") !== "refresh_token") return undefined;
         return {
@@ -647,13 +649,19 @@ describe("A3 — channel lock ordering, credential fencing and claim recovery", 
           },
         };
       };
-      sellerBehavior = () => ({ status: 401, body: { error: "unauthorized" } });
-      const refreshing = racingAccounts.refreshAccount(account.id, audit(), { force: true });
-      await refreshAccountLocked.promise;
+      sellerBehavior = async () => {
+        sellerEntered.resolve();
+        await releaseSeller.promise;
+        return { status: 401, body: { error: "unauthorized" } };
+      };
       const processing = racingCatalog.processSyncJobs(audit(), {
         listingId: listing.id,
         queueDrift: false,
       });
+      await sellerEntered.promise;
+      const refreshing = racingAccounts.refreshAccount(account.id, audit(), { force: true });
+      await refreshAccountLocked.promise;
+      releaseSeller.resolve();
       await Promise.race([revokeAccountAttempt.promise, revokeCredentialUpdate.promise]);
       await waitForDatabaseLockWait();
       refreshReleased = true;

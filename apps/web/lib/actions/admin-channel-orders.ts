@@ -8,7 +8,13 @@ import { ChannelOrderError } from "@mundonettech/integrations";
 import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
-import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
+import {
+  actionError,
+  actionSuccess,
+  closedFormObject,
+  formString,
+  type ActionState,
+} from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
 import { channelOrderService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
@@ -45,13 +51,23 @@ function publicValues(formData: FormData): Record<string, string> {
   return values;
 }
 
-async function authorize(options: { readonly requireFinanceRead?: boolean } = {}) {
+async function authorize(
+  formData: FormData,
+  allowedFields: readonly string[],
+  options: { readonly requireFinanceRead?: boolean } = {},
+) {
   const session = await getAdminSession({
     permission: "integrations:write",
     requireRecentMfa: true,
   });
   if (options.requireFinanceRead && !hasAdminPermission(session.profile.role, "finance:read")) {
     throw new AdminAuthorizationError("FORBIDDEN");
+  }
+  if (!closedFormObject(formData, allowedFields)) {
+    throw new ChannelOrderError(
+      "INVALID_INPUT",
+      "Channel order form fields must be known, unique strings.",
+    );
   }
   const context = await getRequestSecurityContext();
   return {
@@ -99,7 +115,7 @@ export async function synchronizeChannelOrderAction(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["orderId"]);
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const result = await channelOrderService().synchronizeOrder(orderId, audit);
     updateTag("catalog:inventory");
@@ -119,7 +135,7 @@ export async function retryChannelOrderStockAction(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["orderId"]);
     const orderId = idSchema.parse(formString(formData, "orderId"));
     await channelOrderService().retryStock(orderId, audit);
     updateTag("catalog:inventory");
@@ -136,7 +152,7 @@ export async function assignChannelOrderStockAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["orderId", "locationId"]);
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const locationId = idSchema.parse(formString(formData, "locationId"));
     await channelOrderService().assignStockLocation({ orderId, locationId, audit });
@@ -154,7 +170,11 @@ export async function reconcileChannelOrderAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize({ requireFinanceRead: true });
+    const audit = await authorize(
+      formData,
+      ["orderId", "version", "evidenceReference", "reasonCode"],
+      { requireFinanceRead: true },
+    );
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const expectedVersion = versionSchema.parse(formString(formData, "version"));
     const evidenceReference = evidenceSchema.parse(formString(formData, "evidenceReference"));
@@ -179,7 +199,19 @@ export async function adjustChannelOrderLedgerAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize({ requireFinanceRead: true });
+    const audit = await authorize(
+      formData,
+      [
+        "orderId",
+        "version",
+        "idempotencyKey",
+        "amountCop",
+        "direction",
+        "evidenceReference",
+        "reasonCode",
+      ],
+      { requireFinanceRead: true },
+    );
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const expectedVersion = versionSchema.parse(formString(formData, "version"));
     const idempotencyKey = idSchema.parse(formString(formData, "idempotencyKey"));

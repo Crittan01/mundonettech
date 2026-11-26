@@ -217,6 +217,7 @@ function failureCode(error: unknown, operation: "OAUTH" | "REFRESH"): string {
     if (error.code === "PROVIDER_REJECTED") return `${operation}_REJECTED`;
   }
   if (error instanceof ChannelAccountError) {
+    if (error.code === "OAUTH_EXPIRED") return "OAUTH_EXPIRED";
     if (error.code === "CONFLICT") return `${operation}_CONFLICT`;
     if (error.code === "FORBIDDEN") return `${operation}_FORBIDDEN`;
   }
@@ -252,8 +253,10 @@ export class ChannelAccountService {
     permission: AdminPermission,
   ): Promise<void> {
     assertUuid(actorAdminUserId, "actorAdminUserId");
+    await db.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR SHARE`;
     const actor = await db.adminUser.findFirst({
       where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+      select: { role: true },
     });
     if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
       throw new ChannelAccountError("FORBIDDEN", "The administrator cannot manage channels.");
@@ -370,6 +373,12 @@ export class ChannelAccountService {
         plaintext,
         ring: this.options.ring,
       });
+      const authorizationUrl = createMercadoLibreAuthorizationUrl({
+        clientId: client.clientId,
+        redirectUri: options.redirectUri,
+        state: pkce.state,
+        codeChallenge: pkce.codeChallenge,
+      });
       const result = await this.db.$transaction(async (tx) => {
         await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
         const now = await this.now(tx);
@@ -453,12 +462,7 @@ export class ChannelAccountService {
         attemptId,
         state: pkce.state,
         expiresAt: result.expiresAt,
-        authorizationUrl: createMercadoLibreAuthorizationUrl({
-          clientId: client.clientId,
-          redirectUri: options.redirectUri,
-          state: pkce.state,
-          codeChallenge: pkce.codeChallenge,
-        }),
+        authorizationUrl,
       };
     } catch (error) {
       if (hasUniqueViolation(error)) {
@@ -629,6 +633,7 @@ export class ChannelAccountService {
     readonly redirectUri: string;
     readonly audit: ChannelCallbackAudit;
   }): Promise<ChannelAccountView> {
+    validateAudit(options.audit);
     const attempt = await this.claimCallback(options);
     const actorAdminUserId = attempt.createdByAdminUserId;
     if (!options.code || options.providerError) {
@@ -707,6 +712,16 @@ export class ChannelAccountService {
           throw new ChannelAccountError("CONFLICT", "The OAuth attempt changed concurrently.");
         }
         await this.actor(tx, attempt.createdByAdminUserId, "integrations:write");
+        if (
+          attempt.expiresAt <= now ||
+          !attempt.claimedAt ||
+          attempt.claimedAt.getTime() <= now.getTime() - oauthLifetimeMs
+        ) {
+          throw new ChannelAccountError(
+            "OAUTH_EXPIRED",
+            "The OAuth authorization attempt expired before token persistence.",
+          );
+        }
         const sealed = this.seal(attempt.credential, options.plaintext);
         const rotated = await tx.integrationCredential.updateMany({
           where: { id: attempt.credentialId, nonce: attempt.credential.nonce, revokedAt: null },
@@ -888,6 +903,7 @@ export class ChannelAccountService {
     options: { readonly force?: boolean } = {},
   ): Promise<ChannelRefreshResult> {
     assertUuid(accountId, "accountId");
+    validateAudit(audit);
     await this.actor(this.db, audit.actorAdminUserId, "integrations:write");
     const claimId = randomUUID();
     const claim = await this.db.$transaction(async (tx) => {
@@ -991,7 +1007,12 @@ export class ChannelAccountService {
         failureCode: code,
         audit,
       });
-      if (error instanceof ChannelAccountError && error.code === "CONFLICT") throw error;
+      if (
+        error instanceof ChannelAccountError &&
+        (error.code === "CONFLICT" || error.code === "FORBIDDEN")
+      ) {
+        throw error;
+      }
       throw new ChannelAccountError(
         "REAUTH_REQUIRED",
         "The channel token could not be renewed safely; reconnect the account.",
@@ -1011,6 +1032,7 @@ export class ChannelAccountService {
     readonly audit: ChannelAuditContext;
   }): Promise<Date> {
     return this.db.$transaction(async (tx) => {
+      await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
       await this.lockAccount(tx, options.accountId);
       const now = await this.now(tx);
       const account = await tx.channelAccount.findUnique({ where: { id: options.accountId } });
@@ -1021,6 +1043,12 @@ export class ChannelAccountService {
         account.credentialId !== options.credentialId
       ) {
         throw new ChannelAccountError("CONFLICT", "The token refresh claim is no longer current.");
+      }
+      if (!account.refreshClaimExpiresAt || account.refreshClaimExpiresAt <= now) {
+        throw new ChannelAccountError(
+          "REAUTH_REQUIRED",
+          "The token refresh claim expired before token persistence.",
+        );
       }
       const credential = await tx.integrationCredential.findUnique({
         where: { id: options.credentialId },
@@ -1071,6 +1099,7 @@ export class ChannelAccountService {
   }
 
   async refreshDueAccounts(audit: ChannelAuditContext): Promise<ChannelScheduledRefreshResult> {
+    validateAudit(audit);
     await this.actor(this.db, audit.actorAdminUserId, "integrations:write");
     const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]?.now;
@@ -1221,29 +1250,37 @@ export class ChannelAccountService {
           "Wait for the in-flight channel order ingestion before disconnecting.",
         );
       }
-      await tx.channelAccount.update({
-        where: { id: accountId },
-        data: {
-          refreshClaimId: disconnectClaimId,
-          refreshClaimedAt: now,
-          refreshClaimExpiresAt: new Date(now.getTime() + disconnectLeaseMs),
-          updatedAt: now,
-        },
-      });
-      return { kind: "READY" as const, account };
+      const claimedLease = account.status === "ACTIVE";
+      if (claimedLease) {
+        await tx.channelAccount.update({
+          where: { id: accountId },
+          data: {
+            refreshClaimId: disconnectClaimId,
+            refreshClaimedAt: now,
+            refreshClaimExpiresAt: new Date(now.getTime() + disconnectLeaseMs),
+            updatedAt: now,
+          },
+        });
+      }
+      return { kind: "READY" as const, account, claimedLease };
     });
     if (preflight.kind === "ALREADY_DISCONNECTED") {
       return { accountId, alreadyDisconnected: true, remoteRevoked: false };
     }
-    const { account } = preflight;
+    const { account, claimedLease } = preflight;
     let remoteRevoked = false;
     let plaintext: Uint8Array | undefined;
     try {
-      if (!account.credential.revokedAt) {
-        plaintext = this.reveal(account.credential);
-        const credential: MercadoLibreTokenCredential = parseMercadoLibreTokenCredential(plaintext);
-        remoteRevoked = await this.client.revoke(credential);
+      this.assertEnvironment(account.credential.environment);
+      if (account.credential.provider !== providerName) {
+        throw new ChannelAccountError("NOT_FOUND", "Channel credential was not found.");
       }
+      plaintext = decryptIntegrationCredential(
+        { ...account.credential, credentialId: account.credential.id },
+        this.options.ring,
+      );
+      const credential: MercadoLibreTokenCredential = parseMercadoLibreTokenCredential(plaintext);
+      remoteRevoked = await this.client.revoke(credential);
     } catch {
       remoteRevoked = false;
     } finally {
@@ -1259,10 +1296,11 @@ export class ChannelAccountService {
         if (current?.status === "DISCONNECTED") {
           return true;
         }
+        const expectedClaimId = claimedLease ? disconnectClaimId : null;
         if (
           !current ||
           current.version !== account.version ||
-          current.refreshClaimId !== disconnectClaimId
+          current.refreshClaimId !== expectedClaimId
         ) {
           throw new ChannelAccountError(
             "CONFLICT",
@@ -1382,7 +1420,7 @@ export class ChannelAccountService {
           where: {
             id: accountId,
             version: account.version,
-            refreshClaimId: disconnectClaimId,
+            refreshClaimId: expectedClaimId,
             status: { not: "DISCONNECTED" },
           },
           data: {
@@ -1415,16 +1453,18 @@ export class ChannelAccountService {
         return false;
       });
     } catch (error) {
-      await this.db.channelAccount
-        .updateMany({
-          where: { id: accountId, refreshClaimId: disconnectClaimId },
-          data: {
-            refreshClaimId: null,
-            refreshClaimedAt: null,
-            refreshClaimExpiresAt: null,
-          },
-        })
-        .catch(() => undefined);
+      if (claimedLease) {
+        await this.db.channelAccount
+          .updateMany({
+            where: { id: accountId, refreshClaimId: disconnectClaimId },
+            data: {
+              refreshClaimId: null,
+              refreshClaimedAt: null,
+              refreshClaimExpiresAt: null,
+            },
+          })
+          .catch(() => undefined);
+      }
       throw error;
     }
     return {

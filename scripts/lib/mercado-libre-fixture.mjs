@@ -185,6 +185,7 @@ export async function startMercadoLibreFixture(options = {}) {
           user_product_id: userProductId,
           seller_id: Number(sellerId),
           status: "active",
+          currency_id: "COP",
           price: body.price,
           available_quantity: body.available_quantity ?? null,
           seller_sku: body.attributes?.find((attribute) => attribute.id === "SELLER_SKU")

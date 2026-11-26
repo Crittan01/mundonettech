@@ -177,8 +177,32 @@ function sumMoney(values: readonly bigint[], field: string): bigint {
 }
 
 function date(value: unknown, field: string): Date {
-  if (typeof value !== "string" || value.length > 40 || !/^\d{4}-\d{2}-\d{2}T/.test(value)) {
+  if (typeof value !== "string" || value.length > 40) {
     return invalid(`${field} is not an ISO timestamp.`);
+  }
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  if (!match) return invalid(`${field} is not an ISO timestamp with an explicit timezone.`);
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const calendar = new Date(Date.UTC(year!, month! - 1, day!));
+  if (
+    calendar.getUTCFullYear() !== year ||
+    calendar.getUTCMonth() !== month! - 1 ||
+    calendar.getUTCDate() !== day ||
+    hour! > 23 ||
+    minute! > 59 ||
+    second! > 59
+  ) {
+    return invalid(`${field} is not a valid calendar timestamp.`);
+  }
+  const offset = match[7];
+  if (offset !== "Z") {
+    const [offsetHour, offsetMinute] = offset!.slice(1).split(":").map(Number);
+    if (offsetHour! > 23 || offsetMinute! > 59) {
+      return invalid(`${field} has an invalid timezone offset.`);
+    }
   }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return invalid(`${field} is not a valid timestamp.`);
@@ -227,7 +251,11 @@ function parsePack(body: string, expectedId: string): MercadoLibrePackSnapshot {
   };
 }
 
-function parsePayment(value: unknown, orderUpdatedAt: Date): MercadoLibrePaymentSnapshot {
+function parsePayment(
+  value: unknown,
+  orderCreatedAt: Date,
+  orderUpdatedAt: Date,
+): MercadoLibrePaymentSnapshot {
   const root = record(value);
   const status = text(root.status, "payment status", 40);
   const supported = new Set([
@@ -259,6 +287,9 @@ function parsePayment(value: unknown, orderUpdatedAt: Date): MercadoLibrePayment
     optionalDate(root.date_approved, "payment date_approved") ??
     optionalDate(root.date_created, "payment date_created") ??
     orderUpdatedAt;
+  if (occurredAt < orderCreatedAt || occurredAt > orderUpdatedAt) {
+    invalid("The payment timestamp is outside the order chronology.");
+  }
   return {
     externalId: externalId(root.id, "payment id"),
     status,
@@ -292,13 +323,18 @@ function parseOrder(
     invalid("The order total does not balance its item line.");
   }
   const saleFeeCents = money(line.sale_fee ?? 0, "sale_fee");
+  const expectedFeeCents = sumMoney([saleFeeCents * BigInt(quantity)], "expected fee");
   const createdAt = date(root.date_created, "order date_created");
   const updatedAt = date(root.last_updated, "order last_updated");
   if (updatedAt < createdAt) invalid("The order timestamps are inconsistent.");
+  const closedAt = optionalDate(root.date_closed, "order date_closed");
+  if (closedAt && (closedAt < createdAt || closedAt > updatedAt)) {
+    invalid("The order closing timestamp is outside its chronology.");
+  }
   if (!Array.isArray(root.payments) || root.payments.length > 100) {
     invalid("The order contains an invalid payments collection.");
   }
-  const payments = root.payments.map((payment) => parsePayment(payment, updatedAt));
+  const payments = root.payments.map((payment) => parsePayment(payment, createdAt, updatedAt));
   if (new Set(payments.map((payment) => payment.externalId)).size !== payments.length) {
     invalid("The order contains duplicate payments.");
   }
@@ -329,7 +365,7 @@ function parseOrder(
   if (!statuses.has(remoteStatus)) invalid("The order status is not supported.");
   const status = ["cancelled", "invalid"].includes(remoteStatus)
     ? "CANCELLED"
-    : remoteStatus === "paid"
+    : ["paid", "confirmed"].includes(remoteStatus)
       ? "PAID"
       : "PENDING";
   if (status === "PAID" && capturedAmountCents === 0n) {
@@ -344,15 +380,18 @@ function parseOrder(
     invalid("The order seller_sku is invalid.");
   }
   const sellerSku = rawSellerSku || null;
-  const stockReferences = !Array.isArray(line.stock)
-    ? []
-    : line.stock.slice(0, 20).map((entry) => {
-        const stock = record(entry);
-        return {
-          storeId: text(stock.store_id, "stock store_id", 64),
-          networkNodeId: text(stock.network_node_id, "stock network_node_id", 64),
-        };
-      });
+  if (line.stock !== null && line.stock !== undefined && !Array.isArray(line.stock)) {
+    invalid("The order stock references must be an array.");
+  }
+  const rawStockReferences = Array.isArray(line.stock) ? line.stock : [];
+  if (rawStockReferences.length > 20) invalid("The order has too many stock references.");
+  const stockReferences = rawStockReferences.map((entry) => {
+    const stock = record(entry);
+    return {
+      storeId: text(stock.store_id, "stock store_id", 64),
+      networkNodeId: text(stock.network_node_id, "stock network_node_id", 64),
+    };
+  });
   return {
     externalId: id,
     externalPackId: optionalExternalId(root.pack_id, "pack id"),
@@ -368,14 +407,14 @@ function parseOrder(
     paidAmountCents,
     capturedAmountCents,
     refundedAmountCents,
-    expectedFeeCents: saleFeeCents * BigInt(quantity),
+    expectedFeeCents,
     marketplaceFeeCents,
     shippingChargeCents: money(root.shipping_cost ?? 0, "shipping_cost"),
     stockReferences,
     payments,
     createdAt,
     updatedAt,
-    closedAt: optionalDate(root.date_closed, "order date_closed"),
+    closedAt,
   };
 }
 
@@ -444,8 +483,14 @@ function parseShipment(body: string, expectedId: string): MercadoLibreShipmentSn
   const shippedAt = ["SHIPPED", "DELIVERED", "NOT_DELIVERED"].includes(status)
     ? (optionalDate(root.date_shipped, "shipment date_shipped") ?? fallbackShippedAt)
     : null;
+  if (shippedAt && (shippedAt < createdAt || shippedAt > updatedAt)) {
+    invalid("The shipment dispatch timestamp is outside its chronology.");
+  }
   if (deliveredAt && shippedAt && deliveredAt < shippedAt) {
     invalid("The shipment delivery timestamp precedes dispatch.");
+  }
+  if (deliveredAt && deliveredAt > updatedAt) {
+    invalid("The shipment delivery timestamp follows its last update.");
   }
   return {
     externalId: id,
@@ -468,7 +513,7 @@ export function parseMercadoLibreNotification(
   requestId?: string | null,
   queryDataId?: string | null,
 ): MercadoLibreNotification {
-  if (typeof body !== "string" || body.length < 2 || body.length > 16_384) {
+  if (typeof body !== "string" || body.length < 2 || Buffer.byteLength(body, "utf8") > 16_384) {
     throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification size is invalid.");
   }
   let parsed: unknown;
@@ -528,7 +573,7 @@ export function parseMercadoLibreNotification(
     );
   }
   const signatureId = urlSignatureId ?? bodySignatureId;
-  const persistedId = signatureId ?? token(root._id) ?? token(requestId);
+  const persistedId = signatureId?.toLowerCase() ?? token(root._id) ?? token(requestId);
   if (!persistedId) {
     throw new MercadoLibreCatalogError(
       "INVALID_INPUT",
@@ -578,6 +623,7 @@ export function verifyMercadoLibreNotificationSignature(options: {
   const nowMs = options.nowMs ?? Date.now();
   const timestampMs = timestamp.length === 10 ? Number(timestamp) * 1_000 : Number(timestamp);
   if (
+    !Number.isSafeInteger(nowMs) ||
     !Number.isSafeInteger(timestampMs) ||
     timestampMs > nowMs + 300_000 ||
     timestampMs < nowMs - 900_000
@@ -605,7 +651,8 @@ export class MercadoLibreOrderClient extends MercadoLibreUserProductsClient {
     const response = await this.request(credential, "GET", `packs/${id}`, undefined, {
       "x-format-response": "true",
     });
-    if (response.body.length > maximumResponseBytes) invalid("The pack response is too large.");
+    if (Buffer.byteLength(response.body, "utf8") > maximumResponseBytes)
+      invalid("The pack response is too large.");
     return parsePack(response.body, id);
   }
 
@@ -615,7 +662,8 @@ export class MercadoLibreOrderClient extends MercadoLibreUserProductsClient {
   ): Promise<MercadoLibreOrderSnapshot> {
     const id = externalId(externalIdValue, "order id");
     const response = await this.request(credential, "GET", `orders/${id}`);
-    if (response.body.length > maximumResponseBytes) invalid("The order response is too large.");
+    if (Buffer.byteLength(response.body, "utf8") > maximumResponseBytes)
+      invalid("The order response is too large.");
     return parseOrder(response.body, id, credential.externalAccountId);
   }
 
@@ -625,7 +673,8 @@ export class MercadoLibreOrderClient extends MercadoLibreUserProductsClient {
   ): Promise<MercadoLibreShipmentSnapshot> {
     const id = externalId(externalIdValue, "shipment id");
     const response = await this.request(credential, "GET", `shipments/${id}`);
-    if (response.body.length > maximumResponseBytes) invalid("The shipment response is too large.");
+    if (Buffer.byteLength(response.body, "utf8") > maximumResponseBytes)
+      invalid("The shipment response is too large.");
     return parseShipment(response.body, id);
   }
 }

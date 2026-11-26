@@ -837,6 +837,73 @@ export class DomainEventWorker {
                   }
                 });
               }
+            } else if (event.eventType === "meta.capi.dispatch.v1") {
+              const metaEventId = recordValue(event.payload)?.metaEventId;
+              if (typeof metaEventId === "string" && /^[0-9a-f-]{36}$/i.test(metaEventId)) {
+                await this.db.$transaction(async (tx) => {
+                  const rows = await tx.$queryRaw<
+                    Array<{ id: string; status: string; requestStartedAt: Date | null }>
+                  >`
+                    SELECT "id", "status"::text AS "status", "requestStartedAt"
+                    FROM "MetaCapiEvent"
+                    WHERE "id" = ${metaEventId}::uuid
+                    FOR UPDATE
+                  `;
+                  const current = rows[0];
+                  if (!current || !["PENDING", "DISPATCHING"].includes(current.status)) return;
+                  const now = await databaseTimestamp(tx);
+                  const uncertain =
+                    current.status === "DISPATCHING" && current.requestStartedAt !== null;
+                  const failureCode = "OUTBOX_RETRY_EXHAUSTED";
+                  await tx.metaCapiEvent.update({
+                    where: { id: current.id },
+                    data: uncertain
+                      ? {
+                          status: "UNCERTAIN",
+                          claimId: null,
+                          claimedBy: null,
+                          claimedAt: null,
+                          claimExpiresAt: null,
+                          failureCode,
+                        }
+                      : {
+                          status: "FAILED",
+                          claimId: null,
+                          claimedBy: null,
+                          claimedAt: null,
+                          claimExpiresAt: null,
+                          completedAt: now,
+                          failureCode,
+                          externalIdHash: null,
+                          emailHash: null,
+                          phoneHash: null,
+                        },
+                  });
+                  await tx.notification.upsert({
+                    where: { deduplicationKey: `meta-capi:${current.id}:review` },
+                    create: {
+                      deduplicationKey: `meta-capi:${current.id}:review`,
+                      category: "meta.capi",
+                      severity: uncertain ? "CRITICAL" : "WARNING",
+                      title: "Evento Meta CAPI requiere revisión",
+                      message: `El despacho se detuvo (${failureCode}). Revisa la configuración y concilia antes de reintentar.`,
+                      href: "/admin/integraciones",
+                      entityType: "MetaCapiEvent",
+                      entityId: current.id,
+                    },
+                    update: {
+                      category: "meta.capi",
+                      severity: uncertain ? "CRITICAL" : "WARNING",
+                      title: "Evento Meta CAPI requiere revisión",
+                      message: `El despacho se detuvo (${failureCode}). Revisa la configuración y concilia antes de reintentar.`,
+                      href: "/admin/integraciones",
+                      entityType: "MetaCapiEvent",
+                      entityId: current.id,
+                      resolvedAt: null,
+                    },
+                  });
+                });
+              }
             }
             failed += 1;
           }

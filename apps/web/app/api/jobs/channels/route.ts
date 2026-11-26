@@ -89,6 +89,9 @@ export async function POST(request: Request) {
     > | null = null;
     try {
       refresh = await channelAccountService(db).refreshDueAccounts(audit);
+      if (refresh.failures.length > 0) {
+        errors.push({ stage: "refreshDueAccounts", code: "REFRESH_INCOMPLETE" });
+      }
     } catch (error) {
       errors.push({ stage: "refreshDueAccounts", code: stageErrorCode(error) });
     }
@@ -110,15 +113,20 @@ export async function POST(request: Request) {
     let sync: Awaited<
       ReturnType<ReturnType<typeof channelCatalogService>["processSyncJobs"]>
     > | null = null;
-    if (ingestion !== null) {
+    if (ingestion !== null && ingestion.failures.length === 0) {
       try {
         sync = await channelCatalogService(db).processSyncJobs(
           { ...audit, requestId: randomUUID() },
           { limit: 10 },
         );
+        if (sync.failures.length > 0) {
+          errors.push({ stage: "processSyncJobs", code: "SYNC_INCOMPLETE" });
+        }
       } catch (error) {
         errors.push({ stage: "processSyncJobs", code: stageErrorCode(error) });
       }
+    } else if (ingestion !== null) {
+      errors.push({ stage: "processResourceEvents", code: "INGESTION_INCOMPLETE" });
     }
 
     let notificationsSynchronized = false;

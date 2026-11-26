@@ -1,10 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 
+import { describe, expect, it, vi } from "vitest";
+
+import { IntegrationEnvironment } from "../../packages/db/dist/index.js";
 import {
   canonicalJson,
   channelRequestDeduplicationKey,
   channelRequestHash,
 } from "../../packages/integrations/dist/channel-catalog-snapshots.js";
+import {
+  CredentialConflictError,
+  CredentialForbiddenError,
+  CredentialRevokedError,
+  IntegrationCredentialVault,
+  createCredentialKeyRing,
+} from "../../packages/integrations/dist/index.js";
+import {
+  IntegrationTransportError,
+  fetchWithLimit,
+} from "../../packages/integrations/dist/integration-http.js";
 import { integrationDigest } from "../../packages/integrations/dist/integration-utils.js";
 import { paymentDigest } from "../../packages/integrations/dist/payment-shared.js";
 import { FlexShippingProvider } from "../../packages/integrations/dist/shipping-providers.js";
@@ -91,5 +105,183 @@ describe("A1 — historical Flex tracking", () => {
     for (const [requestKey, trackingCode] of vectors) {
       expect((await provider.findLabel(requestKey))?.trackingCode).toBe(trackingCode);
     }
+  });
+});
+
+describe("A8 — canonical request integrity and bounded transport", () => {
+  it.each([
+    new Date("2026-11-25T00:00:00.000Z"),
+    Uint8Array.from([1, 2, 3]),
+    new Map([["secret", "value"]]),
+    /credential/,
+  ])("rejects non-plain objects in strict request hashes", (value) => {
+    expect(() => canonicalJson({ value })).toThrow(/plain objects/);
+    expect(() => channelRequestHash({ value })).toThrow(/plain objects/);
+  });
+
+  it("propagates caller cancellation without exposing provider details", async () => {
+    const caller = new AbortController();
+    const provider: { signal: AbortSignal | null } = { signal: null };
+    const fetchImpl = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const signal = init?.signal ?? null;
+      provider.signal = signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("sensitive detail")), {
+          once: true,
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const operation = fetchWithLimit({
+      url: "https://provider.example.test/resource",
+      init: { signal: caller.signal },
+      fetchImpl,
+      timeoutMs: 60_000,
+    });
+    caller.abort();
+
+    await expect(operation).rejects.toMatchObject({
+      name: "IntegrationTransportError",
+      code: "NETWORK_UNCERTAIN",
+      message: "Provider communication did not produce a deterministic response.",
+    });
+    await expect(operation).rejects.toBeInstanceOf(IntegrationTransportError);
+    expect(provider.signal?.aborted).toBe(true);
+  });
+});
+
+describe("A8 — vault actor fences before credential branches", () => {
+  function ring() {
+    return createCredentialKeyRing({
+      environment: IntegrationEnvironment.LOCAL,
+      activeVersion: 1,
+      serializedKeys: JSON.stringify({ 1: Buffer.alloc(32, 7).toString("base64") }),
+    });
+  }
+
+  it("rejects an inactive actor before reading the credential", async () => {
+    const findUnique = vi.fn();
+    const tx = {
+      $executeRaw: vi.fn(async () => 0),
+      adminUser: { findFirst: vi.fn(async () => null) },
+      integrationCredential: { findUnique },
+    };
+    const db = {
+      $transaction: vi.fn(async (callback: (transaction: typeof tx) => Promise<unknown>) =>
+        callback(tx),
+      ),
+    };
+    const vault = new IntegrationCredentialVault(db as never, ring());
+
+    await expect(vault.revoke(randomUUID(), randomUUID())).rejects.toBeInstanceOf(
+      CredentialForbiddenError,
+    );
+    expect(tx.$executeRaw).toHaveBeenCalledOnce();
+    expect(findUnique).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the actor on a revoked no-op without writes or duplicate audit", async () => {
+    const updateMany = vi.fn();
+    const createAudit = vi.fn();
+    const tx = {
+      $executeRaw: vi.fn(async () => 0),
+      adminUser: { findFirst: vi.fn(async () => ({ role: "SUPERADMIN" })) },
+      integrationCredential: {
+        findUnique: vi.fn(async () => ({
+          id: "123e4567-e89b-42d3-a456-426614174000",
+          provider: "wompi",
+          environment: IntegrationEnvironment.LOCAL,
+          revokedAt: new Date("2026-11-25T00:00:00.000Z"),
+        })),
+        updateMany,
+      },
+      adminActionLog: { create: createAudit },
+    };
+    const db = {
+      $transaction: vi.fn(async (callback: (transaction: typeof tx) => Promise<unknown>) =>
+        callback(tx),
+      ),
+    };
+    const vault = new IntegrationCredentialVault(db as never, ring());
+
+    await expect(
+      vault.revoke("123e4567-e89b-42d3-a456-426614174000", randomUUID()),
+    ).rejects.toBeInstanceOf(CredentialRevokedError);
+    expect(tx.adminUser.findFirst).toHaveBeenCalledOnce();
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(createAudit).not.toHaveBeenCalled();
+  });
+
+  function lockedVault(
+    provider: string,
+    queryRaw: (query: TemplateStringsArray, ...values: unknown[]) => Promise<unknown>,
+  ) {
+    const updateMany = vi.fn();
+    const createAudit = vi.fn();
+    const tx = {
+      $executeRaw: vi.fn(async () => 0),
+      $queryRaw: vi.fn(queryRaw),
+      adminUser: { findFirst: vi.fn(async () => ({ role: "SUPERADMIN" })) },
+      integrationCredential: {
+        findUnique: vi.fn(async () => ({
+          id: "123e4567-e89b-42d3-a456-426614174000",
+          provider,
+          environment: IntegrationEnvironment.LOCAL,
+          revokedAt: null,
+        })),
+        updateMany,
+      },
+      adminActionLog: { create: createAudit },
+    };
+    const db = {
+      $transaction: vi.fn(async (callback: (transaction: typeof tx) => Promise<unknown>) =>
+        callback(tx),
+      ),
+    };
+    return {
+      vault: new IntegrationCredentialVault(db as never, ring()),
+      updateMany,
+      createAudit,
+    };
+  }
+
+  it("locks and rejects an active Mercado Libre account before revocation", async () => {
+    const statements: string[] = [];
+    const { vault, updateMany, createAudit } = lockedVault(
+      "mercado-libre",
+      async (query: TemplateStringsArray) => {
+        statements.push(query.join(" "));
+        return [{ id: randomUUID(), status: "ACTIVE", refreshClaimId: null }];
+      },
+    );
+
+    await expect(
+      vault.revoke("123e4567-e89b-42d3-a456-426614174000", randomUUID()),
+    ).rejects.toBeInstanceOf(CredentialConflictError);
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain("ChannelAccount");
+    expect(statements[0]).toContain("FOR UPDATE");
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(createAudit).not.toHaveBeenCalled();
+  });
+
+  it("locks and rejects a draft DIAN invoice before revocation", async () => {
+    const statements: string[] = [];
+    const { vault, updateMany, createAudit } = lockedVault(
+      "dian",
+      async (query: TemplateStringsArray) => {
+        statements.push(query.join(" "));
+        return [{ id: randomUUID() }];
+      },
+    );
+
+    await expect(
+      vault.revoke("123e4567-e89b-42d3-a456-426614174000", randomUUID()),
+    ).rejects.toBeInstanceOf(CredentialConflictError);
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain("TaxInvoice");
+    expect(statements[0]).toContain("FOR UPDATE");
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(createAudit).not.toHaveBeenCalled();
   });
 });

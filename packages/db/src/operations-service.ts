@@ -382,7 +382,7 @@ export class OperationsService {
         WHERE channels."status" = 'REAUTH_REQUIRED'
         UNION ALL
         SELECT 'channel-sync:' || listings."id", 'channels.sync',
-          CASE WHEN listings."lastProviderError" IN ('PROVIDER_UNCERTAIN', 'SYNC_UNCERTAIN', 'CLAIM_EXPIRED', 'PERSISTENCE_CONFLICT')
+          CASE WHEN listings."lastProviderError" IN ('PROVIDER_UNCERTAIN', 'SYNC_UNCERTAIN', 'CLAIM_EXPIRED', 'PERSISTENCE_CONFLICT', 'INVALID_RESPONSE')
             THEN 'CRITICAL' ELSE 'WARNING' END,
           'Publicación de canal requiere revisión',
           left('La sincronización se detuvo (' || listings."lastProviderError" || '). Revisa el job y concilia antes de reintentar.', 500),

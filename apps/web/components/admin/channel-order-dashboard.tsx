@@ -64,9 +64,15 @@ const stockErrorLabels: Record<string, string> = {
   STOCK_ORIGIN_AMBIGUOUS: "Hay varias bodegas posibles; un operador debe elegir el origen real.",
   STOCK_MAPPING_REQUIRED: "La asignación de variante y bodega está incompleta.",
   STOCK_ORIGIN_INVALID: "La bodega asignada ya no es válida para la logística de la orden.",
-  INSUFFICIENT_STOCK: "No hay disponibilidad suficiente; no se reservó ni descontó inventario.",
+  SHIPMENT_LOGISTIC_DIVERGENCE: "La logística del envío no coincide con la oferta vendida.",
+  INSUFFICIENT_STOCK:
+    "No hay disponibilidad suficiente; no se descontó inventario y la orden quedó en revisión.",
 };
 const reconciliationReasonLabels: Record<string, string> = {
+  PACK_ORDER_STATE_DIVERGENCE: "El pack cancelado contiene una orden con otro estado",
+  PAID_TOTAL_DIVERGENCE: "El importe pagado no coincide con el bruto de la orden",
+  PAYMENT_CHARGEBACK_REVIEW: "Existe un contracargo sin reembolso completo registrado",
+  INSUFFICIENT_STOCK: "No fue posible completar el descuento de inventario por falta de stock",
   PAYMENT_TOTAL_DIVERGENCE: "Diferencia entre importe pagado y capturas aprobadas",
   FEE_TOTAL_DIVERGENCE: "Diferencia entre comisión esperada y comisión aplicada",
   PAYMENT_STATE_DIVERGENCE: "Pedido pagado sin saldo neto capturado",
@@ -213,6 +219,7 @@ export function ChannelOrderDashboardView({
                 ) : null}
                 {canWrite ? (
                   <ChannelOrderActions
+                    key={`${order.id}:${order.version}`}
                     order={order}
                     canReconcile={canReconcile}
                     locations={locations[order.id] ?? []}

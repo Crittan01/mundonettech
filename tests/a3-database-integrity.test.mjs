@@ -2826,3 +2826,210 @@ describe("A7 — CRM, B2B, loyalty and lifecycle structural integrity", () => {
     });
   });
 });
+
+describe("A8 — omnichannel chronology and ownership integrity", () => {
+  async function createChannelFixture(client, { trackSerial = false } = {}) {
+    const adminUserId = await createAdmin(client);
+    const credentialId = randomUUID();
+    await client.query(
+      `INSERT INTO "IntegrationCredential" (
+        "id", "provider", "environment", "accountName", "keyVersion", "nonce",
+        "ciphertext", "authTag", "createdByAdminUserId"
+      ) VALUES ($1, 'mercado-libre', 'LOCAL', $2, 1, $3, $4, $5, $6)`,
+      [
+        credentialId,
+        `a8-${randomUUID()}`,
+        randomBytes(12),
+        randomBytes(32),
+        randomBytes(16),
+        adminUserId,
+      ],
+    );
+    const catalog = await createCatalogFixture(client);
+    if (trackSerial) {
+      await client.query(`UPDATE "Product" SET "trackSerial" = true WHERE "id" = $1`, [
+        catalog.productId,
+      ]);
+    }
+    const locationId = await createLocationWithZeroStock(client, catalog.variantId);
+    const accountId = randomUUID();
+    await client.query(
+      `INSERT INTO "ChannelAccount" (
+        "id", "provider", "siteId", "environment", "credentialId", "externalAccountId",
+        "label", "status", "scopes", "tokenExpiresAt", "createdByAdminUserId"
+      ) VALUES (
+        $1, 'MERCADO_LIBRE', 'MCO', 'LOCAL', $2, $3, 'A8 Meli', 'ACTIVE',
+        ARRAY['offline_access', 'read', 'write'], CURRENT_TIMESTAMP + INTERVAL '1 hour', $4
+      )`,
+      [
+        accountId,
+        credentialId,
+        String(Math.floor(100000000 + Math.random() * 899999999)),
+        adminUserId,
+      ],
+    );
+    const externalOrderId = String(Math.floor(1000000000 + Math.random() * 8999999999));
+    const externalPackId = String(Math.floor(1000000000 + Math.random() * 8999999999));
+    const externalShipmentId = String(Math.floor(1000000000 + Math.random() * 8999999999));
+    const packId = randomUUID();
+    const shipmentId = randomUUID();
+    const channelOrderId = randomUUID();
+    await client.query(
+      `INSERT INTO "ChannelPack" (
+        "id", "accountId", "externalPackId", "externalShipmentId", "externalStatus",
+        "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+      ) VALUES ($1, $2, $3, $4, 'RELEASED', $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [packId, accountId, externalPackId, externalShipmentId, randomBytes(32)],
+    );
+    await client.query(
+      `INSERT INTO "ChannelShipment" (
+        "id", "accountId", "packId", "externalShipmentId", "externalOrderId", "externalPackId",
+        "logisticType", "status", "costCents", "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'ME2', 'READY_TO_SHIP', 0, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [
+        shipmentId,
+        accountId,
+        packId,
+        externalShipmentId,
+        externalOrderId,
+        externalPackId,
+        randomBytes(32),
+      ],
+    );
+    await client.query(
+      `INSERT INTO "ChannelOrder" (
+        "id", "accountId", "packId", "shipmentId", "variantId", "stockLocationId",
+        "externalOrderId", "externalItemId", "remoteStatus", "status", "quantity",
+        "unitPriceCents", "grossAmountCents", "paidAmountCents", "capturedAmountCents",
+        "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, 'paid', 'PAID', 1,
+        100000, 100000, 100000, 100000, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+      )`,
+      [
+        channelOrderId,
+        accountId,
+        packId,
+        shipmentId,
+        catalog.variantId,
+        locationId,
+        externalOrderId,
+        `MCO${externalOrderId}`,
+        randomBytes(32),
+      ],
+    );
+    return { adminUserId, accountId, catalog, locationId, packId, shipmentId, channelOrderId };
+  }
+
+  it("rejects invalid chronology, excess refunds, pack regression and cross-order shipment ownership", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createChannelFixture(client);
+      await expectSqlViolation(
+        client,
+        `UPDATE "ChannelOrder" SET "externalClosedAt" = "externalCreatedAt" - INTERVAL '1 minute'
+         WHERE "id" = $1`,
+        [fixture.channelOrderId],
+        "23514",
+        "ChannelOrder_timestamps_valid",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "ChannelOrder" SET "refundedAmountCents" = "capturedAmountCents" + 1
+         WHERE "id" = $1`,
+        [fixture.channelOrderId],
+        "23514",
+        "ChannelOrder_refund_within_capture",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "ChannelPack" SET "externalStatus" = 'PENDING',
+         "externalUpdatedAt" = CURRENT_TIMESTAMP + INTERVAL '1 minute' WHERE "id" = $1`,
+        [fixture.packId],
+        "55000",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "ChannelShipment" SET "status" = 'SHIPPED',
+         "shippedAt" = "externalCreatedAt" - INTERVAL '1 minute',
+         "externalUpdatedAt" = CURRENT_TIMESTAMP + INTERVAL '1 minute' WHERE "id" = $1`,
+        [fixture.shipmentId],
+        "23514",
+        "ChannelShipment_timestamps_valid",
+      );
+      const foreignShipmentId = randomUUID();
+      await client.query(
+        `INSERT INTO "ChannelShipment" (
+          "id", "accountId", "externalShipmentId", "externalOrderId", "logisticType", "status",
+          "costCents", "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+        ) VALUES ($1, $2, $3, '999999999', 'ME2', 'READY_TO_SHIP', 0, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          foreignShipmentId,
+          fixture.accountId,
+          String(Math.floor(1000000000 + Math.random() * 8999999999)),
+          randomBytes(32),
+        ],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "ChannelOrder" SET "shipmentId" = $2 WHERE "id" = $1`,
+        [fixture.channelOrderId, foreignShipmentId],
+        "55000",
+      );
+      const unshippedOrderId = randomUUID();
+      await client.query(
+        `INSERT INTO "ChannelOrder" (
+          "id", "accountId", "externalOrderId", "externalItemId", "remoteStatus", "status",
+          "quantity", "unitPriceCents", "grossAmountCents", "paidAmountCents", "capturedAmountCents",
+          "expectedFeeCents", "marketplaceFeeCents", "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+        ) VALUES (
+          $1, $2, $3, $4, 'paid', 'PAID', 1, 100000, 100000, 100000, 100000,
+          10000, 10000, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )`,
+        [
+          unshippedOrderId,
+          fixture.accountId,
+          String(Math.floor(2000000000 + Math.random() * 899999999)),
+          `MCO${Date.now()}`,
+          randomBytes(32),
+        ],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "ChannelOrder" SET "shipmentId" = $2 WHERE "id" = $1`,
+        [unshippedOrderId, foreignShipmentId],
+        "23514",
+      );
+    });
+  });
+
+  it("requires exact serialized-unit parity with the channel reservation before dispatch", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createChannelFixture(client, { trackSerial: true });
+      const reservationKey = `channel-order:${fixture.channelOrderId}:reservation:v1`;
+      await client.query(
+        `UPDATE "ChannelOrder" SET "stockStatus" = 'RESERVED', "reservationKey" = $2,
+         "reservedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [fixture.channelOrderId, reservationKey],
+      );
+      await client.query(
+        `UPDATE "StockLevel" SET "onHand" = 1, "committed" = 1, "weightedAvgCostCents" = 60000
+         WHERE "locationId" = $1 AND "variantId" = $2`,
+        [fixture.locationId, fixture.catalog.variantId],
+      );
+      const serializedUnitId = randomUUID();
+      await client.query(
+        `INSERT INTO "SerializedUnit" (
+          "id", "variantId", "locationId", "serial", "status", "reservationKey"
+        ) VALUES ($1, $2, $3, $4, 'RESERVED', 'another-reservation')`,
+        [serializedUnitId, fixture.catalog.variantId, fixture.locationId, `A8-${randomUUID()}`],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "SerializedUnit" SET "status" = 'SOLD', "channelOrderId" = $2,
+         "reservationKey" = NULL, "soldAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [serializedUnitId, fixture.channelOrderId],
+        "23514",
+      );
+    });
+  });
+});

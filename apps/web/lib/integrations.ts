@@ -31,15 +31,22 @@ const state = globalThis as typeof globalThis & {
 
 export function getIntegrationEnvironment(): IntegrationEnvironment {
   const configured = process.env.INTEGRATION_ENVIRONMENT;
+  const vercelEnvironment = process.env.VERCEL_ENV;
   const inferred =
-    process.env.VERCEL_ENV === "production"
+    vercelEnvironment === "production"
       ? IntegrationEnvironment.PRD
-      : process.env.VERCEL_ENV === "preview"
+      : vercelEnvironment === "preview"
         ? IntegrationEnvironment.STG
         : IntegrationEnvironment.LOCAL;
   const value = configured ?? inferred;
   if (!Object.values(IntegrationEnvironment).includes(value as IntegrationEnvironment)) {
     throw new Error("INTEGRATION_ENVIRONMENT must be LOCAL, STG or PRD.");
+  }
+  if (
+    value !== inferred &&
+    (vercelEnvironment === "production" || vercelEnvironment === "preview")
+  ) {
+    throw new Error("INTEGRATION_ENVIRONMENT must match the isolated Vercel environment.");
   }
   return value as IntegrationEnvironment;
 }

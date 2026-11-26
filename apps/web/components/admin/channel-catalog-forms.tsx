@@ -186,7 +186,17 @@ export function ChannelListingCreateForm({
   const initialVariant = state.values?.variantId ?? variants[0]?.id ?? "";
   const [variantId, setVariantId] = useState(initialVariant);
   const selected = variants.find((variant) => variant.id === variantId) ?? variants[0];
-  if (!selected) return null;
+  if (!selected) {
+    return (
+      <p
+        role="status"
+        className="rounded-lg border border-border p-4 text-sm text-muted-foreground"
+      >
+        No hay variantes activas elegibles. Completa una variante con imagen lista y datos
+        logísticos antes de preparar una publicación.
+      </p>
+    );
+  }
   return (
     <form action={action} className="space-y-4" aria-busy={pending}>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -388,26 +398,30 @@ export function ChannelListingSyncActions({ listing }: { readonly listing: Chann
   return (
     <div className="space-y-4 rounded-lg border border-border p-4">
       <div className="flex flex-wrap gap-2">
-        {listing.offers.map((offer) => (
-          <div key={offer.id} className="flex flex-wrap gap-2">
-            <SyncButton
-              listingId={listing.id}
-              offerId={offer.id}
-              kind="SYNC_PRICE"
-              label={`Sincronizar precio ${offer.externalItemId ?? "borrador"}`}
-              pendingLabel="Sincronizando precio…"
-            />
-            <SyncButton
-              listingId={listing.id}
-              offerId={offer.id}
-              kind="SYNC_LOCAL_STOCK"
-              label={
-                offer.logisticType === "FULFILLMENT" ? "Leer stock Full" : "Sincronizar stock local"
-              }
-              pendingLabel="Conciliando stock…"
-            />
-          </div>
-        ))}
+        {listing.offers
+          .filter((offer) => offer.externalItemId)
+          .map((offer) => (
+            <div key={offer.id} className="flex flex-wrap gap-2">
+              <SyncButton
+                listingId={listing.id}
+                offerId={offer.id}
+                kind="SYNC_PRICE"
+                label={`Sincronizar precio ${offer.externalItemId ?? "borrador"}`}
+                pendingLabel="Sincronizando precio…"
+              />
+              <SyncButton
+                listingId={listing.id}
+                offerId={offer.id}
+                kind="SYNC_LOCAL_STOCK"
+                label={
+                  offer.logisticType === "FULFILLMENT"
+                    ? "Leer stock Full"
+                    : "Sincronizar stock local"
+                }
+                pendingLabel="Conciliando stock…"
+              />
+            </div>
+          ))}
         <SyncButton
           listingId={listing.id}
           kind="RECONCILE_REMOTE"

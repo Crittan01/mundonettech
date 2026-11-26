@@ -81,7 +81,8 @@ export function channelStockQuantities(variant: ChannelVariantSnapshot): {
 
 function mediaOrigin(value: string, allowLoopback: boolean): string {
   const url = new URL(value);
-  const loopback = allowLoopback && ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+  const loopback =
+    allowLoopback && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
   if (
     (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
     url.username ||
@@ -95,10 +96,18 @@ function mediaOrigin(value: string, allowLoopback: boolean): string {
 }
 
 function publicMediaUrl(origin: string, storageKey: string): string {
-  if (!/^[A-Za-z0-9/._-]{1,500}$/.test(storageKey) || storageKey.split("/").includes("..")) {
+  const segments = storageKey.split("/");
+  if (
+    !/^[A-Za-z0-9/._-]{1,500}$/.test(storageKey) ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
     throw new TypeError("The catalog media key is not safe for channel publication.");
   }
-  return `${origin}/${storageKey.split("/").map(encodeURIComponent).join("/")}`;
+  return `${origin}/${segments.map(encodeURIComponent).join("/")}`;
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function measurement(value: number): string {
@@ -163,7 +172,7 @@ export function buildChannelContentSnapshot(options: {
       return (
         leftVariant - rightVariant ||
         left.position - right.position ||
-        left.id.localeCompare(right.id)
+        compareCodePoints(left.id, right.id)
       );
     });
   const pictureSources = [
@@ -171,6 +180,9 @@ export function buildChannelContentSnapshot(options: {
   ].slice(0, 12);
   if (pictureSources.length === 0) {
     throw new TypeError("The variant needs a ready JPEG, PNG or WebP image before publication.");
+  }
+  if (!Number.isInteger(variant.weightGrams) || variant.weightGrams <= 0) {
+    throw new TypeError("Invalid package weight.");
   }
   const attributes: MercadoLibreAttributeInput[] = [
     { id: "ITEM_CONDITION", valueName: "Nuevo" },
@@ -185,7 +197,7 @@ export function buildChannelContentSnapshot(options: {
   const gtin = resolveCommercialGtin(variant.gtin, variant.ean);
   if (gtin) attributes.push({ id: "GTIN", valueName: gtin });
   for (const link of [...variant.optionLinks].sort((left, right) =>
-    left.optionDefinition.key.localeCompare(right.optionDefinition.key),
+    compareCodePoints(left.optionDefinition.key, right.optionDefinition.key),
   )) {
     attributes.push({
       name: printable(link.optionDefinition.name, "option name", 120),

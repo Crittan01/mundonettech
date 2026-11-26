@@ -885,7 +885,6 @@ export class AccountService {
       blockingRefund,
       blockingReturn,
       blockingWarranty,
-      blockingMetaCapi,
       blockingPaymentTransaction,
       blockingTaxInvoice,
       blockingCreditNote,
@@ -934,13 +933,6 @@ export class AccountService {
         where: {
           order: { customerId },
           status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
-        },
-        select: { id: true },
-      }),
-      tx.metaCapiEvent.findFirst({
-        where: {
-          customerId,
-          status: "DISPATCHING",
         },
         select: { id: true },
       }),
@@ -993,7 +985,6 @@ export class AccountService {
       blockingRefund ||
       blockingReturn ||
       blockingWarranty ||
-      blockingMetaCapi ||
       blockingPaymentTransaction ||
       blockingTaxInvoice ||
       blockingCreditNote ||

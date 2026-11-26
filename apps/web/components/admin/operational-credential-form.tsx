@@ -144,7 +144,9 @@ export function OperationalCredentialForm({
       </div>
     );
   }
-  const currentFields = fields[provider];
+  const currentFields = fields[provider].filter(
+    (field) => !(provider === "meta" && environment === "PRD" && field.name === "testEventCode"),
+  );
   const values = state.values?.provider === provider ? state.values : undefined;
   return (
     <form action={action} className="space-y-5">
@@ -158,6 +160,7 @@ export function OperationalCredentialForm({
               id="operational-provider"
               value={provider}
               onChange={(event) => setProvider(event.target.value as Provider)}
+              disabled={pending}
               className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
             >
               <option value="aveonline">Aveonline</option>
@@ -176,6 +179,7 @@ export function OperationalCredentialForm({
               name="accountName"
               defaultValue={values?.accountName ?? ""}
               maxLength={120}
+              disabled={pending}
               required
             />
             <p className="text-xs text-muted-foreground">
@@ -208,6 +212,7 @@ export function OperationalCredentialForm({
                   autoComplete="off"
                   spellCheck={false}
                   defaultValue={defaultValue}
+                  disabled={pending}
                   required={required}
                   className="min-h-32 w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm"
                 />
@@ -220,6 +225,7 @@ export function OperationalCredentialForm({
                   spellCheck={false}
                   defaultValue={defaultValue}
                   min={field.type === "number" ? 1 : undefined}
+                  disabled={pending}
                   required={required}
                 />
               )}

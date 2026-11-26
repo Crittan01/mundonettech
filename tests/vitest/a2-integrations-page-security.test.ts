@@ -20,7 +20,7 @@ class AdminAuthorizationError extends Error {
 }
 
 interface PageModule {
-  default(): Promise<unknown>;
+  default(input?: { searchParams?: Promise<{ cursor?: string | string[] }> }): Promise<unknown>;
 }
 
 function loadPage(mocks: Record<string, unknown>): PageModule {
@@ -177,6 +177,56 @@ describe("A2 — integrations page recent MFA and safe RSC", () => {
     expect(serialized).not.toContain("accountName");
     expect(serialized).toContain("123e4567-e89b-42d3-a456-426614174001");
   });
+
+  it("passes the cursor to the domain and renders safe navigation beyond 100 credentials", async () => {
+    const cursor = "123e4567-e89b-42d3-a456-426614174001";
+    const nextCursor = "123e4567-e89b-42d3-a456-426614174002";
+    const list = vi.fn(async () => ({
+      items: [
+        {
+          id: "123e4567-e89b-42d3-a456-426614174003",
+          provider: "meta",
+          accountName,
+          environment: "LOCAL",
+          keyVersion: 1,
+          createdAt: new Date("2026-11-24T12:00:00.000Z"),
+          updatedAt: new Date("2026-11-24T12:00:00.000Z"),
+          revokedAt: null,
+        },
+      ],
+      nextCursor,
+    }));
+    const page = loadPage({
+      "@mundonettech/core": core,
+      ...componentMocks(),
+      "@/lib/security/admin-auth": {
+        AdminAuthorizationError,
+        getAdminSession: vi.fn(async () => session()),
+        requireAdminPage: vi.fn(async () => session()),
+      },
+      "@/lib/integrations": {
+        getIntegrationCredentialVault: vi.fn(() => ({ list })),
+        getIntegrationEnvironment: vi.fn(() => "LOCAL"),
+        metaCapiService: vi.fn(() => ({ listEvents: vi.fn(async () => []) })),
+      },
+      "@/lib/seo-data": {
+        getMetaCatalogFeed: vi.fn(async () => ({ accepted: 0, issues: [] })),
+      },
+    });
+
+    const tree = await page.default({ searchParams: Promise.resolve({ cursor }) });
+    const serialized = JSON.stringify(tree);
+    expect(list).toHaveBeenCalledWith(actorAdminUserId, {
+      includeRevoked: true,
+      limit: 100,
+      cursor,
+    });
+    expect(serialized).toContain("Primera página");
+    expect(serialized).toContain("Siguiente página");
+    expect(serialized).toContain(`/admin/integraciones?cursor=${nextCursor}`);
+    expect(serialized).not.toContain(accountName);
+    expect(serialized).not.toContain("accountName");
+  });
 });
 
 describe("A2 — channel request stability across RSC refreshes", () => {
@@ -215,5 +265,24 @@ describe("A5 — DIAN trust anchor wizard", () => {
     expect(source).toContain('field.name === "signatureTrustAnchorPem"');
     expect(source).toContain('environment === "PRD"');
     expect(source).toContain("<textarea");
+  });
+});
+
+describe("A8 — credential form progress and repeated success", () => {
+  it("re-arms the Wompi success view for every new submission and exposes pending states", () => {
+    const source = readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../apps/web/components/admin/integration-credential-forms.tsx",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    expect(source).toContain("setDismissSuccess(false);");
+    expect(source).toContain("encrypt(event.currentTarget);");
+    expect(source).toContain('pending ? "Recifrando…"');
+    expect(source).toContain('pending ? "Revocando…"');
+    expect(source.match(/aria-busy=\{pending\}/g)).toHaveLength(2);
   });
 });

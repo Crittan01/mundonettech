@@ -26,6 +26,7 @@ export interface MetaCatalogIssue {
 export interface MetaCatalogFeed {
   readonly csv: string;
   readonly accepted: number;
+  readonly excluded: number;
   readonly issues: readonly MetaCatalogIssue[];
 }
 
@@ -134,7 +135,8 @@ export function buildMetaCatalogCsv(items: readonly MerchantFeedItem[]): MetaCat
       item.availableQuantity !== undefined &&
       (!Number.isInteger(item.availableQuantity) ||
         item.availableQuantity < 0 ||
-        item.availableQuantity > 2_147_483_647)
+        item.availableQuantity > 2_147_483_647 ||
+        item.available !== item.availableQuantity > 0)
     ) {
       reject("INVALID_INVENTORY");
       continue;
@@ -178,6 +180,7 @@ export function buildMetaCatalogCsv(items: readonly MerchantFeedItem[]): MetaCat
   return {
     csv: `${serializeCsv([headers, ...rows])}\r\n`,
     accepted: rows.length,
+    excluded: items.length - rows.length,
     issues,
   };
 }

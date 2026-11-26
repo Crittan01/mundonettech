@@ -47,6 +47,13 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}
 const providerName = "mercado-libre";
 const syncLeaseMs = 30_000;
 const maxJobAttempts = 4;
+const uncertainFailureCodes = new Set([
+  "CLAIM_EXPIRED",
+  "INVALID_RESPONSE",
+  "PERSISTENCE_CONFLICT",
+  "PROVIDER_UNCERTAIN",
+  "SYNC_UNCERTAIN",
+]);
 
 export type ChannelCatalogErrorCode =
   | "INVALID_INPUT"
@@ -376,16 +383,33 @@ function providerFailure(error: unknown): { status: "FAILED" | "UNCERTAIN"; code
   return { status: "UNCERTAIN", code: "SYNC_UNCERTAIN" };
 }
 
-function remoteQuantities(stock: MercadoLibreStockSnapshot | null): {
+function remoteQuantities(
+  stock: MercadoLibreStockSnapshot | null,
+  listing?: Pick<ChannelListing, "sellerStoreId" | "sellerNetworkNodeId">,
+): {
   local: number | null;
   full: number | null;
 } {
   if (!stock) return { local: null, full: null };
   let local: number | null = null;
   let full: number | null = null;
+  const multiOrigin = Boolean(listing?.sellerStoreId && listing.sellerNetworkNodeId);
   for (const location of stock.locations) {
-    if (location.type === "meli_facility") full = (full ?? 0) + location.quantity;
-    else local = (local ?? 0) + location.quantity;
+    if (location.type === "meli_facility") {
+      full = (full ?? 0) + location.quantity;
+      continue;
+    }
+    if (multiOrigin) {
+      if (
+        location.type === "seller_warehouse" &&
+        location.storeId === listing?.sellerStoreId &&
+        location.networkNodeId === listing?.sellerNetworkNodeId
+      ) {
+        local = (local ?? 0) + location.quantity;
+      }
+      continue;
+    }
+    local = (local ?? 0) + location.quantity;
   }
   if ((local ?? 0) > 2_147_483_647 || (full ?? 0) > 2_147_483_647) {
     throw new MercadoLibreCatalogError(
@@ -436,6 +460,16 @@ export class ChannelCatalogService {
     }
   }
 
+  private async lockedActor(
+    tx: Prisma.TransactionClient,
+    actorAdminUserId: string,
+    permission: AdminPermission,
+  ): Promise<void> {
+    assertUuid(actorAdminUserId, "actorAdminUserId");
+    await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR SHARE`;
+    await this.actor(tx, actorAdminUserId, permission);
+  }
+
   private async now(tx: Prisma.TransactionClient): Promise<Date> {
     const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const value = rows[0]?.now;
@@ -447,7 +481,7 @@ export class ChannelCatalogService {
     tx: Prisma.TransactionClient,
     audit: ChannelAuditContext,
     action: string,
-    targetType: "ChannelListing" | "ChannelOffer" | "ChannelSyncJob",
+    targetType: "ChannelAccount" | "ChannelListing" | "ChannelOffer" | "ChannelSyncJob",
     targetId: string,
     metadata: Prisma.JsonObject = {},
   ): Promise<void> {
@@ -640,7 +674,7 @@ export class ChannelCatalogService {
     const calculated = calculatedOffer(options.offer);
     try {
       return await this.db.$transaction(async (tx) => {
-        await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+        await this.lockedActor(tx, options.audit.actorAdminUserId, "integrations:write");
         await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${options.accountId}::uuid FOR SHARE`;
         const account = await tx.channelAccount.findUnique({ where: { id: options.accountId } });
         if (!account) throw new ChannelCatalogError("NOT_FOUND", "Channel account was not found.");
@@ -767,15 +801,35 @@ export class ChannelCatalogService {
   ): Promise<ChannelSyncJob> {
     const offer = options.offerId
       ? options.listing.offers.find((candidate) => candidate.id === options.offerId)
-      : options.listing.offers[0];
-    if (["SYNC_PRICE", "PUBLISH"].includes(options.kind) && !offer) {
+      : options.kind === "RECONCILE_REMOTE"
+        ? (options.listing.offers.find((candidate) => !candidate.externalItemId) ??
+          options.listing.offers[0])
+        : options.listing.offers[0];
+    if (
+      (options.offerId && !offer) ||
+      (["SYNC_PRICE", "PUBLISH"].includes(options.kind) && !offer)
+    ) {
       throw new ChannelCatalogError("NOT_FOUND", "A channel offer is required.");
     }
-    if (options.kind === "PUBLISH" && !offer?.externalItemId) {
+    if (
+      options.kind !== "RECONCILE_REMOTE" &&
+      uncertainFailureCodes.has(options.listing.lastProviderError ?? "")
+    ) {
+      throw new ChannelCatalogError(
+        "RECONCILE_REQUIRED",
+        "Reconcile the uncertain remote result before another write.",
+      );
+    }
+    if (options.kind === "PUBLISH" && offer && !offer.externalItemId) {
       const uncertain = await tx.channelSyncJob.findFirst({
-        where: { listingId: options.listing.id, kind: "PUBLISH", status: "UNCERTAIN" },
+        where: {
+          listingId: options.listing.id,
+          offerId: offer.id,
+          kind: "PUBLISH",
+          status: "UNCERTAIN",
+        },
       });
-      if (uncertain && !options.listing.externalUserProductId) {
+      if (uncertain) {
         throw new ChannelCatalogError(
           "RECONCILE_REQUIRED",
           "Reconcile the uncertain publication before creating another item.",
@@ -893,7 +947,7 @@ export class ChannelCatalogService {
     });
     if (!peek) throw new ChannelCatalogError("NOT_FOUND", "Channel listing was not found.");
     const job = await this.db.$transaction(async (tx) => {
-      await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+      await this.lockedActor(tx, options.audit.actorAdminUserId, "integrations:write");
       await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${peek.accountId}::uuid FOR SHARE`;
       await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${options.listingId}::uuid FOR UPDATE`;
       const listing = await tx.channelListing.findUnique({
@@ -926,7 +980,12 @@ export class ChannelCatalogService {
     const calculated = calculatedOffer(options.offer);
     try {
       await this.db.$transaction(async (tx) => {
-        await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+        await this.lockedActor(tx, options.audit.actorAdminUserId, "integrations:write");
+        await tx.$executeRaw`
+          SELECT account."id" FROM "ChannelAccount" account
+          JOIN "ChannelListing" listing ON listing."accountId" = account."id"
+          WHERE listing."id" = ${options.listingId}::uuid
+          FOR SHARE OF account`;
         await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${options.listingId}::uuid FOR UPDATE`;
         const listing = await tx.channelListing.findUnique({
           where: { id: options.listingId },
@@ -1015,7 +1074,13 @@ export class ChannelCatalogService {
     await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
     const calculated = calculatedOffer(options.offer);
     await this.db.$transaction(async (tx) => {
-      await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+      await this.lockedActor(tx, options.audit.actorAdminUserId, "integrations:write");
+      await tx.$executeRaw`
+        SELECT account_record."id" FROM "ChannelOffer" offer_record
+        JOIN "ChannelListing" listing_record ON listing_record."id" = offer_record."listingId"
+        JOIN "ChannelAccount" account_record ON account_record."id" = listing_record."accountId"
+        WHERE offer_record."id" = ${options.offerId}::uuid
+        FOR SHARE OF account_record`;
       await tx.$executeRaw`
         SELECT listing_record."id" FROM "ChannelOffer" offer_record
         JOIN "ChannelListing" listing_record ON listing_record."id" = offer_record."listingId"
@@ -1027,6 +1092,12 @@ export class ChannelCatalogService {
       });
       if (!current) throw new ChannelCatalogError("NOT_FOUND", "Channel offer was not found.");
       this.assertEnvironment(current.listing.account.environment);
+      if (current.listing.account.status && current.listing.account.status !== "ACTIVE") {
+        throw new ChannelCatalogError(
+          "REAUTH_REQUIRED",
+          "Reconnect the account before changing offers.",
+        );
+      }
       if (current.version !== options.expectedVersion) {
         throw new ChannelCatalogError("CONFLICT", "The offer changed before the update.");
       }
@@ -1128,6 +1199,7 @@ export class ChannelCatalogService {
         claimExpiresAt: { lte: now },
         listing: { account: { environment: this.options.ring.environment } },
       },
+      include: { listing: { select: { accountId: true } } },
       orderBy: [{ claimExpiresAt: "asc" }, { id: "asc" }],
       take: 20,
     });
@@ -1136,6 +1208,8 @@ export class ChannelCatalogService {
       if (!candidate.claimId) continue;
       const claimId = candidate.claimId;
       const changed = await this.db.$transaction(async (tx) => {
+        await this.lockedActor(tx, audit.actorAdminUserId, "integrations:write");
+        await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${candidate.listing.accountId}::uuid FOR SHARE`;
         await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${candidate.listingId}::uuid FOR UPDATE`;
         const updated = await tx.channelSyncJob.updateMany({
           where: {
@@ -1156,6 +1230,19 @@ export class ChannelCatalogService {
           },
         });
         if (updated.count !== 1) return false;
+        await tx.channelSyncJob.updateMany({
+          where: {
+            listingId: candidate.listingId,
+            id: { not: candidate.id },
+            status: { in: ["PENDING", "RETRY_SCHEDULED"] },
+          },
+          data: {
+            status: "SUPERSEDED",
+            completedAt: now,
+            failureCode: "SUPERSEDED",
+            updatedAt: now,
+          },
+        });
         const job = await tx.channelSyncJob.findUniqueOrThrow({ where: { id: candidate.id } });
         const listing = await tx.channelListing.findUniqueOrThrow({
           where: { id: job.listingId },
@@ -1194,7 +1281,11 @@ export class ChannelCatalogService {
     return recovered;
   }
 
-  private async claimNext(workerId: string, listingId?: string): Promise<JobWithRelations | null> {
+  private async claimNext(
+    workerId: string,
+    audit: ChannelAuditContext,
+    listingId?: string,
+  ): Promise<JobWithRelations | null> {
     const candidates = listingId
       ? await this.db.$queryRaw<Array<{ id: string; listingId: string }>>`
           SELECT job."id", job."listingId"
@@ -1240,6 +1331,12 @@ export class ChannelCatalogService {
     for (const candidate of candidates) {
       const claimId = randomUUID();
       const claimed = await this.db.$transaction(async (tx) => {
+        await this.lockedActor(tx, audit.actorAdminUserId, "integrations:write");
+        await tx.$executeRaw`
+          SELECT account."id" FROM "ChannelAccount" account
+          JOIN "ChannelListing" listing ON listing."accountId" = account."id"
+          WHERE listing."id" = ${candidate.listingId}::uuid
+          FOR SHARE OF account`;
         const now = await this.now(tx);
         const lockedListings = await tx.$queryRaw<
           Array<{ id: string }>
@@ -1423,7 +1520,7 @@ export class ChannelCatalogService {
     } else {
       stock = await this.client.getStock(credential, item.userProductId);
     }
-    const remote = remoteQuantities(stock);
+    const remote = remoteQuantities(stock, job.listing);
     return {
       externalUserProductId: item.userProductId,
       externalItemId: item.id,
@@ -1535,14 +1632,19 @@ export class ChannelCatalogService {
         stock = await this.client.getStock(credential, job.listing.externalUserProductId);
       }
     }
-    const remote = remoteQuantities(stock);
+    const remote = remoteQuantities(stock, job.listing);
+    const localDiverges = Boolean(localOffer && remote.local !== quantity);
     const fullDiverges = !localOffer && remote.full !== quantity;
     return {
       remoteLocalQuantity: remote.local,
       remoteFullQuantity: remote.full,
       remoteStockVersion: stock?.version ?? null,
-      status: fullDiverges ? "RECONCILE_REQUIRED" : "ACTIVE",
-      ...(fullDiverges ? { providerError: "FULL_STOCK_DIVERGENCE" } : {}),
+      status: localDiverges || fullDiverges ? "RECONCILE_REQUIRED" : "ACTIVE",
+      ...(localDiverges
+        ? { providerError: "REMOTE_DIVERGENCE" }
+        : fullDiverges
+          ? { providerError: "FULL_STOCK_DIVERGENCE" }
+          : {}),
     };
   }
 
@@ -1554,26 +1656,50 @@ export class ChannelCatalogService {
     const content = requiredContent(payload);
     let externalUserProductId = job.listing.externalUserProductId;
     let externalItemId = job.offer?.externalItemId ?? undefined;
-    if (!externalUserProductId) {
+    if (!externalItemId && job.offer) {
+      const expected = payload.expectedOffers?.find(
+        (candidate) => candidate.offerId === job.offer?.id,
+      );
       const ids = await this.client.findItemIdsBySellerSku(credential, content.sellerSku);
-      if (ids.length === 0) {
+      const linkedItemIds = new Set(
+        job.listing.offers.map((offer) => offer.externalItemId).filter((id) => id !== null),
+      );
+      const candidates = [];
+      for (const id of ids) {
+        const item = await this.client.getItem(credential, id);
+        if (
+          linkedItemIds.has(item.id) ||
+          (externalUserProductId && item.userProductId !== externalUserProductId) ||
+          (expected && item.priceCents.toString() !== expected.priceCents)
+        ) {
+          continue;
+        }
+        candidates.push(item);
+      }
+      if (candidates.length === 0) {
         throw new ChannelCatalogError(
           "NOT_FOUND",
-          "No unique remote publication matches this seller SKU.",
+          "No unique remote publication matches this seller SKU and offer.",
         );
       }
-      if (ids.length !== 1 || !ids[0]) {
+      const adopted = candidates[0];
+      if (candidates.length !== 1 || !adopted) {
         throw new ChannelCatalogError(
           "CONFLICT",
           "Multiple remote items require manual seller review.",
         );
       }
-      const item = await this.client.getItem(credential, ids[0]);
-      externalUserProductId = item.userProductId;
-      externalItemId = item.id;
+      externalUserProductId = adopted.userProductId;
+      externalItemId = adopted.id;
+    }
+    if (!externalUserProductId || !externalItemId) {
+      throw new ChannelCatalogError(
+        "CONFLICT",
+        "The remote User Product and offer could not be identified.",
+      );
     }
     const stock = await this.client.getStock(credential, externalUserProductId);
-    const remote = remoteQuantities(stock);
+    const remote = remoteQuantities(stock, job.listing);
     let matches = true;
     for (const expected of payload.expectedOffers ?? []) {
       const offer = job.listing.offers.find((candidate) => candidate.id === expected.offerId);
@@ -1592,14 +1718,14 @@ export class ChannelCatalogService {
       }
       if (expected.logisticType === "FULFILLMENT") {
         if (remote.full !== expected.quantity) matches = false;
-      } else if (remote.local !== null && remote.local !== expected.quantity) {
+      } else if (remote.local !== expected.quantity) {
         matches = false;
       }
     }
     if (!payload.expectedOffers?.length && payload.quantity !== undefined) {
       if (job.offer?.logisticType === "FULFILLMENT") {
         if (remote.full !== payload.quantity) matches = false;
-      } else if (remote.local !== null && remote.local !== payload.quantity) {
+      } else if (remote.local !== payload.quantity) {
         matches = false;
       }
     }
@@ -1621,6 +1747,8 @@ export class ChannelCatalogService {
   ): Promise<"COMPLETED" | "REPLAYED" | "STALE"> {
     const payload = payloadRecord(job);
     return this.db.$transaction(async (tx) => {
+      await this.lockedActor(tx, audit.actorAdminUserId, "integrations:write");
+      await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${job.listing.account.id}::uuid FOR SHARE`;
       const now = await this.now(tx);
       await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${job.listingId}::uuid FOR UPDATE`;
       await tx.$executeRaw`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${job.id}::uuid FOR UPDATE`;
@@ -1779,8 +1907,10 @@ export class ChannelCatalogService {
 
   private async revokeAccount(
     snapshot: Pick<ChannelAccount, "id" | "credentialId" | "version">,
+    audit: ChannelAuditContext,
   ): Promise<void> {
     await this.db.$transaction(async (tx) => {
+      await this.lockedActor(tx, audit.actorAdminUserId, "integrations:write");
       await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${snapshot.id}::uuid FOR UPDATE`;
       const now = await this.now(tx);
       const account = await tx.channelAccount.findUnique({ where: { id: snapshot.id } });
@@ -1820,6 +1950,9 @@ export class ChannelCatalogService {
           "The channel credential changed during revocation.",
         );
       }
+      await this.audit(tx, audit, "CHANNEL_ACCOUNT_ACCESS_REVOKED", "ChannelAccount", snapshot.id, {
+        reasonCode: "CHANNEL_API_UNAUTHORIZED",
+      });
     });
   }
 
@@ -1829,6 +1962,8 @@ export class ChannelCatalogService {
     audit: ChannelAuditContext,
   ): Promise<"COMPLETED" | "REPLAYED" | "STALE"> {
     return this.db.$transaction(async (tx) => {
+      await this.lockedActor(tx, audit.actorAdminUserId, "integrations:write");
+      await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${job.listing.account.id}::uuid FOR SHARE`;
       const now = await this.now(tx);
       await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${job.listingId}::uuid FOR UPDATE`;
       await tx.$executeRaw`SELECT "id" FROM "ChannelSyncJob" WHERE "id" = ${job.id}::uuid FOR UPDATE`;
@@ -1872,6 +2007,21 @@ export class ChannelCatalogService {
       });
       if (failed.count !== 1) {
         throw new ChannelCatalogError("CONFLICT", "The channel job failure is no longer valid.");
+      }
+      if (failure.status === "UNCERTAIN") {
+        await tx.channelSyncJob.updateMany({
+          where: {
+            listingId: job.listingId,
+            id: { not: job.id },
+            status: { in: ["PENDING", "RETRY_SCHEDULED"] },
+          },
+          data: {
+            status: "SUPERSEDED",
+            completedAt: now,
+            failureCode: "SUPERSEDED",
+            updatedAt: now,
+          },
+        });
       }
       const listingFailure = await tx.channelListing.updateMany({
         where: { id: listing.id, syncClaimId: job.claimId },
@@ -1984,6 +2134,9 @@ export class ChannelCatalogService {
     } = {},
   ): Promise<ChannelSyncBatchResult> {
     await this.actor(this.db, audit.actorAdminUserId, "integrations:write");
+    await this.db.$transaction(async (tx) => {
+      await this.lockedActor(tx, audit.actorAdminUserId, "integrations:write");
+    });
     if (options.listingId) assertUuid(options.listingId, "listingId");
     const limit = options.limit ?? 5;
     if (!Number.isInteger(limit) || limit < 1 || limit > 20) {
@@ -1992,9 +2145,9 @@ export class ChannelCatalogService {
         "The synchronization limit must be between 1 and 20.",
       );
     }
-    if (options.queueDrift !== false) await this.queueStockDrift(audit, options.listingId);
     const workerId = randomUUID();
     const recoveredExpired = await this.recoverExpiredClaims(audit);
+    if (options.queueDrift !== false) await this.queueStockDrift(audit, options.listingId);
     const failures: { jobId: string; code: string }[] = [];
     let claimed = 0;
     let succeeded = 0;
@@ -2002,7 +2155,7 @@ export class ChannelCatalogService {
     let failed = 0;
     let uncertain = 0;
     while (claimed < limit) {
-      const job = await this.claimNext(workerId, options.listingId);
+      const job = await this.claimNext(workerId, audit, options.listingId);
       if (!job) break;
       claimed += 1;
       try {
@@ -2041,7 +2194,9 @@ export class ChannelCatalogService {
         const failure = retry
           ? { status: "RETRY_SCHEDULED" as const, code: "VERSION_CONFLICT" }
           : classified;
-        if (failure.code === "UNAUTHORIZED") await this.revokeAccount(job.listing.account);
+        if (failure.code === "UNAUTHORIZED") {
+          await this.revokeAccount(job.listing.account, { ...audit, requestId: randomUUID() });
+        }
         const outcome = await this.failJob(job, failure, { ...audit, requestId: randomUUID() });
         if (outcome === "STALE") continue;
         failures.push({ jobId: job.id, code: failure.code });

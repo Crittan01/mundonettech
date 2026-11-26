@@ -2063,6 +2063,29 @@ export const securityPostureManifest = {
     },
     {
       table: "ChannelOrder",
+      name: "ChannelOrder_timestamps_valid",
+      kind: "c",
+      columns: ["externalUpdatedAt", "externalCreatedAt", "externalClosedAt"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK ("externalUpdatedAt" >= "externalCreatedAt" AND ("externalClosedAt" IS NULL OR "externalClosedAt" >= "externalCreatedAt" AND "externalClosedAt" <= "externalUpdatedAt"))',
+    },
+    {
+      table: "ChannelOrder",
+      name: "ChannelOrder_refund_within_capture",
+      kind: "c",
+      columns: ["refundedAmountCents", "capturedAmountCents"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition: 'CHECK ("refundedAmountCents" <= "capturedAmountCents")',
+    },
+    {
+      table: "ChannelOrder",
       name: "ChannelOrder_variantId_fkey",
       kind: "f",
       columns: ["variantId"],
@@ -2200,6 +2223,18 @@ export const securityPostureManifest = {
       validated: true,
       definition:
         'CHECK ((status = ANY (ARRAY[\'PENDING\'::"ChannelShipmentStatus", \'READY_TO_SHIP\'::"ChannelShipmentStatus", \'CANCELLED\'::"ChannelShipmentStatus"])) AND "shippedAt" IS NULL AND "deliveredAt" IS NULL OR (status = ANY (ARRAY[\'SHIPPED\'::"ChannelShipmentStatus", \'NOT_DELIVERED\'::"ChannelShipmentStatus"])) AND "shippedAt" IS NOT NULL AND "deliveredAt" IS NULL OR status = \'DELIVERED\'::"ChannelShipmentStatus" AND "shippedAt" IS NOT NULL AND "deliveredAt" IS NOT NULL AND "deliveredAt" >= "shippedAt")',
+    },
+    {
+      table: "ChannelShipment",
+      name: "ChannelShipment_timestamps_valid",
+      kind: "c",
+      columns: ["externalUpdatedAt", "externalCreatedAt", "shippedAt", "deliveredAt"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK ("externalUpdatedAt" >= "externalCreatedAt" AND ("shippedAt" IS NULL OR "shippedAt" >= "externalCreatedAt" AND "shippedAt" <= "externalUpdatedAt") AND ("deliveredAt" IS NULL OR "deliveredAt" >= "shippedAt" AND "deliveredAt" <= "externalUpdatedAt"))',
     },
     {
       table: "ChannelShipment",
@@ -22410,6 +22445,8 @@ export const securityPostureManifest = {
     "20261125120100_a5_checkout_flex_document_constraints",
     "20261125130000_a6_postsale_financial_integrity",
     "20261125140000_a7_crm_b2b_growth_integrity",
+    "20261125150000_a8_channel_order_integrity",
+    "20261125230000_a8_meta_capi_consent_cancellation",
   ],
   signedColumns: [
     {

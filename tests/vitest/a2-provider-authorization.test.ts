@@ -3,7 +3,14 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
+import {
+  actionError,
+  actionSuccess,
+  formString,
+  type ActionState,
+} from "../../apps/web/lib/action-state";
 import { IntegrationEnvironment } from "../../packages/db/dist/index.js";
+import * as integrationPackage from "../../packages/integrations/dist/index.js";
 import {
   B2bCopilotService,
   EmailService,
@@ -16,6 +23,7 @@ import {
   type FiscalParty,
   type InvoiceDocumentInput,
 } from "../../packages/integrations/dist/index.js";
+import { loadActionModule } from "./a2-action-loader.js";
 import { loadTypeScriptModule } from "./a2-routes-events/route-loader.js";
 
 const actorId = randomUUID();
@@ -520,4 +528,142 @@ describe("A5 Resend uncertain HTTP outcomes", () => {
       vi.unstubAllEnvs();
     }
   });
+});
+
+describe("A8 — deployment environment isolation", () => {
+  function environmentModule() {
+    return loadTypeScriptModule<{ getIntegrationEnvironment(): IntegrationEnvironment }>(
+      fileURLToPath(new URL("../../apps/web/lib/integrations.ts", import.meta.url)),
+      {
+        "server-only": {},
+        "@mundonettech/config/store": {
+          storeConfig: { name: "Tienda de pruebas", url: "https://example.test" },
+        },
+        "@mundonettech/db": { IntegrationEnvironment },
+        "@mundonettech/integrations": {},
+        "@/lib/db": {},
+        "@/lib/env": {},
+      },
+    );
+  }
+
+  it.each([
+    ["production", IntegrationEnvironment.PRD, IntegrationEnvironment.PRD],
+    ["preview", IntegrationEnvironment.STG, IntegrationEnvironment.STG],
+  ] as const)("accepts only the matching key ring in Vercel %s", (vercel, configured, expected) => {
+    vi.stubEnv("VERCEL_ENV", vercel);
+    vi.stubEnv("INTEGRATION_ENVIRONMENT", configured);
+    try {
+      expect(environmentModule().getIntegrationEnvironment()).toBe(expected);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    ["production", IntegrationEnvironment.LOCAL],
+    ["production", IntegrationEnvironment.STG],
+    ["preview", IntegrationEnvironment.LOCAL],
+    ["preview", IntegrationEnvironment.PRD],
+  ] as const)("fails closed on a cross-environment override in Vercel %s", (vercel, configured) => {
+    vi.stubEnv("VERCEL_ENV", vercel);
+    vi.stubEnv("INTEGRATION_ENVIRONMENT", configured);
+    try {
+      expect(() => environmentModule().getIntegrationEnvironment()).toThrow(/isolated Vercel/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+type CredentialAction = (previous: ActionState, formData: FormData) => Promise<ActionState>;
+
+function credentialActionModule(file: "admin-integrations" | "admin-operational-credentials") {
+  const getIntegrationCredentialVault = vi.fn();
+  const actions = loadActionModule<Record<string, CredentialAction>>(file, {
+    "@mundonettech/integrations": integrationPackage,
+    "@/lib/action-state": { actionError, actionSuccess, formString },
+    "@/lib/security/admin-auth": {
+      AdminAuthorizationError: class extends Error {},
+      getAdminSession: vi.fn(async () => ({ profile: { id: actorId, role: "SUPERADMIN" } })),
+    },
+    "@/lib/security/request-context": {
+      getRequestSecurityContext: vi.fn(async () => ({
+        ipHash: audit.ipHash,
+        userAgentHash: audit.userAgentHash,
+      })),
+    },
+    "@/lib/integrations": {
+      getIntegrationCredentialVault,
+      getIntegrationEnvironment: vi.fn(() => IntegrationEnvironment.LOCAL),
+    },
+    "next/cache": { revalidatePath: vi.fn() },
+  });
+  return { actions, getIntegrationCredentialVault };
+}
+
+function manipulatedWompiForm(mode: "unknown" | "duplicate"): FormData {
+  const data = new FormData();
+  const values = {
+    accountName: "Wompi principal",
+    publicKey: "pub_test_A2PUBLICKEYVALID1234567890",
+    privateKey: "prv_test_A2PRIVATEKEYVALID1234567890",
+    integritySecret: "test_integrity_A2INTEGRITYVALID1234567890",
+    eventsSecret: "test_events_A2EVENTSVALID1234567890",
+  };
+  for (const [key, value] of Object.entries(values)) data.append(key, value);
+  if (mode === "duplicate") data.append("privateKey", values.privateKey);
+  else data.append("unexpectedSecret", "must-not-reach-the-vault");
+  return data;
+}
+
+function manipulatedMetaForm(mode: "unknown" | "duplicate"): FormData {
+  const data = new FormData();
+  const values = {
+    provider: "meta",
+    accountName: "Meta principal",
+    pixelId: "123456789012345",
+    accessToken: "a2-meta-access-token-that-must-not-leak",
+    testEventCode: "",
+  };
+  for (const [key, value] of Object.entries(values)) data.append(key, value);
+  if (mode === "duplicate") data.append("accessToken", values.accessToken);
+  else data.append("unexpectedSecret", "must-not-reach-the-vault");
+  return data;
+}
+
+describe("A8 — closed credential form boundaries", () => {
+  it.each(["unknown", "duplicate"] as const)(
+    "rejects %s Wompi fields before parsing or vault access without returning secrets",
+    async (mode) => {
+      const { actions, getIntegrationCredentialVault } =
+        credentialActionModule("admin-integrations");
+      const data = manipulatedWompiForm(mode);
+      const state = await actions.createWompiCredentialAction!(
+        { status: "idle", message: "" },
+        data,
+      );
+      expect(state.status).toBe("error");
+      expect(getIntegrationCredentialVault).not.toHaveBeenCalled();
+      expect(JSON.stringify(state)).not.toContain("A2PRIVATEKEYVALID");
+      expect(JSON.stringify(state)).not.toContain("must-not-reach-the-vault");
+    },
+  );
+
+  it.each(["unknown", "duplicate"] as const)(
+    "rejects %s operational fields before provider parsing or vault access",
+    async (mode) => {
+      const { actions, getIntegrationCredentialVault } = credentialActionModule(
+        "admin-operational-credentials",
+      );
+      const state = await actions.createOperationalCredentialAction!(
+        { status: "idle", message: "" },
+        manipulatedMetaForm(mode),
+      );
+      expect(state).toMatchObject({ status: "error", values: { provider: "meta" } });
+      expect(getIntegrationCredentialVault).not.toHaveBeenCalled();
+      expect(JSON.stringify(state)).not.toContain("a2-meta-access-token-that-must-not-leak");
+      expect(JSON.stringify(state)).not.toContain("must-not-reach-the-vault");
+    },
+  );
 });

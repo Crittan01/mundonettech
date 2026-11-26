@@ -44,6 +44,7 @@ function orderPayload() {
         full_unit_price: 72.37,
         currency_id: "COP",
         sale_fee: 11.07,
+        stock: [] as { store_id: string; network_node_id: string }[],
       },
     ],
     payments: [
@@ -173,6 +174,68 @@ describe("Mercado Libre order contracts", () => {
   });
 });
 
+describe("Mercado Libre chronology and bounded resource contracts", () => {
+  it("reserves confirmed orders with approved captures and rejects impossible chronology", async () => {
+    const confirmed = orderPayload();
+    confirmed.status = "confirmed";
+    const snapshot = await clientFor(confirmed).getOrder(credential, "2000009713473608");
+    expect(snapshot.status).toBe("PAID");
+
+    const invalidCalendar = orderPayload();
+    invalidCalendar.date_created = "2026-02-30T09:34:59.000-05:00";
+    await expect(
+      clientFor(invalidCalendar).getOrder(credential, "2000009713473608"),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+
+    const missingTimezone = orderPayload();
+    missingTimezone.date_created = "2026-11-01T09:34:59.000";
+    await expect(
+      clientFor(missingTimezone).getOrder(credential, "2000009713473608"),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+
+    const earlyClose = orderPayload();
+    earlyClose.date_closed = "2026-11-01T09:00:00.000-05:00";
+    await expect(
+      clientFor(earlyClose).getOrder(credential, "2000009713473608"),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+
+    const earlyPayment = orderPayload();
+    earlyPayment.payments[0]!.date_last_modified = "2026-11-01T09:00:00.000-05:00";
+    await expect(
+      clientFor(earlyPayment).getOrder(credential, "2000009713473608"),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+
+    const earlyShipment = {
+      id: 44028792542,
+      order_id: 2000009713473608,
+      pack_id: 2000006556183755,
+      status: "shipped",
+      substatus: null,
+      logistic_type: "cross_docking",
+      mode: "me2",
+      tracking_number: "TRACK-1",
+      cost: 0,
+      date_created: "2026-11-01T09:34:59.000-05:00",
+      date_shipped: "2026-11-01T09:00:00.000-05:00",
+      last_updated: "2026-11-01T09:37:20.000-05:00",
+    };
+    await expect(
+      clientFor(earlyShipment).getShipment(credential, "44028792542"),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects excess stock references instead of truncating provider evidence", async () => {
+    const payload = orderPayload();
+    payload.order_items[0]!.stock = Array.from({ length: 21 }, (_, index) => ({
+      store_id: `STORE-${index}`,
+      network_node_id: `NODE-${index}`,
+    }));
+    await expect(clientFor(payload).getOrder(credential, "2000009713473608")).rejects.toMatchObject(
+      { code: "INVALID_RESPONSE" },
+    );
+  });
+});
+
 describe("Mercado Libre signed notifications", () => {
   it("supports data.id and x-request-id forms and verifies the exact HMAC manifest", () => {
     const withData = parseMercadoLibreNotification(
@@ -237,7 +300,7 @@ describe("Mercado Libre signed notifications", () => {
       "request-unit-2",
       "AbC-987",
     );
-    expect(fromQuery).toMatchObject({ notificationId: "AbC-987", signatureId: "abc-987" });
+    expect(fromQuery).toMatchObject({ notificationId: "abc-987", signatureId: "abc-987" });
     expect(() =>
       parseMercadoLibreNotification(
         JSON.stringify({
@@ -290,5 +353,39 @@ describe("Mercado Libre signed notifications", () => {
         nowMs,
       }),
     ).not.toThrow();
+  });
+
+  it("enforces UTF-8 byte limits, canonical replay IDs and a finite verification clock", () => {
+    const oversized = JSON.stringify({
+      topic: "orders_v2",
+      resource: "/orders/123",
+      user_id: 8035443,
+      data: { id: "ñ".repeat(9_000) },
+    });
+    expect(Buffer.byteLength(oversized, "utf8")).toBeGreaterThan(16_384);
+    expect(oversized.length).toBeLessThan(16_384);
+    expect(() => parseMercadoLibreNotification(oversized, "request-unit-3")).toThrow(
+      "The notification size is invalid.",
+    );
+
+    const normalized = parseMercadoLibreNotification(
+      JSON.stringify({
+        topic: "orders_v2",
+        resource: "/orders/123",
+        user_id: 8035443,
+        data: { id: "AbC-987" },
+      }),
+      "request-unit-3",
+    );
+    expect(normalized.notificationId).toBe("abc-987");
+    expect(() =>
+      verifyMercadoLibreNotificationSignature({
+        notificationId: "abc-987",
+        requestId: "request-unit-3",
+        signature: `ts=1760000000,v1=${"a".repeat(64)}`,
+        clientSecret: credential.clientSecret,
+        nowMs: Number.NaN,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 });

@@ -44,6 +44,19 @@ export function FunnelMetrics() {
   }, []);
 
   const scheduleFlush = useCallback(() => {
+    const pending = counters.current;
+    const total =
+      pending.pageViews + pending.productViews + pending.cartAdditions + pending.checkoutStarts;
+    if (
+      pending.pageViews >= 1_000 ||
+      pending.productViews >= 1_000 ||
+      pending.cartAdditions >= 1_000 ||
+      pending.checkoutStarts >= 1_000 ||
+      total >= 2_000
+    ) {
+      flushPending();
+      return;
+    }
     if (timer.current !== null) return;
     timer.current = window.setTimeout(flushPending, 2_000);
   }, [flushPending]);

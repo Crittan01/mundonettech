@@ -36,6 +36,19 @@ const credentialInputSchema = credentialSecretsSchema.extend({ accountName: acco
 
 type CredentialSecrets = z.infer<typeof credentialSecretsSchema>;
 
+const secretFields = ["publicKey", "privateKey", "integritySecret", "eventsSecret"] as const;
+
+function hasClosedForm(formData: FormData, allowedFields: readonly string[]): boolean {
+  const allowed = new Set(allowedFields);
+  const seen = new Set<string>();
+  for (const [key, value] of formData.entries()) {
+    if (key.startsWith("$ACTION_")) continue;
+    if (!allowed.has(key) || typeof value !== "string" || seen.has(key)) return false;
+    seen.add(key);
+  }
+  return true;
+}
+
 async function authorize() {
   const session = await getAdminSession({
     permission: "integrations:write",
@@ -107,6 +120,9 @@ export async function createWompiCredentialAction(
   let sealed: Uint8Array<ArrayBuffer> | undefined;
   try {
     const audit = await authorize();
+    if (!hasClosedForm(formData, ["accountName", ...secretFields])) {
+      return actionError("El formulario contiene campos desconocidos o duplicados.");
+    }
     const parsed = credentialInputSchema.safeParse({
       accountName: formString(formData, "accountName"),
       ...secretValues(formData),
@@ -144,6 +160,9 @@ export async function rotateWompiCredentialAction(
   let sealed: Uint8Array<ArrayBuffer> | undefined;
   try {
     const audit = await authorize();
+    if (!hasClosedForm(formData, ["credentialId", "accountName", ...secretFields])) {
+      return actionError("El formulario contiene campos desconocidos o duplicados.");
+    }
     const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
     const parsed = credentialSecretsSchema.safeParse(secretValues(formData));
     if (!id.success || !parsed.success) {
@@ -178,6 +197,9 @@ export async function reencryptCredentialAction(
 ): Promise<ActionState> {
   try {
     const audit = await authorize();
+    if (!hasClosedForm(formData, ["credentialId"])) {
+      return actionError("El formulario contiene campos desconocidos o duplicados.");
+    }
     const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
     if (!id.success) return actionError("La credencial seleccionada no es válida.");
     await getIntegrationCredentialVault().reencryptWithActiveKey(
@@ -198,6 +220,9 @@ export async function revokeCredentialAction(
 ): Promise<ActionState> {
   try {
     const audit = await authorize();
+    if (!hasClosedForm(formData, ["credentialId", "confirmation"])) {
+      return actionError("El formulario contiene campos desconocidos o duplicados.");
+    }
     const id = z.string().uuid().safeParse(formString(formData, "credentialId"));
     if (!id.success || formString(formData, "confirmation") !== "REVOCAR") {
       return actionError("Escribe REVOCAR para confirmar la revocación irreversible.");

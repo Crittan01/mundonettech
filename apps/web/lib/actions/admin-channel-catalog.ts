@@ -180,8 +180,19 @@ function syncMessage(result: {
   failed: number;
   uncertain: number;
   retryScheduled: number;
+  recoveredExpired: number;
   failures: readonly { code: string }[];
 }): ActionState {
+  if (result.uncertain > 0 || result.recoveredExpired > 0) {
+    return actionError(
+      "Hay resultados inciertos persistidos. Concilia el estado remoto antes de cualquier nueva escritura.",
+    );
+  }
+  if (result.retryScheduled > 0) {
+    return actionError(
+      "El stock remoto cambió durante la escritura. Quedó programado un reintento acotado con una nueva lectura de x-version.",
+    );
+  }
   if (result.failures.length > 0) {
     return actionError(
       "La sincronización se detuvo. Revisa el trabajo persistido y concilia antes de reintentar.",

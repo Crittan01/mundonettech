@@ -29,6 +29,9 @@ export function ChannelAccountActions({
     disconnectChannelAccountAction,
     initialActionState,
   );
+  if (!canRefresh && !canDisconnect && !disconnectState.message) {
+    return null;
+  }
   return (
     <div className="mt-5 space-y-4 border-t border-border pt-4">
       {canRefresh ? (
@@ -65,6 +68,7 @@ export function ChannelAccountActions({
                 minLength={11}
                 maxLength={11}
                 autoComplete="off"
+                disabled={disconnecting}
                 required
               />
             </div>

@@ -22,7 +22,9 @@ export async function GET() {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": 'inline; filename="meta-catalog.csv"',
         "X-Meta-Catalog-Items": String(feed.accepted),
-        "X-Meta-Catalog-Exclusions": String(feed.issues.length),
+        "X-Meta-Catalog-Exclusions": String(
+          feed.excluded ?? feed.issues.filter((issue) => issue.code !== "INVALID_GTIN").length,
+        ),
       },
     });
   } catch {

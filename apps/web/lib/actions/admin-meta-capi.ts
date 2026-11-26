@@ -6,7 +6,7 @@ import { MetaCapiServiceError } from "@mundonettech/integrations";
 import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
-import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
+import { actionError, actionSuccess, closedFormObject, type ActionState } from "@/lib/action-state";
 import { metaCapiService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
@@ -26,17 +26,22 @@ export async function reconcileMetaCapiAction(
   _previous: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
-  const reference = inputSchema.shape.reference.safeParse(formString(formData, "reference"));
-  const values = reference.success ? { reference: reference.data } : undefined;
+  let values: Record<string, string> | undefined;
   try {
     const session = await getAdminSession({
       permission: "integrations:write",
       requireRecentMfa: true,
     });
+    const raw = closedFormObject(formData, ["metaEventId", "resolution", "reference"]);
+    if (!raw) {
+      return actionError("El formulario contiene campos inválidos o repetidos.");
+    }
+    const reference = inputSchema.shape.reference.safeParse(raw.reference ?? "");
+    values = reference.success ? { reference: reference.data } : undefined;
     const input = inputSchema.parse({
-      metaEventId: formString(formData, "metaEventId"),
-      resolution: formString(formData, "resolution"),
-      reference: formString(formData, "reference"),
+      metaEventId: raw.metaEventId ?? "",
+      resolution: raw.resolution ?? "",
+      reference: raw.reference ?? "",
     });
     const context = await getRequestSecurityContext();
     const saved = await metaCapiService().reconcile({
@@ -59,10 +64,10 @@ export async function reconcileMetaCapiAction(
     );
   } catch (error) {
     if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
-      return actionError("Confirma tu autenticador antes de conciliar el evento.", values);
+      return actionError("Confirma tu autenticador antes de conciliar el evento.");
     }
     if (error instanceof AdminAuthorizationError) {
-      return actionError("Tu sesión no está autorizada para conciliar eventos Meta.", values);
+      return actionError("Tu sesión no está autorizada para conciliar eventos Meta.");
     }
     if (error instanceof z.ZodError) {
       return actionError(
@@ -88,12 +93,18 @@ export async function reconcileMetaCapiAction(
   }
 }
 
-export async function refreshMetaCatalogFeedAction(): Promise<ActionState> {
+export async function refreshMetaCatalogFeedAction(
+  _previous?: ActionState,
+  formData?: FormData,
+): Promise<ActionState> {
   try {
     const session = await getAdminSession({
       permission: "integrations:write",
       requireRecentMfa: true,
     });
+    if (formData && !closedFormObject(formData, [])) {
+      return actionError("El formulario contiene campos inválidos o repetidos.");
+    }
     const context = await getRequestSecurityContext();
     await metaCapiService().recordFeedRefresh({
       actorAdminUserId: session.profile.id,

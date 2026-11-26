@@ -11,6 +11,7 @@ import {
 import {
   actionError,
   actionSuccess,
+  closedFormObject,
   formString,
   type ActionState,
 } from "../../apps/web/lib/action-state";
@@ -96,7 +97,7 @@ function baseMocks(role = "SUPERADMIN") {
   const cookies = vi.fn(async () => ({ set: cookieSet }));
   const mocks: Record<string, unknown> = {
     "@mundonettech/integrations": integrations,
-    "@/lib/action-state": { actionError, actionSuccess, formString },
+    "@/lib/action-state": { actionError, actionSuccess, closedFormObject, formString },
     "@/lib/security/admin-auth": { AdminAuthorizationError, getAdminSession },
     "@/lib/security/request-context": { getRequestSecurityContext },
     "@/lib/security/session-policy": {
@@ -691,4 +692,73 @@ describe("A2 — Mercado Libre OAuth action wiring", () => {
     expect(JSON.stringify(state)).not.toContain(clientSecret);
     expect(base.revalidatePath).not.toHaveBeenCalled();
   });
+});
+
+describe("A8 — closed Mercado Libre channel forms", () => {
+  const cases = [
+    [
+      "startMercadoLibreConnectionAction",
+      () =>
+        form({
+          accountId: "",
+          label: "Mercado Libre principal",
+          clientId: "123456789012",
+          clientSecret,
+        }),
+    ],
+    ["refreshChannelAccountAction", () => form({ accountId })],
+    ["disconnectChannelAccountAction", () => form({ accountId, confirmation: "DESVINCULAR" })],
+  ] as const;
+
+  it.each(cases)(
+    "%s rejects unknown fields before request context or domain effects",
+    async (name, makeForm) => {
+      const base = baseMocks();
+      const startMercadoLibreOAuth = vi.fn();
+      const refreshAccount = vi.fn();
+      const disconnectAccount = vi.fn();
+      base.mocks["@/lib/integrations"] = {
+        channelAccountService: vi.fn(() => ({
+          startMercadoLibreOAuth,
+          refreshAccount,
+          disconnectAccount,
+        })),
+        mercadoLibreOAuthRedirectUri: () =>
+          "http://127.0.0.1:4010/api/channels/mercado-libre/oauth/callback",
+      };
+      const actions = loadActionModule<Record<string, FormAction>>("admin-channels", base.mocks);
+      const input = makeForm();
+      input.set("unexpectedSecret", "must-not-be-accepted-or-reflected");
+      const result = await actions[name]!(previous, input);
+      expect(result.status).toBe("error");
+      expect(JSON.stringify(result)).not.toContain("must-not-be-accepted-or-reflected");
+      expect(base.getRequestSecurityContext).not.toHaveBeenCalled();
+      expect(base.channelAccountService).not.toHaveBeenCalled();
+      expect(base.cookies).not.toHaveBeenCalled();
+      expect(startMercadoLibreOAuth).not.toHaveBeenCalled();
+      expect(refreshAccount).not.toHaveBeenCalled();
+      expect(disconnectAccount).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(cases)(
+    "%s rejects duplicate fields without taking the first value",
+    async (name, makeForm) => {
+      const base = baseMocks();
+      const channelAccountService = vi.fn();
+      base.mocks["@/lib/integrations"] = {
+        channelAccountService,
+        mercadoLibreOAuthRedirectUri: () =>
+          "http://127.0.0.1:4010/api/channels/mercado-libre/oauth/callback",
+      };
+      const actions = loadActionModule<Record<string, FormAction>>("admin-channels", base.mocks);
+      const input = makeForm();
+      input.append("accountId", randomUUID());
+      const result = await actions[name]!(previous, input);
+      expect(result.status).toBe("error");
+      expect(base.getRequestSecurityContext).not.toHaveBeenCalled();
+      expect(channelAccountService).not.toHaveBeenCalled();
+      expect(base.cookies).not.toHaveBeenCalled();
+    },
+  );
 });

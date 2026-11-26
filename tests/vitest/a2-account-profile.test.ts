@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountError, AccountService } from "../../packages/db/src/account-service";
+import { cancelPendingMetaCapiForCustomerInTransaction } from "../../packages/db/src/meta-capi";
 
 const customerId = randomUUID();
 const initialUpdatedAt = new Date("2026-11-24T11:00:00.000Z");
@@ -235,6 +236,54 @@ describe("A6 — cursor de pedidos y obligaciones de anonimización", () => {
     expect(transaction.paymentTransactionFindFirst).toHaveBeenCalledWith({
       where: { attempt: { order: { customerId } }, status: { in: ["PENDING", "PROCESSING"] } },
       select: { id: true },
+    });
+  });
+});
+
+describe("A8 — cancelación Meta por privacidad", () => {
+  it("cierra y purga PENDING, DISPATCHING y UNCERTAIN sin tocar terminales", async () => {
+    const rows = [{ id: randomUUID() }, { id: randomUUID() }, { id: randomUUID() }];
+    const findMany = vi.fn(async () => rows);
+    const updateMany = vi.fn(async () => ({ count: rows.length }));
+    const resolveAlerts = vi.fn(async () => ({ count: rows.length }));
+    const tx = {
+      metaCapiEvent: { findMany, updateMany },
+      notification: { updateMany: resolveAlerts },
+    };
+
+    const count = await cancelPendingMetaCapiForCustomerInTransaction(tx as never, customerId, now);
+
+    expect(count).toBe(3);
+    const expectedWhere = {
+      customerId,
+      status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] },
+    };
+    expect(findMany).toHaveBeenCalledWith({ where: expectedWhere, select: { id: true } });
+    expect(updateMany).toHaveBeenCalledWith({
+      where: expectedWhere,
+      data: {
+        status: "SKIPPED",
+        completedAt: now,
+        failureCode: "NO_CONSENT",
+        externalIdHash: null,
+        emailHash: null,
+        phoneHash: null,
+        availableAt: now,
+        claimId: null,
+        claimedBy: null,
+        claimedAt: null,
+        claimExpiresAt: null,
+        requestStartedAt: null,
+      },
+    });
+    expect(expectedWhere.status.in).not.toContain("FAILED");
+    expect(expectedWhere.status.in).not.toContain("SENT");
+    expect(resolveAlerts).toHaveBeenCalledWith({
+      where: {
+        deduplicationKey: { in: rows.map((row) => `meta-capi:${row.id}:review`) },
+        resolvedAt: null,
+      },
+      data: { resolvedAt: now },
     });
   });
 });

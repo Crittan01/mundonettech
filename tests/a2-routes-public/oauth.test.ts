@@ -177,3 +177,24 @@ describe("Mercado Libre OAuth callback", () => {
     expect(mocks.getCookie).not.toHaveBeenCalled();
   });
 });
+
+describe("A8 — OAuth provider error canonicalization", () => {
+  it.each(["", " ACCESS_DENIED ", "access denied"])(
+    "consumes malformed provider error %j without offering an authorization code",
+    async (providerError) => {
+      mocks.completeOAuth.mockRejectedValue(channelAccountError("OAUTH_REJECTED"));
+      const response = await callbackRequest(
+        `state=${state}&code=${code}&error=${encodeURIComponent(providerError)}`,
+      );
+      expect(await response.text()).toContain("oauth=denied");
+      expect(mocks.completeOAuth).toHaveBeenCalledOnce();
+      expect(mocks.completeOAuth.mock.calls[0]?.[0]).toMatchObject({
+        attemptId,
+        state,
+        providerError: "invalid_request",
+      });
+      expect(mocks.completeOAuth.mock.calls[0]?.[0]).not.toHaveProperty("code");
+      expectNoStoreNoIndex(response);
+    },
+  );
+});

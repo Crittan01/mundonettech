@@ -58,6 +58,12 @@ describe("F4A.1 — RBAC for operational and finance surfaces", () => {
       expect(canReadNotificationCategory(role, "channels.sync")).toBe(
         hasAdminPermission(role, "integrations:read"),
       );
+      expect(canReadNotificationCategory(role, "channels.orders")).toBe(
+        hasAdminPermission(role, "integrations:read"),
+      );
+      expect(canReadNotificationCategory(role, "meta.capi")).toBe(
+        hasAdminPermission(role, "integrations:read"),
+      );
       expect(canReadNotificationCategory(role, "payments.review")).toBe(
         hasAdminPermission(role, "payments:read"),
       );

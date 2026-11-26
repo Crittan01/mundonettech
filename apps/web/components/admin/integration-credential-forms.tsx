@@ -74,6 +74,11 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
     setStep((current) => Math.min(3, current + 1));
   }
 
+  function encrypt(currentForm: HTMLFormElement) {
+    setDismissSuccess(false);
+    startTransition(() => action(new FormData(currentForm)));
+  }
+
   function advanceOrEncrypt() {
     if (step < 3) {
       continueForward();
@@ -81,7 +86,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
     }
     const currentForm = form.current;
     if (!currentForm?.reportValidity()) return;
-    startTransition(() => action(new FormData(currentForm)));
+    encrypt(currentForm);
   }
 
   if (state.status === "success" && !dismissSuccess) {
@@ -112,7 +117,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
       onSubmit={(event) => {
         event.preventDefault();
         if (step !== 3) return;
-        startTransition(() => action(new FormData(event.currentTarget)));
+        encrypt(event.currentTarget);
       }}
       className="space-y-5"
       noValidate
@@ -280,10 +285,10 @@ export function CredentialRotationForm({ credential }: { credential: Integration
 export function ReencryptCredentialForm({ credentialId }: { credentialId: string }) {
   const [state, action, pending] = useActionState(reencryptCredentialAction, initialActionState);
   return (
-    <form action={action} className="space-y-3">
+    <form action={action} className="space-y-3" aria-busy={pending}>
       <input type="hidden" name="credentialId" value={credentialId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
-        Recifrar con clave activa
+        {pending ? "Recifrando…" : "Recifrar con clave activa"}
       </Button>
       <FormMessage state={state} />
     </form>
@@ -293,7 +298,7 @@ export function ReencryptCredentialForm({ credentialId }: { credentialId: string
 export function RevokeCredentialForm({ credentialId }: { credentialId: string }) {
   const [state, action, pending] = useActionState(revokeCredentialAction, initialActionState);
   return (
-    <form action={action} className="space-y-3">
+    <form action={action} className="space-y-3" aria-busy={pending}>
       <input type="hidden" name="credentialId" value={credentialId} />
       <div className="space-y-2">
         <Label htmlFor={`confirmation-${credentialId}`}>Confirmación irreversible</Label>
@@ -303,10 +308,11 @@ export function RevokeCredentialForm({ credentialId }: { credentialId: string })
           placeholder="Escribe REVOCAR"
           maxLength={7}
           required
+          disabled={pending}
         />
       </div>
       <Button type="submit" variant="destructive" size="sm" disabled={pending}>
-        Revocar credencial
+        {pending ? "Revocando…" : "Revocar credencial"}
       </Button>
       <FormMessage state={state} />
     </form>

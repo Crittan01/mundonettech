@@ -600,6 +600,7 @@ describe("F6.2 — claims, reconciliation and failure safety", () => {
       id: itemId,
       user_product_id: userProductId,
       seller_id: 8035443,
+      currency_id: "COP",
       status: "active",
       price: Number(offer.priceCents / 100n),
       available_quantity: 8,
@@ -705,6 +706,157 @@ describe("F6.2 — claims, reconciliation and failure safety", () => {
     });
   });
 
+  it("adopts a unique additional offer after an uncertain create without another POST", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    await service.addOffer({
+      listingId: listing.id,
+      offer: formula({ listingTypeId: "gold_pro", targetNetCents: 200_000n }),
+      audit: audit(),
+    });
+    createBehavior = () => ({ destroy: true });
+    const uncertain = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(uncertain.uncertain, 1);
+    const draftOffer = await db.channelOffer.findFirstOrThrow({
+      where: { listingId: listing.id, externalItemId: null },
+    });
+    await assert.rejects(
+      service.enqueueSync({
+        listingId: listing.id,
+        offerId: draftOffer.id,
+        kind: "PUBLISH",
+        force: true,
+        audit: audit(),
+      }),
+      (error) => error.code === "RECONCILE_REQUIRED",
+    );
+
+    const itemId = "MCO977777778";
+    fixture.items.set(itemId, {
+      id: itemId,
+      user_product_id: listing.externalUserProductId,
+      seller_id: 8035443,
+      currency_id: "COP",
+      status: "active",
+      price: Number(draftOffer.priceCents / 100n),
+      available_quantity: 8,
+      seller_sku: catalog.sku,
+      shipping: {},
+    });
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "RECONCILE_REMOTE",
+      force: true,
+      audit: audit(),
+    });
+    const reconciled = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(reconciled.succeeded, 1, JSON.stringify(reconciled));
+    const adopted = await db.channelOffer.findUniqueOrThrow({ where: { id: draftOffer.id } });
+    assert.equal(adopted.externalItemId, itemId);
+    assert.equal(adopted.status, "ACTIVE");
+    assert.equal(
+      fixture.calls.filter((call) => call.method === "POST" && call.path === "/items").length,
+      2,
+    );
+  });
+
+  it("supersedes dependent writes after uncertainty and requires reconciliation", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const priceJob = await service.enqueueSync({
+      listingId: listing.id,
+      offerId: listing.offers[0].id,
+      kind: "SYNC_PRICE",
+      audit: audit(),
+    });
+    const stockJob = await service.enqueueSync({
+      listingId: listing.id,
+      offerId: listing.offers[0].id,
+      kind: "SYNC_LOCAL_STOCK",
+      audit: audit(),
+    });
+    itemBehavior = ({ method }) => (method === "PUT" ? { destroy: true } : undefined);
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.uncertain, 1);
+    assert.equal(result.claimed, 1);
+    assert.equal(
+      (await db.channelSyncJob.findUniqueOrThrow({ where: { id: priceJob.id } })).status,
+      "UNCERTAIN",
+    );
+    assert.equal(
+      (await db.channelSyncJob.findUniqueOrThrow({ where: { id: stockJob.id } })).status,
+      "SUPERSEDED",
+    );
+    assert.equal(fixture.calls.filter((call) => call.method === "PUT").length, 1);
+    await assert.rejects(
+      service.enqueueSync({
+        listingId: listing.id,
+        offerId: listing.offers[0].id,
+        kind: "SYNC_LOCAL_STOCK",
+        force: true,
+        audit: audit(),
+      }),
+      (error) => error.code === "RECONCILE_REQUIRED",
+    );
+  });
+
+  it("isolates the configured seller warehouse from other remote stock origins", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog, { warehouse: true });
+    const stock = fixture.stocks.get(listing.externalUserProductId);
+    const sellingAddress = stock.locations.find((location) => location.type === "selling_address");
+    if (sellingAddress) {
+      sellingAddress.quantity = 50;
+    } else {
+      stock.locations.push({ type: "selling_address", quantity: 50 });
+    }
+    stock.locations.push({
+      type: "seller_warehouse",
+      quantity: 99,
+      store_id: "other-store",
+      network_node_id: "other-node",
+    });
+    await admin.query(
+      `UPDATE "StockLevel" SET "safetyStock" = 3 WHERE "locationId" = $1 AND "variantId" = $2`,
+      [catalog.inventory.locationId, catalog.variantId],
+    );
+    await service.enqueueSync({ listingId: listing.id, kind: "SYNC_LOCAL_STOCK", audit: audit() });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    const current = await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } });
+    assert.equal(current.remoteLocalQuantity, 7);
+    assert.equal(
+      stock.locations.find(
+        (location) => location.type === "seller_warehouse" && location.store_id === "other-store",
+      ).quantity,
+      99,
+    );
+  });
+
+  it("marks local stock reconciliation required when the post-write read diverges", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    await admin.query(
+      `UPDATE "StockLevel" SET "safetyStock" = 3 WHERE "locationId" = $1 AND "variantId" = $2`,
+      [catalog.inventory.locationId, catalog.variantId],
+    );
+    stockBehavior = ({ current }) => ({
+      status: 200,
+      version: current.version,
+      body: {
+        id: current.id,
+        user_id: current.user_id,
+        locations: [{ type: "selling_address", quantity: 6 }],
+      },
+    });
+    await service.enqueueSync({ listingId: listing.id, kind: "SYNC_LOCAL_STOCK", audit: audit() });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.succeeded, 1);
+    const current = await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } });
+    assert.equal(current.status, "RECONCILE_REQUIRED");
+    assert.equal(current.lastProviderError, "REMOTE_DIVERGENCE");
+    assert.equal(current.remoteLocalQuantity, 6);
+  });
+
   it("revokes the account on provider authentication failure without retrying", async () => {
     const catalog = await makeCatalog();
     const listing = await createListing(catalog);
@@ -771,6 +923,7 @@ describe("F6.2 — claims, reconciliation and failure safety", () => {
         id: "MCO988888881",
         user_product_id: "MCOU988888881",
         seller_id: sellerUserId,
+        currency_id: "COP",
         status: "active",
         price: body.price,
         available_quantity: body.available_quantity ?? 8,

@@ -305,7 +305,7 @@ export default async function ChannelsPage({
           </div>
           {canWrite ? <ProcessChannelJobsButton /> : null}
         </div>
-        {canWrite && activeAccounts.length > 0 && variants.length > 0 ? (
+        {canWrite && activeAccounts.length > 0 ? (
           <details className="rounded-xl border border-border bg-card p-5">
             <summary className="cursor-pointer text-lg font-semibold">
               Preparar una publicación

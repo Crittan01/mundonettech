@@ -115,7 +115,11 @@ export function ChannelOrderActions({
           label="Sincronizar pedido y envío"
           pendingLabel="Sincronizando pedido…"
         />
-        {order.stockStatus === "REVIEW_REQUIRED" ? (
+        {order.stockStatus === "REVIEW_REQUIRED" ||
+        (order.stockStatus === "RESERVED" &&
+          ["SHIPMENT_LOGISTIC_DIVERGENCE", "INSUFFICIENT_STOCK"].includes(
+            order.stockError ?? "",
+          )) ? (
           <SubmitForm
             action={retryChannelOrderStockAction}
             orderId={order.id}

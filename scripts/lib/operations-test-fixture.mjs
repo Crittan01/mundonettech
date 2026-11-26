@@ -263,7 +263,12 @@ export async function seedOperationsFixture(client, { adminId, catalog, checkout
       "externalIdHash", "emailHash", "phoneHash"
     ) VALUES (
       $1, $2, 'PURCHASE', $3, $4, $5, $6, 'LOCAL', '123456789012345', 'https://example.test/meta',
-      CURRENT_TIMESTAMP, 'https://example.test/checkout', $7, $8::jsonb, $9, $10, $11, $12
+      (SELECT date_trunc('milliseconds', max(payment."completedAt"))
+       FROM "PaymentTransaction" payment
+       JOIN "PaymentAttempt" attempt ON attempt."id" = payment."attemptId"
+       WHERE attempt."orderId" = $4 AND payment."kind" = 'CAPTURE'
+         AND payment."status" = 'SUCCEEDED' AND payment."completedAt" IS NOT NULL),
+      'https://example.test/checkout', $7, $8::jsonb, $9, $10, $11, $12
     )`,
     [
       metaEventId,

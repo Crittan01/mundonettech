@@ -1,3 +1,4 @@
+import { hasAdminPermission, matchesSecretTimingSafe } from "../../../packages/core/dist/index.js";
 import {
   ChannelOrderError,
   EmailConflictError,
@@ -342,5 +343,73 @@ describe("A2 Wompi webhook HTTP boundary", () => {
     const failed = await current.route.POST(requestWithJson(`${webhookUrl}/wompi`, "{}"));
     expect(failed.status).toBe(500);
     expect(await responseBody(failed)).toEqual({ error: "Webhook processing failed." });
+  });
+});
+
+describe("A8 channel scheduler ingestion fence", () => {
+  it("does not push catalog drift after a partially ingested batch and still synchronizes alerts", async () => {
+    const actorId = "8a089e6d-5691-4d34-9d52-2f12e36b12aa";
+    const secret = "channel-scheduler-secret-32-characters";
+    const refreshDueAccounts = vi.fn().mockResolvedValue({
+      scanned: 0,
+      refreshed: 0,
+      skipped: 0,
+      failed: 0,
+      expiredAttempts: 0,
+      failures: [],
+    });
+    const processResourceEvents = vi.fn().mockResolvedValue({
+      claimed: 1,
+      completed: 0,
+      retries: 1,
+      failed: 0,
+      failures: [{ eventId: "event-1", code: "PROVIDER_UNCERTAIN" }],
+    });
+    const processSyncJobs = vi.fn();
+    const synchronizeNotifications = vi.fn().mockResolvedValue(undefined);
+    class OperationsService {
+      synchronizeNotifications = synchronizeNotifications;
+    }
+    const route = loadRoute("jobs/channels", {
+      "@mundonettech/core": { hasAdminPermission, matchesSecretTimingSafe },
+      "@mundonettech/db": { OperationsService },
+      "next/cache": { revalidateTag: vi.fn() },
+      "@/lib/db": {
+        getDatabase: vi.fn(() => ({
+          adminUser: {
+            findFirst: vi.fn().mockResolvedValue({ id: actorId, role: "SUPERADMIN" }),
+          },
+        })),
+      },
+      "@/lib/integrations": {
+        channelAccountService: vi.fn(() => ({ refreshDueAccounts })),
+        channelCatalogService: vi.fn(() => ({ processSyncJobs })),
+        channelOrderService: vi.fn(() => ({ processResourceEvents })),
+      },
+      "@/lib/security/request-context": {
+        getRequestSecurityContext: vi.fn().mockResolvedValue({
+          ipHash: new Uint8Array(32).fill(4),
+          userAgentHash: new Uint8Array(32).fill(5),
+        }),
+      },
+    });
+    vi.stubEnv("CHANNEL_CRON_SECRET", secret);
+    vi.stubEnv("CHANNEL_JOB_ACTOR_ID", actorId);
+    try {
+      const response = await route.POST(
+        new Request("https://jobs.example.test/api/jobs/channels", {
+          method: "POST",
+          headers: { authorization: `Bearer ${secret}` },
+        }),
+      );
+      expect(response.status).toBe(500);
+      expect(processSyncJobs).not.toHaveBeenCalled();
+      expect(synchronizeNotifications).toHaveBeenCalledOnce();
+      expect(await responseBody(response)).toMatchObject({
+        errors: [{ stage: "processResourceEvents", code: "INGESTION_INCOMPLETE" }],
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

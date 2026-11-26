@@ -76,6 +76,12 @@ function serializeCanonical(value: unknown, strict: boolean): string {
       .join(",")}]`;
   }
   if (typeof value === "object" && value !== null) {
+    if (strict) {
+      const prototype: unknown = Object.getPrototypeOf(value);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new TypeError("Strict integration payloads must contain only plain objects.");
+      }
+    }
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, entry]) => entry !== undefined)
       .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))

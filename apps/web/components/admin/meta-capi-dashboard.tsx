@@ -36,6 +36,7 @@ const failureLabels: Record<string, string> = {
   REQUEST_HASH_MISMATCH: "El request sellado no coincide",
   REQUEST_INVALID: "El request persistido no es válido",
   CLAIM_EXPIRED: "El reclamo expiró sin confirmación",
+  OUTBOX_RETRY_EXHAUSTED: "El worker agotó los reintentos de despacho",
 };
 
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {

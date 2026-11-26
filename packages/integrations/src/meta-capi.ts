@@ -252,6 +252,7 @@ export class MetaConversionsApiClient {
       if (response.status === 401 || response.status === 403) {
         return { kind: "REJECTED", code: "CREDENTIAL_REJECTED" };
       }
+      if (response.status === 408) return { kind: "UNCERTAIN", code: "PROVIDER_UNCERTAIN" };
       if (response.status >= 400 && response.status < 500) {
         return { kind: "REJECTED", code: "PAYLOAD_REJECTED" };
       }

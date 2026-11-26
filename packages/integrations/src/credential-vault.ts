@@ -196,6 +196,47 @@ async function writeAudit(
   });
 }
 
+async function assertChannelCredentialAvailable(
+  tx: Prisma.TransactionClient,
+  credentialId: string,
+  mode: "ACCOUNT" | "REFRESH",
+): Promise<void> {
+  const accounts = await tx.$queryRaw<
+    Array<{ id: string; status: string; refreshClaimId: string | null }>
+  >`SELECT "id", "status"::text AS "status", "refreshClaimId" FROM "ChannelAccount" WHERE "credentialId" = ${credentialId}::uuid ORDER BY "id" FOR UPDATE`;
+  if (
+    accounts.some((account) =>
+      mode === "ACCOUNT" ? account.status === "ACTIVE" : account.refreshClaimId !== null,
+    )
+  ) {
+    throw new CredentialConflictError();
+  }
+  const attempts = await tx.$queryRaw<
+    Array<{ id: string; status: string }>
+  >`SELECT "id", "status"::text AS "status" FROM "ChannelOAuthAttempt" WHERE "credentialId" = ${credentialId}::uuid FOR UPDATE`;
+  if (attempts.some((attempt) => ["PENDING", "PROCESSING"].includes(attempt.status))) {
+    throw new CredentialConflictError();
+  }
+}
+
+async function assertDianCredentialAvailable(
+  tx: Prisma.TransactionClient,
+  credentialId: string,
+  includeDraft: boolean,
+): Promise<void> {
+  const activeStatuses = includeDraft
+    ? ["DRAFT", "TRANSMITTING", "UNCERTAIN"]
+    : ["TRANSMITTING", "UNCERTAIN"];
+  const invoices = await tx.$queryRaw<
+    Array<{ id: string }>
+  >`SELECT "id" FROM "TaxInvoice" WHERE "credentialId" = ${credentialId}::uuid AND "status"::text = ANY(${activeStatuses}::text[]) ORDER BY "id" FOR UPDATE`;
+  if (invoices.length > 0) throw new CredentialConflictError();
+  const creditNotes = await tx.$queryRaw<
+    Array<{ id: string }>
+  >`SELECT "id" FROM "CreditNote" WHERE "credentialId" = ${credentialId}::uuid AND "status"::text = ANY(${activeStatuses}::text[]) ORDER BY "id" FOR UPDATE`;
+  if (creditNotes.length > 0) throw new CredentialConflictError();
+}
+
 export class IntegrationCredentialVault {
   constructor(
     private readonly db: PrismaClient,
@@ -321,30 +362,10 @@ export class IntegrationCredentialVault {
         throw new CredentialConflictError();
       }
       if (existing.provider === "mercado-libre") {
-        const [activeAccount, activeAttempt] = await Promise.all([
-          tx.channelAccount.findFirst({
-            where: { credentialId: existing.id, status: "ACTIVE" },
-            select: { id: true },
-          }),
-          tx.channelOAuthAttempt.findFirst({
-            where: { credentialId: existing.id, status: { in: ["PENDING", "PROCESSING"] } },
-            select: { id: true },
-          }),
-        ]);
-        if (activeAccount || activeAttempt) throw new CredentialConflictError();
+        await assertChannelCredentialAvailable(tx, existing.id, "ACCOUNT");
       }
       if (existing.provider === "dian") {
-        const [activeInvoice, activeCreditNote] = await Promise.all([
-          tx.taxInvoice.findFirst({
-            where: { credentialId: existing.id, status: { in: ["TRANSMITTING", "UNCERTAIN"] } },
-            select: { id: true },
-          }),
-          tx.creditNote.findFirst({
-            where: { credentialId: existing.id, status: { in: ["TRANSMITTING", "UNCERTAIN"] } },
-            select: { id: true },
-          }),
-        ]);
-        if (activeInvoice || activeCreditNote) throw new CredentialConflictError();
+        await assertDianCredentialAvailable(tx, existing.id, false);
       }
       const sealed = encryptIntegrationCredential({
         credentialId: existing.id,
@@ -396,17 +417,7 @@ export class IntegrationCredentialVault {
       }
       if (existing.revokedAt) throw new CredentialRevokedError();
       if (existing.provider === "mercado-libre") {
-        const accounts = await tx.$queryRaw<
-          Array<{ id: string; refreshClaimId: string | null }>
-        >`SELECT "id", "refreshClaimId" FROM "ChannelAccount" WHERE "credentialId" = ${existing.id}::uuid ORDER BY "id" FOR UPDATE`;
-        if (accounts.some((account) => account.refreshClaimId !== null)) {
-          throw new CredentialConflictError();
-        }
-        const activeAttempt = await tx.channelOAuthAttempt.findFirst({
-          where: { credentialId: existing.id, status: { in: ["PENDING", "PROCESSING"] } },
-          select: { id: true },
-        });
-        if (activeAttempt) throw new CredentialConflictError();
+        await assertChannelCredentialAvailable(tx, existing.id, "REFRESH");
       }
       const sealed = reencryptIntegrationCredential(
         {
@@ -453,36 +464,10 @@ export class IntegrationCredentialVault {
       }
       if (existing.revokedAt) throw new CredentialRevokedError();
       if (existing.provider === "mercado-libre") {
-        const [activeAccount, activeAttempt] = await Promise.all([
-          tx.channelAccount.findFirst({
-            where: { credentialId: existing.id, status: "ACTIVE" },
-            select: { id: true },
-          }),
-          tx.channelOAuthAttempt.findFirst({
-            where: { credentialId: existing.id, status: { in: ["PENDING", "PROCESSING"] } },
-            select: { id: true },
-          }),
-        ]);
-        if (activeAccount || activeAttempt) throw new CredentialConflictError();
+        await assertChannelCredentialAvailable(tx, existing.id, "ACCOUNT");
       }
       if (existing.provider === "dian") {
-        const [activeInvoice, activeCreditNote] = await Promise.all([
-          tx.taxInvoice.findFirst({
-            where: {
-              credentialId: existing.id,
-              status: { in: ["DRAFT", "TRANSMITTING", "UNCERTAIN"] },
-            },
-            select: { id: true },
-          }),
-          tx.creditNote.findFirst({
-            where: {
-              credentialId: existing.id,
-              status: { in: ["DRAFT", "TRANSMITTING", "UNCERTAIN"] },
-            },
-            select: { id: true },
-          }),
-        ]);
-        if (activeInvoice || activeCreditNote) throw new CredentialConflictError();
+        await assertDianCredentialAvailable(tx, existing.id, true);
       }
       const result = await tx.integrationCredential.updateMany({
         where: { id: existing.id, nonce: existing.nonce, revokedAt: null },

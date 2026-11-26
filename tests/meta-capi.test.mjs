@@ -5,7 +5,6 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import pg from "pg";
 
 import {
-  AccountError,
   AccountService,
   CartService,
   createDatabaseClient,
@@ -96,8 +95,43 @@ async function makePaidOrder(options = {}) {
       adminId: actor.id,
       ...(options.taxRegime ? { taxRegime: options.taxRegime } : {}),
     });
+    const wompiCredentialId = randomUUID();
+    const attemptId = randomUUID();
+    await admin.query(
+      `INSERT INTO "IntegrationCredential" (
+        "id", "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+      ) VALUES ($1, 'wompi', 'LOCAL', $2, 1, $3, $4, $5, $6)`,
+      [
+        wompiCredentialId,
+        `meta-wompi-${randomUUID().slice(0, 8)}`,
+        randomBytes(12),
+        randomBytes(32),
+        randomBytes(16),
+        actor.id,
+      ],
+    );
+    await admin.query(
+      `INSERT INTO "PaymentAttempt" (
+        "id", "orderId", "provider", "environment", "status", "idempotencyKey", "requestHash",
+        "reference", "amountCents", "credentialId", "providerStatus", "completedAt"
+      ) VALUES ($1, $2, 'WOMPI', 'LOCAL', 'SUCCEEDED', $3, $4, $5, 195000, $6, 'APPROVED', CURRENT_TIMESTAMP)`,
+      [
+        attemptId,
+        checkout.orderId,
+        `meta-wompi-${randomUUID()}`,
+        randomBytes(32),
+        randomUUID(),
+        wompiCredentialId,
+      ],
+    );
+    await admin.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, 'WOMPI', 'CAPTURE', 'SUCCEEDED', 195000, $2, $3, CURRENT_TIMESTAMP)`,
+      [attemptId, `trx-${randomUUID()}`, randomBytes(32)],
+    );
     await admin.query("COMMIT");
-    return { catalog, checkout, paidAt: new Date() };
+    return { catalog, checkout, paidAt: new Date(Date.now() + 1_000) };
   } catch (error) {
     await admin.query("ROLLBACK").catch(() => undefined);
     throw error;
@@ -424,6 +458,41 @@ describe("F6.4 — persistent Meta CAPI purchase delivery", () => {
     assert.equal(fixture.calls.length, 0);
   });
 
+  it("keeps a provider result received after claim expiry uncertain and blocks blind retry", async () => {
+    const { catalog, checkout, paidAt } = await makePaidOrder();
+    await grantConsent(catalog);
+    await createCredential();
+    const metaEventId = await enqueue(catalog, checkout, paidAt);
+    let calls = 0;
+    service = new MetaCapiService(db, {
+      environment: IntegrationEnvironment.LOCAL,
+      publicSiteUrl: "http://127.0.0.1:4110",
+      vault,
+      apiUrl: fixture.origin,
+      allowLoopback: true,
+      claimMilliseconds: 1_000,
+      client: {
+        async send() {
+          calls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 1_100));
+          return { kind: "SENT", providerTraceId: "meta-late-trace" };
+        },
+      },
+    });
+    assert.equal(
+      (await service.dispatch(metaEventId, "worker:meta-late-claim")).status,
+      "UNCERTAIN",
+    );
+    const uncertain = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(uncertain.failureCode, "CLAIM_EXPIRED");
+    assert.equal(uncertain.providerTraceId, null);
+    assert.equal(
+      (await service.dispatch(metaEventId, "worker:meta-no-late-retry")).status,
+      "UNCERTAIN",
+    );
+    assert.equal(calls, 1);
+  });
+
   it("enforces one active Meta credential per environment", async () => {
     await createCredential();
     await assert.rejects(createCredential(), CredentialAlreadyExistsError);
@@ -731,7 +800,7 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
     assert.equal(fixture.calls[0].body.data[0].event_id, `purchase:${checkout.orderId}`);
   });
 
-  it("purges hashes on UNCERTAIN when consent is revoked and closes UNCERTAIN/FAILED alerts via DISCARD", async () => {
+  it("cancels UNCERTAIN on revocation, purges hashes and still allows audited DISCARD for FAILED", async () => {
     const { catalog, checkout, paidAt } = await makePaidOrder();
     await grantConsent(catalog);
     await createCredential();
@@ -765,13 +834,14 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
       { ipHash: hash(), userAgentHash: hash() },
     );
 
-    const uncertainAfterRevoke = await db.metaCapiEvent.findUniqueOrThrow({
+    const skippedAfterRevoke = await db.metaCapiEvent.findUniqueOrThrow({
       where: { id: metaEventId },
     });
-    assert.equal(uncertainAfterRevoke.status, "UNCERTAIN");
-    assert.equal(uncertainAfterRevoke.externalIdHash, null);
-    assert.equal(uncertainAfterRevoke.emailHash, null);
-    assert.equal(uncertainAfterRevoke.phoneHash, null);
+    assert.equal(skippedAfterRevoke.status, "SKIPPED");
+    assert.equal(skippedAfterRevoke.failureCode, "NO_CONSENT");
+    assert.equal(skippedAfterRevoke.externalIdHash, null);
+    assert.equal(skippedAfterRevoke.emailHash, null);
+    assert.equal(skippedAfterRevoke.phoneHash, null);
 
     await assert.rejects(
       service.reconcile({
@@ -780,17 +850,17 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
         reference: "EM-CANNOT-RETRY",
         audit: audit(),
       }),
+      (error) => error instanceof MetaCapiServiceError && error.code === "NOT_RETRYABLE",
+    );
+    await assert.rejects(
+      service.reconcile({
+        metaEventId,
+        resolution: "DISCARD",
+        reference: "EM-ALREADY-CANCELLED",
+        audit: audit(),
+      }),
       (error) => error instanceof MetaCapiServiceError && error.code === "CONFLICT",
     );
-
-    const discarded = await service.reconcile({
-      metaEventId,
-      resolution: "DISCARD",
-      reference: "EM-NOT-RECEIVED-CLOSED-1",
-      audit: audit(),
-    });
-    assert.equal(discarded.status, "SKIPPED");
-    assert.equal(discarded.reconcilable, false);
     const afterSnapshot = await operations.snapshot(actor.id);
     assert.equal(
       afterSnapshot.notifications.some(
@@ -798,10 +868,6 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
       ),
       false,
     );
-    const discardLog = await db.adminActionLog.findFirstOrThrow({
-      where: { targetId: metaEventId, action: "META_CAPI_EVENT_DISCARDED" },
-    });
-    assert.equal(discardLog.actorAdminUserId, actor.id);
 
     const second = await makePaidOrder();
     await grantConsent(second.catalog);
@@ -821,9 +887,15 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
       audit: audit(),
     });
     assert.equal(closedFailed.status, "SKIPPED");
+    const discardLog = await db.adminActionLog.findFirstOrThrow({
+      where: { targetId: failedId, action: "META_CAPI_EVENT_DISCARDED" },
+    });
+    assert.equal(discardLog.actorAdminUserId, actor.id);
+    assert.equal(discardLog.metadata.eventId, `purchase:${second.checkout.orderId}`);
+    assert.match(discardLog.metadata.requestHash, /^[0-9a-f]{64}$/);
   });
 
-  it("preserves profile consent flags past 20 DATA_PROCESSING rows and purges UNCERTAIN hashes on anonymization", async () => {
+  it("preserves profile consent flags and cancels DISPATCHING with hash purging on anonymization", async () => {
     const { catalog, checkout, paidAt } = await makePaidOrder({ taxRegime: "NO_RESPONSABLE_IVA" });
     await grantConsent(catalog);
     await db.consent.create({
@@ -889,33 +961,109 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
         attempts: 1,
       },
     });
-    await assert.rejects(
-      accounts.anonymize(catalog.customerId, "ELIMINAR MI CUENTA", {
-        ipHash: hash(),
-        userAgentHash: hash(),
-      }),
-      (error) => error instanceof AccountError && error.code === "CONFLICT",
-    );
-
-    await db.metaCapiEvent.update({
-      where: { id: metaEventId },
-      data: {
-        status: "UNCERTAIN",
-        claimId: null,
-        claimedBy: null,
-        claimedAt: null,
-        claimExpiresAt: null,
-        failureCode: "PROVIDER_UNCERTAIN",
-      },
-    });
     await accounts.anonymize(catalog.customerId, "ELIMINAR MI CUENTA", {
       ipHash: hash(),
       userAgentHash: hash(),
     });
     const afterAnonymize = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
-    assert.equal(afterAnonymize.status, "UNCERTAIN");
+    assert.equal(afterAnonymize.status, "SKIPPED");
+    assert.equal(afterAnonymize.failureCode, "NO_CONSENT");
     assert.equal(afterAnonymize.externalIdHash, null);
     assert.equal(afterAnonymize.emailHash, null);
     assert.equal(afterAnonymize.phoneHash, null);
+    assert.equal(afterAnonymize.claimId, null);
+    assert.equal(afterAnonymize.requestStartedAt, null);
+  });
+
+  it("resets attempts and resolves alerts when reconciling RETRY after PROVIDER_RATE_LIMITED exhaustion", async () => {
+    const { catalog, checkout, paidAt } = await makePaidOrder();
+    await grantConsent(catalog);
+    await createCredential();
+    const metaEventId = await enqueue(catalog, checkout, paidAt);
+    behavior = () => ({ status: 429, headers: { "retry-after": "1" }, body: {} });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await db.metaCapiEvent.update({
+        where: { id: metaEventId },
+        data: { availableAt: new Date(Date.now() - 1_000) },
+      });
+      await service.dispatch(metaEventId, `worker:rate-limit-${attempt}`);
+    }
+    const exhausted = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(exhausted.status, "FAILED");
+    assert.equal(exhausted.failureCode, "PROVIDER_RATE_LIMITED");
+    assert.equal(exhausted.attempts, 3);
+
+    const retried = await service.reconcile({
+      metaEventId,
+      resolution: "RETRY",
+      reference: "META-RATE-LIMIT-RETRY-001",
+      audit: audit(),
+    });
+    assert.equal(retried.status, "PENDING");
+    assert.equal(retried.attempts, 0);
+    const alert = await db.notification.findUniqueOrThrow({
+      where: { deduplicationKey: `meta-capi:${metaEventId}:review` },
+    });
+    assert.ok(alert.resolvedAt);
+
+    behavior = undefined;
+    const sent = await service.dispatch(metaEventId, "worker:rate-limit-recovered");
+    assert.equal(sent.status, "SENT");
+  });
+
+  it("transitions PENDING MetaCapiEvent to FAILED (OUTBOX_RETRY_EXHAUSTED) when DomainEventWorker exhausts retries", async () => {
+    const { catalog, checkout, paidAt } = await makePaidOrder();
+    await grantConsent(catalog);
+    await createCredential();
+    const metaEventId = await enqueue(catalog, checkout, paidAt);
+    await db.domainOutbox.updateMany({
+      where: {
+        processedAt: null,
+        failedAt: null,
+        NOT: { aggregateId: metaEventId },
+      },
+      data: { availableAt: new Date(Date.now() + 3_600_000) },
+    });
+    const worker = new DomainEventWorker(db, {
+      workerId: "worker:meta-exhausted",
+      shipping: new ShippingService(db, {
+        vault: vault.forSystemProvider("aveonline"),
+        environment: IntegrationEnvironment.LOCAL,
+      }),
+      email: new EmailService(db, {
+        vault: vault.forSystemProvider("resend"),
+        publicSiteUrl: "http://127.0.0.1:4110",
+        environment: IntegrationEnvironment.LOCAL,
+      }),
+      invoice: new InvoiceService(db, {
+        vault: vault.forSystemProvider("dian"),
+        environment: IntegrationEnvironment.LOCAL,
+      }),
+      vault: vault.forSystemProvider("resend"),
+      publicSiteUrl: "http://127.0.0.1:4110",
+      allowLoopback: true,
+      storeName: "Tienda de pruebas",
+      receiptTokenForSubmission: () => randomBytes(32).toString("base64url"),
+      maximumAttempts: 1,
+    });
+    const batch = await worker.runBatch(1);
+    assert.equal(batch.failed, 1);
+    const failedEvent = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(failedEvent.status, "FAILED");
+    assert.equal(failedEvent.failureCode, "OUTBOX_RETRY_EXHAUSTED");
+    assert.equal(failedEvent.externalIdHash, null);
+    assert.equal(failedEvent.emailHash, null);
+    assert.equal(failedEvent.phoneHash, null);
+    const alert = await db.notification.findUniqueOrThrow({
+      where: { deduplicationKey: `meta-capi:${metaEventId}:review` },
+    });
+    assert.equal(alert.resolvedAt, null);
+    const recovered = await service.reconcile({
+      metaEventId,
+      resolution: "RETRY",
+      reference: "META-OUTBOX-RETRY-001",
+      audit: audit(),
+    });
+    assert.equal(recovered.status, "PENDING");
   });
 });

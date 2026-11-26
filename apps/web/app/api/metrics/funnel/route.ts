@@ -63,9 +63,10 @@ function hasValidOrigin(request: Request): boolean {
   return hasCanonicalSameOrigin(request);
 }
 
-function declaredBodyLength(request: Request): number {
+function declaredBodyLength(request: Request): number | null {
   const value = request.headers.get("content-length");
-  if (value === null || !/^[0-9]+$/.test(value)) throw new RangeError("Invalid body size.");
+  if (value === null) return null;
+  if (!/^[0-9]+$/.test(value)) throw new RangeError("Invalid body size.");
   const declared = Number(value);
   if (!Number.isSafeInteger(declared) || declared < 2 || declared > maximumBodyBytes) {
     throw new RangeError("Invalid body size.");
@@ -75,7 +76,7 @@ function declaredBodyLength(request: Request): number {
 
 async function readBody(request: Request): Promise<string> {
   declaredBodyLength(request);
-  if (!request.body) return "";
+  if (!request.body) throw new RangeError("Invalid body size.");
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -93,6 +94,7 @@ async function readBody(request: Request): Promise<string> {
   } finally {
     reader.releaseLock();
   }
+  if (total < 2) throw new RangeError("Invalid body size.");
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
   } catch {
@@ -164,7 +166,7 @@ export async function POST(request: Request) {
     if (error instanceof RangeError) {
       return Response.json({ error: "Invalid batch size." }, { status: 413, headers });
     }
-    if (error instanceof z.ZodError || error instanceof SyntaxError || error instanceof TypeError) {
+    if (error instanceof z.ZodError || error instanceof SyntaxError) {
       return Response.json({ error: "Invalid aggregate batch." }, { status: 400, headers });
     }
     return Response.json({ error: "Metrics could not be recorded." }, { status: 500, headers });

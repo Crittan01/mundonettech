@@ -30,6 +30,71 @@ import { getRequestSecurityContext } from "@/lib/security/request-context";
 const providerSchema = z.enum(["aveonline", "resend", "dian", "gemini", "meta"]);
 type OperationalProvider = z.infer<typeof providerSchema>;
 
+const providerFields: Record<OperationalProvider, readonly string[]> = {
+  aveonline: [
+    "username",
+    "password",
+    "companyId",
+    "companyCode",
+    "companyDocument",
+    "originLegalName",
+    "originEmail",
+    "agentId",
+    "carrierId",
+    "authUrl",
+    "labelsUrl",
+    "lookupUrl",
+  ],
+  resend: [
+    "apiKey",
+    "fromEmail",
+    "fromName",
+    "replyTo",
+    "svixSecret",
+    "unsubscribeSecret",
+    "apiUrl",
+  ],
+  meta: ["pixelId", "accessToken", "testEventCode"],
+  gemini: ["apiKey", "model", "apiUrl"],
+  dian: [
+    "bearerToken",
+    "providerUrl",
+    "issuerNit",
+    "issuerDv",
+    "issuerLegalName",
+    "issuerEmail",
+    "issuerAddress",
+    "issuerDepartmentCode",
+    "issuerDepartmentName",
+    "issuerMunicipalityCode",
+    "issuerMunicipalityName",
+    "issuerPostalCode",
+    "issuerPhoneE164",
+    "softwareId",
+    "softwarePin",
+    "signatureTrustAnchorPem",
+    "invoicePrefix",
+    "invoiceResolutionNumber",
+    "invoiceResolutionStart",
+    "invoiceResolutionEnd",
+    "invoiceResolutionDate",
+    "invoiceResolutionValidFrom",
+    "invoiceResolutionValidTo",
+    "creditNotePrefix",
+  ],
+};
+
+function hasClosedForm(formData: FormData, allowedFields: readonly string[]): boolean {
+  const allowed = new Set(allowedFields);
+  const seen = new Set<string>();
+  for (const [key, value] of formData.entries()) {
+    if (key.startsWith("$ACTION_")) continue;
+    if (!allowed.has(key) || typeof value !== "string" || seen.has(key)) return false;
+    seen.add(key);
+  }
+  return true;
+}
+
 function publicValues(formData: FormData): Record<string, string> {
   const provider = providerSchema.safeParse(formString(formData, "provider"));
   return provider.success ? { provider: provider.data } : {};
@@ -177,6 +242,10 @@ async function persist(formData: FormData, rotate: boolean): Promise<ActionState
   try {
     const audit = await authorize();
     const provider = providerSchema.parse(required(formData, "provider"));
+    const identityFields = rotate ? ["credentialId", "accountName"] : ["accountName"];
+    if (!hasClosedForm(formData, ["provider", ...identityFields, ...providerFields[provider]])) {
+      throw new TypeError("Credential form contains unknown or duplicate fields.");
+    }
     sealed = Uint8Array.from(
       new TextEncoder().encode(JSON.stringify(credentialPayload(provider, formData))),
     );
