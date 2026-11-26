@@ -17,6 +17,39 @@ import { Readable } from "node:stream";
 import { RecoveryError } from "./recovery-config.mjs";
 
 const multipartPartSize = 8 * 1024 * 1024;
+const maxMultipartParts = 10_000;
+const maxPartUploadAttempts = 3;
+
+async function uploadPartWithRetry(client, input, uploadId, partNumber, chunks, chunkBytes) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxPartUploadAttempts; attempt += 1) {
+    if (input.signal?.aborted) {
+      throw new Error("Multipart upload aborted.");
+    }
+    try {
+      const result = await client.send(
+        new UploadPartCommand({
+          Bucket: input.bucket,
+          Key: input.key,
+          UploadId: uploadId,
+          PartNumber: partNumber,
+          Body: Readable.from(chunks),
+          ContentLength: chunkBytes,
+        }),
+        { abortSignal: input.signal },
+      );
+      if (!result.ETag) throw new Error("R2 did not return a part ETag.");
+      return result.ETag;
+    } catch (error) {
+      lastError = error;
+      if (input.signal?.aborted || attempt === maxPartUploadAttempts) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+    }
+  }
+  throw lastError;
+}
 
 async function streamMultipart(client, input) {
   let uploadId;
@@ -39,19 +72,18 @@ async function streamMultipart(client, input) {
     const flush = async () => {
       if (chunkBytes === 0) return;
       const partNumber = parts.length + 1;
-      const result = await client.send(
-        new UploadPartCommand({
-          Bucket: input.bucket,
-          Key: input.key,
-          UploadId: uploadId,
-          PartNumber: partNumber,
-          Body: Readable.from(chunks),
-          ContentLength: chunkBytes,
-        }),
-        { abortSignal: input.signal },
+      if (partNumber > maxMultipartParts) {
+        throw new Error("Multipart upload exceeded the maximum 10,000 parts.");
+      }
+      const etag = await uploadPartWithRetry(
+        client,
+        input,
+        uploadId,
+        partNumber,
+        chunks,
+        chunkBytes,
       );
-      if (!result.ETag) throw new Error("R2 did not return a part ETag.");
-      parts.push({ ETag: result.ETag, PartNumber: partNumber });
+      parts.push({ ETag: etag, PartNumber: partNumber });
       chunks = [];
       chunkBytes = 0;
     };
@@ -77,7 +109,9 @@ async function streamMultipart(client, input) {
       }),
       { abortSignal: input.signal },
     );
+    uploadId = undefined;
     if (!completed.ETag) throw new Error("R2 did not seal the multipart upload.");
+    return { etag: completed.ETag };
   } catch (error) {
     if (uploadId) {
       await client
@@ -90,13 +124,15 @@ async function streamMultipart(client, input) {
         )
         .catch(() => undefined);
     }
-    throw new RecoveryError(
+    const failure = new RecoveryError(
       "R2_MULTIPART_UPLOAD_FAILED",
       "The encrypted multipart upload failed.",
       {
         cause: error,
       },
     );
+    if (input.signal?.aborted) failure.recoveryCleanup = true;
+    throw failure;
   }
 }
 
@@ -146,7 +182,8 @@ export class R2RecoveryStorage {
     await this.client.send(new HeadBucketCommand({ Bucket: bucketName }));
     let objectCount = 0n;
     let continuationToken;
-    let firstKey;
+    let firstNonEmptyKey;
+    let firstAnyKey;
     do {
       const page = await this.client.send(
         new ListObjectsV2Command({
@@ -157,7 +194,10 @@ export class R2RecoveryStorage {
       );
       for (const object of page.Contents ?? []) {
         objectCount += 1n;
-        if (!firstKey && object.Key) firstKey = object.Key;
+        if (object.Key) {
+          if (!firstAnyKey) firstAnyKey = object.Key;
+          if (!firstNonEmptyKey && (object.Size ?? 0) > 0) firstNonEmptyKey = object.Key;
+        }
       }
       const nextToken = page.IsTruncated ? page.NextContinuationToken : undefined;
       if (page.IsTruncated && (!nextToken || nextToken === continuationToken)) {
@@ -170,17 +210,25 @@ export class R2RecoveryStorage {
     } while (continuationToken);
     let readVerified = false;
     if (objectCount > 0n) {
-      if (!firstKey)
+      const probeKey = firstNonEmptyKey ?? firstAnyKey;
+      if (!probeKey)
         throw new RecoveryError("R2_BUCKET_OBJECT_INVALID", "R2 returned an object without a key.");
       try {
         const response = await this.client.send(
-          new GetObjectCommand({ Bucket: bucketName, Key: firstKey, Range: "bytes=0-0" }),
+          new GetObjectCommand({
+            Bucket: bucketName,
+            Key: probeKey,
+            ...(firstNonEmptyKey ? { Range: "bytes=0-0" } : {}),
+          }),
         );
         if (!response.Body) {
           throw new RecoveryError("R2_BUCKET_READ_FAILED", "R2 returned an empty object response.");
         }
-        for await (const chunk of response.Body) void chunk;
-        readVerified = true;
+        let bytesRead = 0;
+        for await (const chunk of response.Body) {
+          bytesRead += Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(chunk);
+        }
+        readVerified = firstNonEmptyKey ? bytesRead >= 1 : true;
       } catch {
         readVerified = false;
       }

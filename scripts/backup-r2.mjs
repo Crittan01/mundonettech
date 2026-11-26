@@ -3,9 +3,8 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import pg from "pg";
-
 import {
+  createRecoveryPgClient,
   loadRecoveryConfig,
   postgresProcessEnvironment,
   recoveryFailureCode,
@@ -15,7 +14,7 @@ import {
   acquireRecoveryLock,
   completeBackupRun,
   expireStaleRun,
-  failRun,
+  failRunWithFallback,
   insertBucketEvidence,
   insertBackupRun,
   newBackupKeys,
@@ -26,26 +25,29 @@ import {
   settleStreamingTasks,
   spawnPostgresRecoveryProcess,
   spawnRecoveryProcess,
+  terminateRecoveryProcesses,
   waitForSuccessfulExit,
 } from "./lib/recovery-process.mjs";
 import { R2RecoveryStorage } from "./lib/r2-recovery-storage.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
+function normalizedEtag(value) {
+  return typeof value === "string" ? value.replace(/^"+|"+$/g, "") : "";
+}
+
 export async function runBackup(options = {}) {
   const environment = options.env ?? process.env;
   const config = await loadRecoveryConfig(environment, { databaseUrl: options.databaseUrl });
   const storage = new R2RecoveryStorage(config.r2);
-  const client = new pg.Client({
-    connectionString: config.databaseUrl,
-    connectionTimeoutMillis: 15_000,
-  });
+  const client = createRecoveryPgClient(config.databaseUrl, "mundonettech-backup-ctrl");
   let runId;
   let unlock;
   let temporaryGpgHome;
   let uploadStarted = false;
   let sealed = false;
   let keys;
+  const spawnedProcesses = [];
   try {
     await client.connect();
     unlock = await acquireRecoveryLock(client, `database-backup:${config.environment}`);
@@ -95,6 +97,7 @@ export async function runBackup(options = {}) {
           },
         },
       );
+      spawnedProcesses.push(dump);
       const gpg = spawnRecoveryProcess(
         "gpg",
         [
@@ -125,6 +128,7 @@ export async function runBackup(options = {}) {
         ],
         { env: processEnvironment, passphrase: config.gpgPassphrase },
       );
+      spawnedProcesses.push(gpg);
       const meter = encryptedMeter();
       const upload = storage.uploadStream({
         key: keys.storageKey,
@@ -133,18 +137,23 @@ export async function runBackup(options = {}) {
       });
       uploadStarted = true;
       const tasks = [
+        waitForSuccessfulExit(dump, "PG_DUMP_FAILED"),
+        waitForSuccessfulExit(gpg, "GPG_ENCRYPTION_FAILED"),
         pipeline(dump.stdout, gpg.stdin),
         pipeline(gpg.stdout, meter.stream),
         upload.done,
-        waitForSuccessfulExit(dump, "PG_DUMP_FAILED"),
-        waitForSuccessfulExit(gpg, "GPG_ENCRYPTION_FAILED"),
       ];
-      await settleStreamingTasks(tasks, [dump, gpg], () => {
+      await settleStreamingTasks(tasks, spawnedProcesses, () => {
         upload.abort();
         meter.stream.destroy();
       });
+      const uploaded = await upload.done;
       const head = await storage.headBackup(keys.storageKey);
-      if (head.ContentLength === undefined || BigInt(head.ContentLength) !== meter.byteSize()) {
+      if (
+        head.ContentLength === undefined ||
+        BigInt(head.ContentLength) !== meter.byteSize() ||
+        (uploaded?.etag && head.ETag && normalizedEtag(head.ETag) !== normalizedEtag(uploaded.etag))
+      ) {
         throw new RecoveryError(
           "BACKUP_SIZE_MISMATCH",
           "R2 did not persist the complete encrypted stream.",
@@ -162,6 +171,7 @@ export async function runBackup(options = {}) {
         byteSize: meter.byteSize().toString(),
         encryptedSha256,
         authSchemaVerified: true,
+        appliedMigrations: schema.appliedMigrations,
         relations: schema.relations,
         buckets: config.bucketNames,
       };
@@ -183,10 +193,17 @@ export async function runBackup(options = {}) {
         completedAt: completed.completedAt,
       };
     } catch (error) {
-      await failRun(client, "backup", runId, recoveryFailureCode(error)).catch(() => undefined);
+      await failRunWithFallback(
+        client,
+        config.databaseUrl,
+        "backup",
+        runId,
+        recoveryFailureCode(error),
+      );
       throw error;
     }
   } finally {
+    terminateRecoveryProcesses(spawnedProcesses);
     if (uploadStarted && !sealed && keys) {
       await Promise.allSettled([
         storage.deleteBackupObject(keys.storageKey),

@@ -1,16 +1,22 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import {
   canAssignAdminRole,
+  hasAdminPermission,
   isAdminRole,
   normalizeEmail,
   OutboundEmailDisabledError,
+  type AdminPermission,
+  type AdminRoleValue,
 } from "@mundonettech/core";
 import {
   AdminActorAuthorizationError,
   AdminOperationRateLimitError,
   assertAdminActorInTransaction,
   consumeAdminOperationRateLimit,
+  type Prisma,
 } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
@@ -24,6 +30,71 @@ import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 class OperationFailure extends Error {}
+
+function assertNotConfiguredSchedulerActorViolation(
+  targetId: string,
+  nextRole: AdminRoleValue,
+  nextStatus: "INVITED" | "ACTIVE" | "SUSPENDED",
+): void {
+  const configuredActors: ReadonlyArray<{
+    readonly envVar: "CMS_JOB_ACTOR_ID" | "CRM_JOB_ACTOR_ID" | "CHANNEL_JOB_ACTOR_ID";
+    readonly configuredId: string | undefined;
+    readonly permission: AdminPermission;
+  }> = [
+    {
+      envVar: "CMS_JOB_ACTOR_ID",
+      configuredId: process.env.CMS_JOB_ACTOR_ID,
+      permission: "content:write",
+    },
+    {
+      envVar: "CRM_JOB_ACTOR_ID",
+      configuredId: process.env.CRM_JOB_ACTOR_ID,
+      permission: "crm:suppress",
+    },
+    {
+      envVar: "CHANNEL_JOB_ACTOR_ID",
+      configuredId: process.env.CHANNEL_JOB_ACTOR_ID,
+      permission: "integrations:write",
+    },
+  ];
+  for (const requirement of configuredActors) {
+    const configuredId = requirement.configuredId?.trim();
+    if (!configuredId || configuredId.toLowerCase() !== targetId.toLowerCase()) continue;
+    if (nextStatus !== "ACTIVE" || !hasAdminPermission(nextRole, requirement.permission)) {
+      throw new OperationFailure(
+        `Esta cuenta está configurada como actor del scheduler (${requirement.envVar}). Rota primero esa variable de entorno antes de suspenderla o retirarle permisos.`,
+      );
+    }
+  }
+}
+
+async function hasPriorActivation(
+  tx: Prisma.TransactionClient,
+  target: { id: string; mfaEnrolledAt: Date | null; lastSignInAt: Date | null },
+): Promise<boolean> {
+  if (target.mfaEnrolledAt !== null || target.lastSignInAt !== null) return true;
+  if (typeof tx.adminActionLog?.findFirst !== "function") return false;
+  const accepted = await tx.adminActionLog.findFirst({
+    where: { targetAdminUserId: target.id, action: "ADMIN_INVITATION_ACCEPTED" },
+    select: { id: true },
+  });
+  return Boolean(accepted);
+}
+
+async function revokeAuthSessionsInDatabase(
+  tx: Prisma.TransactionClient,
+  authUserId: string,
+): Promise<void> {
+  if (typeof tx.$queryRaw !== "function") return;
+  const check = await tx.$queryRaw<Array<{ canRevoke: boolean }>>`
+    SELECT (
+      to_regclass('auth.sessions') IS NOT NULL
+      AND has_table_privilege('auth.sessions', 'DELETE')
+    ) AS "canRevoke"
+  `;
+  if (!check[0]?.canRevoke) return;
+  await tx.$executeRaw`DELETE FROM auth.sessions WHERE user_id = ${authUserId}::uuid`;
+}
 
 function formObject(formData: FormData): Record<string, string> | null {
   const values: Record<string, string> = {};
@@ -108,6 +179,7 @@ export async function inviteAdministratorAction(
             action: "ADMIN_USER_INVITED",
             targetType: "AdminUser",
             targetId: created.id,
+            requestId: randomUUID(),
             ipHash: context.ipHash,
             userAgentHash: context.userAgentHash,
             metadata: { role: created.role, status: created.status },
@@ -162,13 +234,21 @@ export async function updateAdministratorAction(
     if (!canAssignAdminRole(session.profile.role, parsed.data.role))
       throw new OperationFailure("No puedes asignar ese rol.");
     const context = await getRequestSecurityContext();
-    await getDatabase().$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('admin-role-membership'))`;
+    const db = getDatabase();
+    await consumeAdminOperationRateLimit(db, {
+      operation: "admin.users.update",
+      actorAdminUserId: session.profile.id,
+      ipHash: context.ipHash,
+      limit: 30,
+      windowSeconds: 3600,
+    });
+
+    const preflight = await db.$transaction(async (tx) => {
       const freshActor = await assertAdminActorInTransaction(
         tx,
         session.profile.id,
         "users:write",
-        { lock: "UPDATE" },
+        { lock: "SHARE" },
       );
       if (!canAssignAdminRole(freshActor.role, parsed.data.role)) {
         throw new OperationFailure("No puedes asignar ese rol.");
@@ -180,16 +260,6 @@ export async function updateAdministratorAction(
         throw new OperationFailure(
           "No puedes administrar una cuenta de tu mismo anillo o superior.",
         );
-      if (target.status === "INVITED" && parsed.data.status === "ACTIVE") {
-        throw new OperationFailure(
-          "Una cuenta invitada solo puede activarse al aceptar su invitación.",
-        );
-      }
-      if (target.status !== "INVITED" && parsed.data.status === "INVITED") {
-        throw new OperationFailure(
-          "No puedes devolver una cuenta existente al estado de invitación.",
-        );
-      }
       const removesActiveSuperadmin =
         target.role === "SUPERADMIN" &&
         target.status === "ACTIVE" &&
@@ -201,55 +271,165 @@ export async function updateAdministratorAction(
         if (activeSuperadmins <= 1)
           throw new OperationFailure("Debe quedar al menos un superadministrador activo.");
       }
-      if (parsed.data.status === "SUSPENDED") {
-        const admin = createSupabaseAdminClient();
-        const banned = await admin.auth.admin.updateUserById(target.authUserId, {
-          ban_duration: "876000h",
-        });
-        if (banned.error) {
+      if (target.role === parsed.data.role && target.status === parsed.data.status) {
+        return { kind: "NOOP" as const };
+      }
+      if (target.status === "INVITED" && parsed.data.status === "ACTIVE") {
+        throw new OperationFailure(
+          "Una cuenta invitada solo puede activarse al aceptar su invitación.",
+        );
+      }
+      if (target.status !== "INVITED" && parsed.data.status === "INVITED") {
+        throw new OperationFailure(
+          "No puedes devolver una cuenta existente al estado de invitación.",
+        );
+      }
+      if (
+        target.status === "SUSPENDED" &&
+        parsed.data.status === "ACTIVE" &&
+        !(await hasPriorActivation(tx, {
+          id: target.id,
+          mfaEnrolledAt: target.mfaEnrolledAt ?? null,
+          lastSignInAt: target.lastSignInAt ?? null,
+        }))
+      ) {
+        throw new OperationFailure(
+          "No puedes activar una cuenta suspendida que nunca completó su invitación.",
+        );
+      }
+      assertNotConfiguredSchedulerActorViolation(target.id, parsed.data.role, parsed.data.status);
+      return {
+        kind: "READY" as const,
+        authUserId: target.authUserId,
+        previousStatus: target.status,
+      };
+    });
+
+    if (preflight.kind === "NOOP") {
+      return actionSuccess("No hubo cambios que aplicar en la cuenta administrativa.");
+    }
+
+    const needsBan = preflight.previousStatus !== "SUSPENDED" && parsed.data.status === "SUSPENDED";
+    const needsUnban = preflight.previousStatus === "SUSPENDED" && parsed.data.status === "ACTIVE";
+    let authStateMutated: "banned" | "unbanned" | null = null;
+    if (needsBan) {
+      const admin = createSupabaseAdminClient();
+      const banned = await admin.auth.admin.updateUserById(preflight.authUserId, {
+        ban_duration: "876000h",
+      });
+      if (banned.error) {
+        throw new OperationFailure(
+          "No pudimos confirmar el bloqueo de autenticación. El cambio no se aplicó.",
+        );
+      }
+      authStateMutated = "banned";
+    } else if (needsUnban) {
+      const admin = createSupabaseAdminClient();
+      const unbanned = await admin.auth.admin.updateUserById(preflight.authUserId, {
+        ban_duration: "none",
+      });
+      if (unbanned.error) {
+        throw new OperationFailure(
+          "No pudimos retirar el bloqueo de autenticación. El cambio no se aplicó.",
+        );
+      }
+      authStateMutated = "unbanned";
+    }
+
+    try {
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('admin-role-membership', 0))`;
+        const freshActor = await assertAdminActorInTransaction(
+          tx,
+          session.profile.id,
+          "users:write",
+          { lock: "SHARE" },
+        );
+        if (!canAssignAdminRole(freshActor.role, parsed.data.role)) {
+          throw new OperationFailure("No puedes asignar ese rol.");
+        }
+        await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${parsed.data.targetId}::uuid FOR UPDATE`;
+        const target = await tx.adminUser.findUnique({ where: { id: parsed.data.targetId } });
+        if (!target || target.deletedAt || !isAdminRole(target.role))
+          throw new OperationFailure("El administrador no existe.");
+        if (!canAssignAdminRole(freshActor.role, target.role))
           throw new OperationFailure(
-            "No pudimos confirmar el bloqueo de autenticación. El cambio no se aplicó.",
+            "No puedes administrar una cuenta de tu mismo anillo o superior.",
+          );
+        if (target.status === "INVITED" && parsed.data.status === "ACTIVE") {
+          throw new OperationFailure(
+            "Una cuenta invitada solo puede activarse al aceptar su invitación.",
           );
         }
-        const signedOut = await admin.auth.admin.signOut(target.authUserId, "global");
-        if (signedOut.error) {
+        if (target.status !== "INVITED" && parsed.data.status === "INVITED") {
           throw new OperationFailure(
-            "No pudimos confirmar la revocación global. El cambio no se aplicó.",
+            "No puedes devolver una cuenta existente al estado de invitación.",
           );
         }
-      } else if (parsed.data.status === "ACTIVE" && target.status === "SUSPENDED") {
-        const admin = createSupabaseAdminClient();
-        const unbanned = await admin.auth.admin.updateUserById(target.authUserId, {
-          ban_duration: "none",
-        });
-        if (unbanned.error) {
+        if (
+          target.status === "SUSPENDED" &&
+          parsed.data.status === "ACTIVE" &&
+          !(await hasPriorActivation(tx, {
+            id: target.id,
+            mfaEnrolledAt: target.mfaEnrolledAt ?? null,
+            lastSignInAt: target.lastSignInAt ?? null,
+          }))
+        ) {
           throw new OperationFailure(
-            "No pudimos retirar el bloqueo de autenticación. El cambio no se aplicó.",
+            "No puedes activar una cuenta suspendida que nunca completó su invitación.",
           );
+        }
+        assertNotConfiguredSchedulerActorViolation(target.id, parsed.data.role, parsed.data.status);
+        const removesActiveSuperadmin =
+          target.role === "SUPERADMIN" &&
+          target.status === "ACTIVE" &&
+          (parsed.data.role !== "SUPERADMIN" || parsed.data.status !== "ACTIVE");
+        if (removesActiveSuperadmin) {
+          const activeSuperadmins = await tx.adminUser.count({
+            where: { role: "SUPERADMIN", status: "ACTIVE", deletedAt: null },
+          });
+          if (activeSuperadmins <= 1)
+            throw new OperationFailure("Debe quedar al menos un superadministrador activo.");
+        }
+        if (parsed.data.status === "SUSPENDED") {
+          await revokeAuthSessionsInDatabase(tx, target.authUserId);
+        }
+        await tx.adminUser.update({
+          where: { id: target.id },
+          data: { role: parsed.data.role, status: parsed.data.status },
+        });
+        await tx.adminActionLog.create({
+          data: {
+            actorAdminUserId: freshActor.id,
+            targetAdminUserId: target.id,
+            action: "ADMIN_USER_UPDATED",
+            targetType: "AdminUser",
+            targetId: target.id,
+            requestId: randomUUID(),
+            ipHash: context.ipHash,
+            userAgentHash: context.userAgentHash,
+            metadata: {
+              previousRole: target.role,
+              previousStatus: target.status,
+              role: parsed.data.role,
+              status: parsed.data.status,
+            },
+          },
+        });
+      });
+    } catch (error) {
+      if (authStateMutated !== null) {
+        try {
+          const admin = createSupabaseAdminClient();
+          await admin.auth.admin.updateUserById(preflight.authUserId, {
+            ban_duration: authStateMutated === "banned" ? "none" : "876000h",
+          });
+        } catch {
+          // Do not mask the primary transaction error during best-effort rollback.
         }
       }
-      await tx.adminUser.update({
-        where: { id: target.id },
-        data: { role: parsed.data.role, status: parsed.data.status },
-      });
-      await tx.adminActionLog.create({
-        data: {
-          actorAdminUserId: freshActor.id,
-          targetAdminUserId: target.id,
-          action: "ADMIN_USER_UPDATED",
-          targetType: "AdminUser",
-          targetId: target.id,
-          ipHash: context.ipHash,
-          userAgentHash: context.userAgentHash,
-          metadata: {
-            previousRole: target.role,
-            previousStatus: target.status,
-            role: parsed.data.role,
-            status: parsed.data.status,
-          },
-        },
-      });
-    });
+      throw error;
+    }
 
     revalidatePath("/admin/usuarios");
     return actionSuccess("Administrador actualizado y cambio registrado en auditoría.");

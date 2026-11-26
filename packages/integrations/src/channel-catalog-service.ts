@@ -2239,7 +2239,7 @@ export class ChannelCatalogService {
           audit: { ...audit, requestId: randomUUID() },
         });
       } catch (error) {
-        if (error instanceof ChannelCatalogError) continue;
+        if (error instanceof ChannelCatalogError && error.code !== "FORBIDDEN") continue;
         throw error;
       }
     }

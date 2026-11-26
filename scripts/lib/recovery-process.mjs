@@ -55,6 +55,16 @@ export function spawnPostgresRecoveryProcess(command, args, options) {
 }
 
 export function waitForSuccessfulExit(child, failureCode) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    if (child.exitCode === 0) return Promise.resolve();
+    const failure = new RecoveryError(
+      failureCode,
+      `A recovery process exited unsuccessfully (${child.exitCode ?? child.signalCode ?? "unknown"}).`,
+    );
+    if (child.recoveryTerminatedByCleanup && child.exitCode === null)
+      failure.recoveryCleanup = true;
+    return Promise.reject(failure);
+  }
   return new Promise((resolve, reject) => {
     child.once("error", (error) => {
       reject(
@@ -70,7 +80,7 @@ export function waitForSuccessfulExit(child, failureCode) {
           failureCode,
           `A recovery process exited unsuccessfully (${code ?? signal ?? "unknown"}).`,
         );
-        if (child.recoveryTerminatedByCleanup) failure.recoveryCleanup = true;
+        if (child.recoveryTerminatedByCleanup && code === null) failure.recoveryCleanup = true;
         reject(failure);
       }
     });
@@ -96,9 +106,18 @@ export function encryptedMeter() {
 
 export function terminateRecoveryProcesses(processes) {
   for (const child of processes) {
+    child.stdin?.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
     if (child.exitCode === null && child.signalCode === null) {
       child.recoveryTerminatedByCleanup = true;
       child.kill("SIGTERM");
+      const killTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, 5_000);
+      killTimer.unref?.();
     }
     if (child.recoveryContainerName) {
       spawnSync(child.recoveryContainerRuntime, ["rm", "--force", child.recoveryContainerName], {
@@ -114,6 +133,15 @@ export async function settleStreamingTasks(tasks, processes, onFailure) {
     await Promise.all(tasks);
   } catch (error) {
     onFailure?.();
+    if (!(error instanceof RecoveryError)) {
+      await Promise.race([
+        Promise.allSettled(tasks),
+        new Promise((resolve) => {
+          const timer = setTimeout(resolve, 250);
+          timer.unref?.();
+        }),
+      ]);
+    }
     terminateRecoveryProcesses(processes);
     const results = await Promise.allSettled(tasks);
     const processFailure = results.find(

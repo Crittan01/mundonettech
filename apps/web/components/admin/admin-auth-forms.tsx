@@ -76,9 +76,11 @@ export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
 export function RecoveryCodes({
   codes,
   returnHref = "/admin",
+  onContinue,
 }: {
   codes: readonly string[];
   returnHref?: string;
+  onContinue?: () => void;
 }) {
   const [confirmed, setConfirmed] = useState(false);
   const [copyMessage, setCopyMessage] = useState("");
@@ -132,11 +134,17 @@ export function RecoveryCodes({
         Guardé los códigos en un lugar seguro.
       </label>
       {confirmed ? (
-        <Button asChild>
-          <Link href={returnHref} prefetch={false}>
+        onContinue ? (
+          <Button type="button" onClick={onContinue}>
             Continuar al panel
-          </Link>
-        </Button>
+          </Button>
+        ) : (
+          <Button asChild>
+            <Link href={returnHref} prefetch={false}>
+              Continuar al panel
+            </Link>
+          </Button>
+        )
       ) : (
         <Button type="button" disabled>
           Continuar al panel

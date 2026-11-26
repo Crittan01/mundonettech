@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { CmsService } from "@mundonettech/cms";
-import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
+import { hasAdminPermission, verifyCronBearer } from "@mundonettech/core";
 import { revalidatePath, revalidateTag } from "next/cache";
 import { z } from "zod";
 
@@ -35,18 +35,22 @@ export const DELETE = methodNotAllowed;
 export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
-  const secret = process.env.CMS_CRON_SECRET?.trim() ?? "";
-  const actorId = process.env.CMS_JOB_ACTOR_ID?.trim() ?? "";
-  const authorization = request.headers.get("authorization") ?? "";
-
-  if (secret.length < 16 || !z.uuid().safeParse(actorId).success) {
+  const auth = verifyCronBearer(request.headers.get("authorization"), process.env.CMS_CRON_SECRET);
+  if (auth === "UNCONFIGURED") {
     return Response.json(
       { error: "CMS scheduler is not configured." },
       { status: 503, headers: noStoreHeaders },
     );
   }
-  if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
+  if (auth === "UNAUTHORIZED") {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers: noStoreHeaders });
+  }
+  const actorId = process.env.CMS_JOB_ACTOR_ID?.trim() ?? "";
+  if (!z.uuid().safeParse(actorId).success) {
+    return Response.json(
+      { error: "CMS scheduler is not configured." },
+      { status: 503, headers: noStoreHeaders },
+    );
   }
 
   try {

@@ -13,6 +13,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
 
+import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
 import { getSessionHmacSecret } from "@/lib/env";
 import {
@@ -99,7 +100,7 @@ export async function getAdminSession(
     }
   }
   if (options.requireRecentMfa) {
-    const now = Date.now();
+    const now = (await getDatabaseClock(getDatabase())).getTime();
     if (
       !lastMfaAt ||
       now - lastMfaAt.getTime() > recentMfaSeconds * 1000 ||

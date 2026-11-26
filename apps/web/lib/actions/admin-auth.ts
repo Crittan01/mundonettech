@@ -1,7 +1,10 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import { verifyTimeoutToken } from "@mundonettech/core";
 import {
+  AdminActorAuthorizationError,
   AdminOperationRateLimitError,
   consumeAdminOperationRateLimit,
   consumeOperationRateLimit,
@@ -21,6 +24,7 @@ import {
   clearAdminFactorResetCookie,
   establishAdminActivity,
   markAdminFactorReset,
+  refreshAdminActivity,
 } from "@/lib/security/activity-cookies";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import type { MfaState } from "@/lib/security/mfa-state";
@@ -251,6 +255,7 @@ export async function recoverAdminFactorAction(
         action: "ADMIN_RECOVERY_CODE_USED",
         targetType: "AdminUser",
         targetId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
         metadata: { removedFactors: totpFactors.length },
@@ -402,12 +407,18 @@ export async function verifyAdminMfaAction(
           action: "ADMIN_MFA_VERIFIED",
           targetType: "AdminUser",
           targetId: session.profile.id,
+          requestId: randomUUID(),
           ipHash: context.ipHash,
           userAgentHash: context.userAgentHash,
           metadata: { factorId: factor.id, recoveryReset: requiresNewCodes },
         },
       });
       return generated;
+    });
+    await recordSecurityEvent(db, {
+      context,
+      eventType: "ADMIN_MFA_VERIFIED",
+      adminUserId: session.profile.id,
     });
     await establishAdminActivity(session.user.id);
     return {
@@ -417,8 +428,13 @@ export async function verifyAdminMfaAction(
       ...(recoveryCodes ? { recoveryCodes } : {}),
     };
   } catch (error) {
+    if (error instanceof AdminOperationRateLimitError) {
+      return mfaError(
+        `Demasiados intentos recientes. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
+      );
+    }
     if (error instanceof MfaVerificationError) return mfaError(error.message);
-    if (error instanceof AdminAuthorizationError)
+    if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError)
       return mfaError("Tu sesión expiró. Vuelve a iniciar sesión.");
     return mfaError("No pudimos completar la verificación. Inténtalo de nuevo.");
   }
@@ -454,7 +470,7 @@ export async function stepUpAdminAction(
       code: parsed.data.code,
     });
     if (result.error) {
-      await safeRecordAdminEvent("ADMIN_MFA_FAILED", session.profile.id);
+      await safeRecordAdminEvent("ADMIN_STEP_UP_FAILED", session.profile.id);
       return actionError("El código no es válido o expiró.");
     }
     const steppedUpSession = await getAdminSession({
@@ -471,6 +487,7 @@ export async function stepUpAdminAction(
         action: "ADMIN_STEP_UP_VERIFIED",
         targetType: "AdminUser",
         targetId: steppedUpSession.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
         metadata: { factorId: factor.id },
@@ -481,14 +498,19 @@ export async function stepUpAdminAction(
       eventType: "ADMIN_STEP_UP_VERIFIED",
       adminUserId: steppedUpSession.profile.id,
     });
-    await establishAdminActivity(steppedUpSession.user.id);
+    await refreshAdminActivity(steppedUpSession.user.id);
     revalidatePath("/admin/seguridad");
     revalidatePath("/admin/usuarios");
     return {
       status: "success",
       message: "Identidad confirmada durante los próximos diez minutos.",
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof AdminOperationRateLimitError) {
+      return actionError(
+        `Demasiados intentos recientes. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
+      );
+    }
     return actionError("Tu sesión expiró o no pudimos verificar el código.");
   }
 }
@@ -511,10 +533,23 @@ export async function regenerateAdminRecoveryCodesAction(): Promise<MfaState> {
       requireRecentMfa: true,
     });
     const context = await getRequestSecurityContext();
-    const recoveryCodes = await regenerateRecoveryCodes(getDatabase(), {
+    const db = getDatabase();
+    await consumeAdminOperationRateLimit(db, {
+      operation: "admin.auth.recovery-codes.regenerate",
+      actorAdminUserId: session.profile.id,
+      ipHash: context.ipHash,
+      limit: 10,
+      windowSeconds: 3600,
+    });
+    const recoveryCodes = await regenerateRecoveryCodes(db, {
       adminUserId: session.profile.id,
       actorAdminUserId: session.profile.id,
       context,
+    });
+    await recordSecurityEvent(db, {
+      context,
+      eventType: "ADMIN_RECOVERY_CODES_REGENERATED",
+      adminUserId: session.profile.id,
     });
     revalidatePath("/admin/seguridad");
     revalidatePath("/admin");
@@ -524,8 +559,17 @@ export async function regenerateAdminRecoveryCodesAction(): Promise<MfaState> {
       recoveryCodes,
     };
   } catch (error) {
+    if (error instanceof AdminOperationRateLimitError) {
+      return mfaError(
+        `Demasiados intentos recientes. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
+      );
+    }
     if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
-      return mfaError("Confirma un código actual de tu autenticador antes de regenerarlos.");
+      return {
+        status: "error",
+        message: "Confirma un código actual de tu autenticador antes de regenerarlos.",
+        mfaStale: true,
+      };
     }
     return mfaError("No pudimos regenerar los códigos. Inténtalo de nuevo.");
   }
@@ -538,6 +582,15 @@ export async function signOutAllAdminSessionsAction(): Promise<ActionState> {
       permission: "security:write_own",
       requireRecentMfa: true,
     });
+    const context = await getRequestSecurityContext();
+    const db = getDatabase();
+    await consumeAdminOperationRateLimit(db, {
+      operation: "admin.auth.sessions.revoke-all",
+      actorAdminUserId: session.profile.id,
+      ipHash: context.ipHash,
+      limit: 10,
+      windowSeconds: 3600,
+    });
     const signedOut = await session.supabase.auth.signOut({ scope: "global" });
     if (signedOut.error) {
       return actionError(
@@ -546,8 +599,6 @@ export async function signOutAllAdminSessionsAction(): Promise<ActionState> {
     }
     sessionsRevoked = true;
     await clearActivityCookies();
-    const context = await getRequestSecurityContext();
-    const db = getDatabase();
     await db.adminActionLog.create({
       data: {
         actorAdminUserId: session.profile.id,
@@ -555,6 +606,7 @@ export async function signOutAllAdminSessionsAction(): Promise<ActionState> {
         action: "ADMIN_SESSIONS_REVOKED_ALL",
         targetType: "AdminUser",
         targetId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
         metadata: { scope: "global" },
@@ -571,10 +623,18 @@ export async function signOutAllAdminSessionsAction(): Promise<ActionState> {
         "Las sesiones se cerraron, pero no pudimos registrar toda la actividad. Vuelve a iniciar sesión.",
       );
     }
-    if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
+    if (error instanceof AdminOperationRateLimitError) {
       return actionError(
-        "Confirma primero un código actual de tu autenticador para cerrar todas las sesiones.",
+        `Demasiados intentos recientes. Inténtalo de nuevo en ${error.retryAfterSeconds} segundos.`,
       );
+    }
+    if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
+      return {
+        status: "error",
+        message:
+          "Confirma primero un código actual de tu autenticador para cerrar todas las sesiones.",
+        mfaStale: true,
+      };
     }
     return actionError("No pudimos cerrar las sesiones. Vuelve a intentarlo.");
   }

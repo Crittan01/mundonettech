@@ -8,14 +8,14 @@ Plataforma de comercio electrónico **100 % productiva** de tecnología, wearabl
 - **Monorepo:** `pnpm` workspaces + Turborepo (`apps/web`, `config/`, `packages/{db,core,media,cms,integrations,legal-co}`).
 - **Datos y Auth:** PostgreSQL 17 (Supabase) + Prisma multi-file (una única cadena de migraciones versionada), 100 % RLS *deny-by-default* con trigger DDL automático, Supabase Auth (OTP de 6 dígitos + MFA TOTP `aal2` obligatorio en `/admin`).
 - **Medios y Respaldos:** Cloudflare R2 (`$0` egress; derivados AVIF/WebP + Spin 360° + modelos 3D PBR/AR `.glb`/`.usdz` + respaldos diarios cifrados GPG AES-256 en streaming).
-- **Operación Comercial en Colombia:** Wompi + Contraentrega (COD) + Transferencia verificada con MFA, Aveonline + Mensajería Flex local, Resend (puerto `EmailProvider`), Mercado Libre `MCO` + Meta CAPI, cumplimiento Ley 1480/2439 + Ley 1581 + Motor Tributario Dual IVA / DIAN.
+- **Operación Comercial en Colombia:** Wompi + Contraentrega (COD) + Transferencia verificada con MFA + Crédito de tienda (`StoreCredit`), Aveonline + Mensajería Flex local, Resend (puerto `EmailProvider`), Mercado Libre `MCO` + Meta CAPI, cumplimiento Ley 1480/2439 + Ley 1581 + Motor Tributario Dual IVA / DIAN.
 
 ## Desarrollo local
 
-Requisitos: Node.js 22, pnpm 11, GNU Make, Podman rootless y su socket de usuario activo.
+Requisitos: Node.js 22, pnpm 11.0.9, GNU Make, Podman rootless y su socket de usuario activo.
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 make db-start
 make dev
 make check && pnpm test && pnpm build
@@ -40,7 +40,8 @@ Los guardas de documentación, higiene Git, español de Colombia y fronteras del
 | Supabase API (Kong) | `:54421` | Auth SSR y API local; PostgREST sin privilegios sobre `public` |
 | PostgreSQL 17 | `:54422` | Instancia local en Podman rootless |
 | Supabase Studio | `:54423` | Consola local de base de datos |
-| Mailpit | `:54424` | Bandeja local para códigos OTP y correos de prueba |
+| Mailpit | `:54424` (`:54425/:54426` SMTP/POP3) | Bandeja local para códigos OTP y correos de prueba |
+| PostgreSQL 17 (pruebas) | `:54428` | Contenedor desechable aislado para suites de integración y RLS |
 
 ## Documentación y flujo de trabajo
 

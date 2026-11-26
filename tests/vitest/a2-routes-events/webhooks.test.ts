@@ -1,4 +1,8 @@
-import { hasAdminPermission, matchesSecretTimingSafe } from "../../../packages/core/dist/index.js";
+import {
+  hasAdminPermission,
+  matchesSecretTimingSafe,
+  verifyCronBearer,
+} from "../../../packages/core/dist/index.js";
 import {
   ChannelOrderError,
   EmailConflictError,
@@ -371,7 +375,7 @@ describe("A8 channel scheduler ingestion fence", () => {
       synchronizeNotifications = synchronizeNotifications;
     }
     const route = loadRoute("jobs/channels", {
-      "@mundonettech/core": { hasAdminPermission, matchesSecretTimingSafe },
+      "@mundonettech/core": { hasAdminPermission, matchesSecretTimingSafe, verifyCronBearer },
       "@mundonettech/db": { OperationsService },
       "next/cache": { revalidateTag: vi.fn() },
       "@/lib/db": {

@@ -505,8 +505,12 @@ export class ChannelAccountService {
     readonly failureCode: string;
     readonly actorAdminUserId: string;
     readonly audit: ChannelCallbackAudit;
+    readonly requireActiveActor?: boolean;
   }): Promise<boolean> {
     return this.db.$transaction(async (tx) => {
+      if (options.requireActiveActor) {
+        await this.actor(tx, options.actorAdminUserId, "integrations:write");
+      }
       const now = await this.now(tx);
       const updated = await tx.channelOAuthAttempt.updateMany({
         where: { id: options.attemptId, status: options.expectedStatus },
@@ -903,8 +907,12 @@ export class ChannelAccountService {
     readonly credentialId: string;
     readonly failureCode: string;
     readonly audit: ChannelAuditContext;
+    readonly requireActiveActor?: boolean;
   }): Promise<void> {
     await this.db.$transaction(async (tx) => {
+      if (options.requireActiveActor) {
+        await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+      }
       await this.lockAccount(tx, options.accountId);
       const now = await this.now(tx);
       const account = await tx.channelAccount.findUnique({ where: { id: options.accountId } });
@@ -1011,6 +1019,7 @@ export class ChannelAccountService {
         credentialId: claim.credentialId,
         failureCode: "REFRESH_UNCERTAIN",
         audit,
+        requireActiveActor: true,
       });
       throw new ChannelAccountError(
         "REAUTH_REQUIRED",
@@ -1189,6 +1198,9 @@ export class ChannelAccountService {
         if (result.status === "REFRESHED") refreshed += 1;
         else skipped += 1;
       } catch (error) {
+        if (error instanceof ChannelAccountError && error.code === "FORBIDDEN") {
+          throw error;
+        }
         if (error instanceof ChannelAccountError && error.code === "REFRESH_IN_PROGRESS") {
           skipped += 1;
           continue;
@@ -1235,6 +1247,7 @@ export class ChannelAccountService {
         failureCode: attempt.status === "PENDING" ? "OAUTH_EXPIRED" : "OAUTH_UNCERTAIN",
         actorAdminUserId: audit.actorAdminUserId,
         audit: { ...audit, requestId: randomUUID() },
+        requireActiveActor: true,
       });
       if (updated) expired += 1;
     }

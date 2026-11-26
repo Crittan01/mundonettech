@@ -68,24 +68,40 @@ function routeName(route) {
   return route === "/" ? "home" : route.replaceAll("/", "-").replace(/^-/, "");
 }
 
-async function buildStandalone() {
-  const child = spawn("pnpm", ["turbo", "run", "build", "--filter=@mundonettech/web", "--force"], {
+async function runCommandChecked(command, args, env, label) {
+  const child = spawn(command, args, {
     cwd: repositoryRoot,
     stdio: "inherit",
-    env: standaloneTestEnvironment({
-      databaseUrl: harness.databaseUrl,
-      authOrigin: authFixture.origin,
-      port: 4110,
-    }),
+    env,
   });
   await new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
-      if (signal) reject(new Error(`Lighthouse build terminated by ${signal}.`));
-      else if (code !== 0) reject(new Error(`Lighthouse build exited with code ${code ?? 1}.`));
+      if (signal) reject(new Error(`${label} terminated by ${signal}.`));
+      else if (code !== 0) reject(new Error(`${label} exited with code ${code ?? 1}.`));
       else resolve();
     });
   });
+}
+
+async function buildStandalone() {
+  const buildEnv = standaloneTestEnvironment({
+    databaseUrl: harness.databaseUrl,
+    authOrigin: authFixture.origin,
+    port: 4110,
+  });
+  await runCommandChecked(
+    "pnpm",
+    ["turbo", "run", "build", "--filter=!@mundonettech/web"],
+    buildEnv,
+    "Lighthouse workspace prebuild",
+  );
+  await runCommandChecked(
+    "pnpm",
+    ["--filter", "@mundonettech/web", "build"],
+    buildEnv,
+    "Lighthouse standalone build",
+  );
 }
 
 try {
@@ -137,8 +153,7 @@ try {
     ),
   );
 } finally {
-  if (runtime) await runtime.stop();
-  if (authFixture) await authFixture.stop();
+  await Promise.allSettled([runtime?.stop(), authFixture?.stop()]);
   await harness.stop();
 }
 

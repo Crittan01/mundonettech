@@ -7,7 +7,7 @@ const requiredFiles = [".gitignore", ".gitleaks.toml"];
 const forbiddenPaths = [
   {
     pattern:
-      /(^|\/)(?:tmp|_archive|node_modules|\.next|\.turbo|out|build|dist|coverage|test-results|playwright-report)(?:\/|$)/,
+      /(^|\/)(?:tmp|_archive|node_modules|\.next|\.turbo|out|build|dist|coverage|test-results|playwright-report|blob-report|\.DS_Store)(?:\/|$)|^playwright\/\.cache(?:\/|$)|^packages\/db\/src\/generated(?:\/|$)/,
     reason: "generated, scratch, or archived paths are not versioned",
   },
   {

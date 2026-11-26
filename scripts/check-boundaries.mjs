@@ -157,7 +157,7 @@ export function findBoundaryViolations(file, text, root = process.cwd()) {
       const configImportsPackage =
         isConfig &&
         (resolvedPath.startsWith("packages/") ||
-          /^@mundonettech\/(?:db|core|media|cms|integrations|legal-co)(?:\/|$)/.test(resolvedPath));
+          /^@mundonettech\/(?!config(?:\/|$))[^/]+(?:\/|$)/.test(resolvedPath));
 
       if (crossesApplicationBoundary || packageImportsConfig || configImportsPackage) {
         errors.push(`${file}: forbidden dependency on "${specifier}".`);
@@ -200,8 +200,7 @@ export function findManifestBoundaryViolations(file, text) {
         isPackage && (depName === "@mundonettech/config" || depName === "@mundonettech/web");
       const forbiddenInConfig =
         isConfig &&
-        (depName === "@mundonettech/web" ||
-          /^@mundonettech\/(?:db|core|media|cms|integrations|legal-co)$/.test(depName));
+        (depName === "@mundonettech/web" || /^@mundonettech\/(?!config$)[^/]+$/.test(depName));
 
       if (forbiddenInPackage || forbiddenInConfig) {
         errors.push(`${file}: forbidden workspace dependency "${depName}" in ${section}.`);
@@ -215,7 +214,7 @@ export function findManifestBoundaryViolations(file, text) {
 export function findTokenColorViolations(file, text) {
   const errors = [];
 
-  if (file === "apps/web/app/globals.css") {
+  if (file.endsWith(".css")) {
     for (const match of text.matchAll(rawCssColorLiteralPattern)) {
       errors.push(
         `${file}:${lineNumberAt(text, match.index ?? 0)}: color literal "${match[0]}" must live in config/theme.config.ts.`,
@@ -332,6 +331,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const codeFiles = allFiles.filter((file) =>
     /^(?:apps|config|packages)\/.*\.(?:ts|tsx|js|jsx|mts|cts|mjs|cjs|prisma)$/.test(file),
   );
+  const scriptFiles = allFiles.filter((file) => /^scripts\/.*\.mjs$/.test(file));
   const manifestFiles = allFiles.filter((file) =>
     /^(?:config\/package\.json|packages\/[^/]+\/package\.json)$/.test(file),
   );
@@ -345,6 +345,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     errors.push(...findBoundaryViolations(file, text, root));
     errors.push(...findIncompleteCodeViolations(file, text));
     errors.push(...findPrismaSchemaViolations(file, text));
+  }
+
+  for (const file of scriptFiles) {
+    const text = readFileSync(file, "utf8");
+    errors.push(...findIncompleteCodeViolations(file, text));
   }
 
   for (const file of manifestFiles) {

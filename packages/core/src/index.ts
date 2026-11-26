@@ -144,7 +144,7 @@ export {
   pointInDeliveryPolygon,
 } from "./delivery.js";
 export type { DeliveryPoint } from "./delivery.js";
-export { matchesSecretTimingSafe } from "./secrets.js";
+export { matchesSecretTimingSafe, verifyCronBearer } from "./secrets.js";
 export {
   assertCrmRetentionMonths,
   contactPairKey,

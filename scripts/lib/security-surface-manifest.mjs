@@ -83,7 +83,7 @@ export const securitySurfaceManifest = {
   "apps/web/app/api/jobs/channels/route.ts": {
     GET: [],
     HEAD: [],
-    POST: ["matchesSecret"],
+    POST: ["verifyCronBearer"],
     PUT: [],
     PATCH: [],
     DELETE: [],
@@ -92,7 +92,7 @@ export const securitySurfaceManifest = {
   "apps/web/app/api/jobs/cms-publish/route.ts": {
     GET: [],
     HEAD: [],
-    POST: ["matchesSecret"],
+    POST: ["verifyCronBearer"],
     PUT: [],
     PATCH: [],
     DELETE: [],
@@ -101,7 +101,7 @@ export const securitySurfaceManifest = {
   "apps/web/app/api/jobs/domain-events/route.ts": {
     GET: [],
     HEAD: [],
-    POST: ["matches"],
+    POST: ["verifyCronBearer"],
     PUT: [],
     PATCH: [],
     DELETE: [],
@@ -110,7 +110,7 @@ export const securitySurfaceManifest = {
   "apps/web/app/api/jobs/health/route.ts": {
     GET: [],
     HEAD: [],
-    POST: ["matchesSecret"],
+    POST: ["verifyCronBearer"],
     PUT: [],
     PATCH: [],
     DELETE: [],
@@ -119,7 +119,7 @@ export const securitySurfaceManifest = {
   "apps/web/app/api/jobs/orders/route.ts": {
     GET: [],
     HEAD: [],
-    POST: ["matchesSecret"],
+    POST: ["verifyCronBearer"],
     PUT: [],
     PATCH: [],
     DELETE: [],
@@ -238,8 +238,14 @@ export const securitySurfaceManifest = {
     verifyAdminMfaAction: ["getAdminSession", "consumeAdminOperationRateLimit"],
     stepUpAdminAction: ["getAdminSession", "consumeAdminOperationRateLimit"],
     signOutAdminAction: [],
-    regenerateAdminRecoveryCodesAction: ["getAdminSession(requireRecentMfa:true)"],
-    signOutAllAdminSessionsAction: ["getAdminSession(requireRecentMfa:true)"],
+    regenerateAdminRecoveryCodesAction: [
+      "getAdminSession(requireRecentMfa:true)",
+      "consumeAdminOperationRateLimit",
+    ],
+    signOutAllAdminSessionsAction: [
+      "getAdminSession(requireRecentMfa:true)",
+      "consumeAdminOperationRateLimit",
+    ],
   },
   "apps/web/lib/actions/admin-b2b.ts": {
     createB2bPriceListAction: [],

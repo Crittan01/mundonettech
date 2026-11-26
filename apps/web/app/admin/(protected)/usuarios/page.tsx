@@ -14,6 +14,8 @@ import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Usuarios administrativos" };
 const pageSize = 20;
+const maxPage = 10_000;
+const numberFormatter = new Intl.NumberFormat("es-CO");
 
 function pageHref(params: Record<string, string>, page: number): string {
   const query = new URLSearchParams(params);
@@ -52,7 +54,7 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
   };
   const db = getDatabase();
   const total = await db.adminUser.count({ where });
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const totalPages = Math.max(1, Math.min(maxPage, Math.ceil(total / pageSize)));
   const page = Math.min(requestedPage, totalPages);
   const users = await db.adminUser.findMany({
     where,
@@ -60,6 +62,23 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
     skip: (page - 1) * pageSize,
     take: pageSize,
   });
+  const suspendedWithoutActivityIds = users
+    .filter((u) => u.status === "SUSPENDED" && !u.mfaEnrolledAt && !u.lastSignInAt)
+    .map((u) => u.id);
+  const priorAcceptedLogs =
+    suspendedWithoutActivityIds.length > 0
+      ? await db.adminActionLog.findMany({
+          where: {
+            targetAdminUserId: { in: suspendedWithoutActivityIds },
+            action: "ADMIN_INVITATION_ACCEPTED",
+          },
+          select: { targetAdminUserId: true },
+          distinct: ["targetAdminUserId"],
+        })
+      : [];
+  const activatedSuspendedIds = new Set(
+    priorAcceptedLogs.map((entry) => entry.targetAdminUserId).filter(Boolean),
+  );
   const filters: Record<string, string> = {
     ...(q ? { q } : {}),
     ...(role ? { role } : {}),
@@ -192,7 +211,18 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
               ) : (
                 <div className="mt-4">
                   <AdministratorEditor
-                    target={{ id: user.id, role: user.role, status: user.status }}
+                    target={{
+                      id: user.id,
+                      role: user.role,
+                      status: user.status,
+                      canReactivate:
+                        user.status !== "SUSPENDED" ||
+                        Boolean(
+                          user.mfaEnrolledAt ||
+                          user.lastSignInAt ||
+                          activatedSuspendedIds.has(user.id),
+                        ),
+                    }}
                     actorRole={session.profile.role}
                     labels={roleLabels}
                   />
@@ -214,24 +244,19 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
         aria-label="Paginación de usuarios administrativos"
       >
         <span className="text-sm text-muted-foreground">
-          Página {page} de {totalPages} · {total} registros
+          Página {page} de {totalPages} · {numberFormatter.format(total)}{" "}
+          {total === 1 ? "registro" : "registros"}
         </span>
         <div className="flex gap-2">
           {page > 1 ? (
-            <Link
-              className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
-              href={pageHref(filters, page - 1)}
-            >
-              Anterior
-            </Link>
+            <Button asChild variant="outline" size="sm">
+              <Link href={pageHref(filters, page - 1)}>Anterior</Link>
+            </Button>
           ) : null}
           {page < totalPages ? (
-            <Link
-              className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
-              href={pageHref(filters, page + 1)}
-            >
-              Siguiente
-            </Link>
+            <Button asChild variant="outline" size="sm">
+              <Link href={pageHref(filters, page + 1)}>Siguiente</Link>
+            </Button>
           ) : null}
         </div>
       </nav>

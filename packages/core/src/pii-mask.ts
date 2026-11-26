@@ -77,6 +77,28 @@ const sensitiveAuditKeyWords = new Set([
   "objectkeys",
   "xml",
   "xmls",
+  "apikey",
+  "apikeys",
+  "privatekey",
+  "privatekeys",
+  "passphrase",
+  "passphrases",
+  "jwt",
+  "jwts",
+  "document",
+  "documents",
+  "documentnumber",
+  "taxid",
+  "taxids",
+  "identification",
+  "identifications",
+  "fullname",
+  "givenname",
+  "familyname",
+  "signer",
+  "signers",
+  "accesstoken",
+  "refreshtoken",
 ]);
 const safeOperationalAuditKeys = new Set(["statuscode", "httpstatus"]);
 const safeSha256AuditKeys = new Set([
@@ -86,6 +108,19 @@ const safeSha256AuditKeys = new Set([
   "contenthash",
 ]);
 const sha256HexPattern = /^[0-9a-f]{64}$/i;
+const sensitiveStringPatterns = [
+  /\bBearer\s+[^\s,;]+/gi,
+  /\bpostgres(?:ql)?:\/\/[^\s]+/gi,
+  /\b[^\s@]+@[^\s@]+\.[^\s@]{2,}\b/g,
+];
+
+function redactSensitiveStringValue(raw: string): string {
+  let sanitized = raw;
+  for (const pattern of sensitiveStringPatterns) {
+    sanitized = sanitized.replace(pattern, "[redactado]");
+  }
+  return sanitized.length > 300 ? `${sanitized.slice(0, 297)}...` : sanitized;
+}
 
 function auditKeySegments(key: string): string[] {
   return key
@@ -126,7 +161,7 @@ export function sanitizeAuditValue(value: unknown, key = "", depth = 0): unknown
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? "[inválido]" : value.toISOString();
   }
-  if (typeof value === "string") return value.length > 300 ? `${value.slice(0, 297)}...` : value;
+  if (typeof value === "string") return redactSensitiveStringValue(value);
   if (Array.isArray(value)) {
     return value.slice(0, 30).map((item) => sanitizeAuditValue(item, key, depth + 1));
   }

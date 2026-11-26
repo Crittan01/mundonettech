@@ -1591,8 +1591,17 @@ export class B2bService {
             return true;
           });
           if (changed) expired += 1;
-        } catch {
-          continue;
+        } catch (error) {
+          if (
+            (error instanceof B2bError && error.code === "CONFLICT") ||
+            (typeof error === "object" &&
+              error !== null &&
+              "code" in error &&
+              error.code === "40001")
+          ) {
+            continue;
+          }
+          throw error;
         }
       }
     }

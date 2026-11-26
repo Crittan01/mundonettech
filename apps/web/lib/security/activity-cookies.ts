@@ -1,6 +1,6 @@
 import "server-only";
 
-import { createTimeoutToken } from "@mundonettech/core";
+import { createTimeoutToken, refreshTimeoutToken } from "@mundonettech/core";
 import { cookies } from "next/headers";
 
 import { getSessionHmacSecret } from "@/lib/env";
@@ -35,6 +35,29 @@ export async function establishAdminActivity(subject: string): Promise<void> {
     { ...sessionCookieOptions, maxAge: adminAbsoluteSeconds },
   );
   expireCookie(store, factorResetCookie);
+}
+
+export async function refreshAdminActivity(subject: string): Promise<void> {
+  const store = await cookies();
+  const current = store.get(adminActivityCookie)?.value;
+  if (!current) {
+    throw new Error("Admin activity session token is missing.");
+  }
+  const refreshed = refreshTimeoutToken({
+    token: current,
+    expectedKind: "admin",
+    expectedSubject: subject,
+    secret: getSessionHmacSecret(),
+    idleSeconds: adminIdleSeconds,
+    maximumAbsoluteSeconds: adminAbsoluteSeconds,
+    refreshAfterSeconds: 0,
+  });
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const remainingAbsoluteSeconds = Math.max(1, refreshed.payload.exp - nowSeconds);
+  store.set(adminActivityCookie, refreshed.token, {
+    ...sessionCookieOptions,
+    maxAge: remainingAbsoluteSeconds,
+  });
 }
 
 export async function establishCustomerActivity(subject: string): Promise<void> {

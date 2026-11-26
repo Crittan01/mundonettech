@@ -5,7 +5,25 @@ import {
   verifyReleaseHttp,
 } from "../../scripts/lib/release-readiness.mjs";
 
-const key = Buffer.alloc(32, 7).toString("base64");
+function distinctKey(seed: number): string {
+  const bytes = Buffer.alloc(32);
+  for (let index = 0; index < 32; index += 1) {
+    bytes[index] = (seed * 31 + index * 17 + 13) % 256;
+  }
+  return bytes.toString("base64");
+}
+
+const sessionKey = distinctKey(1);
+const securityPepper = distinctKey(2);
+const recoveryPepper = distinctKey(3);
+const cmsCronKey = distinctKey(4);
+const orderCronKey = distinctKey(5);
+const domainCronKey = distinctKey(6);
+const healthCronKey = distinctKey(7);
+const channelCronKey = distinctKey(8);
+const prdRingKey = distinctKey(9);
+const stgRingKey = distinctKey(10);
+const localRingKey = distinctKey(11);
 const approvals = [
   "RELEASE_LEGAL_REVIEW_APPROVED",
   "RELEASE_BUSINESS_IDENTITY_VERIFIED",
@@ -44,20 +62,20 @@ function environment(
     NEXT_PUBLIC_SUPABASE_URL: "https://supabase.example.test",
     NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_real_environment_key",
     SUPABASE_SERVICE_ROLE_KEY: "sb_secret_real_environment_key",
-    SESSION_TIMEOUT_SECRET: key,
-    SECURITY_EVENT_PEPPER: key,
-    RECOVERY_CODE_PEPPER: key,
-    CMS_CRON_SECRET: key,
-    ORDER_CRON_SECRET: key,
-    DOMAIN_WORKER_CRON_SECRET: key,
-    HEALTH_CRON_SECRET: key,
-    CHANNEL_CRON_SECRET: key,
+    SESSION_TIMEOUT_SECRET: sessionKey,
+    SECURITY_EVENT_PEPPER: securityPepper,
+    RECOVERY_CODE_PEPPER: recoveryPepper,
+    CMS_CRON_SECRET: cmsCronKey,
+    ORDER_CRON_SECRET: orderCronKey,
+    DOMAIN_WORKER_CRON_SECRET: domainCronKey,
+    HEALTH_CRON_SECRET: healthCronKey,
+    CHANNEL_CRON_SECRET: channelCronKey,
     CMS_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
     CRM_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
     CHANNEL_JOB_ACTOR_ID: "00000000-0000-4000-8000-00000000c201",
     NEXT_PUBLIC_TURNSTILE_SITE_KEY: "0x4-real-site-key",
     TURNSTILE_SECRET_KEY: "0x4-real-secret-key",
-    INTEGRATION_CREDENTIAL_KEYS_PRD: JSON.stringify({ 1: key }),
+    INTEGRATION_CREDENTIAL_KEYS_PRD: JSON.stringify({ 1: prdRingKey }),
     INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_PRD: "1",
     R2_ENDPOINT: "https://r2.example.test",
     R2_BUCKET: "shop-media",
@@ -90,7 +108,7 @@ describe("release configuration gate", () => {
         INTEGRATION_ENVIRONMENT: "STG",
         INTEGRATION_CREDENTIAL_KEYS_PRD: undefined,
         INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_PRD: undefined,
-        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 2: key }),
+        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 2: stgRingKey }),
         INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_STG: "2",
         RELEASE_GO_LIVE_APPROVED: undefined,
       }),
@@ -115,8 +133,8 @@ describe("release configuration gate", () => {
         TURNSTILE_VERIFY_ENDPOINT: "http://127.0.0.1:54427/siteverify",
         EMAIL_SEND_DISABLED: "true",
         NEXT_PUBLIC_SITE_URL: "https://shop.example.test/hidden",
-        INTEGRATION_CREDENTIAL_KEYS_LOCAL: JSON.stringify({ 1: key }),
-        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 1: key }),
+        INTEGRATION_CREDENTIAL_KEYS_LOCAL: JSON.stringify({ 1: localRingKey }),
+        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 1: stgRingKey }),
         RELEASE_LEGAL_REVIEW_APPROVED: "NO",
       }),
     );
@@ -154,7 +172,7 @@ describe("release configuration gate", () => {
         R2_BUCKET: "shop-prd-media",
         INTEGRATION_CREDENTIAL_KEYS_PRD: undefined,
         INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_PRD: undefined,
-        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 1: key }),
+        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 1: stgRingKey }),
         INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_STG: "1",
       }),
     );
@@ -241,6 +259,54 @@ describe("release configuration gate", () => {
       multilinePassphrase.find((check) => check.name === "release.backupGpgPassphrase")?.passed,
     ).toBe(false);
   });
+
+  it("enforces secret uniqueness, exact 32-byte base64 keys, non-placeholder values, sslmode, DIRECT_URL DR isolation, and R2 endpoint isolation", () => {
+    const emptyDirectOk = validateReleaseConfiguration(environment({ DIRECT_URL: "" }));
+    expect(emptyDirectOk.filter((check) => !check.passed)).toEqual([]);
+
+    const badChecks = validateReleaseConfiguration(
+      environment({
+        VERCEL_ENV: "preview",
+        BANK_TRANSFER_INSTRUCTIONS: "REPLACE_WITH_VERIFIED_PUBLIC_TRANSFER_INSTRUCTIONS",
+        DATABASE_URL: "postgresql://postgres.example.test/store?sslmode=disable",
+        DIRECT_URL: "postgresql://dr.example.test/store",
+        NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "REPLACE_WITH_ENVIRONMENT_PUBLISHABLE_KEY",
+        SUPABASE_SERVICE_ROLE_KEY: "REPLACE_WITH_ENVIRONMENT_PUBLISHABLE_KEY",
+        SESSION_TIMEOUT_SECRET: Buffer.alloc(32, 7).toString("base64"),
+        ORDER_CRON_SECRET: cmsCronKey,
+        R2_RECOVERY_BUCKETS: "shop-backups,shop-media,shop-media",
+        BACKUP_GPG_PASSPHRASE: "REPLACE_WITH_RANDOM_HIGH_ENTROPY_PASSPHRASE",
+      }),
+    );
+    expect(badChecks.filter((check) => !check.passed).map((check) => check.name)).toEqual(
+      expect.arrayContaining([
+        "release.vercelEnvParity",
+        "release.bankTransferInstructions",
+        "release.database",
+        "release.supabasePublishableKey",
+        "release.supabaseServiceRoleKey",
+        "release.supabaseKeySeparation",
+        "release.SESSION_TIMEOUT_SECRET",
+        "release.distinctSecrets",
+        "release.r2RecoveryBuckets",
+        "release.backupGpgPassphrase",
+        "release.drIsolation",
+      ]),
+    );
+
+    const stgPrdR2 = validateReleaseConfiguration(
+      environment({
+        RELEASE_ENVIRONMENT: "STG",
+        INTEGRATION_ENVIRONMENT: "STG",
+        INTEGRATION_CREDENTIAL_KEYS_PRD: undefined,
+        INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_PRD: undefined,
+        INTEGRATION_CREDENTIAL_KEYS_STG: JSON.stringify({ 1: stgRingKey }),
+        INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_STG: "1",
+        R2_ENDPOINT: "https://r2-prd.example.test",
+      }),
+    );
+    expect(stgPrdR2.find((check) => check.name === "release.r2Endpoint")?.passed).toBe(false);
+  });
 });
 
 describe("release HTTP gate", () => {
@@ -255,8 +321,16 @@ describe("release HTTP gate", () => {
   it("requires live, ready, public, feed, admin redirect and scheduler authn responses", async () => {
     const fetchImplementation = (async (input: string | URL | Request, init?: RequestInit) => {
       const path = new URL(String(input)).pathname;
-      if (path === "/api/health/live") return Response.json({ status: "alive" }, { headers });
-      if (path === "/api/health/ready") return Response.json({ status: "ready" }, { headers });
+      if (path === "/api/health/live")
+        return Response.json(
+          { status: "alive" },
+          { headers: { ...headers, "Cache-Control": "no-store" } },
+        );
+      if (path === "/api/health/ready")
+        return Response.json(
+          { status: "ready" },
+          { headers: { ...headers, "Cache-Control": "no-store" } },
+        );
       if (path === "/admin") {
         return new Response(null, {
           status: 307,

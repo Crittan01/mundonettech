@@ -22,28 +22,43 @@ function methodNotAllowed(): Response {
   );
 }
 
+const readinessTimeoutMs = 3_000;
+
 export async function GET() {
   await connection();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
-    const rows = await getDatabase().$queryRaw<ReadinessRow[]>`
-      SELECT
-        current_setting('server_version_num')::int AS "serverVersion",
-        (
-          SELECT count(*)::int
-          FROM "_prisma_migrations"
-          WHERE "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL
-        ) AS "appliedMigrations",
-        (
-          SELECT count(*)::int
-          FROM "_prisma_migrations"
-          WHERE "finished_at" IS NULL OR "rolled_back_at" IS NOT NULL
-        ) AS "unfinishedMigrations",
-        EXISTS (
-          SELECT 1
-          FROM pg_event_trigger
-          WHERE evtname = 'enforce_rls_on_new_table' AND evtenabled IN ('O', 'A')
-        ) AS "rlsTriggerEnabled"
-    `;
+    const query = getDatabase().$transaction(
+      async (tx) => {
+        await tx.$executeRaw`SET LOCAL statement_timeout = '3000'`;
+        return tx.$queryRaw<ReadinessRow[]>`
+          SELECT
+            current_setting('server_version_num')::int AS "serverVersion",
+            (
+              SELECT count(*)::int
+              FROM "_prisma_migrations"
+              WHERE "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL
+            ) AS "appliedMigrations",
+            (
+              SELECT count(*)::int
+              FROM "_prisma_migrations"
+              WHERE "finished_at" IS NULL OR "rolled_back_at" IS NOT NULL
+            ) AS "unfinishedMigrations",
+            EXISTS (
+              SELECT 1
+              FROM pg_event_trigger
+              WHERE evtname = 'enforce_rls_on_new_table' AND evtenabled IN ('O', 'A')
+            ) AS "rlsTriggerEnabled"
+        `;
+      },
+      { maxWait: readinessTimeoutMs, timeout: readinessTimeoutMs },
+    );
+    const rows = await Promise.race([
+      query,
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error("ReadinessTimeout")), readinessTimeoutMs);
+      }),
+    ]);
     const readiness = rows[0];
     if (
       !readiness ||
@@ -62,10 +77,14 @@ export async function GET() {
       error instanceof Error ? error.name : "UnknownError",
     );
     return Response.json({ status: "unavailable" }, { status: 503, headers });
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
 }
 
-export const HEAD = methodNotAllowed;
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "GET" } });
+}
 export const POST = methodNotAllowed;
 export const PUT = methodNotAllowed;
 export const PATCH = methodNotAllowed;

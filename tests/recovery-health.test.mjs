@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { after, before, describe, it } from "node:test";
 
@@ -428,6 +431,105 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
     assert.equal(alert.category, "health.outbox");
     assert.equal(alert.href, "/admin/salud");
     assert.equal(alert.resolvedAt, null);
+  });
+
+  it("refuses symlink, world-readable, or dual BACKUP_GPG_PASSPHRASE_FILE configurations and enforces DIRECT_URL DR isolation", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "mnt-passphrase-test-"));
+    try {
+      const validFile = path.join(dir, "passphrase.txt");
+      const looseFile = path.join(dir, "loose.txt");
+      const linkFile = path.join(dir, "link.txt");
+      await writeFile(validFile, `${passphrase}\n`, { mode: 0o600 });
+      await chmod(validFile, 0o600);
+      await writeFile(looseFile, `${passphrase}\n`, { mode: 0o644 });
+      await chmod(looseFile, 0o644);
+      await symlink(validFile, linkFile);
+
+      await assert.rejects(
+        runBackup({
+          env: { ...environment, BACKUP_GPG_PASSPHRASE_FILE: validFile },
+        }),
+        (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      );
+      await assert.rejects(
+        runBackup({
+          env: {
+            ...environment,
+            BACKUP_GPG_PASSPHRASE: undefined,
+            BACKUP_GPG_PASSPHRASE_FILE: looseFile,
+          },
+        }),
+        (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      );
+      await assert.rejects(
+        runBackup({
+          env: {
+            ...environment,
+            BACKUP_GPG_PASSPHRASE: undefined,
+            BACKUP_GPG_PASSPHRASE_FILE: linkFile,
+          },
+        }),
+        (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      );
+      const validFileBackup = await runBackup({
+        env: {
+          ...environment,
+          BACKUP_GPG_PASSPHRASE: undefined,
+          BACKUP_GPG_PASSPHRASE_FILE: validFile,
+        },
+      });
+      assert.equal(validFileBackup.status, "SUCCEEDED");
+      await assert.rejects(
+        runDisasterRecoveryDrill({
+          env: {
+            ...environment,
+            DIRECT_URL: environment.DR_DATABASE_URL,
+          },
+          force: true,
+        }),
+        (error) => error.code === "DR_TARGET_NOT_ISOLATED",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects tampered ciphertext downloads and tolerates 0-byte bucket marker objects", async () => {
+    fixture.state.tamperNextDownload = true;
+    try {
+      await assert.rejects(
+        runDisasterRecoveryDrill({ env: environment, force: true }),
+        (error) => error.code === "GPG_DECRYPTION_FAILED" || error.code === "BACKUP_HASH_MISMATCH",
+      );
+    } finally {
+      fixture.state.tamperNextDownload = false;
+    }
+    const zeroKey = `${mediaBucket}/000-empty-marker/`;
+    fixture.objects.set(zeroKey, { bytes: Buffer.alloc(0), lastModified: new Date() });
+    try {
+      const drillWithZeroMarker = await runDisasterRecoveryDrill({ env: environment, force: true });
+      assert.equal(drillWithZeroMarker.status, "SUCCEEDED");
+    } finally {
+      fixture.objects.delete(zeroKey);
+    }
+    const emptyRun = await db.backupRun.create({ data: { environment: "LOCAL" } });
+    await assert.rejects(
+      sql.query(
+        `UPDATE "BackupRun"
+         SET "status" = 'SUCCEEDED', "completedAt" = CURRENT_TIMESTAMP,
+             "storageKey" = 'database/LOCAL/2026/11/26/no-buckets.dump.gpg',
+             "manifestKey" = 'database/LOCAL/2026/11/26/no-buckets.manifest.json',
+             "byteSize" = 128, "encryptedSha256" = decode(repeat('ab', 32), 'hex'),
+             "authSchemaVerified" = true
+         WHERE "id" = $1`,
+        [emptyRun.id],
+      ),
+      /passing bucket coverage/,
+    );
+    await db.backupRun.update({
+      where: { id: emptyRun.id },
+      data: { status: "FAILED", completedAt: new Date(), failureCode: "R2_BUCKET_ACCESS_FAILED" },
+    });
   });
 
   it("refuses to create a backup when the required auth schema is incomplete", async () => {

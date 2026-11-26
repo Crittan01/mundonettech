@@ -207,7 +207,7 @@ export default async function HealthPage() {
                   </div>
                 </dl>
                 {backup.failureCode ? (
-                  <p role="alert" className="mt-4 text-sm">
+                  <p className="mt-4 text-sm text-destructive">
                     {failureLabels[backup.failureCode] ?? `Fallo registrado: ${backup.failureCode}`}
                   </p>
                 ) : null}
@@ -240,9 +240,7 @@ export default async function HealthPage() {
           <p className="mt-1 text-sm text-muted-foreground">
             Últimos {dashboard.drills.length} simulacros (ventana de los 5 más recientes) · Último
             éxito: {date(snapshot.latestSuccessfulDrillAt)} · próximo vencimiento:{" "}
-            {date(
-              dashboard.drills.find((drill) => drill.status === "SUCCEEDED")?.nextDueAt ?? null,
-            )}
+            {date(dashboard.nextDrillDueAt)}
           </p>
         </div>
         {dashboard.drills.length === 0 ? (
@@ -261,7 +259,7 @@ export default async function HealthPage() {
                   {date(drill.nextDueAt)}
                 </p>
                 {drill.failureCode ? (
-                  <p role="alert" className="mt-4 text-sm">
+                  <p className="mt-4 text-sm text-destructive">
                     {failureLabels[drill.failureCode] ?? `Fallo registrado: ${drill.failureCode}`}
                   </p>
                 ) : null}
@@ -270,7 +268,7 @@ export default async function HealthPage() {
                     role="region"
                     aria-label={`Verificación de buckets del simulacro ${index + 1}`}
                     tabIndex={0}
-                    className="mt-4 overflow-x-auto rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                    className="mt-4 overflow-x-auto rounded-lg outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                   >
                     <table className="w-full min-w-[560px] text-left text-sm">
                       <caption className="sr-only">Verificación del 100 % de los buckets</caption>
@@ -341,7 +339,7 @@ export default async function HealthPage() {
             role="region"
             aria-label="Tabla de capturas agregadas de salud"
             tabIndex={0}
-            className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            className="overflow-x-auto rounded-xl border border-border bg-card outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           >
             <table className="w-full min-w-[720px] text-left text-sm">
               <caption className="sr-only">
@@ -365,8 +363,8 @@ export default async function HealthPage() {
                       {date(record.capturedAt)}
                     </th>
                     <td className="p-3">{statusLabels[record.status]}</td>
-                    <td className="p-3">{record.pendingOutbox}</td>
-                    <td className="p-3">{record.failedOutbox}</td>
+                    <td className="p-3">{numberFormatter.format(record.pendingOutbox)}</td>
+                    <td className="p-3">{numberFormatter.format(record.failedOutbox)}</td>
                     <td className="p-3">{record.backupFresh ? "Vigente" : "Vencido"}</td>
                     <td className="p-3">{record.drillCurrent ? "Vigente" : "Pendiente"}</td>
                   </tr>

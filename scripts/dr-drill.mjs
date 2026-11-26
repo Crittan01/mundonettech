@@ -4,9 +4,8 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import pg from "pg";
-
 import {
+  createRecoveryPgClient,
   loadRecoveryConfig,
   parseDatabaseUrl,
   postgresProcessEnvironment,
@@ -17,7 +16,7 @@ import {
   acquireRecoveryLock,
   completeDrillRun,
   expireStaleRun,
-  failRun,
+  failRunWithFallback,
   insertBucketEvidence,
   insertDrillRun,
   sourceSchemaEvidence,
@@ -27,6 +26,7 @@ import {
   settleStreamingTasks,
   spawnPostgresRecoveryProcess,
   spawnRecoveryProcess,
+  terminateRecoveryProcesses,
   waitForSuccessfulExit,
 } from "./lib/recovery-process.mjs";
 import { R2RecoveryStorage } from "./lib/r2-recovery-storage.mjs";
@@ -38,11 +38,15 @@ function validateManifest(manifest, backup, config) {
   const validRelations =
     Array.isArray(manifest?.relations) &&
     manifest.relations.length >= 2 &&
+    manifest.relations.includes("auth.users") &&
     manifest.relations.every(
       (relation, index) =>
         /^(public|auth)\.[a-zA-Z0-9_]+$/.test(relation) &&
         (index === 0 || manifest.relations[index - 1] < relation),
     );
+  const validAppliedMigrations =
+    manifest?.appliedMigrations === undefined ||
+    (Number.isSafeInteger(manifest.appliedMigrations) && manifest.appliedMigrations >= 1);
   if (
     !manifest ||
     manifest.formatVersion !== 1 ||
@@ -55,6 +59,7 @@ function validateManifest(manifest, backup, config) {
     manifest.encryptedSha256 !== backup.encryptedSha256 ||
     manifest.authSchemaVerified !== true ||
     !validRelations ||
+    !validAppliedMigrations ||
     !Array.isArray(manifest.buckets) ||
     JSON.stringify([...manifest.buckets].sort()) !== JSON.stringify(config.bucketNames)
   ) {
@@ -85,10 +90,11 @@ async function createRestoredDatabase(client) {
   const version = await client.query(
     "SELECT current_setting('server_version_num')::int AS version",
   );
-  if ((version.rows[0]?.version ?? 0) < 170000) {
+  const serverVersion = version.rows[0]?.version ?? 0;
+  if (serverVersion < 170000 || serverVersion >= 180000) {
     throw new RecoveryError(
       "DR_DATABASE_VERSION_UNSUPPORTED",
-      "The DR target requires PostgreSQL 17 or newer.",
+      "The DR target requires PostgreSQL 17.",
     );
   }
   const databaseName = `mnt_dr_${randomBytes(10).toString("hex")}`;
@@ -96,8 +102,23 @@ async function createRestoredDatabase(client) {
   return databaseName;
 }
 
-async function dropRestoredDatabase(client, databaseName) {
-  await client.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+async function dropRestoredDatabase(client, databaseName, fallbackConnectionString) {
+  try {
+    if (client) {
+      await client.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+      return;
+    }
+  } catch {
+    if (!fallbackConnectionString) throw new Error("Unable to drop DR database.");
+  }
+  if (!fallbackConnectionString) return;
+  const fallback = createRecoveryPgClient(fallbackConnectionString, "mundonettech-dr-cleanup");
+  try {
+    await fallback.connect();
+    await fallback.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
+  } finally {
+    await fallback.end().catch(() => undefined);
+  }
 }
 
 export async function runDisasterRecoveryDrill(options = {}) {
@@ -108,16 +129,15 @@ export async function runDisasterRecoveryDrill(options = {}) {
     requireDrTarget: true,
   });
   const storage = new R2RecoveryStorage(config.r2);
-  const source = new pg.Client({
-    connectionString: config.databaseUrl,
-    connectionTimeoutMillis: 15_000,
-  });
+  const source = createRecoveryPgClient(config.databaseUrl, "mundonettech-dr-source");
   let targetAdmin;
   let restoredClient;
   let restoredDatabase;
   let drillId;
   let unlock;
   let temporaryGpgHome;
+  const spawnedProcesses = [];
+  let downloadBody;
   try {
     await source.connect();
     unlock = await acquireRecoveryLock(source, `disaster-recovery:${config.environment}`);
@@ -196,10 +216,7 @@ export async function runDisasterRecoveryDrill(options = {}) {
         );
       }
 
-      targetAdmin = new pg.Client({
-        connectionString: config.drDatabaseUrl,
-        connectionTimeoutMillis: 15_000,
-      });
+      targetAdmin = createRecoveryPgClient(config.drDatabaseUrl, "mundonettech-dr-admin");
       await targetAdmin.connect();
       restoredDatabase = await createRestoredDatabase(targetAdmin);
       const restoredUrl = parseDatabaseUrl(config.drDatabaseUrl, "DR_DATABASE_URL");
@@ -214,6 +231,7 @@ export async function runDisasterRecoveryDrill(options = {}) {
         LC_ALL: "C",
       };
       const response = await storage.getBackupStream(backup.storageKey);
+      downloadBody = response.Body;
       const meter = encryptedMeter();
       const gpg = spawnRecoveryProcess(
         "gpg",
@@ -233,6 +251,7 @@ export async function runDisasterRecoveryDrill(options = {}) {
         ],
         { env: commonEnvironment, passphrase: config.gpgPassphrase },
       );
+      spawnedProcesses.push(gpg);
       const restore = spawnPostgresRecoveryProcess(
         "pg_restore",
         [
@@ -253,13 +272,14 @@ export async function runDisasterRecoveryDrill(options = {}) {
           },
         },
       );
+      spawnedProcesses.push(restore);
       const tasks = [
-        pipeline(response.Body, meter.stream, gpg.stdin),
-        pipeline(gpg.stdout, restore.stdin),
         waitForSuccessfulExit(gpg, "GPG_DECRYPTION_FAILED"),
         waitForSuccessfulExit(restore, "PG_RESTORE_FAILED"),
+        pipeline(response.Body, meter.stream, gpg.stdin),
+        pipeline(gpg.stdout, restore.stdin),
       ];
-      await settleStreamingTasks(tasks, [gpg, restore], () => {
+      await settleStreamingTasks(tasks, spawnedProcesses, () => {
         response.Body.destroy();
         meter.stream.destroy();
       });
@@ -273,16 +293,16 @@ export async function runDisasterRecoveryDrill(options = {}) {
         );
       }
 
-      restoredClient = new pg.Client({
-        connectionString: restoredUrl.toString(),
-        connectionTimeoutMillis: 15_000,
-      });
+      restoredClient = createRecoveryPgClient(restoredUrl.toString(), "mundonettech-dr-verify");
       await restoredClient.connect();
       const restoredSchema = await sourceSchemaEvidence(restoredClient);
-      if (JSON.stringify(restoredSchema.relations) !== JSON.stringify(manifest.relations)) {
+      if (
+        JSON.stringify(restoredSchema.relations) !== JSON.stringify(manifest.relations) ||
+        !restoredSchema.rlsTriggerEnabled
+      ) {
         throw new RecoveryError(
           "DR_SCHEMA_MISMATCH",
-          "The restored public/auth relations differ from the backup manifest.",
+          "The restored public/auth relations or RLS event trigger differ from the backup manifest.",
         );
       }
       const migrations = await restoredClient.query(
@@ -290,7 +310,13 @@ export async function runDisasterRecoveryDrill(options = {}) {
           count(*) FILTER (WHERE "finished_at" IS NULL OR "rolled_back_at" IS NOT NULL)::int AS unfinished
          FROM "_prisma_migrations"`,
       );
-      if ((migrations.rows[0]?.applied ?? 0) < 1 || migrations.rows[0].unfinished !== 0) {
+      const applied = migrations.rows[0]?.applied ?? 0;
+      const unfinished = migrations.rows[0]?.unfinished ?? 0;
+      if (
+        applied < 1 ||
+        unfinished !== 0 ||
+        (manifest.appliedMigrations !== undefined && applied !== manifest.appliedMigrations)
+      ) {
         throw new RecoveryError(
           "DR_MIGRATIONS_INVALID",
           "The restored migration ledger is incomplete.",
@@ -298,7 +324,7 @@ export async function runDisasterRecoveryDrill(options = {}) {
       }
       await restoredClient.end();
       restoredClient = undefined;
-      await dropRestoredDatabase(targetAdmin, restoredDatabase);
+      await dropRestoredDatabase(targetAdmin, restoredDatabase, config.drDatabaseUrl);
       restoredDatabase = undefined;
       await targetAdmin.end();
       targetAdmin = undefined;
@@ -308,16 +334,25 @@ export async function runDisasterRecoveryDrill(options = {}) {
       });
       return { drillId, status: "SUCCEEDED", nextDueAt: completed.nextDueAt };
     } catch (error) {
-      await failRun(source, "drill", drillId, recoveryFailureCode(error)).catch(() => undefined);
+      await failRunWithFallback(
+        source,
+        config.databaseUrl,
+        "drill",
+        drillId,
+        recoveryFailureCode(error),
+      );
       throw error;
     }
   } finally {
+    downloadBody?.destroy?.();
+    terminateRecoveryProcesses(spawnedProcesses);
     if (restoredClient) await restoredClient.end().catch(() => undefined);
-    if (targetAdmin) {
-      if (restoredDatabase)
-        await dropRestoredDatabase(targetAdmin, restoredDatabase).catch(() => undefined);
-      await targetAdmin.end().catch(() => undefined);
+    if (restoredDatabase) {
+      await dropRestoredDatabase(targetAdmin, restoredDatabase, config.drDatabaseUrl).catch(
+        () => undefined,
+      );
     }
+    if (targetAdmin) await targetAdmin.end().catch(() => undefined);
     if (unlock) await unlock().catch(() => undefined);
     await source.end().catch(() => undefined);
     storage.destroy();

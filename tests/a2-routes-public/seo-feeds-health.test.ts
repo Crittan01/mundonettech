@@ -5,13 +5,23 @@ import { expectMethodAllowlist, expectNoStoreNoIndex } from "./test-helpers";
 
 const mocks = vi.hoisted(() => ({
   connection: vi.fn(),
+  executeRaw: vi.fn(),
   getGoogleMerchantFeed: vi.fn(),
   getMetaCatalogFeed: vi.fn(),
   getSitemapPartitions: vi.fn(),
   queryRaw: vi.fn(),
 }));
 
-vi.mock("@/lib/db", () => ({ getDatabase: () => ({ $queryRaw: mocks.queryRaw }) }));
+vi.mock("@/lib/db", () => ({
+  getDatabase: () => ({
+    $transaction: async <T>(
+      callback: (tx: {
+        $executeRaw: typeof mocks.executeRaw;
+        $queryRaw: typeof mocks.queryRaw;
+      }) => Promise<T>,
+    ) => callback({ $executeRaw: mocks.executeRaw, $queryRaw: mocks.queryRaw }),
+  }),
+}));
 vi.mock("@/lib/seo-data", () => ({
   getGoogleMerchantFeed: mocks.getGoogleMerchantFeed,
   getMetaCatalogFeed: mocks.getMetaCatalogFeed,
@@ -183,13 +193,21 @@ describe("health probes", () => {
     expect(mocks.connection).toHaveBeenCalledOnce();
   });
 
-  it("requires PostgreSQL 17, applied migrations and enabled RLS enforcement", async () => {
+  it("requires PostgreSQL 17, applied migrations, bounded statement_timeout and enabled RLS enforcement", async () => {
     const response = await readyRoute.GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ status: "ready" });
+    const timeoutSql = String(mocks.executeRaw.mock.calls[0]?.[0]?.join("?"));
+    expect(timeoutSql).toContain("SET LOCAL statement_timeout = '3000'");
     const sql = String(mocks.queryRaw.mock.calls[0]?.[0]?.join("?"));
     expect(sql).toContain("evtenabled IN ('O', 'A')");
     expect(sql).not.toContain("evtenabled <> 'D'");
+    const headLive = await liveRoute.HEAD();
+    expect(headLive.status).toBe(405);
+    expect(await headLive.text()).toBe("");
+    const headReady = await readyRoute.HEAD();
+    expect(headReady.status).toBe(405);
+    expect(await headReady.text()).toBe("");
   });
 
   it.each([

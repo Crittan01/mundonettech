@@ -2334,6 +2334,9 @@ export class ChannelOrderService {
         }
         completed += 1;
       } catch (error) {
+        if (error instanceof ChannelOrderError && error.code === "FORBIDDEN") {
+          throw error;
+        }
         const code =
           error instanceof MercadoLibreCatalogError || error instanceof ChannelOrderError
             ? error.code

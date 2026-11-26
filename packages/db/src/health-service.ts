@@ -69,19 +69,11 @@ function snapshotView(
     record.latestSuccessfulBackupAt !== null &&
     capturedAt - record.latestSuccessfulBackupAt.getTime() <= backupFreshnessMs &&
     record.latestSuccessfulBackupAt.getTime() <= capturedAt + 300_000;
-  const oldestOutboxAgeMs = record.oldestPendingOutboxAt
-    ? capturedAt - record.oldestPendingOutboxAt.getTime()
-    : null;
-  const outboxHealthy =
-    record.failedOutbox === 0 &&
-    record.pendingOutbox <= outboxWarningCount &&
-    (oldestOutboxAgeMs === null || oldestOutboxAgeMs <= outboxWarningAgeMs);
   const computedDrillCurrent =
     record.latestSuccessfulDrillAt !== null &&
     capturedAt - record.latestSuccessfulDrillAt.getTime() <= drillMaximumAgeMs &&
     record.latestSuccessfulDrillAt.getTime() <= capturedAt + 300_000 &&
-    (record.status === "HEALTHY" ||
-      !(record.databaseReady && computedBackupFresh && outboxHealthy));
+    record.status === "HEALTHY";
   return {
     id: record.id,
     capturedAt: record.capturedAt.toISOString(),
@@ -209,7 +201,7 @@ export class OperationalHealthService {
           current_setting('server_version_num')::int AS "serverVersion",
           (SELECT count(*)::int FROM "_prisma_migrations" WHERE "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL) AS "appliedMigrations",
           (SELECT count(*)::int FROM "_prisma_migrations" WHERE "finished_at" IS NULL OR "rolled_back_at" IS NOT NULL) AS "unfinishedMigrations",
-          EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'enforce_rls_on_new_table' AND evtenabled <> 'D') AS "rlsTriggerEnabled",
+          EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'enforce_rls_on_new_table' AND evtenabled IN ('O', 'A')) AS "rlsTriggerEnabled",
           (SELECT count(*)::int FROM "DomainOutbox" WHERE "processedAt" IS NULL AND "failedAt" IS NULL) AS "pendingOutbox",
           (SELECT count(*)::int FROM "DomainOutbox" WHERE "failedAt" IS NOT NULL) AS "failedOutbox",
           (SELECT min("availableAt") FROM "DomainOutbox" WHERE "processedAt" IS NULL AND "failedAt" IS NULL) AS "oldestPendingOutboxAt",
@@ -227,6 +219,7 @@ export class OperationalHealthService {
       const databaseLatencyMs = Math.min(120_000, Math.max(0, measuredLatency));
       const databaseReady =
         health.serverVersion >= 170_000 &&
+        health.serverVersion < 180_000 &&
         health.appliedMigrations > 0 &&
         health.unfinishedMigrations === 0 &&
         health.rlsTriggerEnabled;
@@ -363,6 +356,7 @@ export class OperationalHealthService {
       return {
         snapshot: snapshotView(snapshot, { backupFresh, drillCurrent }),
         activeAlerts,
+        nextDrillDueAt: health.nextDrillDueAt?.toISOString() ?? null,
       };
     });
   }
@@ -379,7 +373,7 @@ export class OperationalHealthService {
     if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, "audit:read")) {
       throw new Error("Active administrator with audit permission not found.");
     }
-    const { snapshot } = await this.capture(environment);
+    const { snapshot, nextDrillDueAt } = await this.capture(environment);
     const [recentSnapshots, backups, drills] = await Promise.all([
       this.db.operationalHealthSnapshot.findMany({
         where: { environment },
@@ -399,11 +393,64 @@ export class OperationalHealthService {
         take: 5,
       }),
     ]);
+    const historicalIds = recentSnapshots
+      .filter((record) => record.id !== snapshot.id)
+      .map((record) => record.id);
+    const historicalDrillStatus = new Map<string, boolean>();
+    if (historicalIds.length > 0) {
+      const drillChecks = await this.db.$queryRaw<Array<{ id: string; drillCurrent: boolean }>>`
+        SELECT
+          s."id",
+          (
+            latest_success."nextDueAt" IS NOT NULL
+            AND s."capturedAt" <= latest_success."nextDueAt"
+            AND COALESCE(latest_any."status"::text, '') <> 'FAILED'
+          ) AS "drillCurrent"
+        FROM "OperationalHealthSnapshot" s
+        LEFT JOIN LATERAL (
+          SELECT d."nextDueAt"
+          FROM "DisasterRecoveryDrill" d
+          WHERE d."environment" = s."environment"
+            AND d."status" = 'SUCCEEDED'
+            AND d."completedAt" <= s."capturedAt"
+          ORDER BY d."completedAt" DESC, d."id" DESC
+          LIMIT 1
+        ) latest_success ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT d."status"
+          FROM "DisasterRecoveryDrill" d
+          WHERE d."environment" = s."environment"
+            AND d."startedAt" <= s."capturedAt"
+          ORDER BY d."startedAt" DESC, d."id" DESC
+          LIMIT 1
+        ) latest_any ON TRUE
+        WHERE s."id" = ANY(${historicalIds}::uuid[])
+      `;
+      for (const row of drillChecks) {
+        historicalDrillStatus.set(row.id, row.drillCurrent);
+      }
+    }
     return {
       snapshot,
-      recentSnapshots: recentSnapshots.map((record) =>
-        record.id === snapshot.id ? snapshot : snapshotView(record),
-      ),
+      nextDrillDueAt,
+      recentSnapshots: recentSnapshots.map((record) => {
+        if (record.id === snapshot.id) return snapshot;
+        const drillCurrent = historicalDrillStatus.get(record.id);
+        return snapshotView(
+          record,
+          drillCurrent === undefined
+            ? undefined
+            : {
+                backupFresh:
+                  record.latestSuccessfulBackupAt !== null &&
+                  record.capturedAt.getTime() - record.latestSuccessfulBackupAt.getTime() <=
+                    backupFreshnessMs &&
+                  record.latestSuccessfulBackupAt.getTime() <=
+                    record.capturedAt.getTime() + 300_000,
+                drillCurrent,
+              },
+        );
+      }),
       backups: backups.map(backupView),
       drills: drills.map(drillView),
     };

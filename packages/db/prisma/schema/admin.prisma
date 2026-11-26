@@ -119,6 +119,9 @@ model AdminActionLog {
   @@index([targetAdminUserId, createdAt])
   @@index([selfDealing, createdAt])
   @@index([requestId])
+  @@index([createdAt(sort: Desc), id(sort: Desc)])
+  @@index([action, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([targetType, createdAt(sort: Desc), id(sort: Desc)])
   @@map("AdminActionLog")
 }
 
@@ -135,9 +138,9 @@ model SecurityEvent {
   adminUser     AdminUser? @relation(fields: [adminUserId], references: [id], onDelete: Restrict)
   customer      Customer?  @relation(fields: [customerId], references: [id], onDelete: Restrict)
 
-  @@unique([eventType, ipHash, dedupMinute])
   @@index([adminUserId, occurredAt])
   @@index([customerId, occurredAt])
+  @@index([occurredAt])
   @@map("SecurityEvent")
 }
 

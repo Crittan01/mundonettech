@@ -507,6 +507,7 @@ function adminSessionHarness(options = {}) {
       },
     },
     "next/server": { connection: async () => undefined },
+    "@/lib/database-clock": { getDatabaseClock: async () => new Date() },
     "@/lib/db": { getDatabase: () => ({ adminUser: { findFirst: async () => profile } }) },
     "@/lib/env": { getSessionHmacSecret: () => hmacSecret },
     "@/lib/security/origin": loadTypeScriptModule("apps/web/lib/security/origin.ts", {}),
@@ -1020,6 +1021,7 @@ function adminActionHarness(options = {}) {
         options.verifyResetToken ?? (() => ({ iat: Math.floor(Date.now() / 1000) - 60 })),
     },
     "@mundonettech/db": {
+      AdminActorAuthorizationError: class AdminActorAuthorizationError extends Error {},
       AdminOperationRateLimitError: class AdminOperationRateLimitError extends Error {
         constructor(retryAfterSeconds = 60) {
           super("rate limited");
@@ -1056,6 +1058,9 @@ function adminActionHarness(options = {}) {
       clearAdminFactorResetCookie,
       establishAdminActivity,
       markAdminFactorReset,
+      refreshAdminActivity: (options.refreshAdminActivity = spy(async () => {
+        order.push("refresh");
+      })),
     },
     "@/lib/security/admin-auth": {
       AdminAuthorizationError: MockAdminAuthorizationError,
@@ -1094,6 +1099,7 @@ function adminActionHarness(options = {}) {
     getAdminSession,
     clearActivityCookies,
     establishAdminActivity,
+    refreshAdminActivity: options.refreshAdminActivity,
     markAdminFactorReset,
     audit,
     recordSecurityEvent,
@@ -1185,10 +1191,11 @@ describe("A2 step-up server action", () => {
     assert.equal(harness.getAdminSession.calls.length, 2);
     assert.equal(harness.getAdminSession.calls[1][0].requireRecentMfa, true);
     assert.equal(harness.audit.calls[0][0].data.action, "ADMIN_STEP_UP_VERIFIED");
-    assert.equal(harness.establishAdminActivity.calls.length, 1);
+    assert.equal(harness.refreshAdminActivity.calls.length, 1);
+    assert.equal(harness.establishAdminActivity.calls.length, 0);
   });
 
-  it("does not audit or establish activity if the fresh AMR check fails", async () => {
+  it("does not audit or refresh activity if the fresh AMR check fails", async () => {
     let call = 0;
     const harness = adminActionHarness({
       getAdminSessionImpl: async (_input, session) => {
@@ -1203,6 +1210,7 @@ describe("A2 step-up server action", () => {
     const state = await harness.actions.stepUpAdminAction({}, form);
     assert.equal(state.status, "error");
     assert.equal(harness.audit.calls.length, 0);
+    assert.equal(harness.refreshAdminActivity.calls.length, 0);
     assert.equal(harness.establishAdminActivity.calls.length, 0);
   });
 });
@@ -1379,9 +1387,12 @@ function adminUsersHarness(options = {}) {
     authUserId: randomUUID(),
     role: "STORE_MANAGER",
     status: "ACTIVE",
+    mfaEnrolledAt: new Date("2026-11-20T00:00:00.000Z"),
+    lastSignInAt: new Date("2026-11-20T00:00:00.000Z"),
     deletedAt: null,
   };
   const update = spy(async () => {
+    if (options.dbUpdateError) throw options.dbUpdateError;
     order.push("update");
     return {};
   });
@@ -1392,17 +1403,21 @@ function adminUsersHarness(options = {}) {
   const create = spy(async ({ data }) => ({ id: targetId, ...data }));
   const tx = {
     $executeRaw: spy(async () => 1),
+    $queryRaw: spy(async () => [{ canRevoke: Boolean(options.canRevokeAuthSessions) }]),
     adminUser: {
       findUnique: spy(async () => target),
       count: spy(async () => options.activeSuperadmins ?? 2),
       update,
       create,
     },
-    adminActionLog: { create: audit },
+    adminActionLog: {
+      create: audit,
+      findFirst: spy(async () => options.priorInvitationAccepted ?? null),
+    },
   };
   const transaction = spy(async (callback) => callback(tx));
-  const updateUserById = spy(async () => {
-    order.push(options.target?.status === "SUSPENDED" ? "unban" : "ban");
+  const updateUserById = spy(async (_id, payload) => {
+    order.push(payload?.ban_duration === "none" ? "unban" : "ban");
     return { data: { user: {} }, error: options.authUpdateError ?? null };
   });
   const authSignOut = spy(async () => {
@@ -1422,6 +1437,7 @@ function adminUsersHarness(options = {}) {
   const mocks = {
     "@mundonettech/core": {
       canAssignAdminRole: core.canAssignAdminRole,
+      hasAdminPermission: core.hasAdminPermission,
       isAdminRole: core.isAdminRole,
       normalizeEmail: core.normalizeEmail,
       OutboundEmailDisabledError: class OutboundEmailDisabledError extends Error {},
@@ -1514,26 +1530,74 @@ describe("A2 administrator role/status mutations", () => {
     assert.equal(harness.authSignOut.calls.length, 0);
   });
 
-  it("does not persist or audit suspension when global sign-out fails", async () => {
-    const harness = adminUsersHarness({ authSignOutError: new Error("signout failed") });
+  it("compensates Supabase ban if the subsequent database commit fails", async () => {
+    const harness = adminUsersHarness({ dbUpdateError: new Error("db commit failed") });
     const state = await harness.actions.updateAdministratorAction({}, updateUserForm());
     assert.equal(state.status, "error");
-    assert.match(state.message, /revocación global/);
-    assert.equal(harness.update.calls.length, 0);
+    assert.deepEqual(harness.order, ["ban", "unban"]);
+    assert.equal(harness.authSignOut.calls.length, 0);
     assert.equal(harness.audit.calls.length, 0);
   });
 
-  it("serializes ban and global revocation before the persisted update and audit", async () => {
-    const harness = adminUsersHarness();
+  it("bans outside the write lock without calling invalid signOut(uuid), updates PG and records requestId", async () => {
+    const harness = adminUsersHarness({ canRevokeAuthSessions: true });
     const state = await harness.actions.updateAdministratorAction({}, updateUserForm());
     assert.equal(state.status, "success");
-    assert.deepEqual(harness.order, ["ban", "globalSignOut", "update", "audit"]);
+    assert.deepEqual(harness.order, ["ban", "update", "audit"]);
     assert.equal(harness.updateUserById.calls[0][0], harness.target.authUserId);
     assert.deepEqual(harness.updateUserById.calls[0][1], { ban_duration: "876000h" });
-    assert.deepEqual(harness.authSignOut.calls[0], [harness.target.authUserId, "global"]);
+    assert.equal(harness.authSignOut.calls.length, 0);
     assert.equal(harness.audit.calls[0][0].data.action, "ADMIN_USER_UPDATED");
+    assert.match(harness.audit.calls[0][0].data.requestId, /^[0-9a-f-]{36}$/);
     assert.equal(harness.audit.calls[0][0].data.metadata.previousStatus, "ACTIVE");
     assert.equal(harness.audit.calls[0][0].data.metadata.status, "SUSPENDED");
+  });
+
+  it("blocks two-step INVITED -> SUSPENDED -> ACTIVE bypass, no-op updates, and suspending a configured scheduler actor", async () => {
+    const neverActivated = adminUsersHarness({
+      target: {
+        id: targetId,
+        authUserId: randomUUID(),
+        role: "STORE_MANAGER",
+        status: "SUSPENDED",
+        mfaEnrolledAt: null,
+        lastSignInAt: null,
+        deletedAt: null,
+      },
+    });
+    const blockedReactivation = await neverActivated.actions.updateAdministratorAction(
+      {},
+      updateUserForm("ACTIVE"),
+    );
+    assert.equal(blockedReactivation.status, "error");
+    assert.match(blockedReactivation.message, /nunca completó su invitación/);
+    assert.equal(neverActivated.updateUserById.calls.length, 0);
+
+    const noop = adminUsersHarness();
+    const noopState = await noop.actions.updateAdministratorAction(
+      {},
+      updateUserForm("ACTIVE", "STORE_MANAGER"),
+    );
+    assert.equal(noopState.status, "success");
+    assert.equal(noop.updateUserById.calls.length, 0);
+    assert.equal(noop.update.calls.length, 0);
+    assert.equal(noop.audit.calls.length, 0);
+
+    const previousActor = process.env.CRM_JOB_ACTOR_ID;
+    process.env.CRM_JOB_ACTOR_ID = targetId;
+    try {
+      const schedulerProtected = adminUsersHarness();
+      const blockedScheduler = await schedulerProtected.actions.updateAdministratorAction(
+        {},
+        updateUserForm("SUSPENDED"),
+      );
+      assert.equal(blockedScheduler.status, "error");
+      assert.match(blockedScheduler.message, /CRM_JOB_ACTOR_ID/);
+      assert.equal(schedulerProtected.updateUserById.calls.length, 0);
+    } finally {
+      if (previousActor === undefined) delete process.env.CRM_JOB_ACTOR_ID;
+      else process.env.CRM_JOB_ACTOR_ID = previousActor;
+    }
   });
 
   it("fails reactivation closed when Supabase refuses to remove the ban", async () => {
@@ -1543,6 +1607,8 @@ describe("A2 administrator role/status mutations", () => {
         authUserId: randomUUID(),
         role: "STORE_MANAGER",
         status: "SUSPENDED",
+        mfaEnrolledAt: new Date("2026-11-20T00:00:00.000Z"),
+        lastSignInAt: new Date("2026-11-20T00:00:00.000Z"),
         deletedAt: null,
       },
       authUpdateError: new Error("unban failed"),
@@ -1651,24 +1717,31 @@ describe("A2 administrator role/status mutations", () => {
 describe("A2 recovery code generation and HMAC storage", () => {
   function recoveryHarness() {
     const consumeAdminRecoveryCode = spy(async () => true);
+    const assertAdminActorInTransaction = spy(async () => ({
+      id: adminId,
+      role: "SUPERADMIN",
+      status: "ACTIVE",
+    }));
     const mocks = {
       "server-only": {},
-      "@mundonettech/db": { consumeAdminRecoveryCode },
+      "@mundonettech/db": { assertAdminActorInTransaction, consumeAdminRecoveryCode },
       "@/lib/env": { getRecoveryCodePepper: () => hmacSecret },
     };
     return {
       module: loadTypeScriptModule("apps/web/lib/security/recovery-codes.ts", mocks),
+      assertAdminActorInTransaction,
       consumeAdminRecoveryCode,
     };
   }
 
   it("returns ten 80-bit codes while persisting only 32-byte HMACs and safe audit metadata", async () => {
-    const { module } = recoveryHarness();
+    const { module, assertAdminActorInTransaction } = recoveryHarness();
     const deleteMany = spy(async () => ({ count: 10 }));
     const createMany = spy(async () => ({ count: 10 }));
     const audit = spy(async () => ({}));
     const tx = {
       $executeRaw: spy(async () => 1),
+      $queryRaw: spy(async () => [{ now: new Date() }]),
       adminRecoveryCode: { deleteMany, createMany },
       adminActionLog: { create: audit },
     };
@@ -1677,6 +1750,7 @@ describe("A2 recovery code generation and HMAC storage", () => {
       actorAdminUserId: adminId,
       context: { ipHash: randomBytes(32), userAgentHash: null },
     });
+    assert.equal(assertAdminActorInTransaction.calls.length, 1);
     assert.equal(codes.length, 10);
     assert.equal(new Set(codes).size, 10);
     for (const code of codes) {
@@ -1772,6 +1846,7 @@ function invitationHarness(options = {}) {
   const redirect = spy((location) => {
     throw new RedirectSignal(location);
   });
+  const recordSecurityEvent = spy(async () => undefined);
   const mocks = {
     "@mundonettech/core": {
       normalizeEmail: core.normalizeEmail,
@@ -1805,6 +1880,7 @@ function invitationHarness(options = {}) {
     "@/lib/security/hibp": { isPasswordCompromised },
     "@/lib/security/request-context": {
       getRequestSecurityContext: async () => ({ ipHash: randomBytes(32), userAgentHash: null }),
+      recordSecurityEvent,
     },
     "@/lib/security/turnstile": { verifyTurnstileToken },
     "@/lib/supabase/server": {
@@ -1823,6 +1899,7 @@ function invitationHarness(options = {}) {
     clearActivityCookies,
     isPasswordCompromised,
     verifyTurnstileToken,
+    recordSecurityEvent,
     redirect,
   };
 }
