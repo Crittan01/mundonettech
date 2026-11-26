@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { parseCoordinateE6 as coordinateE6 } from "@mundonettech/core";
+import { canManageDeliveryZones, parseCoordinateE6 as coordinateE6 } from "@mundonettech/core";
 import {
   LocalDeliveryConflictError,
   LocalDeliveryService,
@@ -69,10 +69,7 @@ async function authorize(
     permission: "fulfillment:write",
     requireRecentMfa: true,
   });
-  if (
-    requireDeliveryZoneManager &&
-    !["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(session.profile.role)
-  ) {
+  if (requireDeliveryZoneManager && !canManageDeliveryZones(session.profile.role)) {
     throw new AdminAuthorizationError("FORBIDDEN");
   }
   assertClosedForm(formData, allowedFields);
@@ -181,10 +178,52 @@ const packageSchema = z
   .min(1)
   .max(1000);
 
-function revalidateLogistics(): void {
+function revalidateLogistics(orderId?: string | null): void {
   revalidatePath("/admin/logistica");
   revalidatePath("/admin/pedidos");
   revalidatePath("/admin/hoy");
+  if (orderId) revalidatePath(`/admin/pedidos/${orderId}`);
+}
+
+interface OptionalLogisticsLookupDb {
+  shipment?: {
+    findUnique?: (args: {
+      where: { id: string };
+      select: { orderId: true };
+    }) => Promise<{ orderId: string } | null>;
+  };
+  shipmentPackage?: {
+    findUnique?: (args: {
+      where: { id: string };
+      select: { shipment: { select: { orderId: true } } };
+    }) => Promise<{ shipment: { orderId: string } } | null>;
+  };
+}
+
+async function resolveShipmentOrderId(shipmentId: string): Promise<string | null> {
+  try {
+    const db = getDatabase() as unknown as OptionalLogisticsLookupDb;
+    const shipment = await db.shipment?.findUnique?.({
+      where: { id: shipmentId },
+      select: { orderId: true },
+    });
+    return shipment?.orderId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolvePackageOrderId(packageId: string): Promise<string | null> {
+  try {
+    const db = getDatabase() as unknown as OptionalLogisticsLookupDb;
+    const pkg = await db.shipmentPackage?.findUnique?.({
+      where: { id: packageId },
+      select: { shipment: { select: { orderId: true } } },
+    });
+    return pkg?.shipment.orderId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function startPickingAction(
@@ -194,11 +233,9 @@ export async function startPickingAction(
   const values = safeSnapshot(formData);
   try {
     const audit = await authorize(formData, ["shipmentId"]);
-    await shippingService().startPicking(
-      z.string().uuid().parse(formString(formData, "shipmentId")),
-      audit,
-    );
-    revalidateLogistics();
+    const shipmentId = z.string().uuid().parse(formString(formData, "shipmentId"));
+    await shippingService().startPicking(shipmentId, audit);
+    revalidateLogistics(await resolveShipmentOrderId(shipmentId));
     return actionSuccess("Alistamiento iniciado y auditado.");
   } catch (error) {
     return failure(error, values);
@@ -212,15 +249,12 @@ export async function packShipmentAction(
   const values = safeSnapshot(formData);
   try {
     const audit = await authorize(formData, ["shipmentId", "packages"]);
+    const shipmentId = z.string().uuid().parse(formString(formData, "shipmentId"));
     const packages = packageSchema.parse(
       JSON.parse(z.string().max(2_000_000).parse(formString(formData, "packages"))),
     );
-    const result = await shippingService().pack(
-      z.string().uuid().parse(formString(formData, "shipmentId")),
-      packages,
-      audit,
-    );
-    revalidateLogistics();
+    const result = await shippingService().pack(shipmentId, packages, audit);
+    revalidateLogistics(await resolveShipmentOrderId(shipmentId));
     return actionSuccess(`${result.packageIds.length} bultos sellados con cobertura exacta.`);
   } catch (error) {
     return failure(error, values);
@@ -234,12 +268,13 @@ export async function processLabelAction(
   const values = safeSnapshot(formData);
   try {
     const audit = await authorize(formData, ["packageId"]);
+    const packageId = z.string().uuid().parse(formString(formData, "packageId"));
     const result = await shippingService().processLabel(
-      z.string().uuid().parse(formString(formData, "packageId")),
+      packageId,
       `admin:${audit.actorAdminUserId}`,
       audit,
     );
-    revalidateLogistics();
+    revalidateLogistics(await resolvePackageOrderId(packageId));
     return actionSuccess(
       result.status === "LABELLED"
         ? `Guía ${result.trackingCode} persistida.`
@@ -257,12 +292,13 @@ export async function reconcileLabelAction(
   const values = safeSnapshot(formData);
   try {
     const audit = await authorize(formData, ["packageId"]);
+    const packageId = z.string().uuid().parse(formString(formData, "packageId"));
     const result = await shippingService().reconcileLabel(
-      z.string().uuid().parse(formString(formData, "packageId")),
+      packageId,
       `admin:${audit.actorAdminUserId}`,
       audit,
     );
-    revalidateLogistics();
+    revalidateLogistics(await resolvePackageOrderId(packageId));
     return actionSuccess(
       result.status === "LABELLED"
         ? "Guía conciliada sin duplicar cobro."
@@ -295,7 +331,7 @@ export async function assignShipmentSerialsAction(
         ),
       );
     const count = await shippingService().assignSerialUnits(shipmentId, serialUnitIds, audit);
-    revalidateLogistics();
+    revalidateLogistics(await resolveShipmentOrderId(shipmentId));
     return actionSuccess(`${count} seriales asignados al envío y auditados.`);
   } catch (error) {
     return failure(error, values);
@@ -331,7 +367,7 @@ export async function dispatchShipmentAction(
       driverName || driverPhoneE164 ? { name: driverName, phoneE164: driverPhoneE164 } : undefined,
       serialUnitIds,
     );
-    revalidateLogistics();
+    revalidateLogistics(await resolveShipmentOrderId(shipmentId));
     return actionSuccess(
       serialUnitIds?.length
         ? "Seriales asignados y despacho confirmado con eventos y notificación encolados."
@@ -349,11 +385,9 @@ export async function deliverShipmentAction(
   const values = safeSnapshot(formData);
   try {
     const audit = await authorize(formData, ["shipmentId"]);
-    await shippingService().markDelivered(
-      z.string().uuid().parse(formString(formData, "shipmentId")),
-      audit,
-    );
-    revalidateLogistics();
+    const shipmentId = z.string().uuid().parse(formString(formData, "shipmentId"));
+    await shippingService().markDelivered(shipmentId, audit);
+    revalidateLogistics(await resolveShipmentOrderId(shipmentId));
     return actionSuccess("Entrega confirmada y evento monotónico registrado.");
   } catch (error) {
     return failure(error, values);

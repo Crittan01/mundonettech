@@ -1,4 +1,5 @@
 import { CatalogService } from "@mundonettech/db";
+import Link from "next/link";
 
 import { CatalogProductForm } from "@/components/admin/catalog-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -13,7 +14,10 @@ export default async function NewCatalogProductPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold">Crear producto</h1>
+        <Link href="/admin/catalogo" className="text-sm text-primary underline underline-offset-4">
+          Volver al catálogo
+        </Link>
+        <h1 className="mt-3 text-3xl font-bold">Crear producto</h1>
         <p className="mt-2 text-muted-foreground">
           Registra el producto y su primera variante. Los cambios exigen MFA reciente y quedan en
           auditoría.

@@ -25,12 +25,12 @@ export default async function AccountOrderDetailPage({
       throw error;
     });
   return (
-    <main>
+    <div>
       <OrderPostSaleView
         order={order}
         channel={{ channel: "account", orderId: id }}
         idempotencySeed={randomUUID()}
       />
-    </main>
+    </div>
   );
 }

@@ -131,18 +131,27 @@ export default async function AssistedPaymentPage({ params }: PageProps<"/pagar/
         </dl>
       </section>
       {!cart.canContinue ? (
-        <section role="alert" className="rounded-xl border border-warning bg-card p-5">
+        <section role="alert" className="space-y-3 rounded-xl border border-warning bg-card p-5">
           <h2 className="font-semibold">La venta necesita una nueva revisión del asesor</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Algún producto, paquete o cantidad ya no está disponible. No puedes aceptar esta
-            versión; solicita un enlace nuevo.
+            versión; solicita un enlace nuevo a tu asesor.
           </p>
+          <div className="flex flex-wrap gap-4 pt-1 text-sm font-medium">
+            <Link href="/productos" className="text-primary underline">
+              Explorar catálogo
+            </Link>
+            <Link href="/ayuda" className="text-primary underline">
+              Ir al Centro de ayuda
+            </Link>
+          </div>
         </section>
       ) : (
         <ClaimAssistedCartForm token={token} disabled={cart.items.length === 0} />
       )}
       <p className="text-xs text-muted-foreground">
-        Referencia de carrito: <span className="font-mono">{cart.id}</span>
+        Enlace personal de un solo uso. Los precios y la disponibilidad volverán a verificarse al
+        confirmar tu compra.
       </p>
     </div>
   );

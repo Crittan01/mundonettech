@@ -3,7 +3,7 @@ import { getGoogleMerchantFeed } from "@/lib/seo-data";
 const headers = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
-  "X-Robots-Tag": "noindex",
+  "X-Robots-Tag": "noindex, nofollow, noarchive",
 } as const;
 
 function methodNotAllowed(): Response {

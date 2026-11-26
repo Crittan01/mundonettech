@@ -520,10 +520,57 @@ export class FinanceService {
       throw new RangeError("limit must be between 1 and 120.");
     }
     const records = await this.db.fiscalWatchSnapshot.findMany({
-      orderBy: [{ snapshotDate: "desc" }, { fiscalYear: "desc" }],
+      orderBy: [{ snapshotDate: "desc" }, { fiscalYear: "desc" }, { id: "desc" }],
       take: limit,
     });
     return records.map(fiscalView);
+  }
+
+  async fiscalHistoryPage(
+    options: { readonly year?: number; readonly page?: number; readonly pageSize?: number } = {},
+  ): Promise<{
+    items: FiscalWatchView[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  }> {
+    if (
+      options.year !== undefined &&
+      (!Number.isInteger(options.year) || options.year < 2000 || options.year > 9998)
+    ) {
+      throw new RangeError("fiscalYear is outside the supported range.");
+    }
+    const requestedPage = options.page ?? 1;
+    const pageSize = options.pageSize ?? 12;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 120
+    ) {
+      throw new RangeError("Invalid fiscal history pagination.");
+    }
+    const where: Prisma.FiscalWatchSnapshotWhereInput =
+      options.year !== undefined ? { fiscalYear: options.year } : {};
+    const total = await this.db.fiscalWatchSnapshot.count({ where });
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const records = await this.db.fiscalWatchSnapshot.findMany({
+      where,
+      orderBy: [{ snapshotDate: "desc" }, { fiscalYear: "desc" }, { id: "desc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    });
+    return {
+      items: records.map(fiscalView),
+      total,
+      page,
+      pageSize,
+      totalPages,
+    };
   }
 }
 

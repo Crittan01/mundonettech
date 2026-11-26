@@ -52,7 +52,7 @@ export const helpArticles: readonly HelpArticle[] = [
       {
         heading: "Prepara tu carrito",
         paragraphs: [
-          "En la ficha de cada producto elige la variante y la cantidad. El carrito vuelve a validar precio, disponibilidad, promociones y composición de bundles antes de continuar.",
+          "En la ficha de cada producto elige la variante y la cantidad. El carrito vuelve a validar precio, disponibilidad, promociones y composición de paquetes promocionales antes de continuar.",
         ],
         bullets: [
           "Revisa SKU, cantidades y totales antes de iniciar el checkout.",
@@ -206,7 +206,7 @@ export const helpArticles: readonly HelpArticle[] = [
       {
         heading: "Actualiza tus datos",
         paragraphs: [
-          "En tu cuenta puedes mantener el perfil y las direcciones usadas en compras posteriores. Cambiar una dirección predeterminada no reescribe los snapshots legales y logísticos de pedidos ya confirmados.",
+          "En tu cuenta puedes mantener el perfil y las direcciones usadas en compras posteriores. Cambiar una dirección predeterminada no modifica los datos legales y de entrega registrados en pedidos ya confirmados.",
         ],
         links: [
           { label: "Mi cuenta", href: "/mi-cuenta" },

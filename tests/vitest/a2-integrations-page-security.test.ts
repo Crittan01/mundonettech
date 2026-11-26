@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 
+import * as adminPresenters from "../../apps/web/lib/admin-presenters.js";
+import * as adminSearchParams from "../../apps/web/lib/admin-search-params.js";
 import * as core from "../../packages/core/dist/index.js";
 import * as integrations from "../../packages/integrations/dist/index.js";
 
@@ -41,6 +43,8 @@ function loadPage(mocks: Record<string, unknown>): PageModule {
   const localRequire = (id: string): unknown => {
     if (Object.hasOwn(mocks, id)) return mocks[id];
     if (id === "@mundonettech/integrations") return integrations;
+    if (id === "@/lib/admin-presenters") return adminPresenters;
+    if (id === "@/lib/admin-search-params") return adminSearchParams;
     return webRequire(id) as unknown;
   };
   const context = createContext({
@@ -97,7 +101,10 @@ function componentMocks() {
       RevokeCredentialForm: component,
       WompiCredentialWizard: component,
     },
+    "@/components/ui/button": { Button: component },
+    "@/components/ui/select": { Select: component },
     "next/link": { __esModule: true, default: component },
+    "next/navigation": { redirect: vi.fn() },
   };
 }
 
@@ -151,9 +158,15 @@ describe("A2 — integrations page recent MFA and safe RSC", () => {
       ],
       nextCursor: null,
     }));
-    const listEvents = vi.fn(async () => []);
+    const listEventsPage = vi.fn(async () => ({
+      items: [],
+      total: 0,
+      page: 1,
+      pageSize: 20,
+      totalPages: 1,
+    }));
     const getIntegrationCredentialVault = vi.fn(() => ({ list }));
-    const metaCapiService = vi.fn(() => ({ listEvents }));
+    const metaCapiService = vi.fn(() => ({ listEventsPage }));
     const page = loadPage({
       "@mundonettech/core": core,
       ...componentMocks(),
@@ -174,7 +187,10 @@ describe("A2 — integrations page recent MFA and safe RSC", () => {
     const tree = await page.default();
     const serialized = JSON.stringify(tree);
     expect(list).toHaveBeenCalledWith(actorAdminUserId, { includeRevoked: true, limit: 100 });
-    expect(listEvents).toHaveBeenCalledWith(actorAdminUserId, 50);
+    expect(listEventsPage).toHaveBeenCalledWith(actorAdminUserId, {
+      page: 1,
+      pageSize: 20,
+    });
     expect(serialized).not.toContain(accountName);
     expect(serialized).not.toContain("accountName");
     expect(serialized).toContain("123e4567-e89b-42d3-a456-426614174001");
@@ -209,7 +225,15 @@ describe("A2 — integrations page recent MFA and safe RSC", () => {
       "@/lib/integrations": {
         getIntegrationCredentialVault: vi.fn(() => ({ list })),
         getIntegrationEnvironment: vi.fn(() => "LOCAL"),
-        metaCapiService: vi.fn(() => ({ listEvents: vi.fn(async () => []) })),
+        metaCapiService: vi.fn(() => ({
+          listEventsPage: vi.fn(async () => ({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 20,
+            totalPages: 1,
+          })),
+        })),
       },
       "@/lib/seo-data": {
         getMetaCatalogFeed: vi.fn(async () => ({ accepted: 0, issues: [] })),
@@ -267,7 +291,7 @@ describe("A5 — DIAN trust anchor wizard", () => {
     expect(source).toContain("multiline: true");
     expect(source).toContain('field.name === "signatureTrustAnchorPem"');
     expect(source).toContain('environment === "PRD"');
-    expect(source).toContain("<textarea");
+    expect(source).toMatch(/<Textarea|<textarea/);
   });
 });
 

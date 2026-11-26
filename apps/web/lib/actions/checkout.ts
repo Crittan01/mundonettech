@@ -17,11 +17,7 @@ import { actionError, formSnapshot, formString, type ActionState } from "@/lib/a
 import { clearCartAccessToken, optionalCustomerId } from "@/lib/cart";
 import { orderService, readCheckoutCartReference, receiptTokenForSubmission } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
-import {
-  normalizePhoneE164,
-  optionalTrimmedText as optionalText,
-  phoneInputPattern,
-} from "@/lib/form-validation";
+import { normalizePhoneE164, phoneInputPattern } from "@/lib/form-validation";
 import {
   blockedIdentityService,
   getBankTransferInstructions,
@@ -39,88 +35,223 @@ import {
 } from "@/lib/payment-identities";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
+const phoneValidationMessage =
+  "Ingresa un teléfono válido en Colombia (10 dígitos) o formato internacional (+57…).";
+
 const submissionSchema = z
   .object({
-    submissionId: z.string().uuid(),
-    reviewFingerprint: z.string().regex(/^[0-9a-f]{64}$/),
-    fulfillmentMethod: z.enum(["HOME_DELIVERY", "LOCAL_DELIVERY", "CLICK_COLLECT"]),
-    paymentMethod: z.enum(["WOMPI", "COD", "BANK_TRANSFER", "STORE_CREDIT"]),
-    wompiCredentialId: z.union([z.string().uuid(), z.literal("")]),
-    email: z.string().trim().email().max(320),
-    givenName: z.string().trim().min(2).max(100),
-    familyName: z.string().trim().min(2).max(100),
-    recipientName: z.string().trim().min(2).max(200),
+    submissionId: z.string().uuid("El identificador del formulario no es válido."),
+    reviewFingerprint: z
+      .string()
+      .regex(
+        /^[0-9a-f]{64}$/,
+        "La verificación del resumen venció. Revisa los totales e inténtalo de nuevo.",
+      ),
+    fulfillmentMethod: z.enum(["HOME_DELIVERY", "LOCAL_DELIVERY", "CLICK_COLLECT"], {
+      error: "Selecciona una modalidad de entrega válida.",
+    }),
+    paymentMethod: z.enum(["WOMPI", "COD", "BANK_TRANSFER", "STORE_CREDIT"], {
+      error: "Selecciona un método de pago válido.",
+    }),
+    wompiCredentialId: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || z.string().uuid().safeParse(value).success,
+        "Selecciona una cuenta Wompi válida.",
+      ),
+    email: z
+      .string()
+      .trim()
+      .email("Ingresa un correo electrónico válido.")
+      .max(320, "El correo no puede superar 320 caracteres."),
+    givenName: z
+      .string()
+      .trim()
+      .min(2, "Ingresa tu nombre (mínimo 2 caracteres).")
+      .max(100, "El nombre no puede superar 100 caracteres."),
+    familyName: z
+      .string()
+      .trim()
+      .min(2, "Ingresa tu apellido (mínimo 2 caracteres).")
+      .max(100, "El apellido no puede superar 100 caracteres."),
+    recipientName: z
+      .string()
+      .trim()
+      .min(2, "Ingresa el nombre de quien recibe (mínimo 2 caracteres).")
+      .max(200, "El nombre de quien recibe no puede superar 200 caracteres."),
     phoneE164: z
       .string()
       .trim()
-      .min(8)
-      .max(24)
-      .regex(phoneInputPattern)
+      .min(8, phoneValidationMessage)
+      .max(24, phoneValidationMessage)
+      .regex(phoneInputPattern, phoneValidationMessage)
       .transform((value, ctx) => {
         try {
           return normalizePhoneE164(value);
         } catch {
-          ctx.addIssue({ code: "custom", message: "Teléfono inválido." });
+          ctx.addIssue({ code: "custom", message: phoneValidationMessage });
           return z.NEVER;
         }
       }),
-    buyerDocumentType: z.union([
-      z.enum(["11", "12", "13", "21", "22", "31", "41", "42", "50", "91"]),
-      z.literal(""),
-    ]),
-    buyerDocumentNumber: z.string().trim().max(30),
-    buyerTaxRegime: z.union([z.enum(["NO_RESPONSABLE_IVA", "RESPONSABLE_IVA"]), z.literal("")]),
-    departmentCode: z.union([z.string().regex(/^[0-9]{2}$/), z.literal("")]),
-    municipalityCode: z.union([z.string().regex(/^[0-9]{5}$/), z.literal("")]),
-    addressLine1: z.string().trim().max(200),
-    addressLine2: optionalText(200),
-    neighborhood: optionalText(120),
-    postalCode: z.union([z.string().regex(/^[0-9]{6}$/), z.literal("")]),
-    clickCollectLocationId: z.union([z.string().uuid(), z.literal("")]),
-    localDeliveryZoneId: z.union([z.string().uuid(), z.literal("")]),
-    deliveryLatitude: z.string().trim().max(24),
-    deliveryLongitude: z.string().trim().max(24),
-    deliveryNotes: optionalText(500),
-    termsAccepted: z.literal("true"),
-    dataProcessingAccepted: z.literal("true"),
+    buyerDocumentType: z.enum(["", "11", "12", "13", "21", "22", "31", "41", "42", "50", "91"], {
+      error: "Selecciona un tipo de documento válido.",
+    }),
+    buyerDocumentNumber: z
+      .string()
+      .trim()
+      .max(30, "El número de documento no puede superar 30 caracteres."),
+    buyerTaxRegime: z.enum(["", "NO_RESPONSABLE_IVA", "RESPONSABLE_IVA"], {
+      error: "Selecciona un régimen tributario válido.",
+    }),
+    departmentCode: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || /^[0-9]{2}$/.test(value),
+        "Selecciona un departamento válido.",
+      ),
+    municipalityCode: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || /^[0-9]{5}$/.test(value),
+        "Selecciona un municipio válido.",
+      ),
+    addressLine1: z.string().trim().max(200, "La dirección no puede superar 200 caracteres."),
+    addressLine2: z
+      .string()
+      .trim()
+      .max(200, "El complemento de dirección no puede superar 200 caracteres.")
+      .transform((value) => value || null),
+    neighborhood: z
+      .string()
+      .trim()
+      .max(120, "El barrio no puede superar 120 caracteres.")
+      .transform((value) => value || null),
+    postalCode: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || /^[0-9]{6}$/.test(value),
+        "El código postal debe tener exactamente 6 dígitos.",
+      ),
+    clickCollectLocationId: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || z.string().uuid().safeParse(value).success,
+        "Selecciona una sede de recogida válida.",
+      ),
+    localDeliveryZoneId: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || z.string().uuid().safeParse(value).success,
+        "Selecciona una zona Flex válida.",
+      ),
+    deliveryLatitude: z.string().trim().max(24, "La latitud de entrega Flex no es válida."),
+    deliveryLongitude: z.string().trim().max(24, "La longitud de entrega Flex no es válida."),
+    deliveryNotes: z
+      .string()
+      .trim()
+      .max(500, "Las notas de entrega no pueden superar 500 caracteres.")
+      .transform((value) => value || null),
+    termsAccepted: z.literal("true", {
+      error: "Debes aceptar los términos y condiciones para confirmar tu pedido.",
+    }),
+    dataProcessingAccepted: z.literal("true", {
+      error: "Debes autorizar el tratamiento de datos personales para continuar.",
+    }),
     advertisingAccepted: z.boolean(),
   })
   .superRefine((value, context) => {
     if (value.fulfillmentMethod !== "CLICK_COLLECT") {
-      if (!value.departmentCode || !value.municipalityCode || value.addressLine1.length < 5) {
+      if (!value.departmentCode) {
         context.addIssue({
           code: "custom",
-          message: "Departamento, municipio y dirección son obligatorios para la entrega.",
+          path: ["departmentCode"],
+          message: "Selecciona un departamento para la entrega.",
+        });
+      }
+      if (!value.municipalityCode) {
+        context.addIssue({
+          code: "custom",
+          path: ["municipalityCode"],
+          message: "Selecciona un municipio para la entrega.",
+        });
+      }
+      if (value.addressLine1.length < 5) {
+        context.addIssue({
+          code: "custom",
+          path: ["addressLine1"],
+          message: "Ingresa una dirección de entrega de al menos 5 caracteres.",
         });
       }
     } else if (!value.clickCollectLocationId) {
-      context.addIssue({ code: "custom", message: "Selecciona una sede de recogida disponible." });
+      context.addIssue({
+        code: "custom",
+        path: ["clickCollectLocationId"],
+        message: "Selecciona una sede de recogida disponible.",
+      });
     }
     const documentRequired =
       value.fulfillmentMethod !== "CLICK_COLLECT" || value.buyerTaxRegime !== "";
-    if (
-      (documentRequired || value.buyerDocumentNumber !== "") &&
-      (!value.buyerDocumentType || !/^[A-Za-z0-9.-]{3,30}$/.test(value.buyerDocumentNumber))
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "El tipo y número de documento son obligatorios.",
-      });
-    }
-    if (value.fulfillmentMethod === "LOCAL_DELIVERY") {
-      if (!value.localDeliveryZoneId || !value.deliveryLatitude || !value.deliveryLongitude) {
+    if (documentRequired || value.buyerDocumentNumber !== "") {
+      if (!value.buyerDocumentType) {
         context.addIssue({
           code: "custom",
-          message: "Selecciona una zona Flex y coordenadas válidas antes de confirmar.",
+          path: ["buyerDocumentType"],
+          message: "Selecciona el tipo de documento.",
+        });
+      }
+      if (!/^[A-Za-z0-9.-]{3,30}$/.test(value.buyerDocumentNumber)) {
+        context.addIssue({
+          code: "custom",
+          path: ["buyerDocumentNumber"],
+          message: "Ingresa un número de documento válido (3 a 30 caracteres).",
+        });
+      }
+    }
+    if (value.fulfillmentMethod === "LOCAL_DELIVERY") {
+      if (!value.localDeliveryZoneId) {
+        context.addIssue({
+          code: "custom",
+          path: ["localDeliveryZoneId"],
+          message: "Selecciona una zona Flex disponible antes de confirmar.",
+        });
+      }
+      if (!value.deliveryLatitude) {
+        context.addIssue({
+          code: "custom",
+          path: ["deliveryLatitude"],
+          message: "Ingresa la latitud de entrega Flex.",
         });
       } else {
         try {
           coordinateE6(value.deliveryLatitude, "deliveryLatitude", -90_000_000, 90_000_000);
+        } catch {
+          context.addIssue({
+            code: "custom",
+            path: ["deliveryLatitude"],
+            message: "La latitud de entrega Flex no es válida.",
+          });
+        }
+      }
+      if (!value.deliveryLongitude) {
+        context.addIssue({
+          code: "custom",
+          path: ["deliveryLongitude"],
+          message: "Ingresa la longitud de entrega Flex.",
+        });
+      } else {
+        try {
           coordinateE6(value.deliveryLongitude, "deliveryLongitude", -180_000_000, 180_000_000);
         } catch {
           context.addIssue({
             code: "custom",
-            message: "Las coordenadas de entrega Flex no son válidas.",
+            path: ["deliveryLongitude"],
+            message: "La longitud de entrega Flex no es válida.",
           });
         }
       }
@@ -166,10 +297,20 @@ export async function confirmCheckoutAction(
     advertisingAccepted: formData.get("advertisingAccepted") === "on",
   });
   if (!parsed.success) {
-    return actionError(
-      "Revisa los campos obligatorios, el formato de contacto, la dirección o sede y las dos aceptaciones.",
-      values,
-    );
+    const fieldErrors: Record<string, string[]> = {};
+    for (const issue of parsed.error.issues) {
+      const key = typeof issue.path[0] === "string" ? issue.path[0] : "_form";
+      fieldErrors[key] = [...(fieldErrors[key] ?? []), issue.message];
+    }
+    const customIssue = parsed.error.issues.find((issue) => issue.code === "custom");
+    return {
+      ...actionError(
+        customIssue?.message ??
+          "Revisa los campos obligatorios, el formato de contacto, la dirección o sede y las dos aceptaciones.",
+        values,
+      ),
+      fieldErrors,
+    };
   }
   const input = parsed.data;
   let receiptUrl: string;

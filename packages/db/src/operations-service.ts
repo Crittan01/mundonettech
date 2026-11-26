@@ -464,8 +464,37 @@ export class OperationsService {
     });
   }
 
-  async snapshot(adminUserId: string): Promise<OperationsSnapshot> {
+  async snapshot(
+    adminUserId: string,
+    options: {
+      readonly notificationsPage?: number;
+      readonly notificationsPageSize?: number;
+      readonly unreadOnly?: boolean;
+      readonly severity?: "INFO" | "WARNING" | "CRITICAL";
+    } = {},
+  ): Promise<OperationsSnapshot> {
     assertUuid(adminUserId, "adminUserId");
+    const requestedPage = options.notificationsPage ?? 1;
+    const pageSize = options.notificationsPageSize ?? 100;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 100
+    ) {
+      throw new RangeError("Invalid notifications pagination options.");
+    }
+    if (options.unreadOnly !== undefined && typeof options.unreadOnly !== "boolean") {
+      throw new TypeError("unreadOnly must be a boolean.");
+    }
+    if (
+      options.severity !== undefined &&
+      !["INFO", "WARNING", "CRITICAL"].includes(options.severity)
+    ) {
+      throw new TypeError("severity must be INFO, WARNING, or CRITICAL.");
+    }
     const actor = await this.db.adminUser.findFirst({
       where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
       select: { id: true, role: true },
@@ -482,21 +511,55 @@ export class OperationsService {
     };
     const nowRows = await this.db.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
     const now = nowRows[0]!.now;
+    const pendingOrdersWhere: Prisma.OrderWhereInput = {
+      orderStatus: "CONFIRMED",
+      paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED"] },
+      fulfillmentStatus: { in: ["UNFULFILLED", "PARTIALLY_FULFILLED"] },
+    };
+    const lateShipmentsWhere: Prisma.ShipmentWhereInput = {
+      promisedAt: { lt: now },
+      status: { notIn: ["DELIVERED", "CANCELLED"] },
+    };
+    const pendingPaymentsWhere: Prisma.PaymentAttemptWhereInput = {
+      OR: [
+        { provider: "BANK_TRANSFER", status: { in: ["PENDING", "PROCESSING"] } },
+        {
+          provider: "COD",
+          status: { in: ["PENDING", "PROCESSING"] },
+          codReconciliation: { is: { status: "DISCREPANCY" } },
+        },
+      ],
+    };
+    const pendingRefundsWhere: Prisma.OrderRefundWhereInput = {
+      status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
+    };
+    const baseNotificationsWhere: Prisma.NotificationWhereInput = {
+      AND: [{ resolvedAt: null }, notificationWhereForRole(actor.role)],
+    };
+    const filteredNotificationsWhere: Prisma.NotificationWhereInput = {
+      AND: [
+        baseNotificationsWhere,
+        ...(options.severity ? [{ severity: options.severity }] : []),
+        ...(options.unreadOnly ? [{ reads: { none: { adminUserId } } }] : []),
+      ],
+    };
     const [
       pendingOrders,
+      pendingOrdersTotal,
       lateShipments,
+      lateShipmentsTotal,
       pendingPayments,
+      pendingPaymentsTotal,
       pendingRefunds,
+      pendingRefundsTotal,
       failedOutbox,
-      notifications,
+      notificationsTotal,
+      unreadNotificationsTotal,
+      filteredNotificationsTotal,
     ] = await Promise.all([
       permissions.orders
         ? this.db.order.findMany({
-            where: {
-              orderStatus: "CONFIRMED",
-              paymentStatus: { in: ["PAID", "PARTIALLY_REFUNDED"] },
-              fulfillmentStatus: { in: ["UNFULFILLED", "PARTIALLY_FULFILLED"] },
-            },
+            where: pendingOrdersWhere,
             select: {
               id: true,
               orderNumber: true,
@@ -510,9 +573,10 @@ export class OperationsService {
             take: 50,
           })
         : Promise.resolve([]),
+      permissions.orders ? this.db.order.count({ where: pendingOrdersWhere }) : Promise.resolve(0),
       permissions.orders
         ? this.db.shipment.findMany({
-            where: { promisedAt: { lt: now }, status: { notIn: ["DELIVERED", "CANCELLED"] } },
+            where: lateShipmentsWhere,
             include: {
               order: { select: { id: true, orderNumber: true } },
               fulfillment: { select: { status: true } },
@@ -521,41 +585,49 @@ export class OperationsService {
             take: 50,
           })
         : Promise.resolve([]),
+      permissions.orders
+        ? this.db.shipment.count({ where: lateShipmentsWhere })
+        : Promise.resolve(0),
       permissions.payments
         ? this.db.paymentAttempt.findMany({
-            where: {
-              OR: [
-                { provider: "BANK_TRANSFER", status: { in: ["PENDING", "PROCESSING"] } },
-                {
-                  provider: "COD",
-                  status: { in: ["PENDING", "PROCESSING"] },
-                  codReconciliation: { is: { status: "DISCREPANCY" } },
-                },
-              ],
-            },
+            where: pendingPaymentsWhere,
             include: { order: { select: { id: true, orderNumber: true } } },
             orderBy: [{ createdAt: "asc" }, { id: "asc" }],
             take: 50,
           })
         : Promise.resolve([]),
       permissions.payments
+        ? this.db.paymentAttempt.count({ where: pendingPaymentsWhere })
+        : Promise.resolve(0),
+      permissions.payments
         ? this.db.orderRefund.findMany({
-            where: { status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] } },
+            where: pendingRefundsWhere,
             include: { order: { select: { id: true, orderNumber: true } } },
             orderBy: [{ createdAt: "asc" }, { id: "asc" }],
             take: 50,
           })
         : Promise.resolve([]),
+      permissions.payments
+        ? this.db.orderRefund.count({ where: pendingRefundsWhere })
+        : Promise.resolve(0),
       permissions.audit
         ? this.db.domainOutbox.count({ where: { failedAt: { not: null } } })
         : Promise.resolve(0),
-      this.db.notification.findMany({
-        where: { AND: [{ resolvedAt: null }, notificationWhereForRole(actor.role)] },
-        include: { reads: { where: { adminUserId }, select: { readAt: true } } },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: 100,
+      this.db.notification.count({ where: baseNotificationsWhere }),
+      this.db.notification.count({
+        where: { AND: [baseNotificationsWhere, { reads: { none: { adminUserId } } }] },
       }),
+      this.db.notification.count({ where: filteredNotificationsWhere }),
     ]);
+    const totalPages = Math.max(1, Math.ceil(filteredNotificationsTotal / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const notifications = await this.db.notification.findMany({
+      where: filteredNotificationsWhere,
+      include: { reads: { where: { adminUserId }, select: { readAt: true } } },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    });
     return {
       permissions,
       pendingOrders: pendingOrders.map((order) => ({
@@ -594,6 +666,20 @@ export class OperationsService {
       })),
       failedOutbox,
       notifications: notifications.map(notificationView),
+      totals: {
+        pendingOrders: pendingOrdersTotal,
+        lateShipments: lateShipmentsTotal,
+        pendingPayments: pendingPaymentsTotal,
+        pendingRefunds: pendingRefundsTotal,
+        notifications: notificationsTotal,
+        unreadNotifications: unreadNotificationsTotal,
+      },
+      notificationsPagination: {
+        page,
+        pageSize,
+        total: filteredNotificationsTotal,
+        totalPages,
+      },
     };
   }
 

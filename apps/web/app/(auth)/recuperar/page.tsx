@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Suspense } from "react";
 import { connection } from "next/server";
 
@@ -27,6 +28,11 @@ async function RecoveryContent({ searchParams }: PageProps<"/recuperar">) {
             ? "La solicitud cifrada venció o no existe. Solicita un código nuevo sin compartir tu correo en el enlace."
             : "Si tu correo puede recibir recuperación, te enviaremos un código de seis dígitos."
       }
+      footer={
+        <Link className="text-primary underline" href="/ingresar">
+          Volver a iniciar sesión
+        </Link>
+      }
     >
       {hasCode ? <PasswordResetForm {...security} /> : <RecoveryRequestForm {...security} />}
     </AuthShell>
@@ -40,6 +46,11 @@ export default function RecoveryPage(props: PageProps<"/recuperar">) {
         <AuthShell
           title="Preparando recuperación"
           description="Estamos validando el estado seguro de tu solicitud."
+          footer={
+            <Link className="text-primary underline" href="/ingresar">
+              Volver a iniciar sesión
+            </Link>
+          }
         >
           <p role="status" className="text-sm text-muted-foreground">
             Cargando recuperación de contraseña…

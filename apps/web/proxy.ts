@@ -53,14 +53,20 @@ function securityPolicy(
   return directives.join("; ");
 }
 
-function applyHeaders(response: NextResponse, csp: string, isDevelopment: boolean): void {
+function applyHeaders(
+  response: NextResponse,
+  csp: string,
+  isDevelopment: boolean,
+  pathname = "/",
+): void {
   response.headers.set("Content-Security-Policy", csp);
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("X-Frame-Options", "DENY");
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  const geolocationPolicy = pathname === "/checkout" || pathname === "/checkout/" ? "(self)" : "()";
   response.headers.set(
     "Permissions-Policy",
-    "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()",
+    `camera=(), microphone=(), geolocation=${geolocationPolicy}, payment=(), usb=(), interest-cohort=()`,
   );
   response.headers.set("Cross-Origin-Opener-Policy", "same-origin");
   response.headers.set("Cross-Origin-Resource-Policy", "same-origin");
@@ -343,7 +349,7 @@ export async function proxy(request: NextRequest) {
     for (const cookie of response.cookies.getAll()) redirectResponse.cookies.set(cookie);
     response = redirectResponse;
   }
-  applyHeaders(response, csp, isDevelopment);
+  applyHeaders(response, csp, isDevelopment, pathname);
   if (serverActionPost) {
     response.headers.set("Cache-Control", "no-store");
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
@@ -354,7 +360,9 @@ export async function proxy(request: NextRequest) {
   }
   if (
     isCapabilityTokenPath(pathname) ||
-    (hasProtectedPathPrefix(pathname, "/ingresar") && request.nextUrl.searchParams.has("next"))
+    ((hasProtectedPathPrefix(pathname, "/ingresar") ||
+      hasProtectedPathPrefix(pathname, "/registro")) &&
+      request.nextUrl.searchParams.has("next"))
   ) {
     response.headers.set("Referrer-Policy", "no-referrer");
     if (hasProtectedPathPrefix(pathname, "/api/channels/mercado-libre/oauth/callback")) {

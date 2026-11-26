@@ -25,12 +25,19 @@ const consentStatusLabels: Record<string, string> = {
   GRANTED: "Otorgado",
   REVOKED: "Revocado",
 };
+const consentSourceLabels: Record<string, string> = {
+  "customer-account": "Mi cuenta",
+  "customer-anonymization": "Anonimización de cuenta",
+  checkout: "Proceso de compra",
+  "storefront-b2b": "Formulario empresarial B2B",
+  "admin-crm": "Gestión administrativa CRM",
+};
 
 export default async function PrivacyPage() {
   const { profile } = await requireCustomerPage();
   const account = await accountService().getProfile(profile.id);
   return (
-    <main className="space-y-8">
+    <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold">Privacidad y eliminación</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
@@ -51,14 +58,15 @@ export default async function PrivacyPage() {
                 <strong>{purposeLabels[consent.purpose] ?? consent.purpose}</strong> ·{" "}
                 {consentStatusLabels[consent.status] ?? consent.status} · v{consent.policyVersion}
                 <span className="block text-muted-foreground">
-                  {dateFormatter.format(consent.occurredAt)} · {consent.source}
+                  {dateFormatter.format(consent.occurredAt)} ·{" "}
+                  {consentSourceLabels[consent.source] ?? consent.source}
                 </span>
               </li>
             ))}
           </ol>
         )}
         <p className="text-sm text-muted-foreground">
-          Los eventos son append-only para conservar evidencia legal.{" "}
+          Los eventos son inmutables (solo admiten nuevos registros) para conservar evidencia legal.{" "}
           <Link href="/legal/tratamiento-datos-personales" className="underline">
             Consulta la política de tratamiento de datos
           </Link>
@@ -77,6 +85,6 @@ export default async function PrivacyPage() {
         </p>
         <AnonymizeAccountForm />
       </section>
-    </main>
+    </div>
   );
 }

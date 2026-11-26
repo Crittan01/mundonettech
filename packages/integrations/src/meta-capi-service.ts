@@ -857,6 +857,88 @@ export class MetaCapiService {
     });
   }
 
+  async listEventsPage(
+    actorAdminUserId: string,
+    options: {
+      readonly status?: MetaCapiEventStatus;
+      readonly page?: number;
+      readonly pageSize?: number;
+    } = {},
+  ): Promise<{
+    items: MetaCapiEventView[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  }> {
+    assertIntegrationUuid(actorAdminUserId, "actorAdminUserId");
+    const requestedPage = options.page ?? 1;
+    const pageSize = options.pageSize ?? 25;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 100
+    ) {
+      throw new MetaCapiServiceError("VALIDATION", "Meta CAPI pagination options are invalid.");
+    }
+    if (
+      options.status !== undefined &&
+      !["PENDING", "DISPATCHING", "SENT", "SKIPPED", "FAILED", "UNCERTAIN"].includes(options.status)
+    ) {
+      throw new MetaCapiServiceError("VALIDATION", "Meta CAPI status filter is invalid.");
+    }
+    return this.db.$transaction(async (tx) => {
+      const actor = await tx.adminUser.findFirst({
+        where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
+        select: { id: true, role: true },
+      });
+      if (!actor || !hasAdminPermission(actor.role, "integrations:read")) {
+        throw new MetaCapiServiceError("UNAUTHORIZED", "Active integrations reader required.");
+      }
+      const where: Prisma.MetaCapiEventWhereInput = {
+        environment: this.options.environment,
+        ...(options.status ? { status: options.status } : {}),
+      };
+      const total = await tx.metaCapiEvent.count({ where });
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(requestedPage, totalPages);
+      const records = await tx.metaCapiEvent.findMany({
+        where,
+        select: {
+          id: true,
+          eventId: true,
+          eventName: true,
+          status: true,
+          orderId: true,
+          eventTime: true,
+          valueCents: true,
+          attempts: true,
+          availableAt: true,
+          sentAt: true,
+          completedAt: true,
+          failureCode: true,
+          providerTraceId: true,
+          reconciliationReference: true,
+          version: true,
+          order: { select: { orderNumber: true } },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      });
+      return {
+        items: records.map(view),
+        total,
+        page,
+        pageSize,
+        totalPages,
+      };
+    });
+  }
+
   async reconcile(input: {
     metaEventId: string;
     resolution: "CONFIRMED_SENT" | "RETRY" | "DISCARD";

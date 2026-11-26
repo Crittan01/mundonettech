@@ -21,8 +21,9 @@ export function AdminInvitationForm({
 }) {
   const [state, action, pending] = useActionState(acceptAdminInvitationAction, initialActionState);
   const [email, setEmail] = useState(defaultEmail);
+  const [code, setCode] = useState("");
   return (
-    <form action={action} className="space-y-5">
+    <form action={action} aria-busy={pending} className="space-y-5">
       <div className="space-y-2">
         <Label htmlFor="email">Correo invitado</Label>
         <Input
@@ -32,6 +33,7 @@ export function AdminInvitationForm({
           required
           value={email}
           onChange={(event) => setEmail(event.target.value)}
+          disabled={pending}
         />
       </div>
       <div className="space-y-2">
@@ -43,6 +45,9 @@ export function AdminInvitationForm({
           pattern="[0-9]{6}"
           maxLength={6}
           required
+          value={code}
+          onChange={(event) => setCode(event.target.value)}
+          disabled={pending}
         />
       </div>
       <div className="space-y-2">
@@ -55,6 +60,7 @@ export function AdminInvitationForm({
           minLength={12}
           maxLength={128}
           required
+          disabled={pending}
         />
       </div>
       <div className="space-y-2">
@@ -67,6 +73,7 @@ export function AdminInvitationForm({
           minLength={12}
           maxLength={128}
           required
+          disabled={pending}
         />
       </div>
       <TurnstileField siteKey={siteKey} nonce={nonce} action="admin_invite" state={state} />

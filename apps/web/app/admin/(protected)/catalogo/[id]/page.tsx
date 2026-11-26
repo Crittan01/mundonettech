@@ -13,6 +13,7 @@ import {
 } from "@/components/admin/catalog-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { ProductMediaAdmin } from "@/components/admin/product-media-admin";
+import { productStatusLabels, variantStatusLabels } from "@/lib/admin-presenters";
 import { getPublicMediaOrigin } from "@/lib/env";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
@@ -25,6 +26,19 @@ const fitLabels = {
   NOT_COMPATIBLE: "No compatible",
 } as const;
 
+const taxGroupCodeLabels: Record<string, string> = {
+  IVA_GENERAL: "IVA general 19 %",
+  IVA_REDUCIDO: "IVA reducido 5 %",
+  IVA_EXENTO: "Exento de IVA (0 %)",
+  IVA_EXCLUIDO: "Excluido de IVA",
+  COMPUTO_UVT: "Cómputo excluido hasta 50 UVT",
+  MOVIL_UVT: "Móviles excluidos hasta 22 UVT",
+};
+
+function labelFor<T extends string>(map: Record<T, string>, value: string): string {
+  return (map as Record<string, string | undefined>)[value] ?? value;
+}
+
 export default async function AdminCatalogProductPage({
   params,
   searchParams,
@@ -36,6 +50,10 @@ export default async function AdminCatalogProductPage({
   const product = await service.getAdminProduct(id, { includeCosts: canWrite });
   if (!product) notFound();
   const references = canWrite ? await service.getReferences() : null;
+  const taxGroupLabel =
+    references?.taxGroups.find((group) => group.id === product.taxGroupId)?.name ??
+    taxGroupCodeLabels[product.taxGroup.code] ??
+    product.taxGroup.code;
   const justCreated = query.created === "1";
 
   return (
@@ -53,7 +71,7 @@ export default async function AdminCatalogProductPage({
         </div>
         <h1 className="mt-3 text-3xl font-bold">{product.name}</h1>
         <p className="mt-2 text-muted-foreground">
-          {product.brand.name} · {product.category.name} · {product.taxGroup.code}
+          {product.brand.name} · {product.category.name} · {taxGroupLabel}
         </p>
       </div>
       {justCreated ? (
@@ -103,7 +121,8 @@ export default async function AdminCatalogProductPage({
             Tu rol permite consultar el catálogo, pero no modificarlo.
           </p>
           <p className="mt-4 text-sm">
-            Slug: <span className="font-mono">{product.slug}</span> · Estado: {product.status}
+            Slug: <span className="font-mono">{product.slug}</span> · Estado:{" "}
+            {labelFor(productStatusLabels, product.status)}
           </p>
         </section>
       )}
@@ -145,7 +164,8 @@ export default async function AdminCatalogProductPage({
               className="rounded-xl border border-border bg-card p-4 text-sm"
             >
               <span className="font-mono">{variant.sku}</span> ·{" "}
-              {formatCopCents(variant.priceCents.toString())} · {variant.status}
+              {formatCopCents(variant.priceCents.toString())} ·{" "}
+              {labelFor(variantStatusLabels, variant.status)}
             </article>
           ),
         )}

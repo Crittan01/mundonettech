@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useState } from "react";
 
 import type { ChannelOrderView, ChannelStockLocationChoice } from "@mundonettech/integrations";
 
@@ -40,7 +40,16 @@ function SubmitForm({
 }) {
   const [state, submit, pending] = useActionState(action, initialActionState);
   return (
-    <form action={submit} className="space-y-3" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => submit(formData));
+      }}
+      className="space-y-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="orderId" value={orderId} />
       {typeof children === "function" ? children({ values: state.values, pending }) : children}
       <Button type="submit" variant="outline" disabled={pending}>
@@ -99,6 +108,95 @@ function EvidenceFields({
   );
 }
 
+function LedgerAdjustmentForm({
+  order,
+  adjustmentIdempotencyKey,
+  onPrepareNew,
+}: {
+  readonly order: ChannelOrderView;
+  readonly adjustmentIdempotencyKey: string;
+  readonly onPrepareNew: () => void;
+}) {
+  const [state, submit, pending] = useActionState(
+    adjustChannelOrderLedgerAction,
+    initialActionState,
+  );
+  const [adjustmentRequest] = useState(() => ({
+    expectedVersion: order.version,
+    idempotencyKey: adjustmentIdempotencyKey,
+  }));
+  const values = state.values;
+  const amountDefault = values?.amountCop ?? "";
+  const directionDefault = values?.direction ?? "CREDIT";
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => submit(formData));
+      }}
+      className="space-y-3"
+      aria-busy={pending}
+    >
+      <input type="hidden" name="orderId" value={order.id} />
+      <input type="hidden" name="version" value={adjustmentRequest.expectedVersion} />
+      <input type="hidden" name="idempotencyKey" value={adjustmentRequest.idempotencyKey} />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor={`amount-${order.id}`}>Valor (COP)</Label>
+          <Input
+            key={`amount-${order.id}-${amountDefault}`}
+            id={`amount-${order.id}`}
+            name="amountCop"
+            inputMode="decimal"
+            pattern="[0-9]{1,15}([.,][0-9]{1,2})?"
+            maxLength={18}
+            defaultValue={amountDefault}
+            disabled={pending}
+            required
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor={`direction-${order.id}`}>Dirección</Label>
+          <Select
+            key={`direction-${order.id}-${directionDefault}`}
+            id={`direction-${order.id}`}
+            name="direction"
+            className="flex py-2"
+            compact
+            defaultValue={directionDefault}
+            disabled={pending}
+            required
+          >
+            <option value="CREDIT">Crédito a favor</option>
+            <option value="DEBIT">Débito en contra</option>
+          </Select>
+        </div>
+      </div>
+      <EvidenceFields suffix={`adjust-${order.id}`} values={values} disabled={pending} />
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" variant="outline" disabled={pending}>
+          {pending ? "Agregando ajuste…" : "Agregar ajuste auditable"}
+        </Button>
+        {state.status === "success" ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={pending}
+            onClick={onPrepareNew}
+          >
+            Preparar nuevo ajuste
+          </Button>
+        ) : null}
+      </div>
+      <FormMessage state={state} />
+    </form>
+  );
+}
+
 const nonLocationStockErrors = new Set([
   "SKU_DIVERGENCE",
   "USER_PRODUCT_DIVERGENCE",
@@ -117,10 +215,9 @@ export function ChannelOrderActions({
   readonly locations: readonly ChannelStockLocationChoice[];
   readonly adjustmentIdempotencyKey: string;
 }) {
-  const [reconcileVersion] = useState(order.version);
-  const [adjustmentRequest] = useState(() => ({
-    expectedVersion: order.version,
-    idempotencyKey: adjustmentIdempotencyKey,
+  const [ledgerSession, setLedgerSession] = useState(() => ({
+    count: 0,
+    key: adjustmentIdempotencyKey,
   }));
   const canAssignLocation =
     order.stockStatus === "REVIEW_REQUIRED" && !nonLocationStockErrors.has(order.stockError ?? "");
@@ -142,7 +239,7 @@ export function ChannelOrderActions({
             action={retryChannelOrderStockAction}
             orderId={order.id}
             label="Reevaluar stock"
-            pendingLabel="Evaluando stock…"
+            pendingLabel="Evaluando inventario…"
           />
         ) : null}
       </div>
@@ -152,8 +249,8 @@ export function ChannelOrderActions({
           <div className="mt-3">
             {locations.length === 0 ? (
               <p className="text-sm text-muted-foreground" role="status">
-                No hay niveles de stock compatibles y activos para esta variante. Primero registra
-                la bodega y su inventario real.
+                No hay niveles de inventario compatibles y activos para esta variante. Primero
+                registra la bodega y su inventario real.
               </p>
             ) : (
               <SubmitForm
@@ -214,7 +311,7 @@ export function ChannelOrderActions({
                 >
                   {({ values, pending }) => (
                     <>
-                      <input type="hidden" name="version" value={reconcileVersion} />
+                      <input type="hidden" name="version" value={order.version} />
                       <EvidenceFields
                         suffix={`reconcile-${order.id}`}
                         values={values}
@@ -231,68 +328,17 @@ export function ChannelOrderActions({
               Agregar ajuste al ledger
             </summary>
             <div className="mt-3">
-              <SubmitForm
-                action={adjustChannelOrderLedgerAction}
-                orderId={order.id}
-                label="Agregar ajuste auditable"
-                pendingLabel="Agregando ajuste…"
-              >
-                {({ values, pending }) => {
-                  const amountDefault = values?.amountCop ?? "";
-                  const directionDefault = values?.direction ?? "CREDIT";
-                  return (
-                    <>
-                      <input
-                        type="hidden"
-                        name="version"
-                        value={adjustmentRequest.expectedVersion}
-                      />
-                      <input
-                        type="hidden"
-                        name="idempotencyKey"
-                        value={adjustmentRequest.idempotencyKey}
-                      />
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <div className="space-y-2">
-                          <Label htmlFor={`amount-${order.id}`}>Valor (COP)</Label>
-                          <Input
-                            key={`amount-${order.id}-${amountDefault}`}
-                            id={`amount-${order.id}`}
-                            name="amountCop"
-                            inputMode="decimal"
-                            pattern="[0-9]{1,15}([.,][0-9]{1,2})?"
-                            maxLength={18}
-                            defaultValue={amountDefault}
-                            disabled={pending}
-                            required
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor={`direction-${order.id}`}>Dirección</Label>
-                          <Select
-                            key={`direction-${order.id}-${directionDefault}`}
-                            id={`direction-${order.id}`}
-                            name="direction"
-                            className="flex py-2"
-                            compact
-                            defaultValue={directionDefault}
-                            disabled={pending}
-                            required
-                          >
-                            <option value="CREDIT">Crédito a favor</option>
-                            <option value="DEBIT">Débito en contra</option>
-                          </Select>
-                        </div>
-                      </div>
-                      <EvidenceFields
-                        suffix={`adjust-${order.id}`}
-                        values={values}
-                        disabled={pending}
-                      />
-                    </>
-                  );
-                }}
-              </SubmitForm>
+              <LedgerAdjustmentForm
+                key={ledgerSession.count}
+                order={order}
+                adjustmentIdempotencyKey={ledgerSession.key}
+                onPrepareNew={() =>
+                  setLedgerSession((prev) => ({
+                    count: prev.count + 1,
+                    key: crypto.randomUUID(),
+                  }))
+                }
+              />
             </div>
           </details>
         </div>

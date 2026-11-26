@@ -8,7 +8,7 @@ import {
 } from "@mundonettech/cms";
 import { useRouter } from "next/navigation";
 import type { FormEvent, ReactNode } from "react";
-import { useActionState, useRef, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { CmsSeoPreview } from "@/components/cms/cms-seo-preview";
@@ -41,7 +41,7 @@ import {
 
 type ServerAction = (previous: ActionState, formData: FormData) => Promise<ActionState>;
 const inputClass =
-  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50";
 
 const blockTypeLabels: Record<CmsBlockType, string> = {
   HERO: "HERO · Portada principal",
@@ -116,20 +116,43 @@ const templateSet = new Set(Object.values(blockTemplates));
 function StatefulForm({
   action,
   submitLabel,
+  srSuffix,
+  resetOnSuccess = false,
   className = "space-y-4",
   children,
 }: {
   action: ServerAction;
   submitLabel: string;
+  srSuffix?: string | undefined;
+  resetOnSuccess?: boolean;
   className?: string;
-  children: (values: Record<string, string> | undefined) => ReactNode;
+  children: (values: Record<string, string> | undefined, pending: boolean) => ReactNode;
 }) {
   const [state, run, pending] = useActionState(action, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (resetOnSuccess && state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [resetOnSuccess, state]);
   return (
-    <form action={run} className={className}>
-      {children(state.values)}
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => run(formData));
+      }}
+      aria-busy={pending}
+      className={className}
+    >
+      {children(state.values, pending)}
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Procesando…" : submitLabel}
+        {srSuffix ? <span className="sr-only">{srSuffix}</span> : null}
       </Button>
       <FormMessage state={state} />
     </form>
@@ -141,6 +164,7 @@ function PageFields({
   values,
   idPrefix,
   openGraphImage,
+  disabled = false,
 }: {
   page?:
     | { slug: string; title: string; seoTitle: string | null; seoDescription: string | null }
@@ -148,6 +172,7 @@ function PageFields({
   values?: Record<string, string> | undefined;
   idPrefix: string;
   openGraphImage: CmsSeoImage | null | undefined;
+  disabled?: boolean;
 }) {
   const defaults = {
     slug: values?.slug ?? page?.slug ?? "",
@@ -158,10 +183,15 @@ function PageFields({
   const [fields, setFields] = useState(defaults);
   const [lastSyncedValues, setLastSyncedValues] = useState(values);
   const [lastPage, setLastPage] = useState(page);
-  if (values !== lastSyncedValues || page !== lastPage) {
-    setLastSyncedValues(values);
+  if (page !== lastPage) {
     setLastPage(page);
+    setLastSyncedValues(values);
     setFields(defaults);
+  } else if (values !== lastSyncedValues) {
+    setLastSyncedValues(values);
+    if (values !== undefined) {
+      setFields(defaults);
+    }
   }
 
   function updateField(field: keyof typeof defaults, value: string) {
@@ -179,6 +209,7 @@ function PageFields({
             value={fields.slug}
             onChange={(event) => updateField("slug", event.target.value)}
             required
+            disabled={disabled}
             maxLength={160}
             autoCapitalize="none"
             spellCheck={false}
@@ -192,6 +223,7 @@ function PageFields({
             value={fields.title}
             onChange={(event) => updateField("title", event.target.value)}
             required
+            disabled={disabled}
             maxLength={200}
           />
         </div>
@@ -202,6 +234,7 @@ function PageFields({
             name="seoTitle"
             value={fields.seoTitle}
             onChange={(event) => updateField("seoTitle", event.target.value)}
+            disabled={disabled}
             maxLength={200}
           />
         </div>
@@ -212,6 +245,7 @@ function PageFields({
             name="seoDescription"
             value={fields.seoDescription}
             onChange={(event) => updateField("seoDescription", event.target.value)}
+            disabled={disabled}
             maxLength={300}
           />
         </div>
@@ -224,9 +258,11 @@ function PageFields({
 function BlockFields({
   values,
   idPrefix,
+  disabled = false,
 }: {
   values?: Record<string, string> | undefined;
   idPrefix: string;
+  disabled?: boolean;
 }) {
   const initialType = cmsBlockTypes.includes(values?.blockType as CmsBlockType)
     ? (values?.blockType as CmsBlockType)
@@ -263,6 +299,7 @@ function BlockFields({
           name="blockType"
           value={selectedType}
           onChange={(event) => handleTypeChange(event.target.value as CmsBlockType)}
+          disabled={disabled}
         >
           {cmsBlockTypes.map((type) => (
             <option key={type} value={type}>
@@ -274,6 +311,7 @@ function BlockFields({
           type="button"
           variant="ghost"
           size="sm"
+          disabled={disabled}
           onClick={() => setDraftJson(blockTemplates[selectedType])}
         >
           Cargar plantilla del tipo
@@ -287,6 +325,7 @@ function BlockFields({
           value={draftJson}
           onChange={(event) => setDraftJson(event.target.value)}
           required
+          disabled={disabled}
           rows={8}
           className={`${inputClass} font-mono`}
         />
@@ -294,6 +333,21 @@ function BlockFields({
           Se valida con esquema estricto según el tipo. Puedes usar tokens como {"{{store.name}}"} o{" "}
           {"{{store.domain}}"}; se bloquea cualquier etiqueta HTML o enlace inseguro.
         </p>
+        {selectedType === "HERO" || selectedType === "IMAGE" ? (
+          <p className="text-xs text-muted-foreground">
+            Consulta o sube imágenes y copia su <code className="font-mono">mediaId</code> en la{" "}
+            <a
+              href="/admin/contenido/medios"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-medium text-primary underline underline-offset-4"
+            >
+              Mediateca
+              <span className="sr-only"> (se abre en una nueva pestaña)</span>
+            </a>
+            .
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -322,7 +376,7 @@ export function CmsPageForm({
       submitLabel={page ? "Guardar página" : "Crear página"}
       className="space-y-5 rounded-xl border border-border bg-card p-5"
     >
-      {(values) => (
+      {(values, pending) => (
         <>
           {page ? <input type="hidden" name="pageId" value={page.id} /> : null}
           {page && liveEdit ? <input type="hidden" name="liveEdit" value="1" /> : null}
@@ -331,8 +385,11 @@ export function CmsPageForm({
             values={values}
             idPrefix={idPrefix}
             openGraphImage={openGraphImage}
+            disabled={pending}
           />
-          {!page ? <BlockFields values={values} idPrefix="initial-block" /> : null}
+          {!page ? (
+            <BlockFields values={values} idPrefix="initial-block" disabled={pending} />
+          ) : null}
         </>
       )}
     </StatefulForm>
@@ -346,24 +403,33 @@ export function CmsAddBlockForm({ pageId }: { pageId: string }) {
       submitLabel="Añadir bloque en borrador"
       className="space-y-4"
     >
-      {(values) => (
+      {(values, pending) => (
         <>
           <input type="hidden" name="pageId" value={pageId} />
-          <BlockFields values={values} idPrefix="new-block" />
+          <BlockFields values={values} idPrefix="new-block" disabled={pending} />
         </>
       )}
     </StatefulForm>
   );
 }
 
-export function CmsNewVersionForm({ blockId, content }: { blockId: string; content: string }) {
+export function CmsNewVersionForm({
+  blockId,
+  content,
+  srSuffix,
+}: {
+  blockId: string;
+  content: string;
+  srSuffix?: string;
+}) {
   return (
     <StatefulForm
       action={createCmsVersionAction}
       submitLabel="Crear nueva versión"
+      srSuffix={srSuffix}
       className="space-y-3"
     >
-      {(values) => {
+      {(values, pending) => {
         const currentContent = values?.content ?? content;
         return (
           <>
@@ -371,11 +437,11 @@ export function CmsNewVersionForm({ blockId, content }: { blockId: string; conte
             <div className="space-y-2">
               <Label htmlFor={`version-${blockId}`}>Contenido de la nueva versión</Label>
               <textarea
-                key={`version-${blockId}-${currentContent}`}
                 id={`version-${blockId}`}
                 name="content"
                 defaultValue={currentContent}
                 required
+                disabled={pending}
                 rows={7}
                 className={`${inputClass} font-mono`}
               />
@@ -387,18 +453,34 @@ export function CmsNewVersionForm({ blockId, content }: { blockId: string; conte
   );
 }
 
-export function CmsPublishVersionForm({ versionId }: { versionId: string }) {
+export function CmsPublishVersionForm({
+  versionId,
+  srSuffix,
+}: {
+  versionId: string;
+  srSuffix?: string;
+}) {
   return (
-    <StatefulForm action={publishCmsVersionAction} submitLabel="Publicar ahora">
+    <StatefulForm action={publishCmsVersionAction} submitLabel="Publicar ahora" srSuffix={srSuffix}>
       {() => <input type="hidden" name="versionId" value={versionId} />}
     </StatefulForm>
   );
 }
 
-export function CmsScheduleVersionForm({ versionId }: { versionId: string }) {
+export function CmsScheduleVersionForm({
+  versionId,
+  srSuffix,
+}: {
+  versionId: string;
+  srSuffix?: string;
+}) {
   return (
-    <StatefulForm action={scheduleCmsVersionAction} submitLabel="Programar versión">
-      {(values) => {
+    <StatefulForm
+      action={scheduleCmsVersionAction}
+      submitLabel="Programar versión"
+      srSuffix={srSuffix}
+    >
+      {(values, pending) => {
         const effectiveAtDefault = values?.effectiveAt ?? "";
         return (
           <>
@@ -406,11 +488,11 @@ export function CmsScheduleVersionForm({ versionId }: { versionId: string }) {
             <div className="space-y-2">
               <Label htmlFor={`schedule-${versionId}`}>Fecha y hora (Colombia)</Label>
               <Input
-                key={`schedule-${versionId}-${effectiveAtDefault}`}
                 id={`schedule-${versionId}`}
                 name="effectiveAt"
                 type="datetime-local"
                 defaultValue={effectiveAtDefault}
+                disabled={pending}
                 required
               />
             </div>
@@ -432,7 +514,7 @@ export function CmsPublishPageForm({ pageId }: { pageId: string }) {
 export function CmsSchedulePageForm({ pageId }: { pageId: string }) {
   return (
     <StatefulForm action={scheduleCmsPageAction} submitLabel="Programar página">
-      {(values) => {
+      {(values, pending) => {
         const scheduledForDefault = values?.scheduledFor ?? "";
         return (
           <>
@@ -440,11 +522,11 @@ export function CmsSchedulePageForm({ pageId }: { pageId: string }) {
             <div className="space-y-2">
               <Label htmlFor={`schedule-page-${pageId}`}>Fecha y hora (Colombia)</Label>
               <Input
-                key={`schedule-page-${pageId}-${scheduledForDefault}`}
                 id={`schedule-page-${pageId}`}
                 name="scheduledFor"
                 type="datetime-local"
                 defaultValue={scheduledForDefault}
+                disabled={pending}
                 required
               />
             </div>
@@ -467,13 +549,15 @@ export function CmsReorderForm({
   pageId,
   blockIds,
   label,
+  srSuffix,
 }: {
   pageId: string;
   blockIds: readonly string[];
   label: string;
+  srSuffix?: string;
 }) {
   return (
-    <StatefulForm action={reorderCmsBlocksAction} submitLabel={label}>
+    <StatefulForm action={reorderCmsBlocksAction} submitLabel={label} srSuffix={srSuffix}>
       {() => (
         <>
           <input type="hidden" name="pageId" value={pageId} />
@@ -484,11 +568,20 @@ export function CmsReorderForm({
   );
 }
 
-export function CmsVisibilityForm({ blockId, isVisible }: { blockId: string; isVisible: boolean }) {
+export function CmsVisibilityForm({
+  blockId,
+  isVisible,
+  srSuffix,
+}: {
+  blockId: string;
+  isVisible: boolean;
+  srSuffix?: string;
+}) {
   return (
     <StatefulForm
       action={setCmsBlockVisibilityAction}
       submitLabel={isVisible ? "Ocultar bloque" : "Mostrar bloque"}
+      srSuffix={srSuffix}
     >
       {() => (
         <>
@@ -507,7 +600,7 @@ export function StoreSettingsForm({ settings }: { settings: StoreSettingsInput }
       submitLabel="Guardar configuración"
       className="grid gap-5 rounded-xl border border-border bg-card p-5 sm:grid-cols-2"
     >
-      {(values) => {
+      {(values, pending) => {
         const regimeDefault = values?.taxRegime ?? settings.taxRegime;
         const thresholdDefault =
           values?.annualRevenueAlertUvt ?? String(settings.annualRevenueAlertUvt);
@@ -533,10 +626,10 @@ export function StoreSettingsForm({ settings }: { settings: StoreSettingsInput }
             <div className="space-y-2">
               <Label htmlFor="settings-regime">Régimen tributario</Label>
               <Select
-                key={`settings-regime-${regimeDefault}`}
                 id="settings-regime"
                 name="taxRegime"
                 defaultValue={regimeDefault}
+                disabled={pending}
               >
                 <option value="NO_RESPONSABLE_IVA">No responsable de IVA</option>
                 <option value="RESPONSABLE_IVA">Responsable de IVA</option>
@@ -545,140 +638,140 @@ export function StoreSettingsForm({ settings }: { settings: StoreSettingsInput }
             <div className="space-y-2">
               <Label htmlFor="settings-threshold">Alerta de ingresos anuales (UVT)</Label>
               <Input
-                key={`settings-threshold-${thresholdDefault}`}
                 id="settings-threshold"
                 name="annualRevenueAlertUvt"
                 type="number"
                 min="1"
                 defaultValue={thresholdDefault}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-currency">Moneda ISO</Label>
               <Input
-                key={`settings-currency-${currencyDefault}`}
                 id="settings-currency"
                 name="currency"
                 defaultValue={currencyDefault}
                 maxLength={3}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-timezone">Zona horaria IANA</Label>
               <Input
-                key={`settings-timezone-${timeZoneDefault}`}
                 id="settings-timezone"
                 name="timeZone"
                 defaultValue={timeZoneDefault}
                 maxLength={64}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-prefix">Prefijo de orden</Label>
               <Input
-                key={`settings-prefix-${prefixDefault}`}
                 id="settings-prefix"
                 name="orderNumberPrefix"
                 defaultValue={prefixDefault}
                 maxLength={12}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-padding">Dígitos del consecutivo</Label>
               <Input
-                key={`settings-padding-${paddingDefault}`}
                 id="settings-padding"
                 name="orderNumberPadding"
                 type="number"
                 min="1"
                 max="12"
                 defaultValue={paddingDefault}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-uvt-value">UVT en centavos COP</Label>
               <Input
-                key={`settings-uvt-value-${uvtValueDefault}`}
                 id="settings-uvt-value"
                 name="uvtValueCents"
                 inputMode="numeric"
                 pattern="[0-9]+"
                 defaultValue={uvtValueDefault}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-uvt-year">Año de la UVT</Label>
               <Input
-                key={`settings-uvt-year-${uvtYearDefault}`}
                 id="settings-uvt-year"
                 name="uvtYear"
                 type="number"
                 min="2000"
                 max="9999"
                 defaultValue={uvtYearDefault}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-shipping">Envío estándar (centavos COP)</Label>
               <Input
-                key={`settings-shipping-${shippingDefault}`}
                 id="settings-shipping"
                 name="standardShippingCents"
                 inputMode="numeric"
                 pattern="[0-9]+"
                 defaultValue={shippingDefault}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-promise">Promesa de entrega (días calendario)</Label>
               <Input
-                key={`settings-promise-${promiseDefault}`}
                 id="settings-promise"
                 name="deliveryPromiseDays"
                 type="number"
                 min="1"
                 max="365"
                 defaultValue={promiseDefault}
+                disabled={pending}
                 required
               />
             </div>
             <div className="space-y-2">
               <Label htmlFor="settings-reservation">Reserva de inventario (minutos)</Label>
               <Input
-                key={`settings-reservation-${reservationDefault}`}
                 id="settings-reservation"
                 name="reservationMinutes"
                 type="number"
                 min="5"
                 max="10080"
                 defaultValue={reservationDefault}
+                disabled={pending}
                 required
               />
             </div>
             <label className="flex min-h-11 items-center gap-3 text-sm font-medium">
               <input
-                key={`settings-cac-${String(clickAndCollectDefault)}`}
                 type="checkbox"
                 name="clickAndCollectEnabled"
                 defaultChecked={clickAndCollectDefault}
+                disabled={pending}
                 className="size-4 accent-primary"
               />
-              Habilitar Click & Collect
+              Habilitar recogida en sede
             </label>
             <label className="flex min-h-11 items-center gap-3 text-sm font-medium">
               <input
-                key={`settings-flex-${String(localDeliveryDefault)}`}
                 type="checkbox"
                 name="localDeliveryEnabled"
                 defaultChecked={localDeliveryDefault}
+                disabled={pending}
                 className="size-4 accent-primary"
               />
               Habilitar entrega local Flex
@@ -797,8 +890,8 @@ export function CmsMediaUploadForm() {
         <div role="alert" className="space-y-2 text-sm text-destructive">
           <p>{status.message}</p>
           {status.code === "mfa_stale" ? (
-            <a href="/admin/seguridad" className="font-medium text-primary underline">
-              Confirmar autenticador en seguridad
+            <a href="#admin-step-up-prompt" className="font-medium text-primary underline">
+              Confirmar autenticador arriba
             </a>
           ) : null}
           {status.code === "unauthorized" ? (
@@ -812,11 +905,24 @@ export function CmsMediaUploadForm() {
   );
 }
 
-export function CmsMediaEditForm({ mediaId, altText }: { mediaId: string; altText: string }) {
+export function CmsMediaEditForm({
+  mediaId,
+  altText,
+  filename,
+}: {
+  mediaId: string;
+  altText: string;
+  filename?: string;
+}) {
+  const srSuffix = filename ? ` (${filename})` : undefined;
   return (
     <div className="space-y-3">
-      <StatefulForm action={updateCmsMediaAltAction} submitLabel="Guardar texto alternativo">
-        {(values) => {
+      <StatefulForm
+        action={updateCmsMediaAltAction}
+        submitLabel="Guardar texto alternativo"
+        srSuffix={srSuffix}
+      >
+        {(values, pending) => {
           const currentAlt = values?.altText ?? altText;
           return (
             <>
@@ -824,11 +930,11 @@ export function CmsMediaEditForm({ mediaId, altText }: { mediaId: string; altTex
               <div className="space-y-2">
                 <Label htmlFor={`alt-${mediaId}`}>Texto alternativo</Label>
                 <Input
-                  key={`alt-${mediaId}-${currentAlt}`}
                   id={`alt-${mediaId}`}
                   name="altText"
                   defaultValue={currentAlt}
                   required
+                  disabled={pending}
                   maxLength={250}
                 />
               </div>
@@ -836,7 +942,11 @@ export function CmsMediaEditForm({ mediaId, altText }: { mediaId: string; altTex
           );
         }}
       </StatefulForm>
-      <StatefulForm action={archiveCmsMediaAction} submitLabel="Archivar activo">
+      <StatefulForm
+        action={archiveCmsMediaAction}
+        submitLabel="Archivar activo"
+        srSuffix={srSuffix}
+      >
         {() => <input type="hidden" name="mediaId" value={mediaId} />}
       </StatefulForm>
     </div>

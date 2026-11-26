@@ -37,7 +37,10 @@ export default async function CustomerLoginPage({ searchParams }: PageProps<"/in
             Recupera tu contraseña
           </Link>
           <span className="mx-2">·</span>
-          <Link className="text-primary underline" href="/registro">
+          <Link
+            className="text-primary underline"
+            href={next ? `/registro?next=${encodeURIComponent(next)}` : "/registro"}
+          >
             Crea una cuenta
           </Link>
         </>

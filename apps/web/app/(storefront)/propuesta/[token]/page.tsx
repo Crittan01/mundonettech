@@ -48,9 +48,9 @@ export default async function ProposalPage({ params }: PageProps<"/propuesta/[to
     }
   }
   const canAccept = Boolean(preview?.cart.canContinue);
-  if (preview && preview.homeDelivery.totalCents !== proposal.totalCents) {
-    throw new Error("Proposal and checkout totals diverge.");
-  }
+  const totalsDiverged = Boolean(
+    preview && preview.homeDelivery.totalCents !== proposal.totalCents,
+  );
   const maskedContactName = `${maskName(proposal.contact.givenName)} ${maskName(proposal.contact.familyName)}`;
   const maskedEmail = maskEmail(proposal.contact.email);
   const maskedPhone = maskPhone(proposal.contact.phoneE164);
@@ -155,19 +155,54 @@ export default async function ProposalPage({ params }: PageProps<"/propuesta/[to
           </Link>
         </section>
       ) : !proposal.available || !preview ? (
-        <section role="alert" className="rounded-xl border border-warning bg-card p-6">
+        <section role="alert" className="space-y-3 rounded-xl border border-warning bg-card p-6">
           <h2 className="text-xl font-semibold">Esta versión no admite aceptación</h2>
-          <p className="mt-2 text-muted-foreground">
+          <p className="text-muted-foreground">
             Solicita a tu asesor un enlace vigente. No se creó ningún pedido desde esta pantalla.
           </p>
+          <div className="flex flex-wrap gap-4 pt-1 text-sm font-medium">
+            <Link href="/empresas" className="text-primary underline">
+              Solicitar nueva propuesta B2B
+            </Link>
+            <Link href="/ayuda" className="text-primary underline">
+              Ir al Centro de ayuda
+            </Link>
+          </div>
+        </section>
+      ) : totalsDiverged ? (
+        <section role="alert" className="space-y-3 rounded-xl border border-warning bg-card p-6">
+          <h2 className="text-xl font-semibold">
+            Los valores de la propuesta requieren actualización
+          </h2>
+          <p className="text-muted-foreground">
+            Las condiciones vigentes de entrega o impuestos cambiaron respecto al total sellado en
+            esta versión. Solicita a tu asesor comercial una propuesta actualizada; no se creó
+            ningún pedido ni reserva.
+          </p>
+          <div className="flex flex-wrap gap-4 pt-1 text-sm font-medium">
+            <Link href="/empresas" className="text-primary underline">
+              Solicitar nueva propuesta B2B
+            </Link>
+            <Link href="/ayuda" className="text-primary underline">
+              Ir al Centro de ayuda
+            </Link>
+          </div>
         </section>
       ) : !canAccept ? (
-        <section role="alert" className="rounded-xl border border-warning bg-card p-6">
+        <section role="alert" className="space-y-3 rounded-xl border border-warning bg-card p-6">
           <h2 className="text-xl font-semibold">La disponibilidad cambió</h2>
-          <p className="mt-2 text-muted-foreground">
+          <p className="text-muted-foreground">
             No hay existencias suficientes para toda la propuesta. Solicita una nueva versión; no se
             reservó stock ni se creó un pedido.
           </p>
+          <div className="flex flex-wrap gap-4 pt-1 text-sm font-medium">
+            <Link href="/empresas" className="text-primary underline">
+              Solicitar nueva propuesta B2B
+            </Link>
+            <Link href="/ayuda" className="text-primary underline">
+              Ir al Centro de ayuda
+            </Link>
+          </div>
         </section>
       ) : (
         <section className="rounded-xl border border-border bg-card p-6 sm:p-8">

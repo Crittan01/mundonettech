@@ -4,11 +4,10 @@ export default function AdminRootLayout({ children }: Readonly<{ children: React
   return (
     <Suspense
       fallback={
-        <main
-          className="flex min-h-screen items-center justify-center bg-secondary/30 px-6"
-          role="status"
-        >
-          <p className="text-sm text-muted-foreground">Verificando sesión administrativa…</p>
+        <main className="flex min-h-screen items-center justify-center bg-secondary/30 px-6">
+          <p role="status" className="text-sm text-muted-foreground">
+            Verificando sesión administrativa…
+          </p>
         </main>
       }
     >

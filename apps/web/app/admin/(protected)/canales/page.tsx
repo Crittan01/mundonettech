@@ -1,4 +1,6 @@
 import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
+import Link from "next/link";
+import { z } from "zod";
 
 import { ChannelAccountActions } from "@/components/admin/channel-account-actions";
 import {
@@ -11,6 +13,10 @@ import {
 import { ChannelConnectionForm } from "@/components/admin/channel-connection-form";
 import { ChannelOrderDashboardView } from "@/components/admin/channel-order-dashboard";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { single } from "@/lib/admin-search-params";
 import {
   channelAccountService,
   channelCatalogService,
@@ -49,14 +55,14 @@ const jobKindLabels: Record<string, string> = {
   PUBLISH: "Publicación",
   SYNC_CONTENT: "Contenido/estado",
   SYNC_PRICE: "Precio",
-  SYNC_LOCAL_STOCK: "Stock",
+  SYNC_LOCAL_STOCK: "Inventario",
   RECONCILE_REMOTE: "Conciliación",
 };
 const providerErrorLabels: Record<string, string> = {
   FULL_STOCK_DIVERGENCE:
-    "Mercado Libre Full reporta una cantidad distinta al snapshot local. Full solo se concilia por lectura; no se escribe desde la tienda.",
+    "Mercado Libre Full reporta una cantidad distinta a la instantánea local. Full solo se concilia por lectura; no se escribe desde la tienda.",
   REMOTE_DIVERGENCE:
-    "El precio, stock o identidad remota difiere del snapshot esperado. Revisa el vendedor antes de reintentar.",
+    "El precio, inventario o identidad remota difiere de la instantánea esperada. Revisa el vendedor antes de reintentar.",
   REMOTE_STATUS_DIVERGENCE:
     "El estado remoto en Mercado Libre difiere del esperado o está en revisión del proveedor. Revisa tu cuenta de vendedor antes de reintentar.",
   VERSION_DIVERGENCE:
@@ -64,7 +70,7 @@ const providerErrorLabels: Record<string, string> = {
   PROVIDER_UNCERTAIN:
     "Mercado Libre no confirmó un resultado duradero. Concilia por SKU antes de cualquier reintento.",
   VERSION_CONFLICT:
-    "El stock cambió durante la escritura. El worker releerá x-version antes de reintentar.",
+    "El inventario cambió durante la escritura. El proceso en segundo plano releerá x-version antes de reintentar.",
   ACCOUNT_DISCONNECTED:
     "La cuenta fue desvinculada; reconectarla no reactiva publicaciones automáticamente.",
   UNAUTHORIZED: "Mercado Libre rechazó el token. Reconecta la cuenta antes de continuar.",
@@ -112,34 +118,81 @@ function maskedSeller(value: string): string {
   return `${value.slice(0, 2)}••••${value.slice(-2)}`;
 }
 
+const jobFailureShortLabels: Record<string, string> = {
+  FULL_STOCK_DIVERGENCE: "Divergencia de inventario en Mercado Libre Full",
+  REMOTE_DIVERGENCE: "Divergencia frente al estado remoto",
+  REMOTE_STATUS_DIVERGENCE: "Divergencia de estado remoto",
+  VERSION_DIVERGENCE: "Cambios locales pendientes de sincronización",
+  PROVIDER_UNCERTAIN: "Resultado incierto del proveedor",
+  VERSION_CONFLICT: "Conflicto de versión de inventario remoto",
+  ACCOUNT_DISCONNECTED: "Cuenta desvinculada",
+  UNAUTHORIZED: "Token rechazado por Mercado Libre",
+  REMOTE_REVOCATION_UNCERTAIN: "Revocación remota sin confirmar",
+  REFRESH_GRANT_INVALID: "Autorización invalidada",
+  PROVIDER_REJECTED: "Datos rechazados por Mercado Libre",
+  RATE_LIMITED: "Límite de solicitudes del proveedor",
+  CLAIM_EXPIRED: "Reclamo de trabajo expirado",
+};
+
+const allowedListingStatuses = [
+  "DRAFT",
+  "ACTIVE",
+  "PAUSED",
+  "RECONCILE_REQUIRED",
+  "CLOSED",
+] as const;
+
 function providerErrorMessage(code: string): string {
   return (
     providerErrorLabels[code] ??
-    "La última operación no terminó correctamente. Revisa el job y concilia antes de reintentar."
+    "La última operación no terminó correctamente. Revisa el trabajo y concilia antes de reintentar."
   );
 }
 
-export default async function ChannelsPage({
-  searchParams,
-}: {
-  readonly searchParams: Promise<{ readonly oauth?: string | string[] }>;
-}) {
+function formatJobFailureCode(code: string): string {
+  const label = jobFailureShortLabels[code];
+  return label ? `${label} (${code})` : `Fallo registrado (${code})`;
+}
+
+export default async function ChannelsPage({ searchParams }: PageProps<"/admin/canales">) {
   const session = await requireAdminPage("integrations:read");
   const canWrite = hasAdminPermission(session.profile.role, "integrations:write");
   const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
   const canReconcile = canWrite && canReadFinance;
+  const params = await searchParams;
+  const q = (single(params.q) ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 100);
+  const rawEstado = single(params.estado) ?? "";
+  const estado = (allowedListingStatuses as readonly string[]).includes(rawEstado) ? rawEstado : "";
+  const rawCuenta = single(params.cuenta)?.trim() ?? "";
+  const cuenta = z.string().uuid().safeParse(rawCuenta).success ? rawCuenta : "";
   const catalog = channelCatalogService();
   const channelOrders = channelOrderService();
-  const [accounts, listings, variants, jobs, orderDashboard, environment, params] =
-    await Promise.all([
-      channelAccountService().listAccounts(session.profile.id),
-      catalog.listListings(session.profile.id),
-      canWrite ? catalog.listPublishableVariants(session.profile.id) : Promise.resolve([]),
-      catalog.listSyncJobs(session.profile.id),
-      channelOrders.dashboard(session.profile.id),
-      Promise.resolve(getIntegrationEnvironment()),
-      searchParams,
-    ]);
+  const [accounts, listings, variants, jobs, orderDashboard, environment] = await Promise.all([
+    channelAccountService().listAccounts(session.profile.id),
+    catalog.listListings(session.profile.id, cuenta || undefined),
+    canWrite ? catalog.listPublishableVariants(session.profile.id) : Promise.resolve([]),
+    catalog.listSyncJobs(session.profile.id),
+    channelOrders.dashboard(session.profile.id),
+    Promise.resolve(getIntegrationEnvironment()),
+  ]);
+  const normalizedQ = q.toLowerCase();
+  const filteredListings = listings.filter((listing) => {
+    if (estado && listing.status !== estado) return false;
+    if (!normalizedQ) return true;
+    return (
+      listing.familyName.toLowerCase().includes(normalizedQ) ||
+      listing.productName.toLowerCase().includes(normalizedQ) ||
+      listing.sku.toLowerCase().includes(normalizedQ) ||
+      (listing.externalUserProductId?.toLowerCase().includes(normalizedQ) ?? false) ||
+      listing.offers.some(
+        (offer) => offer.externalItemId?.toLowerCase().includes(normalizedQ) ?? false,
+      )
+    );
+  });
+  const hasListingFilters = Boolean(q || estado || cuenta);
   const locationEntries = canWrite
     ? await Promise.all(
         orderDashboard.orders
@@ -156,7 +209,7 @@ export default async function ChannelsPage({
   const locations = Object.fromEntries(locationEntries);
   const activeAccounts = accounts.filter((account) => account.status === "ACTIVE");
   const redirectUri = mercadoLibreOAuthRedirectUri();
-  const oauthKey = typeof params.oauth === "string" ? params.oauth : undefined;
+  const oauthKey = single(params.oauth);
   const outcome =
     oauthKey && Object.hasOwn(oauthMessages, oauthKey) ? oauthMessages[oauthKey] : undefined;
   return (
@@ -164,15 +217,22 @@ export default async function ChannelsPage({
       <div>
         <h1 className="text-3xl font-bold">Canales de venta</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
-          Conecta vendedores de Mercado Libre Colombia y administra User Products, ofertas, stock y
-          precios con trabajos persistentes. Ningún secreto aparece en descriptores, jobs ni
-          auditoría.
+          Conecta vendedores de Mercado Libre Colombia y administra User Products, ofertas,
+          inventario y precios con trabajos persistentes. Ningún secreto aparece en descriptores,
+          trabajos ni auditoría.
         </p>
+        {hasAdminPermission(session.profile.role, "integrations:read") ? (
+          <div className="mt-4 flex flex-wrap gap-4 text-sm">
+            <Link className="text-primary underline" href="/admin/integraciones">
+              Ir a integraciones y bóveda
+            </Link>
+          </div>
+        ) : null}
       </div>
       {outcome ? (
         <p
           role={outcome.error ? "alert" : "status"}
-          className={`rounded-xl border p-4 text-sm ${outcome.error ? "border-destructive text-destructive" : "border-success"}`}
+          className={`rounded-xl border bg-card p-4 text-sm ${outcome.error ? "border-destructive text-destructive" : "border-success"}`}
         >
           {outcome.message}
         </p>
@@ -199,7 +259,7 @@ export default async function ChannelsPage({
             Conectar una cuenta de Mercado Libre
           </h2>
           <p className="mt-2 mb-5 text-sm text-muted-foreground">
-            Registra una aplicación para MCO con el redirect URI fijo y habilita PKCE. El
+            Registra una aplicación para MCO con la URI de retorno fija y habilita PKCE. El
             intercambio ocurre exclusivamente entre servidores.
           </p>
           <ChannelConnectionForm environment={environment} redirectUri={redirectUri} />
@@ -308,12 +368,80 @@ export default async function ChannelsPage({
               User Products y ofertas
             </h2>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              Stock local y Full son independientes. Los jobs usan request hash, claims, x-version y
-              conciliación; un timeout nunca autoriza una creación ciega.
+              El inventario local y el de Full son independientes. Los trabajos usan huella de
+              solicitud, reclamos, x-version y conciliación; un tiempo agotado nunca autoriza una
+              creación ciega.
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Mostrando {filteredListings.length} de las últimas {listings.length} publicaciones
+              (ventana de hasta 100 más recientes · últimos {jobs.length} trabajos evaluados, hasta
+              100).
             </p>
           </div>
           {canWrite ? <ProcessChannelJobsButton /> : null}
         </div>
+        <form
+          key={`${q}|${estado}|${cuenta}`}
+          action="/admin/canales"
+          className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
+        >
+          <label htmlFor="channel-listings-q" className="sr-only">
+            Buscar publicaciones por SKU, producto o identificador
+          </label>
+          <Input
+            id="channel-listings-q"
+            name="q"
+            defaultValue={q}
+            maxLength={100}
+            placeholder="SKU, producto, User Product o ítem remoto"
+            className="min-w-56 flex-1"
+          />
+          <Select
+            name="estado"
+            defaultValue={estado}
+            aria-label="Filtrar publicaciones por estado"
+            fullWidth={false}
+          >
+            <option value="">Todos los estados</option>
+            {allowedListingStatuses.map((item) => (
+              <option key={item} value={item}>
+                {item === "ACTIVE"
+                  ? "Publicación activa"
+                  : item === "PAUSED"
+                    ? "Publicación pausada"
+                    : item === "DRAFT"
+                      ? "En borrador"
+                      : (statusLabels[item] ?? item)}
+              </option>
+            ))}
+          </Select>
+          {accounts.length > 0 ? (
+            <Select
+              name="cuenta"
+              defaultValue={cuenta}
+              aria-label="Filtrar publicaciones por cuenta"
+              fullWidth={false}
+            >
+              <option value="">Todas las cuentas</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label}
+                </option>
+              ))}
+            </Select>
+          ) : null}
+          <Button type="submit" variant="outline">
+            Filtrar
+          </Button>
+          {hasListingFilters ? (
+            <Link
+              href="/admin/canales"
+              className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+            >
+              Limpiar
+            </Link>
+          ) : null}
+        </form>
         {canWrite && activeAccounts.length > 0 ? (
           <details className="rounded-xl border border-border bg-card p-5">
             <summary className="cursor-pointer text-lg font-semibold">
@@ -332,16 +460,22 @@ export default async function ChannelsPage({
             Conecta una cuenta activa antes de preparar publicaciones.
           </p>
         ) : null}
-        {listings.length === 0 ? (
+        {filteredListings.length === 0 ? (
           <div className="rounded-xl border border-border bg-card p-8 text-center">
-            <h3 className="text-lg font-semibold">No hay publicaciones administradas</h3>
+            <h3 className="text-lg font-semibold">
+              {hasListingFilters
+                ? "No hay publicaciones que coincidan con estos filtros"
+                : "No hay publicaciones administradas"}
+            </h3>
             <p className="mt-2 text-sm text-muted-foreground">
-              Selecciona una variante real del catálogo para persistir su primer job de publicación.
+              {hasListingFilters
+                ? "Ajusta la búsqueda o limpia los filtros para consultar las últimas publicaciones."
+                : "Selecciona una variante real del catálogo para persistir su primer trabajo de publicación."}
             </p>
           </div>
         ) : (
           <ul className="space-y-6">
-            {listings.map((listing) => {
+            {filteredListings.map((listing) => {
               const listingJobs = jobs.filter((job) => job.listingId === listing.id).slice(0, 6);
               return (
                 <li
@@ -371,13 +505,13 @@ export default async function ChannelsPage({
                       <dd className="mt-1 font-mono">{listing.externalCategoryId}</dd>
                     </div>
                     <div>
-                      <dt>Stock local / remoto</dt>
+                      <dt>Inventario local / remoto</dt>
                       <dd className="mt-1">
                         {listing.localQuantity} / {listing.remoteLocalQuantity ?? "Sin lectura"}
                       </dd>
                     </div>
                     <div>
-                      <dt>Stock Full / x-version</dt>
+                      <dt>Inventario Full / x-version</dt>
                       <dd className="mt-1">
                         {listing.remoteFullQuantity ?? "Sin ubicación"} /{" "}
                         {listing.remoteStockVersion ?? "Sin lectura"}
@@ -458,7 +592,7 @@ export default async function ChannelsPage({
                   ) : null}
                   <details>
                     <summary className="cursor-pointer text-sm font-medium">
-                      Trabajos recientes ({listingJobs.length})
+                      Últimos {listingJobs.length} trabajos recientes (máx. 6)
                     </summary>
                     {listingJobs.length === 0 ? (
                       <p className="mt-3 text-sm text-muted-foreground">
@@ -473,7 +607,9 @@ export default async function ChannelsPage({
                             </span>{" "}
                             · {jobStatusLabels[job.status] ?? job.status} · intento {job.attempts}
                             {job.failureCode ? (
-                              <span className="ml-1 font-mono">· {job.failureCode}</span>
+                              <span className="mt-1 block text-destructive">
+                                {formatJobFailureCode(job.failureCode)}
+                              </span>
                             ) : null}
                             <span className="mt-1 block text-muted-foreground">
                               {dateFormatter.format(job.createdAt)}

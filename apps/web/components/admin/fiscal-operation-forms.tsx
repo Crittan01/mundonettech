@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { startTransition, useActionState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -37,7 +37,16 @@ export function FiscalOperationForm({
 }) {
   const [state, action, pending] = useActionState(actions[kind], initialActionState);
   return (
-    <form action={action} className="space-y-2">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-2"
+    >
       <input type="hidden" name={fields[kind]} value={id} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Procesando…" : label}

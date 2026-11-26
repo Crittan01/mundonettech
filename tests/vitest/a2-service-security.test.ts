@@ -318,10 +318,10 @@ describe("A6 — posventa admin con RBAC transaccional y mínima exposición", (
     });
     const reviews = vi.fn(async () => []);
     postSaleMocks.tx = {
-      returnRequest: { findMany: returns },
-      warrantyClaim: { findMany: warranties },
-      supportTicket: { findMany: tickets },
-      review: { findMany: reviews },
+      returnRequest: { findMany: returns, count: vi.fn(async () => 1) },
+      warrantyClaim: { findMany: warranties, count: vi.fn(async () => 0) },
+      supportTicket: { findMany: tickets, count: vi.fn(async () => 1) },
+      review: { findMany: reviews, count: vi.fn(async () => 0) },
     };
 
     const queue = await createService().queue(adminId);
@@ -350,7 +350,7 @@ describe("A6 — posventa admin con RBAC transaccional y mínima exposición", (
       expect(query).toBeDefined();
       return [];
     });
-    postSaleMocks.tx = { review: { findMany: reviewRows } };
+    postSaleMocks.tx = { review: { findMany: reviewRows, count: vi.fn(async () => 0) } };
     await createService().reviewQueue(adminId);
     expect(postSaleMocks.assertActor).toHaveBeenCalledWith(
       postSaleMocks.tx,

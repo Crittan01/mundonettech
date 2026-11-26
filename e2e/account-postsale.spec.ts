@@ -433,11 +433,11 @@ test("admin moderates RMA, reviews and support with recent MFA and publishes onl
   await transitionSelect.selectOption("APPROVE");
   await page.locator(`#return-note-${rmaId}`).fill("Retracto aprobado dentro de la ventana legal.");
   await returnForm.getByRole("button", { name: "Aplicar transición" }).click();
-  await expect(page.getByText("AWAITING_RETURN").first()).toBeVisible();
+  await expect(page.getByText("Esperando devolución").first()).toBeVisible();
   await transitionSelect.selectOption("RECEIVE");
   await page.locator(`#return-note-${rmaId}`).fill("Unidad recibida y serial verificado.");
   await returnForm.getByRole("button", { name: "Aplicar transición" }).click();
-  await expect(page.getByText("RECEIVED").first()).toBeVisible();
+  await expect(page.getByText("Recibida en bodega").first()).toBeVisible();
 
   await page.goto("/admin/resenas");
   const reviewCard = page.locator("article").filter({ hasText: "Compra verificada E2E" });
@@ -446,7 +446,7 @@ test("admin moderates RMA, reviews and support with recent MFA and publishes onl
     .getByLabel("Nota de moderación")
     .fill("Reseña real y apropiada para publicación.");
   await reviewCard.getByRole("button", { name: "Aplicar decisión" }).click();
-  await expect(reviewCard).toContainText("PUBLISHED");
+  await expect(reviewCard).toContainText("Publicada");
   await page.goto(`/producto/${order.productSlug}#resenas`);
   await expect(page.getByRole("heading", { name: "Compra verificada E2E" })).toBeVisible();
   const publicReviewCard = page

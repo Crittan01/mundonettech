@@ -70,7 +70,7 @@ export function ProposalAcceptanceForm({
       <input type="hidden" name="token" value={token} />
       <input type="hidden" name="reviewFingerprint" value={reviewFingerprint} />
       <input type="hidden" name="submissionId" value={submissionId} />
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Recepción y firma</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -114,6 +114,10 @@ export function ProposalAcceptanceForm({
               id="proposal-document-type"
               name="signerDocumentType"
               required
+              aria-invalid={state.fieldErrors?.signerDocumentType ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.signerDocumentType ? "proposal-document-type-error" : undefined
+              }
             >
               <option value="13">Cédula de ciudadanía</option>
               <option value="12">Tarjeta de identidad</option>
@@ -126,6 +130,10 @@ export function ProposalAcceptanceForm({
               <option value="50">NIT de otro país</option>
               <option value="91">Otro documento</option>
             </Select>
+            <FieldErrors
+              id="proposal-document-type-error"
+              messages={state.fieldErrors?.signerDocumentType}
+            />
           </div>
           <div className="space-y-2">
             <Label htmlFor="proposal-document-number">Número de documento</Label>
@@ -158,6 +166,12 @@ export function ProposalAcceptanceForm({
               id="proposal-buyer-document-type"
               name="buyerDocumentType"
               required
+              aria-invalid={state.fieldErrors?.buyerDocumentType ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.buyerDocumentType
+                  ? "proposal-buyer-document-type-error"
+                  : undefined
+              }
             >
               <option value="31">NIT</option>
               <option value="13">Cédula de ciudadanía</option>
@@ -166,6 +180,10 @@ export function ProposalAcceptanceForm({
               <option value="50">NIT de otro país</option>
               <option value="91">Otro documento</option>
             </Select>
+            <FieldErrors
+              id="proposal-buyer-document-type-error"
+              messages={state.fieldErrors?.buyerDocumentType}
+            />
           </div>
           <div className="space-y-2 sm:col-span-2">
             <Label htmlFor="proposal-tax-regime">Régimen de IVA del comprador</Label>
@@ -174,14 +192,22 @@ export function ProposalAcceptanceForm({
               id="proposal-tax-regime"
               name="buyerTaxRegime"
               required
+              aria-invalid={state.fieldErrors?.buyerTaxRegime ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.buyerTaxRegime ? "proposal-tax-regime-error" : undefined
+              }
             >
               <option value="NO_RESPONSABLE_IVA">No responsable de IVA</option>
               <option value="RESPONSABLE_IVA">Responsable de IVA</option>
             </Select>
+            <FieldErrors
+              id="proposal-tax-regime-error"
+              messages={state.fieldErrors?.buyerTaxRegime}
+            />
           </div>
         </div>
       </fieldset>
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Dirección de entrega</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -195,6 +221,10 @@ export function ProposalAcceptanceForm({
                 setMunicipalityCode("");
               }}
               required
+              aria-invalid={state.fieldErrors?.departmentCode ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.departmentCode ? "proposal-department-error" : undefined
+              }
             >
               <option value="">Selecciona un departamento</option>
               {departments.map((department) => (
@@ -203,6 +233,10 @@ export function ProposalAcceptanceForm({
                 </option>
               ))}
             </Select>
+            <FieldErrors
+              id="proposal-department-error"
+              messages={state.fieldErrors?.departmentCode}
+            />
           </div>
           <div className="space-y-2">
             <Label htmlFor="proposal-municipality">Municipio</Label>
@@ -213,6 +247,10 @@ export function ProposalAcceptanceForm({
               onChange={(event) => setMunicipalityCode(event.target.value)}
               disabled={!departmentCode}
               required
+              aria-invalid={state.fieldErrors?.municipalityCode ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.municipalityCode ? "proposal-municipality-error" : undefined
+              }
             >
               <option value="">Selecciona un municipio</option>
               {municipalitiesForDepartment.map((municipality) => (
@@ -221,6 +259,10 @@ export function ProposalAcceptanceForm({
                 </option>
               ))}
             </Select>
+            <FieldErrors
+              id="proposal-municipality-error"
+              messages={state.fieldErrors?.municipalityCode}
+            />
           </div>
           <div className="space-y-2 sm:col-span-2">
             <Label htmlFor="proposal-address">Dirección</Label>
@@ -246,7 +288,12 @@ export function ProposalAcceptanceForm({
               id="proposal-address-2"
               name="addressLine2"
               maxLength={200}
+              aria-invalid={state.fieldErrors?.addressLine2 ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.addressLine2 ? "proposal-address-2-error" : undefined
+              }
             />
+            <FieldErrors id="proposal-address-2-error" messages={state.fieldErrors?.addressLine2} />
           </div>
           <div className="space-y-2">
             <Label htmlFor="proposal-neighborhood">Barrio (opcional)</Label>
@@ -255,6 +302,14 @@ export function ProposalAcceptanceForm({
               id="proposal-neighborhood"
               name="neighborhood"
               maxLength={120}
+              aria-invalid={state.fieldErrors?.neighborhood ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.neighborhood ? "proposal-neighborhood-error" : undefined
+              }
+            />
+            <FieldErrors
+              id="proposal-neighborhood-error"
+              messages={state.fieldErrors?.neighborhood}
             />
           </div>
           <div className="space-y-2">
@@ -266,7 +321,10 @@ export function ProposalAcceptanceForm({
               inputMode="numeric"
               pattern="[0-9]{6}"
               maxLength={6}
+              aria-invalid={state.fieldErrors?.postalCode ? true : undefined}
+              aria-describedby={state.fieldErrors?.postalCode ? "proposal-postal-error" : undefined}
             />
+            <FieldErrors id="proposal-postal-error" messages={state.fieldErrors?.postalCode} />
           </div>
           <div className="space-y-2 sm:col-span-2">
             <Label htmlFor="proposal-notes">Indicaciones de entrega (opcional)</Label>
@@ -276,11 +334,17 @@ export function ProposalAcceptanceForm({
               name="deliveryNotes"
               maxLength={500}
               rows={3}
+              aria-invalid={state.fieldErrors?.deliveryNotes ? true : undefined}
+              aria-describedby={
+                state.fieldErrors?.deliveryNotes ? "proposal-notes-error" : undefined
+              }
             />
+            <FieldErrors id="proposal-notes-error" messages={state.fieldErrors?.deliveryNotes} />
           </div>
         </div>
       </fieldset>
-      <div className="space-y-3 text-sm">
+      <fieldset className="space-y-3 text-sm" disabled={pending}>
+        <legend className="sr-only">Declaraciones y consentimientos</legend>
         <label className="flex items-start gap-3">
           <input
             type="checkbox"
@@ -299,8 +363,10 @@ export function ProposalAcceptanceForm({
               href="/legal/terminos-y-condiciones"
               className="text-primary underline"
               target="_blank"
+              rel="noopener noreferrer"
             >
               términos y condiciones
+              <span className="sr-only"> (se abre en una nueva pestaña)</span>
             </Link>{" "}
             y las condiciones de esta versión.
           </span>
@@ -326,8 +392,10 @@ export function ProposalAcceptanceForm({
               href="/legal/tratamiento-datos-personales"
               className="text-primary underline"
               target="_blank"
+              rel="noopener noreferrer"
             >
               política de datos
+              <span className="sr-only"> (se abre en una nueva pestaña)</span>
             </Link>
             .
           </span>
@@ -349,12 +417,25 @@ export function ProposalAcceptanceForm({
             firma registrada es veraz.
           </span>
         </label>
-      </div>
+      </fieldset>
       <FormMessage state={state} />
-      <Button type="submit" size="lg" disabled={pending || !municipalityCode}>
+      {!municipalityCode ? (
+        <p id="proposal-submit-hint" className="text-xs text-muted-foreground">
+          Selecciona departamento y municipio para habilitar la firma de la propuesta.
+        </p>
+      ) : null}
+      <Button
+        type="submit"
+        size="lg"
+        disabled={pending || !municipalityCode}
+        aria-busy={pending}
+        aria-describedby={
+          !municipalityCode ? "proposal-submit-hint proposal-submit-note" : "proposal-submit-note"
+        }
+      >
         {pending ? "Validando y creando el pedido…" : "Firmar propuesta y crear pedido"}
       </Button>
-      <p className="text-xs text-muted-foreground">
+      <p id="proposal-submit-note" className="text-xs text-muted-foreground">
         La operación vuelve a validar precio, impuestos y existencias. El pedido quedará
         inicialmente pendiente de pago.
       </p>

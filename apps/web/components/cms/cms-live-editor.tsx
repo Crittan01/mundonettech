@@ -1,4 +1,4 @@
-import type { CmsPageView } from "@mundonettech/cms";
+import type { CmsBlockView, CmsPageView } from "@mundonettech/cms";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
@@ -31,6 +31,15 @@ const pageStatusLabels = {
   ARCHIVED: "Archivada",
 } as const;
 
+const blockTypeLabels: Record<CmsBlockView["type"], string> = {
+  HERO: "Portada principal",
+  RICH_TEXT: "Texto enriquecido",
+  IMAGE: "Imagen editorial",
+  CTA: "Llamado a la acción",
+  PRODUCT_GRID: "Cuadrícula de productos",
+  FAQ: "Preguntas frecuentes",
+};
+
 export async function CmsLiveEditor({
   slug,
   publicPage,
@@ -62,23 +71,23 @@ export async function CmsLiveEditor({
       <header className="space-y-5 rounded-2xl border border-border bg-card p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="text-sm font-semibold text-primary">Live Edit</p>
+            <p className="text-sm font-semibold text-primary">Edición en vivo</p>
             <h1 className="mt-1 text-3xl font-bold">{page.title}</h1>
             <p className="mt-2 text-sm text-muted-foreground">
               {pageStatusLabels[page.status]} · Las versiones más recientes, incluidos borradores y
               bloques ocultos, solo son visibles en esta sesión editorial.
             </p>
           </div>
-          <nav aria-label="Acciones de Live Edit" className="flex flex-wrap gap-3 text-sm">
+          <nav aria-label="Acciones de edición en vivo" className="flex flex-wrap gap-3 text-sm">
             <Link
               href={`/pagina/${page.slug}`}
-              className="min-h-11 py-3 text-primary underline-offset-4 hover:underline"
+              className="inline-flex min-h-11 items-center rounded-sm py-3 text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
-              Salir de Live Edit
+              Salir de edición en vivo
             </Link>
             <Link
               href={`/admin/contenido/${page.id}`}
-              className="min-h-11 py-3 text-primary underline-offset-4 hover:underline"
+              className="inline-flex min-h-11 items-center rounded-sm py-3 text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
               Administración completa
             </Link>
@@ -121,7 +130,8 @@ export async function CmsLiveEditor({
           <article key={block.id} className="space-y-4 rounded-xl border border-border bg-card p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h3 className="font-semibold">
-                {block.type} · posición {block.position + 1} · v{block.version}
+                {blockTypeLabels[block.type]} ({block.type} · posición {block.position + 1} · v
+                {block.version})
               </h3>
               <div className="flex flex-wrap items-end gap-3">
                 {index > 0 ? (
@@ -169,7 +179,9 @@ export async function CmsLiveEditor({
           </p>
         ) : null}
         <details className="rounded-xl border border-border bg-card">
-          <summary className="cursor-pointer p-4 font-semibold">Añadir bloque</summary>
+          <summary className="min-h-11 cursor-pointer p-4 font-semibold outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
+            Añadir bloque
+          </summary>
           <div className="p-4 pt-0">
             <CmsAddBlockForm pageId={page.id} />
           </div>
@@ -185,7 +197,8 @@ export async function CmsLiveEditor({
             Vista previa de la última versión
           </h2>
           <p className="mt-2 text-sm text-muted-foreground">
-            Esta salida usa el mismo renderer, catálogo y mediateca que el storefront público.
+            Esta salida usa el mismo motor de presentación, catálogo y mediateca que la tienda
+            pública.
           </p>
         </div>
         <CmsPageRenderer page={page} preview />

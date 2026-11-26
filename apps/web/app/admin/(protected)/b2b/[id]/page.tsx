@@ -11,7 +11,7 @@ import {
 } from "@mundonettech/core";
 import { B2bError } from "@mundonettech/db";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { z } from "zod";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -21,6 +21,7 @@ import {
   B2bProposalBuilder,
   B2bProposalLifecycleForms,
 } from "@/components/admin/b2b-proposal-forms";
+import { crmSourceLabels } from "@/lib/admin-presenters";
 import { bogotaInputValue } from "@/lib/admin-pricing-presenters";
 import { b2bService } from "@/lib/b2b";
 import { getDatabase } from "@/lib/db";
@@ -41,6 +42,24 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+
+const copilotFailureLabels: Record<string, string> = {
+  CREDENTIAL_NOT_FOUND: "La credencial seleccionada no existe o no pertenece a este ambiente",
+  CREDENTIAL_REVOKED: "La credencial seleccionada fue revocada",
+  CREDENTIAL_INVALID: "La credencial de Google Gemini no tiene un formato válido",
+  PROVIDER_TIMEOUT: "Google Gemini superó el tiempo máximo de respuesta",
+  PROVIDER_RATE_LIMITED: "Límite de solicitudes alcanzado en Google Gemini",
+  PROVIDER_REJECTED: "Google Gemini rechazó la solicitud",
+  PROVIDER_ERROR: "Error temporal en Google Gemini",
+  INVALID_OUTPUT: "La respuesta del modelo no cumplió el contrato estructurado",
+  NETWORK_ERROR: "Error de red al consultar Google Gemini",
+  UNAUTHORIZED: "Google Gemini rechazó la autenticación de la llave API",
+};
+
+function formatCopilotFailure(code: string): string {
+  const description = copilotFailureLabels[code];
+  return description ? `${description} (${code})` : `Fallo de ejecución (${code})`;
+}
 
 function defaultExpiry(): string {
   return bogotaInputValue(new Date(Date.now() + 7 * 86_400_000));
@@ -88,6 +107,7 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
   const canWrite = hasAdminPermission(session.profile.role, "b2b:write");
   const canReadCrm = hasAdminPermission(session.profile.role, "crm:read");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
+  const canReadIntegrations = hasAdminPermission(session.profile.role, "integrations:read");
   const active = !["WON", "LOST", "CANCELLED"].includes(opportunity.status);
   let copilotAuthorized = false;
   if (canWrite) {
@@ -95,7 +115,17 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
       await getAdminSession({ permission: "b2b:write", requireRecentMfa: true });
       copilotAuthorized = true;
     } catch (error) {
-      if (!(error instanceof AdminAuthorizationError && error.code === "MFA_STALE")) throw error;
+      if (error instanceof AdminAuthorizationError) {
+        if (error.code === "MFA_STALE") {
+          copilotAuthorized = false;
+        } else if (error.code === "AAL1") {
+          redirect("/admin/login/mfa");
+        } else {
+          redirect(`/admin/login?reason=${error.code === "TIMEOUT" ? "timeout" : "security"}`);
+        }
+      } else {
+        throw error;
+      }
     }
   }
   const credentials = copilotAuthorized
@@ -120,7 +150,7 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
             {opportunityStatusLabels[opportunity.status]}
           </span>
         </div>
-        <p className="mt-2 text-sm text-muted-foreground">
+        <p className="mt-2 text-sm break-all text-muted-foreground">
           {canReadCrm ? (
             <Link href={`/admin/crm/${opportunity.contact.id}`} className="underline">
               {opportunity.contact.givenName} {opportunity.contact.familyName}
@@ -151,8 +181,8 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
           {opportunity.requirements}
         </p>
         <p className="mt-3 text-xs text-muted-foreground">
-          Fuente: {opportunity.source} · autorización registrada{" "}
-          {dateFormatter.format(opportunity.acceptedAt)}
+          Fuente: {crmSourceLabels[opportunity.source] ?? opportunity.source} · autorización
+          registrada {dateFormatter.format(opportunity.acceptedAt)}
         </p>
       </section>
       {canWrite && active ? (
@@ -198,7 +228,7 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
                 </p>
                 {proposal.priceListCodeSnapshot ? (
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Lista {proposal.priceListCodeSnapshot} · snapshot v
+                    Lista {proposal.priceListCodeSnapshot} · instantánea v
                     {proposal.priceListVersionSnapshot}
                   </p>
                 ) : null}
@@ -307,13 +337,18 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
               requestId={randomUUID()}
               credentials={credentials}
             />
-          ) : (
+          ) : canReadIntegrations ? (
             <p className="rounded-lg border border-border p-4 text-sm text-muted-foreground">
-              Configura una credencial Gemini en{" "}
+              Configura una credencial Google Gemini en{" "}
               <Link href="/admin/integraciones" className="text-primary underline">
                 Integraciones
               </Link>{" "}
               para habilitar el análisis real.
+            </p>
+          ) : (
+            <p className="rounded-lg border border-border p-4 text-sm text-muted-foreground">
+              Solicita a un rol con permisos de integraciones configurar una credencial Google
+              Gemini activa para habilitar el análisis real.
             </p>
           )
         ) : null}
@@ -348,7 +383,7 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
                     </p>
                   ) : null}
                   {run.failureCode ? (
-                    <p className="mt-2 text-destructive">Código seguro: {run.failureCode}</p>
+                    <p className="mt-2 text-destructive">{formatCopilotFailure(run.failureCode)}</p>
                   ) : null}
                 </li>
               );

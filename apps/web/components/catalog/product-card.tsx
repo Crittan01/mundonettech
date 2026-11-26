@@ -37,15 +37,35 @@ function cardImage(
   return null;
 }
 
+function buildCompareHref(
+  nextSlugs: readonly string[],
+  extraParams?: Readonly<Record<string, string>>,
+): string {
+  const parts: string[] = [];
+  if (nextSlugs.length > 0) {
+    parts.push(`productos=${encodeURIComponent(nextSlugs.join(","))}`);
+  }
+  if (extraParams) {
+    for (const [key, value] of Object.entries(extraParams)) {
+      if (value && key !== "productos") {
+        parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(value)}`);
+      }
+    }
+  }
+  return parts.length > 0 ? `/comparar?${parts.join("&")}` : "/comparar";
+}
+
 export function ProductCard({
   product,
   mediaOrigin,
   compareSlugs = [],
+  compareExtraParams,
   headingLevel = 2,
 }: {
   product: CatalogProductSummary;
   mediaOrigin: string | null;
   compareSlugs?: readonly string[];
+  compareExtraParams?: Readonly<Record<string, string>>;
   headingLevel?: 2 | 3 | 4;
 }) {
   const image = cardImage(product, mediaOrigin);
@@ -54,16 +74,13 @@ export function ProductCard({
   const nextSlugs = compared
     ? compareSlugs.filter((slug) => slug !== product.slug)
     : [...compareSlugs, product.slug];
-  const compareHref =
-    nextSlugs.length > 0
-      ? `/comparar?productos=${encodeURIComponent(nextSlugs.join(","))}`
-      : "/comparar";
+  const compareHref = buildCompareHref(nextSlugs, compareExtraParams);
   return (
     <article className="flex h-full flex-col overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-sm">
       <Link
         href={`/producto/${product.slug}`}
         prefetch={false}
-        className="relative block aspect-[4/3] bg-secondary outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+        className="relative block aspect-[4/3] bg-secondary outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         aria-label={`${image ? "" : "Imagen no disponible. "}Ver ${product.name}`}
       >
         {image ? (
@@ -86,14 +103,14 @@ export function ProductCard({
           <Link
             href={`/marca/${product.brand.slug}`}
             prefetch={false}
-            className="text-xs font-semibold tracking-wide text-muted-foreground uppercase hover:text-foreground"
+            className="inline-flex min-h-7 items-center rounded-sm py-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           >
             {product.brand.name}
           </Link>
           <Heading className="mt-1 text-lg leading-snug font-semibold">
             <Link
               href={`/producto/${product.slug}`}
-              className="outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+              className="rounded-sm outline-hidden hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
             >
               {product.name}
             </Link>
@@ -129,9 +146,10 @@ export function ProductCard({
             <Link
               href={compareHref}
               prefetch={false}
-              className="inline-flex min-h-10 items-center text-sm font-medium text-primary underline-offset-4 hover:underline"
+              className="inline-flex min-h-11 items-center rounded-sm text-sm font-medium text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
               {compared ? "Quitar del comparador" : "Añadir al comparador"}
+              <span className="sr-only">: {product.name}</span>
             </Link>
           ) : null}
         </div>

@@ -12,7 +12,7 @@ export default async function AccountPage() {
   const marketingEmail = account.marketingEmailGranted;
   const advertising = account.advertisingGranted;
   return (
-    <main className="space-y-8">
+    <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold">Mi cuenta</h1>
         <p className="mt-2 text-muted-foreground">
@@ -56,6 +56,6 @@ export default async function AccountPage() {
           }}
         />
       </section>
-    </main>
+    </div>
   );
 }

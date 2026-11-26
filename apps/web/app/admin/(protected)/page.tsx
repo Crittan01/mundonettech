@@ -1,4 +1,5 @@
 import { hasAdminPermission } from "@mundonettech/core";
+import Link from "next/link";
 
 import { getDatabase } from "@/lib/db";
 import { getDatabaseClock } from "@/lib/database-clock";
@@ -36,7 +37,7 @@ export default async function AdminDashboardPage() {
     ...(globalEvents === null ? [] : [{ label: "Eventos globales (24 h)", value: globalEvents }]),
     ...(pendingOutbox === null
       ? []
-      : [{ label: "Eventos pendientes en outbox", value: pendingOutbox }]),
+      : [{ label: "Eventos pendientes en la cola de salida", value: pendingOutbox }]),
   ];
   return (
     <div className="space-y-8">
@@ -58,6 +59,44 @@ export default async function AdminDashboardPage() {
       ) : (
         <p>No hay indicadores disponibles.</p>
       )}
+      <section
+        aria-labelledby="quick-links-title"
+        className="rounded-xl border border-border bg-card p-5"
+      >
+        <h2 id="quick-links-title" className="font-semibold">
+          Accesos rápidos
+        </h2>
+        <nav aria-label="Accesos rápidos administrativos" className="mt-4 flex flex-wrap gap-3">
+          <Link
+            href="/admin/hoy"
+            className="rounded-md border border-border bg-background px-4 py-2 text-sm font-medium hover:bg-accent"
+          >
+            Operación de hoy
+          </Link>
+          <Link
+            href="/admin/seguridad"
+            className="rounded-md border border-border bg-background px-4 py-2 text-sm font-medium hover:bg-accent"
+          >
+            Seguridad y MFA
+          </Link>
+          {hasAdminPermission(session.profile.role, "orders:read") ? (
+            <Link
+              href="/admin/pedidos"
+              className="rounded-md border border-border bg-background px-4 py-2 text-sm font-medium hover:bg-accent"
+            >
+              Pedidos
+            </Link>
+          ) : null}
+          {hasAdminPermission(session.profile.role, "audit:read") ? (
+            <Link
+              href="/admin/auditoria"
+              className="rounded-md border border-border bg-background px-4 py-2 text-sm font-medium hover:bg-accent"
+            >
+              Auditoría
+            </Link>
+          ) : null}
+        </nav>
+      </section>
       <section className="rounded-xl border border-border bg-card p-5">
         <h2 className="font-semibold">Tu sesión</h2>
         <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2">

@@ -23,54 +23,91 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const querySchema = z.object({
-  segmento: z.string().uuid().optional(),
-  cursor: z.string().uuid().optional(),
-});
+const uuidParamSchema = z.string().uuid().optional();
 
 export default async function SegmentsPage({ searchParams }: PageProps<"/admin/segmentos">) {
   const session = await requireAdminPage("crm:read");
   const raw = await searchParams;
-  const parsed = querySchema.safeParse({
-    segmento: single(raw.segmento),
-    cursor: single(raw.cursor),
-  });
+  const rawSegmento = single(raw.segmento) || undefined;
+  const rawCursor = single(raw.cursor) || undefined;
+  const parsedSegmento = uuidParamSchema.safeParse(rawSegmento);
+  const parsedCursor = uuidParamSchema.safeParse(rawCursor);
+  const paramsValid = parsedSegmento.success && parsedCursor.success;
+  const validSegmento = parsedSegmento.success ? parsedSegmento.data : undefined;
+  const validCursor = parsedCursor.success ? parsedCursor.data : undefined;
+
   const service = segmentationService();
-  const segments = await service.listSegments(session.profile.id, {
-    ...(parsed.success && parsed.data.cursor ? { cursor: parsed.data.cursor } : {}),
-  });
-  const detailResult =
-    parsed.success && parsed.data.segmento
-      ? await service.getSegmentDetail(session.profile.id, parsed.data.segmento).then(
-          (record) => ({ record, notFound: false }),
-          (error: unknown) => {
-            if (error instanceof LifecycleError && error.code === "NOT_FOUND") {
-              return { record: null, notFound: true };
-            }
-            throw error;
-          },
-        )
-      : null;
+  let invalidCursorFromDb = false;
+  const segments = parsedCursor.success
+    ? await service
+        .listSegments(session.profile.id, {
+          ...(validCursor ? { cursor: validCursor } : {}),
+        })
+        .catch((error: unknown) => {
+          if (
+            error instanceof LifecycleError &&
+            (error.code === "NOT_FOUND" || error.code === "VALIDATION")
+          ) {
+            invalidCursorFromDb = true;
+            return { items: [], nextCursor: null };
+          }
+          throw error;
+        })
+    : { items: [], nextCursor: null };
+  const detailResult = validSegmento
+    ? await service.getSegmentDetail(session.profile.id, validSegmento).then(
+        (record) => ({ record, notFound: false }),
+        (error: unknown) => {
+          if (error instanceof LifecycleError && error.code === "NOT_FOUND") {
+            return { record: null, notFound: true };
+          }
+          throw error;
+        },
+      )
+    : null;
   const detail = detailResult?.record ?? null;
   const detailNotFound = detailResult?.notFound ?? false;
+  const queryInvalid = !paramsValid || invalidCursorFromDb;
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
-  const nextParams = new URLSearchParams();
-  if (parsed.success && parsed.data.segmento) nextParams.set("segmento", parsed.data.segmento);
+  const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
+
+  const firstPageParams = new URLSearchParams();
+  if (validSegmento && !detailNotFound) firstPageParams.set("segmento", validSegmento);
+  const firstPageHref = firstPageParams.size
+    ? `/admin/segmentos?${firstPageParams.toString()}`
+    : "/admin/segmentos";
+
+  const nextParams = new URLSearchParams(firstPageParams);
   if (segments.nextCursor) nextParams.set("cursor", segments.nextCursor);
+
+  const openSegmentHref = (segmentId: string) => {
+    const params = new URLSearchParams();
+    params.set("segmento", segmentId);
+    if (validCursor && !invalidCursorFromDb) params.set("cursor", validCursor);
+    return `/admin/segmentos?${params.toString()}`;
+  };
+  const showClearFilters =
+    Boolean(rawSegmento) || Boolean(rawCursor) || queryInvalid || detailNotFound;
   return (
     <div className="space-y-10">
       <div>
         <h1 className="text-3xl font-bold">Segmentos y consentimiento</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Audiencias calculadas sobre capturas y reembolsos reales. Solo ingresan cuentas activas
-          con autorización comercial vigente y sin supresión de lifecycle.
+          con autorización comercial vigente y sin supresión de ciclo de vida.
         </p>
-        <div className="mt-4 flex gap-4 text-sm">
-          <Link className="underline" href="/admin/lifecycle">
-            Administrar journeys
+        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+          <Link className="text-primary underline" href="/admin/crm">
+            Abrir consola CRM 360°
           </Link>
-          {hasAdminPermission(session.profile.role, "finance:read") ? (
-            <Link className="underline" href="/admin/analitica-rfm">
+          <Link className="text-primary underline" href="/admin/fidelizacion">
+            Ver fidelización y referidos
+          </Link>
+          <Link className="text-primary underline" href="/admin/lifecycle">
+            Administrar recorridos de ciclo de vida
+          </Link>
+          {canReadFinance ? (
+            <Link className="text-primary underline" href="/admin/analitica-rfm">
               Ver analítica RFM/LTV
             </Link>
           ) : null}
@@ -94,10 +131,20 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
         </section>
       ) : null}
       <section aria-labelledby="segment-list" className="space-y-4">
-        <h2 id="segment-list" className="text-2xl font-semibold">
-          Segmentos persistidos
-        </h2>
-        {!parsed.success ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 id="segment-list" className="text-2xl font-semibold">
+            Segmentos persistidos
+          </h2>
+          {showClearFilters ? (
+            <Link
+              href="/admin/segmentos"
+              className="inline-flex min-h-11 items-center text-sm text-primary underline"
+            >
+              Limpiar filtros
+            </Link>
+          ) : null}
+        </div>
+        {queryInvalid ? (
           <p role="alert" className="text-sm text-destructive">
             El segmento o cursor solicitado no es válido.
           </p>
@@ -123,7 +170,9 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
                     </p>
                   </div>
                   <Button asChild variant="outline" size="sm">
-                    <Link href={`/admin/segmentos?segmento=${segment.id}`}>Abrir</Link>
+                    <Link href={openSegmentHref(segment.id)}>
+                      Abrir<span className="sr-only"> {segment.name}</span>
+                    </Link>
                   </Button>
                 </div>
                 <p className="mt-3 text-sm">{segment.description ?? "Sin descripción."}</p>
@@ -140,13 +189,22 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
             ))}
           </div>
         )}
-        {segments.nextCursor ? (
-          <Link
-            className="inline-flex underline"
-            href={`/admin/segmentos?${nextParams.toString()}`}
-          >
-            Página siguiente
-          </Link>
+        {rawCursor || segments.nextCursor ? (
+          <nav aria-label="Paginación de segmentos" className="flex flex-wrap items-center gap-4">
+            {rawCursor ? (
+              <Link className="text-sm text-primary underline" href={firstPageHref}>
+                Primera página
+              </Link>
+            ) : null}
+            {segments.nextCursor ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={`/admin/segmentos?${nextParams.toString()}`}
+              >
+                Página siguiente
+              </Link>
+            ) : null}
+          </nav>
         ) : null}
       </section>
       {detail ? (
@@ -182,7 +240,12 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
                 Todavía no hay cambios de membresía. Activa el segmento y ejecuta su evaluación.
               </p>
             ) : (
-              <div className="overflow-x-auto rounded-xl border border-border bg-card">
+              <div
+                role="region"
+                aria-label="Tabla de historial de membresía del segmento"
+                tabIndex={0}
+                className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
                 <table className="w-full min-w-[68rem] text-left text-sm">
                   <caption className="sr-only">
                     Historial auditable de membresía del segmento

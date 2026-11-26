@@ -115,17 +115,25 @@ function parseOffer(formData: FormData): ChannelOfferConfiguration {
   if (data.pricingMode === "MANUAL" && !wholeCopPattern.test(data.manualPriceCop)) {
     throw new ChannelCatalogError("INVALID_INPUT", "A manual offer requires a whole COP price.");
   }
-  return {
-    mode: data.pricingMode,
-    listingTypeId: data.listingTypeId,
-    fulfillment: data.logisticType === "FULFILLMENT",
-    commissionBps,
-    fixedFeeCents: cents(data.fixedFeeCop || "0"),
-    shippingCostCents: cents(data.shippingCostCop || "0"),
-    targetNetCents: data.pricingMode === "FORMULA" ? optionalCents(data.targetNetCop) : null,
-    manualPriceCents:
-      data.pricingMode === "MANUAL" ? optionalWholeCents(data.manualPriceCop) : null,
-  };
+  try {
+    return {
+      mode: data.pricingMode,
+      listingTypeId: data.listingTypeId,
+      fulfillment: data.logisticType === "FULFILLMENT",
+      commissionBps,
+      fixedFeeCents: cents(data.fixedFeeCop || "0"),
+      shippingCostCents: cents(data.shippingCostCop || "0"),
+      targetNetCents: data.pricingMode === "FORMULA" ? optionalCents(data.targetNetCop) : null,
+      manualPriceCents:
+        data.pricingMode === "MANUAL" ? optionalWholeCents(data.manualPriceCop) : null,
+    };
+  } catch (error) {
+    if (error instanceof ChannelCatalogError) throw error;
+    throw new ChannelCatalogError(
+      "INVALID_INPUT",
+      "The channel offer monetary amounts are invalid.",
+    );
+  }
 }
 
 const offerFieldNames = [

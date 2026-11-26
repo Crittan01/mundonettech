@@ -4,6 +4,7 @@ import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -21,6 +22,15 @@ const bogotaFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
   timeZone: "America/Bogota",
 });
+
+function contentHref(q: string, status: string | undefined, page: number): string {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (status) params.set("status", status);
+  if (page > 1) params.set("page", String(page));
+  const qs = params.toString();
+  return qs ? `/admin/contenido?${qs}` : "/admin/contenido";
+}
 
 export default async function AdminContentPage({ searchParams }: PageProps<"/admin/contenido">) {
   const session = await requireAdminPage("content:read");
@@ -61,28 +71,37 @@ export default async function AdminContentPage({ searchParams }: PageProps<"/adm
         </div>
       </div>
       <form
+        key={`${q}|${status ?? ""}`}
         action="/admin/contenido"
-        className="flex flex-wrap gap-3 rounded-xl border border-border bg-card p-4"
+        className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
       >
         <LabelledSearch value={q} />
-        <select
+        <Select
           name="status"
           defaultValue={status ?? ""}
           aria-label="Filtrar por estado editorial"
-          className="h-11 rounded-md border border-input bg-background px-3 text-sm"
+          fullWidth={false}
         >
           <option value="">Todos los estados</option>
           <option value="DRAFT">Borradores</option>
           <option value="SCHEDULED">Programadas</option>
           <option value="PUBLISHED">Publicadas</option>
           <option value="ARCHIVED">Archivadas</option>
-        </select>
+        </Select>
         <Button type="submit" variant="outline">
           Filtrar
         </Button>
+        {q || status ? (
+          <Link
+            href="/admin/contenido"
+            className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+          >
+            Limpiar
+          </Link>
+        ) : null}
       </form>
       <p role="status" className="text-sm text-muted-foreground">
-        {result.total} páginas
+        {result.total} {result.total === 1 ? "página" : "páginas"}
       </p>
       {result.items.length ? (
         <section className="space-y-3" aria-label="Páginas editoriales">
@@ -120,31 +139,25 @@ export default async function AdminContentPage({ searchParams }: PageProps<"/adm
           </p>
         </section>
       )}
-      <nav aria-label="Paginación editorial" className="flex items-center justify-between">
-        <span className="text-sm text-muted-foreground">
-          Página {result.page} de {result.totalPages}
-        </span>
-        <div className="flex gap-2">
-          {result.page > 1 ? (
-            <Button asChild variant="outline" size="sm">
-              <Link
-                href={`/admin/contenido?q=${encodeURIComponent(q)}&status=${status ?? ""}&page=${result.page - 1}`}
-              >
-                Anterior
-              </Link>
-            </Button>
-          ) : null}
-          {result.page < result.totalPages ? (
-            <Button asChild variant="outline" size="sm">
-              <Link
-                href={`/admin/contenido?q=${encodeURIComponent(q)}&status=${status ?? ""}&page=${result.page + 1}`}
-              >
-                Siguiente
-              </Link>
-            </Button>
-          ) : null}
-        </div>
-      </nav>
+      {result.total > 0 ? (
+        <nav aria-label="Paginación editorial" className="flex items-center justify-between">
+          <span className="text-sm text-muted-foreground">
+            Página {result.page} de {result.totalPages}
+          </span>
+          <div className="flex gap-2">
+            {result.page > 1 ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={contentHref(q, status, result.page - 1)}>Anterior</Link>
+              </Button>
+            ) : null}
+            {result.page < result.totalPages ? (
+              <Button asChild variant="outline" size="sm">
+                <Link href={contentHref(q, status, result.page + 1)}>Siguiente</Link>
+              </Button>
+            ) : null}
+          </div>
+        </nav>
+      ) : null}
     </div>
   );
 }

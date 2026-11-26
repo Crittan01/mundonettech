@@ -3,6 +3,7 @@ export {
   adminRing,
   adminRoles,
   canAssignAdminRole,
+  canManageDeliveryZones,
   hasAdminPermission,
   isAdminRole,
 } from "./rbac.js";

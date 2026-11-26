@@ -26,6 +26,11 @@ export const metadata: Metadata = {
     title: "Comparador de productos",
     description,
   },
+  twitter: {
+    card: "summary",
+    title: "Comparador de productos",
+    description,
+  },
 };
 
 const retractLabels = {
@@ -50,7 +55,7 @@ async function CompareResults({
         .filter(Boolean),
     ),
   ];
-  const rawCandidateQuery = typeof params.q === "string" ? params.q : "";
+  const rawCandidateQuery = Array.isArray(params.q) ? (params.q[0] ?? "") : (params.q ?? "");
   const candidateQuery = rawCandidateQuery
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .trim()
@@ -69,6 +74,15 @@ async function CompareResults({
   }
 
   const activeSlugs = comparison.products.map((product) => product.slug);
+  const compareExtraParams = candidateQuery ? { q: candidateQuery } : undefined;
+  const catalogExploreHref =
+    activeSlugs.length > 0
+      ? `/productos?comparar=${encodeURIComponent(activeSlugs.join(","))}`
+      : "/productos";
+  const clearSearchHref =
+    activeSlugs.length > 0
+      ? `/comparar?productos=${encodeURIComponent(activeSlugs.join(","))}`
+      : "/comparar";
   const candidates = await searchCatalog({
     ...(candidateQuery ? { q: candidateQuery } : {}),
     pageSize: 12,
@@ -79,7 +93,7 @@ async function CompareResults({
 
   return (
     <div className="space-y-8">
-      {comparison.products.length > 0 ? (
+      {comparison.products.length > 0 || slugs.length > 0 ? (
         <div className="flex justify-end">
           <Button asChild variant="outline" size="sm">
             <Link href="/comparar">Limpiar comparación</Link>
@@ -87,7 +101,10 @@ async function CompareResults({
         </div>
       ) : null}
       {error ? (
-        <p role="alert" className="rounded-xl border border-destructive p-4 text-destructive">
+        <p
+          role="alert"
+          className="rounded-xl border border-destructive bg-card p-4 text-destructive"
+        >
           {error}
         </p>
       ) : null}
@@ -102,17 +119,18 @@ async function CompareResults({
               product={product}
               mediaOrigin={mediaOrigin}
               compareSlugs={activeSlugs}
+              {...(compareExtraParams ? { compareExtraParams } : {})}
             />
           ))}
         </section>
-      ) : (
+      ) : !error ? (
         <section className="rounded-2xl border border-border bg-card p-8 text-center">
           <h2 className="text-xl font-semibold">Tu comparación está vacía</h2>
           <p className="mt-2 text-muted-foreground">
             Usa «Añadir al comparador» en una tarjeta para comenzar.
           </p>
         </section>
-      )}
+      ) : null}
       {comparison.products.length === 1 ? (
         <p
           role="status"
@@ -124,7 +142,8 @@ async function CompareResults({
       {comparison.products.length >= 2 ? (
         <section
           aria-labelledby="comparison-table-title"
-          className="overflow-x-auto rounded-xl border border-border"
+          tabIndex={0}
+          className="overflow-x-auto rounded-xl border border-border outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           <h2 id="comparison-table-title" className="sr-only">
             Comparación detallada
@@ -140,7 +159,10 @@ async function CompareResults({
                 </th>
                 {comparison.products.map((product) => (
                   <th scope="col" className="p-4" key={product.id}>
-                    <Link href={`/producto/${product.slug}`} className="hover:underline">
+                    <Link
+                      href={`/producto/${product.slug}`}
+                      className="rounded-sm outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                    >
                       {product.name}
                     </Link>
                   </th>
@@ -184,7 +206,9 @@ async function CompareResults({
                 </th>
                 {comparison.products.map((product) => (
                   <td className="p-4" key={product.id}>
-                    {product.available > 0 ? `${product.available} unidades` : "Sin unidades"}
+                    {product.available > 0
+                      ? `${product.available} ${product.available === 1 ? "unidad" : "unidades"}`
+                      : "Sin unidades"}
                   </td>
                 ))}
               </tr>
@@ -204,7 +228,7 @@ async function CompareResults({
                 </th>
                 {comparison.products.map((product) => (
                   <td className="p-4" key={product.id}>
-                    {product.warrantyMonths} meses
+                    {product.warrantyMonths} {product.warrantyMonths === 1 ? "mes" : "meses"}
                   </td>
                 ))}
               </tr>
@@ -243,7 +267,10 @@ async function CompareResults({
             </h2>
             <p className="mt-2 text-muted-foreground">
               Busca aquí o{" "}
-              <Link href="/productos" className="text-primary underline underline-offset-4">
+              <Link
+                href={catalogExploreHref}
+                className="rounded-sm text-primary underline underline-offset-4 outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              >
                 explora todo el catálogo
               </Link>
               .
@@ -257,7 +284,7 @@ async function CompareResults({
             {activeSlugs.length > 0 ? (
               <input type="hidden" name="productos" value={activeSlugs.join(",")} />
             ) : null}
-            <div className="min-w-64 flex-1 space-y-2">
+            <div className="w-full min-w-0 flex-1 space-y-2 sm:w-auto sm:min-w-64">
               <Label htmlFor="compare-q">Buscar producto para comparar</Label>
               <Input
                 id="compare-q"
@@ -270,6 +297,11 @@ async function CompareResults({
             <Button type="submit" variant="outline">
               Buscar
             </Button>
+            {candidateQuery.length > 0 ? (
+              <Button asChild variant="ghost">
+                <Link href={clearSearchHref}>Limpiar búsqueda</Link>
+              </Button>
+            ) : null}
           </form>
           {selectableCandidates.length ? (
             <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -279,6 +311,7 @@ async function CompareResults({
                   product={product}
                   mediaOrigin={mediaOrigin}
                   compareSlugs={activeSlugs}
+                  {...(compareExtraParams ? { compareExtraParams } : {})}
                   headingLevel={3}
                 />
               ))}

@@ -120,6 +120,8 @@ const reservedRedirectSourcePrefixes = [
   "/referido",
   "/propuesta",
   "/empresas",
+  "/productos",
+  "/comparar",
 ] as const;
 
 const reservedRedirectTargetPrefixes = [

@@ -13,14 +13,17 @@ export function ProductReviews({
   slug,
   reviews,
   variantId,
+  hasActiveCursor = false,
 }: {
   readonly slug: string;
   readonly reviews: PublicReviewsData;
   readonly variantId: string | undefined;
+  readonly hasActiveCursor?: boolean;
 }) {
   const nextQuery = new URLSearchParams();
   if (variantId) nextQuery.set("variant", variantId);
   if (reviews.nextCursor) nextQuery.set("reviewCursor", reviews.nextCursor);
+  const firstPageHref = `/producto/${slug}${variantId ? `?variant=${encodeURIComponent(variantId)}` : ""}#resenas`;
   return (
     <section aria-labelledby="reviews-public-title" id="resenas" className="space-y-5">
       <div>
@@ -52,13 +55,25 @@ export function ProductReviews({
           ))}
         </ol>
       ) : null}
-      {reviews.nextCursor ? (
-        <Link
-          href={`/producto/${slug}?${nextQuery.toString()}#resenas`}
-          className="inline-block rounded-md border border-input px-4 py-2 text-sm font-medium"
-        >
-          Ver siguiente página de reseñas
-        </Link>
+      {hasActiveCursor || reviews.nextCursor ? (
+        <div className="flex flex-wrap gap-3">
+          {hasActiveCursor ? (
+            <Link
+              href={firstPageHref}
+              className="inline-flex min-h-11 items-center rounded-md border border-input px-4 py-2 text-sm font-medium outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Volver a las primeras reseñas
+            </Link>
+          ) : null}
+          {reviews.nextCursor ? (
+            <Link
+              href={`/producto/${slug}?${nextQuery.toString()}#resenas`}
+              className="inline-flex min-h-11 items-center rounded-md border border-input px-4 py-2 text-sm font-medium outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              Ver siguiente página de reseñas
+            </Link>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );

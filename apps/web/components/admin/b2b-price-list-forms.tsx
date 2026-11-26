@@ -1,7 +1,7 @@
 "use client";
 
 import { formatCopCents } from "@mundonettech/core";
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,7 @@ import {
   updateB2bPriceListAction,
   upsertB2bPriceListItemAction,
 } from "@/lib/actions/admin-b2b";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 export interface B2bPriceListFormView {
   readonly id: string;
@@ -34,9 +34,11 @@ export interface B2bPriceListFormView {
 function PriceListFields({
   record,
   values,
+  disabled = false,
 }: {
   record?: B2bPriceListFormView;
   values?: Record<string, string> | undefined;
+  disabled?: boolean;
 }) {
   return (
     <>
@@ -48,6 +50,7 @@ function PriceListFields({
           defaultValue={values?.code ?? record?.code}
           minLength={3}
           maxLength={40}
+          disabled={disabled}
           required
         />
       </div>
@@ -59,6 +62,7 @@ function PriceListFields({
           defaultValue={values?.name ?? record?.name}
           minLength={2}
           maxLength={160}
+          disabled={disabled}
           required
         />
       </div>
@@ -70,6 +74,7 @@ function PriceListFields({
           defaultValue={values?.description ?? record?.description ?? ""}
           maxLength={500}
           rows={2}
+          disabled={disabled}
         />
       </div>
       <div className="space-y-2">
@@ -79,6 +84,7 @@ function PriceListFields({
           name="validFrom"
           type="datetime-local"
           defaultValue={values?.validFrom ?? record?.validFromInput}
+          disabled={disabled}
         />
       </div>
       <div className="space-y-2">
@@ -88,6 +94,7 @@ function PriceListFields({
           name="validTo"
           type="datetime-local"
           defaultValue={values?.validTo ?? record?.validToInput}
+          disabled={disabled}
         />
       </div>
     </>
@@ -96,9 +103,27 @@ function PriceListFields({
 
 export function B2bPriceListCreateForm() {
   const [state, action, pending] = useActionState(createB2bPriceListAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
-    <form action={action} className="grid gap-4 sm:grid-cols-2" aria-busy={pending}>
-      <PriceListFields values={state.values} />
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="grid gap-4 sm:grid-cols-2"
+      aria-busy={pending}
+    >
+      <PriceListFields values={state.values} disabled={pending} />
       <div className="sm:col-span-2">
         <FormMessage state={state} />
       </div>
@@ -112,10 +137,19 @@ export function B2bPriceListCreateForm() {
 export function B2bPriceListEditForm({ record }: { readonly record: B2bPriceListFormView }) {
   const [state, action, pending] = useActionState(updateB2bPriceListAction, initialActionState);
   return (
-    <form action={action} className="grid gap-4 sm:grid-cols-2" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="grid gap-4 sm:grid-cols-2"
+      aria-busy={pending}
+    >
       <input type="hidden" name="priceListId" value={record.id} />
       <input type="hidden" name="expectedVersion" value={record.version} />
-      <PriceListFields record={record} values={state.values} />
+      <PriceListFields record={record} values={state.values} disabled={pending} />
       <div className="sm:col-span-2">
         <FormMessage state={state} />
       </div>
@@ -138,7 +172,15 @@ export function B2bPriceListStatusForms({ record }: { readonly record: B2bPriceL
   return (
     <div className="space-y-3">
       {record.status === "DRAFT" ? (
-        <form action={activateAction}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (activating) return;
+            const formData = new FormData(event.currentTarget);
+            startTransition(() => activateAction(formData));
+          }}
+          aria-busy={activating}
+        >
           <input type="hidden" name="priceListId" value={record.id} />
           <input type="hidden" name="expectedVersion" value={record.version} />
           <Button type="submit" disabled={activating}>
@@ -148,7 +190,15 @@ export function B2bPriceListStatusForms({ record }: { readonly record: B2bPriceL
         </form>
       ) : null}
       {record.status !== "ARCHIVED" ? (
-        <form action={archiveAction}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (archiving) return;
+            const formData = new FormData(event.currentTarget);
+            startTransition(() => archiveAction(formData));
+          }}
+          aria-busy={archiving}
+        >
           <input type="hidden" name="priceListId" value={record.id} />
           <input type="hidden" name="expectedVersion" value={record.version} />
           <Button type="submit" variant="outline" disabled={archiving}>
@@ -169,9 +219,23 @@ export function B2bPriceListItemForm({
   readonly expectedVersion: number;
 }) {
   const [state, action, pending] = useActionState(upsertB2bPriceListItemAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
     <form
-      action={action}
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
       className="grid items-end gap-3 sm:grid-cols-[1fr_1fr_auto]"
       aria-busy={pending}
     >
@@ -184,6 +248,7 @@ export function B2bPriceListItemForm({
           name="sku"
           defaultValue={state.values?.sku}
           maxLength={64}
+          disabled={pending}
           required
         />
       </div>
@@ -195,6 +260,7 @@ export function B2bPriceListItemForm({
           defaultValue={state.values?.unitPrice}
           inputMode="numeric"
           pattern="[0-9]+"
+          disabled={pending}
           required
         />
       </div>
@@ -227,7 +293,15 @@ export function B2bRemovePriceListItemForm({
       <p className="text-sm">
         <span className="font-mono">{sku}</span> · {formatCopCents(priceCents)}
       </p>
-      <form action={action}>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (pending) return;
+          const formData = new FormData(event.currentTarget);
+          startTransition(() => action(formData));
+        }}
+        aria-busy={pending}
+      >
         <input type="hidden" name="priceListId" value={priceListId} />
         <input type="hidden" name="itemId" value={itemId} />
         <input type="hidden" name="expectedVersion" value={expectedVersion} />
@@ -262,7 +336,12 @@ export function B2bOrganizationAssignmentForm({
   const selected = activeLists.find((list) => list.id === selectedId);
   return (
     <form
-      action={action}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
       className="grid items-end gap-3 rounded-lg border border-border p-4 sm:grid-cols-[1fr_1fr_auto]"
       aria-busy={pending}
     >
@@ -277,6 +356,7 @@ export function B2bOrganizationAssignmentForm({
           name="priceListId"
           value={selectedId}
           onChange={(event) => setSelectedId(event.target.value)}
+          disabled={pending}
         >
           <option value="">Sin lista</option>
           {activeLists.map((list) => (

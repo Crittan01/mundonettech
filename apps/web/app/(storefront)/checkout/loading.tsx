@@ -5,6 +5,7 @@ export default function CheckoutLoading() {
       role="status"
       aria-live="polite"
     >
+      <span className="sr-only">Cargando proceso de compra…</span>
       <div className="text-center">
         <p className="font-medium">Validando carrito, impuestos y disponibilidad…</p>
         <p className="mt-2 text-sm text-muted-foreground">

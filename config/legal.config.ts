@@ -260,7 +260,7 @@ export const legalConfig = {
           "Al finalizar la conservación, el dato se elimina o anonimiza de manera que no pueda asociarse nuevamente a una persona. Si debe bloquearse por una controversia o requerimiento, se restringe su acceso y uso hasta que la causa termine.",
         ]),
         section("seguridad", "Medidas de seguridad", [
-          "Usamos RBAC, MFA para administración, sesiones firmadas y con expiración, RLS deny-by-default, bóveda de credenciales, minimización de datos, máscaras PII y registros de auditoría. Los respaldos se cifran y su recuperación se verifica operativamente.",
+          "Usamos control de acceso por roles, autenticación multifactor administrativa, sesiones firmadas con expiración, aislamiento estricto de datos por defecto, bóveda cifrada de credenciales, minimización de datos, enmascaramiento de datos personales y registros de auditoría. Los respaldos se cifran y su recuperación se verifica operativamente.",
           "Los accesos se limitan por necesidad de conocer. Ante una vulneración evaluamos alcance, riesgo y obligaciones de reporte, contenemos el incidente y documentamos las acciones correctivas.",
         ]),
         section("vigencia", "Vigencia y cambios", [
@@ -299,7 +299,7 @@ export const legalConfig = {
           "Meta Conversions API opera únicamente entre servidores cuando otorgas autorización publicitaria. No instala el píxel de Meta ni crea cookies publicitarias en tu navegador; recibe solo los hashes y datos de compra descritos en el aviso de privacidad.",
         ]),
         section("no-esenciales", "Cookies analíticas o publicitarias", [
-          "Actualmente no instalamos cookies analíticas o publicitarias no esenciales. Si se incorporan en el futuro, informaremos sus finalidades, duración y terceros antes de activarlas y solicitaremos consentimiento cuando sea exigible. Rechazar una cookie no esencial ni la autorización para Meta Conversions API impide una compra básica.",
+          "Actualmente no instalamos cookies analíticas o publicitarias no esenciales. Si se incorporan en el futuro, informaremos sus finalidades, duración y terceros antes de activarlas y solicitaremos consentimiento cuando sea exigible. Ni rechazar una cookie no esencial ni negar la autorización para Meta Conversions API impide realizar una compra.",
         ]),
         section("control", "Cómo controlarlas", [
           "Puedes borrar o bloquear cookies desde el navegador. Bloquear las estrictamente necesarias puede impedir el inicio de sesión o la finalización segura de una compra. Las preferencias de marketing pueden revocarse por los enlaces de baja y los canales de privacidad.",
@@ -327,7 +327,7 @@ export const legalConfig = {
         ),
         section("plazo", "Plazo para ejercerlo", [
           "Para bienes, el término máximo es de cinco días hábiles contados desde la entrega. El cálculo excluye sábados, domingos y los dieciocho festivos oficiales colombianos; si la entrega ocurre en un día no hábil, el cómputo comienza con el siguiente día hábil.",
-          "Conserva la evidencia de entrega y envía la comunicación a más tardar el día de vencimiento. Nuestro motor de SLA usa la zona America/Bogota para evitar diferencias de fecha del servidor.",
+          "Conserva la evidencia de entrega y envía la comunicación a más tardar el día de vencimiento. Los plazos se calculan con la hora oficial de Colombia (Bogotá, UTC-5) para evitar diferencias de fecha del servidor.",
         ]),
         section("excepciones", "Excepciones legales", [
           "La ley excluye determinados bienes y contratos, entre otros los personalizados, los que por naturaleza no puedan devolverse o se deterioren rápidamente, perecederos y bienes de uso personal. Una etiqueta de excepción no permite desconocer garantías ni derechos por defectos, falta de conformidad o información engañosa.",
@@ -445,7 +445,7 @@ export const legalConfig = {
           "Si la entrega supera el plazo pactado o el plazo legal aplicable, o el producto no está disponible, puedes terminar el contrato cuando proceda y obtener la devolución de las sumas pagadas sin retenciones indebidas.",
           "Para este supuesto, la devolución debe efectuarse en un máximo de quince días calendario. Te informaremos las opciones de pago para procesarla y conservaremos trazabilidad de la gestión.",
         ]),
-        section("recogida", "Click & Collect y entregas locales", [
+        section("recogida", "Recogida en tienda y entregas locales", [
           "Cuando la recogida esté habilitada, informaremos sede, horario, identificación y plazo para reclamar. Solo la persona autorizada en la orden o quien acredite la autorización podrá retirarla.",
           "Las entregas locales pueden tener zonas, cortes y condiciones específicas que se mostrarán antes del pago. Estas condiciones no reducen los derechos por retraso o indisponibilidad.",
         ]),

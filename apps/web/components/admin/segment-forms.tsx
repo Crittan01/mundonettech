@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { startTransition, useActionState } from "react";
 
 import {
   formatCopCentsForInput,
@@ -38,12 +38,14 @@ function NumberField({
   label,
   value,
   minimum = 0,
+  disabled = false,
 }: {
   id: string;
   name: string;
   label: string;
   value: string | number | null;
   minimum?: number;
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-2">
@@ -55,6 +57,7 @@ function NumberField({
         min={minimum}
         step={1}
         defaultValue={value ?? ""}
+        disabled={disabled}
         placeholder="Sin límite"
       />
     </div>
@@ -80,7 +83,16 @@ export function SegmentEditorForm({
   const values = state.values;
   const prefix = segment ? `segment-${segment.id}` : "segment-new";
   return (
-    <form action={action} className="space-y-4">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-4"
+    >
       {segment ? (
         <>
           <input type="hidden" name="segmentId" value={segment.id} />
@@ -97,6 +109,7 @@ export function SegmentEditorForm({
             minLength={2}
             maxLength={120}
             defaultValue={values?.name ?? segment?.name ?? ""}
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -105,6 +118,7 @@ export function SegmentEditorForm({
             id={`${prefix}-rfm`}
             name="rfmClass"
             defaultValue={values?.rfmClass ?? definition.rfmClass ?? ""}
+            disabled={pending}
           >
             <option value="">Cualquier clase</option>
             {Object.entries(rfmClassLabels).map(([value, label]) => (
@@ -122,6 +136,7 @@ export function SegmentEditorForm({
           name="description"
           maxLength={500}
           defaultValue={values?.description ?? segment?.description ?? ""}
+          disabled={pending}
           placeholder="Explica qué comunicación recibirá este grupo y por qué."
         />
       </div>
@@ -132,12 +147,14 @@ export function SegmentEditorForm({
           name="minFrequency"
           label="Frecuencia mínima"
           value={values !== undefined ? (values.minFrequency ?? "") : definition.minFrequency}
+          disabled={pending}
         />
         <NumberField
           id={`${prefix}-max-frequency`}
           name="maxFrequency"
           label="Frecuencia máxima"
           value={values !== undefined ? (values.maxFrequency ?? "") : definition.maxFrequency}
+          disabled={pending}
         />
       </fieldset>
       <fieldset className="grid gap-4 rounded-lg border border-border p-4 sm:grid-cols-2">
@@ -155,6 +172,7 @@ export function SegmentEditorForm({
                 ? (values.minNetLtvCop ?? "")
                 : formatCopCentsForInput(definition.minNetLtvCents)
             }
+            disabled={pending}
             placeholder="Sin mínimo"
           />
         </div>
@@ -171,6 +189,7 @@ export function SegmentEditorForm({
                 ? (values.maxNetLtvCop ?? "")
                 : formatCopCentsForInput(definition.maxNetLtvCents)
             }
+            disabled={pending}
             placeholder="Sin máximo"
           />
         </div>
@@ -187,6 +206,7 @@ export function SegmentEditorForm({
               : definition.lastPurchaseWithinDays
           }
           minimum={1}
+          disabled={pending}
         />
         <NumberField
           id={`${prefix}-older`}
@@ -197,6 +217,7 @@ export function SegmentEditorForm({
               ? (values.lastPurchaseOlderThanDays ?? "")
               : definition.lastPurchaseOlderThanDays
           }
+          disabled={pending}
         />
       </fieldset>
       <Button type="submit" disabled={pending}>
@@ -223,7 +244,23 @@ export function SegmentStateButtons({
   return (
     <div className="space-y-3">
       {segment.status !== "ARCHIVED" ? (
-        <form action={transition} className="flex flex-wrap gap-2">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (transitioning) return;
+            const submitter = (event.nativeEvent as SubmitEvent).submitter;
+            const formData = new FormData(event.currentTarget);
+            if (
+              (submitter instanceof HTMLButtonElement || submitter instanceof HTMLInputElement) &&
+              submitter.name
+            ) {
+              formData.append(submitter.name, submitter.value);
+            }
+            startTransition(() => transition(formData));
+          }}
+          aria-busy={transitioning}
+          className="flex flex-wrap gap-2"
+        >
           <input type="hidden" name="segmentId" value={segment.id} />
           <input type="hidden" name="expectedVersion" value={segment.version} />
           {segment.status === "DRAFT" ? (
@@ -244,7 +281,15 @@ export function SegmentStateButtons({
       ) : null}
       <FormMessage state={transitionState} />
       {segment.status === "ACTIVE" ? (
-        <form action={refresh}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (refreshing) return;
+            const formData = new FormData(event.currentTarget);
+            startTransition(() => refresh(formData));
+          }}
+          aria-busy={refreshing}
+        >
           <input type="hidden" name="segmentId" value={segment.id} />
           <Button type="submit" variant="secondary" disabled={refreshing}>
             {refreshing ? "Evaluando…" : "Evaluar miembros ahora"}

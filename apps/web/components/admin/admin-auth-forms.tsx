@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useActionState, useEffect, useState } from "react";
+import { startTransition, useActionState, useEffect, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { TurnstileField } from "@/components/auth/turnstile-field";
@@ -26,8 +26,18 @@ interface SecurityProps {
 
 export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(loginAdminAction, initialActionState);
+  const [email, setEmail] = useState("");
   return (
-    <form action={action} className="space-y-5">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-5"
+    >
       <div className="space-y-2">
         <Label htmlFor="email">Correo corporativo</Label>
         <Input
@@ -37,6 +47,9 @@ export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
           autoComplete="username"
           required
           maxLength={320}
+          value={email}
+          onChange={(event) => setEmail(event.target.value)}
+          disabled={pending}
         />
       </div>
       <div className="space-y-2">
@@ -48,6 +61,7 @@ export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
           autoComplete="current-password"
           required
           maxLength={128}
+          disabled={pending}
         />
       </div>
       <TurnstileField siteKey={siteKey} nonce={nonce} action="admin_login" state={state} />
@@ -59,7 +73,13 @@ export function AdminLoginForm({ siteKey, nonce }: SecurityProps) {
   );
 }
 
-export function RecoveryCodes({ codes }: { codes: string[] }) {
+export function RecoveryCodes({
+  codes,
+  returnHref = "/admin",
+}: {
+  codes: readonly string[];
+  returnHref?: string;
+}) {
   const [confirmed, setConfirmed] = useState(false);
   const [copyMessage, setCopyMessage] = useState("");
   async function copy() {
@@ -105,21 +125,23 @@ export function RecoveryCodes({ codes }: { codes: string[] }) {
       <label className="flex items-start gap-2 text-sm">
         <input
           type="checkbox"
-          className="mt-1"
+          className="mt-1 size-4 shrink-0 accent-primary"
           checked={confirmed}
           onChange={(event) => setConfirmed(event.target.checked)}
         />
         Guardé los códigos en un lugar seguro.
       </label>
-      <Button asChild disabled={!confirmed}>
-        <Link
-          aria-disabled={!confirmed}
-          tabIndex={confirmed ? 0 : -1}
-          href={confirmed ? "/admin" : "#"}
-        >
+      {confirmed ? (
+        <Button asChild>
+          <Link href={returnHref} prefetch={false}>
+            Continuar al panel
+          </Link>
+        </Button>
+      ) : (
+        <Button type="button" disabled>
           Continuar al panel
-        </Link>
-      </Button>
+        </Button>
+      )}
     </section>
   );
 }
@@ -172,7 +194,16 @@ export function AdminMfaForm({
             ) : null}
           </div>
         ) : null}
-        <form action={verifyAction} className="space-y-5">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (verifying) return;
+            const formData = new FormData(event.currentTarget);
+            startTransition(() => verifyAction(formData));
+          }}
+          aria-busy={verifying}
+          className="space-y-5"
+        >
           <input type="hidden" name="factorId" value={factorId} />
           <div className="space-y-2">
             <Label htmlFor="code">Código del autenticador</Label>
@@ -184,6 +215,7 @@ export function AdminMfaForm({
               pattern="[0-9]{6}"
               maxLength={6}
               required
+              disabled={verifying}
               className="text-center text-2xl tracking-[0.4em]"
             />
           </div>
@@ -195,14 +227,24 @@ export function AdminMfaForm({
         {canUseRecoveryCode ? (
           <button
             type="button"
-            className="text-sm text-primary underline"
+            aria-expanded={mode === "recovery"}
+            className="inline-flex min-h-11 items-center rounded-sm text-sm text-primary underline outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => setMode(mode === "recovery" ? "totp" : "recovery")}
           >
             {mode === "recovery" ? "Volver al autenticador" : "Usar un código de recuperación"}
           </button>
         ) : null}
         {canUseRecoveryCode && mode === "recovery" ? (
-          <form action={recoveryAction} className="space-y-3 border-t border-border pt-4">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (recovering) return;
+              const formData = new FormData(event.currentTarget);
+              startTransition(() => recoveryAction(formData));
+            }}
+            aria-busy={recovering}
+            className="space-y-3 border-t border-border pt-4"
+          >
             <Label htmlFor="recoveryCode">Código de recuperación</Label>
             <Input
               id="recoveryCode"
@@ -210,6 +252,7 @@ export function AdminMfaForm({
               autoComplete="off"
               required
               maxLength={40}
+              disabled={recovering}
             />
             <TurnstileField
               siteKey={siteKey}
@@ -230,7 +273,14 @@ export function AdminMfaForm({
       <p className="text-sm leading-6 text-muted-foreground">
         No tienes un autenticador verificado. Configúralo antes de entrar al panel.
       </p>
-      <form action={enrollAction}>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (enrolling) return;
+          startTransition(() => enrollAction());
+        }}
+        aria-busy={enrolling}
+      >
         <Button type="submit" disabled={enrolling}>
           {enrolling ? "Preparando…" : "Configurar autenticador"}
         </Button>
@@ -240,13 +290,23 @@ export function AdminMfaForm({
         <>
           <button
             type="button"
-            className="text-sm text-primary underline"
+            aria-expanded={mode === "recovery"}
+            className="inline-flex min-h-11 items-center rounded-sm text-sm text-primary underline outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => setMode(mode === "recovery" ? "totp" : "recovery")}
           >
             {mode === "recovery" ? "Ocultar recuperación" : "Usar un código de recuperación"}
           </button>
           {mode === "recovery" ? (
-            <form action={recoveryAction} className="space-y-3 border-t border-border pt-4">
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (recovering) return;
+                const formData = new FormData(event.currentTarget);
+                startTransition(() => recoveryAction(formData));
+              }}
+              aria-busy={recovering}
+              className="space-y-3 border-t border-border pt-4"
+            >
               <Label htmlFor="recoveryCode">Código de recuperación</Label>
               <Input
                 id="recoveryCode"
@@ -254,6 +314,7 @@ export function AdminMfaForm({
                 autoComplete="off"
                 required
                 maxLength={40}
+                disabled={recovering}
               />
               <TurnstileField
                 siteKey={siteKey}

@@ -32,30 +32,70 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
-const querySchema = z.object({
-  q: z.string().trim().max(320).optional(),
-  status: z.enum(["ACTIVE", "MERGED", "ANONYMIZED"]).optional(),
-  tasks: z.enum(["all", "mine"]).optional(),
-  cursor: z.string().uuid().optional(),
-});
+const numberFormatter = new Intl.NumberFormat("es-CO");
+
+const qSchema = z.string().trim().max(320).optional();
+const statusSchema = z.enum(["ACTIVE", "MERGED", "ANONYMIZED"]).optional();
+const tasksSchema = z.enum(["all", "mine"]).optional();
+const cursorSchema = z.string().uuid().optional();
+
+function parsePositivePage(value: string | undefined, maxPage = 10_000): number {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed)) return maxPage;
+  return Math.max(1, Math.min(maxPage, parsed));
+}
+
+function crmHref(options: {
+  q?: string;
+  status?: "ACTIVE" | "MERGED" | "ANONYMIZED";
+  tasks?: "all" | "mine";
+  cursor?: string;
+  tareasPagina?: number;
+}): string {
+  const params = new URLSearchParams();
+  if (options.q) params.set("q", options.q);
+  if (options.status) params.set("status", options.status);
+  if (options.tasks) params.set("tasks", options.tasks);
+  if (options.cursor) params.set("cursor", options.cursor);
+  if (options.tareasPagina && options.tareasPagina > 1) {
+    params.set("tareasPagina", String(options.tareasPagina));
+  }
+  const qs = params.toString();
+  return qs ? `/admin/crm?${qs}` : "/admin/crm";
+}
 
 export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">) {
   const session = await requireAdminPage("crm:read");
   const raw = await searchParams;
-  const parsed = querySchema.safeParse({
-    q: single(raw.q)?.trim() || undefined,
-    status: single(raw.status) || undefined,
-    tasks: single(raw.tasks) || undefined,
-    cursor: single(raw.cursor) || undefined,
-  });
-  const query = parsed.success ? parsed.data : {};
+  const rawQ = single(raw.q)?.trim() || undefined;
+  const rawStatus = single(raw.status) || undefined;
+  const rawTasks = single(raw.tasks) || undefined;
+  const rawCursor = single(raw.cursor) || undefined;
+  const requestedTasksPage = parsePositivePage(single(raw.tareasPagina));
+
+  const parsedQ = qSchema.safeParse(rawQ);
+  const parsedStatus = statusSchema.safeParse(rawStatus);
+  const parsedTasks = tasksSchema.safeParse(rawTasks);
+  const parsedCursor = cursorSchema.safeParse(rawCursor);
+
+  const paramsValid =
+    parsedQ.success && parsedStatus.success && parsedTasks.success && parsedCursor.success;
+  const query = {
+    q: parsedQ.success ? parsedQ.data : undefined,
+    status: parsedStatus.success ? parsedStatus.data : undefined,
+    tasks: parsedTasks.success ? parsedTasks.data : undefined,
+    cursor: parsedCursor.success ? parsedCursor.data : undefined,
+  };
   const db = getDatabase();
   const service = crmService(db);
   const canWrite = hasAdminPermission(session.profile.role, "crm:write");
   const canMerge = hasAdminPermission(session.profile.role, "crm:merge");
+  const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
   let cursorNotFound = false;
-  const [contacts, openTasks, organizations, pending, merged] = await Promise.all([
-    parsed.success
+  const [contacts, tasksResult, organizations, pending, merged] = await Promise.all([
+    paramsValid
       ? service
           .listContacts({
             ...(query.q ? { query: query.q } : {}),
@@ -71,10 +111,11 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
             throw error;
           })
       : Promise.resolve({ items: [], nextCursor: null }),
-    service.listTasks({
+    service.listTasksPage({
       status: "OPEN",
       ...(query.tasks === "mine" ? { assignedToAdminUserId: session.profile.id } : {}),
-      limit: 25,
+      page: requestedTasksPage,
+      pageSize: 25,
     }),
     service.listOrganizations(),
     canMerge
@@ -84,12 +125,20 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
       ? crmMergeService(db).listCandidates(session.profile.id, "MERGED")
       : Promise.resolve([]),
   ]);
-  const filterValid = parsed.success && !cursorNotFound;
-  const nextParams = new URLSearchParams();
-  if (query.q) nextParams.set("q", query.q);
-  if (query.status) nextParams.set("status", query.status);
-  if (query.tasks) nextParams.set("tasks", query.tasks);
-  if (contacts.nextCursor) nextParams.set("cursor", contacts.nextCursor);
+  const filterValid = paramsValid && !cursorNotFound;
+  const effectiveCursor = filterValid ? query.cursor : undefined;
+  const firstPageHref = crmHref({
+    ...(query.q ? { q: query.q } : {}),
+    ...(query.status ? { status: query.status } : {}),
+    ...(query.tasks ? { tasks: query.tasks } : {}),
+    tareasPagina: tasksResult.page,
+  });
+  const hasActiveFilters =
+    Boolean(query.q) ||
+    (query.status !== undefined && query.status !== "ACTIVE") ||
+    (query.tasks !== undefined && query.tasks !== "all") ||
+    Boolean(rawCursor) ||
+    !filterValid;
   return (
     <div className="space-y-10">
       <div>
@@ -98,6 +147,22 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
           Identidades, compradores, organizaciones, actividades y tareas con PII enmascarada, fusión
           humana reversible y retención Hábeas Data.
         </p>
+        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+          <Link className="text-primary underline" href="/admin/fidelizacion">
+            Ver fidelización y referidos
+          </Link>
+          <Link className="text-primary underline" href="/admin/segmentos">
+            Administrar segmentos
+          </Link>
+          <Link className="text-primary underline" href="/admin/lifecycle">
+            Administrar recorridos de ciclo de vida
+          </Link>
+          {canReadFinance ? (
+            <Link className="text-primary underline" href="/admin/analitica-rfm">
+              Ver analítica RFM/LTV
+            </Link>
+          ) : null}
+        </div>
       </div>
       {canWrite || canMerge ? (
         <CmsStepUp session={session} />
@@ -110,8 +175,12 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
         <h2 id="crm-search" className="text-2xl font-semibold">
           Contactos
         </h2>
-        <form className="flex flex-wrap items-end gap-3" action="/admin/crm">
-          <div className="space-y-2">
+        <form
+          key={`${query.q ?? ""}|${query.status ?? "ACTIVE"}|${query.tasks ?? "all"}`}
+          className="flex flex-wrap items-end gap-3"
+          action="/admin/crm"
+        >
+          <div className="w-full space-y-2 sm:w-auto sm:min-w-64">
             <Label htmlFor="crm-q">Buscar</Label>
             <Input
               id="crm-q"
@@ -149,6 +218,14 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
           <Button type="submit" variant="outline">
             Filtrar
           </Button>
+          {hasActiveFilters ? (
+            <Link
+              href="/admin/crm"
+              className="inline-flex min-h-11 items-center px-2 text-sm text-primary underline"
+            >
+              Limpiar filtros
+            </Link>
+          ) : null}
         </form>
         {!filterValid ? (
           <p role="alert" className="text-sm text-destructive">
@@ -168,7 +245,7 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
                   {contact.givenName} {contact.familyName}
                 </Link>
               </h3>
-              <p className="mt-1 text-sm text-muted-foreground">
+              <p className="mt-1 text-sm break-all text-muted-foreground">
                 {contact.email} · {contact.phoneE164}
               </p>
               <p className="mt-2 text-sm">
@@ -182,44 +259,109 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
             </article>
           ))}
         </div>
-        {contacts.nextCursor ? (
-          <Link className="inline-flex underline" href={`/admin/crm?${nextParams.toString()}`}>
-            Página siguiente
-          </Link>
+        {rawCursor || contacts.nextCursor ? (
+          <nav
+            aria-label="Paginación de contactos CRM"
+            className="flex flex-wrap items-center gap-4"
+          >
+            {rawCursor ? (
+              <Link className="text-sm text-primary underline" href={firstPageHref}>
+                Primera página
+              </Link>
+            ) : null}
+            {contacts.nextCursor ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={crmHref({
+                  ...(query.q ? { q: query.q } : {}),
+                  ...(query.status ? { status: query.status } : {}),
+                  ...(query.tasks ? { tasks: query.tasks } : {}),
+                  cursor: contacts.nextCursor,
+                  tareasPagina: tasksResult.page,
+                })}
+              >
+                Página siguiente
+              </Link>
+            ) : null}
+          </nav>
         ) : null}
       </section>
       <section aria-labelledby="crm-task-queue" className="space-y-4">
         <h2 id="crm-task-queue" className="text-2xl font-semibold">
-          Cola operativa de tareas ({openTasks.length})
+          Cola operativa de tareas ({numberFormatter.format(tasksResult.total)})
         </h2>
-        {openTasks.length === 0 ? (
+        {tasksResult.items.length === 0 ? (
           <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
             No hay tareas pendientes o en curso para este filtro.
           </p>
         ) : (
-          <div className="grid gap-3 lg:grid-cols-2">
-            {openTasks.map((task) => (
-              <article key={task.id} className="rounded-xl border border-border bg-card p-4">
-                <h3 className="font-semibold">
-                  <Link className="underline" href={`/admin/crm/${task.contactId}`}>
-                    {task.title}
-                  </Link>
-                </h3>
-                <p className="mt-1 text-sm">
-                  {crmTaskStatusLabels[task.status]} · Prioridad{" "}
-                  {crmTaskPriorityLabels[task.priority]}
-                  {task.isOverdue ? (
-                    <span className="ml-2 font-semibold text-destructive">· Vencida</span>
-                  ) : null}
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Contacto: {task.contact.givenName} {task.contact.familyName} · Vence{" "}
-                  {dateFormatter.format(task.dueAt)} ·{" "}
-                  {task.assignedTo?.displayName ?? "Sin asignar"}
-                </p>
-              </article>
-            ))}
-          </div>
+          <>
+            <div className="grid gap-3 lg:grid-cols-2">
+              {tasksResult.items.map((task) => (
+                <article key={task.id} className="rounded-xl border border-border bg-card p-4">
+                  <h3 className="font-semibold">
+                    <Link className="underline" href={`/admin/crm/${task.contactId}`}>
+                      {task.title}
+                    </Link>
+                  </h3>
+                  <p className="mt-1 text-sm">
+                    {crmTaskStatusLabels[task.status]} · Prioridad{" "}
+                    {crmTaskPriorityLabels[task.priority]}
+                    {task.isOverdue ? (
+                      <span className="ml-2 font-semibold text-destructive">· Vencida</span>
+                    ) : null}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Contacto: {task.contact.givenName} {task.contact.familyName} · Vence{" "}
+                    {dateFormatter.format(task.dueAt)} ·{" "}
+                    {task.assignedTo?.displayName ?? "Sin asignar"}
+                  </p>
+                </article>
+              ))}
+            </div>
+            <nav
+              aria-label="Paginación de tareas CRM"
+              className="flex flex-wrap items-center justify-between gap-3"
+            >
+              <span className="text-sm text-muted-foreground">
+                Página {tasksResult.page} de {tasksResult.totalPages} ·{" "}
+                {numberFormatter.format(tasksResult.total)}{" "}
+                {tasksResult.total === 1 ? "tarea" : "tareas"}
+              </span>
+              <div className="flex gap-2">
+                {tasksResult.page > 1 ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link
+                      href={crmHref({
+                        ...(query.q ? { q: query.q } : {}),
+                        ...(query.status ? { status: query.status } : {}),
+                        ...(query.tasks ? { tasks: query.tasks } : {}),
+                        ...(effectiveCursor ? { cursor: effectiveCursor } : {}),
+                        tareasPagina: tasksResult.page - 1,
+                      })}
+                    >
+                      Anterior
+                    </Link>
+                  </Button>
+                ) : null}
+                {tasksResult.page < tasksResult.totalPages ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link
+                      href={crmHref({
+                        ...(query.q ? { q: query.q } : {}),
+                        ...(query.status ? { status: query.status } : {}),
+                        ...(query.tasks ? { tasks: query.tasks } : {}),
+                        ...(effectiveCursor ? { cursor: effectiveCursor } : {}),
+                        tareasPagina: tasksResult.page + 1,
+                      })}
+                    >
+                      Siguiente
+                    </Link>
+                  </Button>
+                ) : null}
+              </div>
+            </nav>
+          </>
         )}
       </section>
       {canWrite ? (

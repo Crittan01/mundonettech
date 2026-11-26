@@ -80,7 +80,16 @@ function MediaItem({
   priority: boolean;
 }) {
   const src = resolveCatalogMediaUrl(media.storageKey, origin);
-  if (!src) return <p role="alert">No pudimos cargar este recurso multimedia.</p>;
+  if (!src) {
+    return (
+      <p
+        role="alert"
+        className="rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
+      >
+        No pudimos cargar este recurso multimedia.
+      </p>
+    );
+  }
   const width = media.width ?? 960;
   const height = media.height ?? 720;
   if (media.mediaType === "IMAGE") {
@@ -181,36 +190,25 @@ export function ProductMediaGallery({
           Aún no hay imágenes publicadas para este producto.
         </div>
       ) : !origin ? (
-        <p role="alert" className="rounded-xl border border-border bg-card p-5">
-          La galería no está disponible porque el origen multimedia no está configurado.
+        <p
+          role="status"
+          className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground"
+        >
+          Las imágenes de este producto no están disponibles en este momento.
         </p>
       ) : (
-        visibleMedia.map((item) =>
-          item.mediaType === "SPIN_360" ? (
-            <div
-              key={`${selectedVariantId ?? "all"}-${item.id}`}
-              className="overflow-hidden rounded-2xl border border-border bg-card p-3"
-            >
-              <MediaItem
-                media={item}
-                origin={origin}
-                priority={priorityFirstImage && item.id === firstImageId}
-              />
-            </div>
-          ) : (
-            <figure
-              key={`${selectedVariantId ?? "all"}-${item.id}`}
-              className="overflow-hidden rounded-2xl border border-border bg-card p-3"
-            >
-              <MediaItem
-                media={item}
-                origin={origin}
-                priority={priorityFirstImage && item.id === firstImageId}
-              />
-              <figcaption className="sr-only">{item.altText}</figcaption>
-            </figure>
-          ),
-        )
+        visibleMedia.map((item) => (
+          <div
+            key={`${selectedVariantId ?? "all"}-${item.id}`}
+            className="overflow-hidden rounded-2xl border border-border bg-card p-3"
+          >
+            <MediaItem
+              media={item}
+              origin={origin}
+              priority={priorityFirstImage && item.id === firstImageId}
+            />
+          </div>
+        ))
       )}
     </section>
   );

@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { normalizeEmail } from "@mundonettech/core";
+import { formatCopCents, normalizeEmail } from "@mundonettech/core";
 import {
   OrderRefundService,
   RefundConflictError,
@@ -351,7 +351,7 @@ export async function adjustStoreCreditAction(
     });
     revalidatePath("/admin/pagos");
     return actionSuccess(
-      `Saldo actualizado: ${result.availableCents} centavos disponibles y ${result.heldCents} retenidos.`,
+      `Saldo actualizado: ${formatCopCents(result.availableCents)} disponibles y ${formatCopCents(result.heldCents)} retenidos.`,
     );
   } catch (error) {
     return failure(error, values);

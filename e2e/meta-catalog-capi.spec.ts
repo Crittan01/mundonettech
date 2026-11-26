@@ -394,7 +394,9 @@ test("Meta credential, catalog feed and Purchase dispatch work through the stand
     "href",
     "/api/feeds/meta-catalog",
   );
-  const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+  const accessibility = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
   expect(accessibility.violations).toEqual([]);
 });
 

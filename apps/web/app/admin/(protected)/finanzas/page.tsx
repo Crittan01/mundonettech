@@ -1,12 +1,14 @@
-import { formatCopCents, formatSignedCopCents } from "@mundonettech/core";
+import { formatCopCents, formatSignedCopCents, hasAdminPermission } from "@mundonettech/core";
 import { currentYearRange, type FinanceReport } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { paymentStatusLabels } from "@/lib/admin-presenters";
 import { single } from "@/lib/admin-search-params";
 import { getDatabaseClock } from "@/lib/database-clock";
 import { getDatabase } from "@/lib/db";
@@ -22,22 +24,45 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
 
-const paymentStatusLabels: Record<string, string> = {
-  UNPAID: "Sin pago",
-  PARTIALLY_PAID: "Pago parcial",
-  PAID: "Pagado",
-  PARTIALLY_REFUNDED: "Reembolsado parcialmente",
-  REFUNDED: "Reembolsado",
+const extraPaymentLabels: Record<string, string> = {
   VOIDED: "Anulado",
 };
+
 const fiscalStatusLabels: Record<string, string> = {
   WITHIN_LIMIT: "Dentro del umbral",
   APPROACHING_LIMIT: "Próximo al umbral",
   THRESHOLD_REACHED: "Umbral alcanzado",
 };
 
+function parsePositivePage(value: string | undefined, maxPage = 10_000): number {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed)) return maxPage;
+  return Math.max(1, Math.min(maxPage, parsed));
+}
+
 function percentage(bps: number | null): string {
   return bps === null ? "Sin base" : `${numberFormatter.format(bps / 100)} %`;
+}
+
+function financePageHref(options: {
+  fromDate: string;
+  toDate: string;
+  year: number;
+  page: number;
+  historialPagina: number;
+}): string {
+  const params = new URLSearchParams({
+    from: options.fromDate,
+    to: options.toDate,
+    year: String(options.year),
+  });
+  if (options.page > 1) params.set("page", String(options.page));
+  if (options.historialPagina > 1) {
+    params.set("historialPagina", String(options.historialPagina));
+  }
+  return `/admin/finanzas?${params.toString()}`;
 }
 
 export default async function FinancePage({ searchParams }: PageProps<"/admin/finanzas">) {
@@ -50,6 +75,8 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
   );
   const raw = await searchParams;
   const requestedYear = single(raw.year);
+  const requestedPage = parsePositivePage(single(raw.page));
+  const requestedHistoryPage = parsePositivePage(single(raw.historialPagina));
   let rangeError: string | null = null;
   let range: ReturnType<typeof parseFinanceRange>;
   try {
@@ -60,7 +87,7 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
   } catch (error) {
     if (error instanceof z.ZodError || error instanceof TypeError || error instanceof RangeError) {
       rangeError =
-        "El rango solicitado no es válido; mostramos las operaciones del año fiscal actual.";
+        "El rango debe ser válido (desde ≤ hasta); mostramos las operaciones del año fiscal actual.";
       range = {
         ...currentYearRange(currentYear),
         fromDate: `${currentYear}-01-01`,
@@ -72,7 +99,6 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
     }
   }
   const watch = await service.refreshFiscalWatch();
-  const history = await service.fiscalHistory();
   let report: FinanceReport;
   try {
     report = await service.report(range);
@@ -91,6 +117,20 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
       throw error;
     }
   }
+  const historyPage = await service.fiscalHistoryPage({
+    year: range.year,
+    page: requestedHistoryPage,
+    pageSize: 12,
+  });
+  const pageSize = 25;
+  const totalRowPages = Math.max(1, Math.ceil(report.rows.length / pageSize));
+  const page = Math.max(1, Math.min(totalRowPages, requestedPage));
+  const pagedRows = report.rows.slice((page - 1) * pageSize, page * pageSize);
+
+  const mfaAgeMs = session.lastMfaAt ? now.getTime() - session.lastMfaAt.getTime() : null;
+  const recentMfa = mfaAgeMs !== null && mfaAgeMs >= -30_000 && mfaAgeMs <= 600_000;
+  const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
+
   const threshold = BigInt(watch.thresholdCents);
   const gross = BigInt(watch.grossCapturedCents);
   const progressBps = threshold > 0n ? Number((gross * 10_000n) / threshold) : 10_000;
@@ -117,16 +157,30 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
             WAC y margen usan aritmética entera, sin PII en el reporte.
           </p>
         </div>
-        <a
-          href={`/admin/finanzas/exportar?${exportParams.toString()}`}
-          download
-          className="rounded-md border border-border px-4 py-2 text-sm font-semibold"
-        >
-          Descargar CSV seguro
-        </a>
+        {recentMfa ? (
+          <a
+            href={`/admin/finanzas/exportar?${exportParams.toString()}`}
+            download
+            className="rounded-md border border-border bg-card px-4 py-2 text-sm font-semibold hover:bg-accent"
+          >
+            Descargar CSV seguro
+          </a>
+        ) : (
+          <p className="rounded-md border border-border bg-secondary/50 px-4 py-2 text-xs text-muted-foreground">
+            Confirma tu autenticador abajo (
+            <a href="#admin-step-up-prompt" className="font-medium text-primary underline">
+              verificación reciente de dos pasos
+            </a>
+            ) para habilitar la descarga del CSV seguro.
+          </p>
+        )}
       </div>
       <CmsStepUp session={session} />
-      <form className="flex flex-wrap items-end gap-4 rounded-xl border border-border bg-card p-5">
+      <form
+        key={`${range.fromDate}|${range.toDate}`}
+        action="/admin/finanzas"
+        className="flex flex-wrap items-end gap-4 rounded-xl border border-border bg-card p-5"
+      >
         <div className="space-y-2">
           <Label htmlFor="finance-from">Desde</Label>
           <Input id="finance-from" name="from" type="date" defaultValue={range.fromDate} required />
@@ -136,7 +190,10 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
           <Input id="finance-to" name="to" type="date" defaultValue={range.toDate} required />
         </div>
         <Button type="submit">Actualizar reporte</Button>
-        <Link href="/admin/finanzas" className="rounded-md px-3 py-2 text-sm font-medium underline">
+        <Link
+          href="/admin/finanzas"
+          className="inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium underline"
+        >
           Año actual
         </Link>
       </form>
@@ -158,10 +215,10 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
       </section>
       <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
         {numberFormatter.format(report.summary.orderCount)} órdenes reconocidas · Margen{" "}
-        {percentage(report.summary.marginBps)}. El costo capturado se prorratea half-up sobre el
-        total de cada orden y descuenta las unidades de reembolsos completados.
+        {percentage(report.summary.marginBps)}. El costo capturado se prorratea con redondeo
+        simétrico sobre el total de cada orden y descuenta las unidades de reembolsos completados.
         {report.summary.orderCount > report.rows.length
-          ? ` La tabla muestra las ${report.rows.length} órdenes más recientes; los totales incluyen todo el periodo.`
+          ? ` El detalle consulta las ${report.rows.length} órdenes más recientes; los totales incluyen todo el periodo.`
           : ""}
       </p>
       <section
@@ -175,7 +232,7 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
             </h2>
             <p className="mt-2 text-sm text-muted-foreground">
               UVT {watch.uvtYear}: {formatCopCents(watch.uvtValueCents)} · Umbral{" "}
-              {formatCopCents(watch.thresholdCents)} · Snapshot{" "}
+              {formatCopCents(watch.thresholdCents)} · Corte{" "}
               {dateFormatter.format(new Date(`${watch.snapshotDate}T12:00:00-05:00`))}
             </p>
           </div>
@@ -222,90 +279,194 @@ export default async function FinancePage({ searchParams }: PageProps<"/admin/fi
           Órdenes del periodo
         </h2>
         {report.rows.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-            No hay capturas reconocidas en este periodo.
-          </p>
+          <Empty>No hay capturas reconocidas en este periodo.</Empty>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border">
-            <table className="w-full min-w-[980px] text-left text-sm">
-              <caption className="sr-only">
-                Detalle financiero por orden sin datos personales
-              </caption>
-              <thead className="bg-secondary">
-                <tr>
-                  {["Pedido", "Reconocido", "Bruto", "Reembolso", "Neto", "WAC", "Margen"].map(
-                    (heading) => (
-                      <th key={heading} scope="col" className="p-3">
-                        {heading}
-                      </th>
-                    ),
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {report.rows.map((record) => (
-                  <tr key={record.orderId} className="border-t border-border">
-                    <th scope="row" className="p-3">
-                      <Link
-                        href={`/admin/pedidos/${record.orderId}`}
-                        className="font-semibold underline"
-                      >
-                        {record.orderNumber}
-                      </Link>
-                      <span className="block text-xs font-normal text-muted-foreground">
-                        {paymentStatusLabels[record.paymentStatus] ?? record.paymentStatus}
-                      </span>
-                    </th>
-                    <td className="p-3">{dateFormatter.format(new Date(record.recognizedAt))}</td>
-                    <td className="p-3">{formatCopCents(record.grossCapturedCents)}</td>
-                    <td className="p-3">{formatCopCents(record.refundedCents)}</td>
-                    <td className="p-3 font-semibold">{formatCopCents(record.netRevenueCents)}</td>
-                    <td className="p-3">{formatCopCents(record.wacCostCents)}</td>
-                    <td className="p-3">{formatSignedCopCents(record.marginCents)}</td>
+          <>
+            <div
+              role="region"
+              aria-label="Tabla de órdenes financieras del periodo"
+              tabIndex={0}
+              className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            >
+              <table className="w-full min-w-[980px] text-left text-sm">
+                <caption className="sr-only">
+                  Detalle financiero por orden sin datos personales
+                </caption>
+                <thead className="bg-secondary">
+                  <tr>
+                    {["Pedido", "Reconocido", "Bruto", "Reembolso", "Neto", "WAC", "Margen"].map(
+                      (heading) => (
+                        <th key={heading} scope="col" className="p-3">
+                          {heading}
+                        </th>
+                      ),
+                    )}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {pagedRows.map((record) => (
+                    <tr key={record.orderId} className="border-t border-border">
+                      <th scope="row" className="p-3">
+                        {canReadOrders ? (
+                          <Link
+                            href={`/admin/pedidos/${record.orderId}`}
+                            className="font-semibold underline"
+                          >
+                            {record.orderNumber}
+                          </Link>
+                        ) : (
+                          <span className="font-semibold">{record.orderNumber}</span>
+                        )}
+                        <span className="block text-xs font-normal text-muted-foreground">
+                          {paymentStatusLabels[
+                            record.paymentStatus as keyof typeof paymentStatusLabels
+                          ] ??
+                            extraPaymentLabels[record.paymentStatus] ??
+                            record.paymentStatus}
+                        </span>
+                      </th>
+                      <td className="p-3">{dateFormatter.format(new Date(record.recognizedAt))}</td>
+                      <td className="p-3">{formatCopCents(record.grossCapturedCents)}</td>
+                      <td className="p-3">{formatCopCents(record.refundedCents)}</td>
+                      <td className="p-3 font-semibold">
+                        {formatCopCents(record.netRevenueCents)}
+                      </td>
+                      <td className="p-3">{formatCopCents(record.wacCostCents)}</td>
+                      <td className="p-3">{formatSignedCopCents(record.marginCents)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {totalRowPages > 1 ? (
+              <nav
+                aria-label="Paginación de órdenes financieras"
+                className="flex flex-wrap items-center justify-between gap-3"
+              >
+                <span className="text-sm text-muted-foreground">
+                  Página {page} de {totalRowPages}
+                </span>
+                <div className="flex gap-2">
+                  {page > 1 ? (
+                    <Button asChild variant="outline" size="sm">
+                      <Link
+                        href={financePageHref({
+                          fromDate: range.fromDate,
+                          toDate: range.toDate,
+                          year: range.year,
+                          page: page - 1,
+                          historialPagina: historyPage.page,
+                        })}
+                      >
+                        Anterior
+                      </Link>
+                    </Button>
+                  ) : null}
+                  {page < totalRowPages ? (
+                    <Button asChild variant="outline" size="sm">
+                      <Link
+                        href={financePageHref({
+                          fromDate: range.fromDate,
+                          toDate: range.toDate,
+                          year: range.year,
+                          page: page + 1,
+                          historialPagina: historyPage.page,
+                        })}
+                      >
+                        Siguiente
+                      </Link>
+                    </Button>
+                  ) : null}
+                </div>
+              </nav>
+            ) : null}
+          </>
         )}
       </section>
       <section aria-labelledby="fiscal-history" className="space-y-4">
         <h2 id="fiscal-history" className="text-xl font-semibold">
-          Snapshots de vigilancia
+          Cortes diarios de vigilancia ({range.year})
         </h2>
-        {history.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-            No hay snapshots históricos.
-          </p>
+        {historyPage.items.length === 0 ? (
+          <Empty>{`No hay cortes históricos registrados para ${range.year}.`}</Empty>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-border">
-            <table className="w-full min-w-[760px] text-left text-sm">
-              <caption className="sr-only">Historial diario de ingresos y umbral fiscal</caption>
-              <thead className="bg-secondary">
-                <tr>
-                  {["Fecha", "Año", "Bruto", "Reembolsos", "Neto", "Estado"].map((heading) => (
-                    <th key={heading} scope="col" className="p-3">
-                      {heading}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {history.map((record) => (
-                  <tr key={record.id} className="border-t border-border">
-                    <th scope="row" className="p-3">
-                      {dateFormatter.format(new Date(`${record.snapshotDate}T12:00:00-05:00`))}
-                    </th>
-                    <td className="p-3">{record.fiscalYear}</td>
-                    <td className="p-3">{formatCopCents(record.grossCapturedCents)}</td>
-                    <td className="p-3">{formatCopCents(record.refundedCents)}</td>
-                    <td className="p-3">{formatCopCents(record.netRevenueCents)}</td>
-                    <td className="p-3">{fiscalStatusLabels[record.status] ?? record.status}</td>
+          <>
+            <div
+              role="region"
+              aria-label="Tabla de cortes diarios de vigilancia fiscal"
+              tabIndex={0}
+              className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            >
+              <table className="w-full min-w-[760px] text-left text-sm">
+                <caption className="sr-only">Historial diario de ingresos y umbral fiscal</caption>
+                <thead className="bg-secondary">
+                  <tr>
+                    {["Fecha", "Año", "Bruto", "Reembolsos", "Neto", "Estado"].map((heading) => (
+                      <th key={heading} scope="col" className="p-3">
+                        {heading}
+                      </th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {historyPage.items.map((record) => (
+                    <tr key={record.id} className="border-t border-border">
+                      <th scope="row" className="p-3">
+                        {dateFormatter.format(new Date(`${record.snapshotDate}T12:00:00-05:00`))}
+                      </th>
+                      <td className="p-3">{record.fiscalYear}</td>
+                      <td className="p-3">{formatCopCents(record.grossCapturedCents)}</td>
+                      <td className="p-3">{formatCopCents(record.refundedCents)}</td>
+                      <td className="p-3">{formatCopCents(record.netRevenueCents)}</td>
+                      <td className="p-3">{fiscalStatusLabels[record.status] ?? record.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <nav
+              aria-label="Paginación de cortes diarios de vigilancia"
+              className="flex flex-wrap items-center justify-between gap-3"
+            >
+              <span className="text-sm text-muted-foreground">
+                Página {historyPage.page} de {historyPage.totalPages} ·{" "}
+                {numberFormatter.format(historyPage.total)}{" "}
+                {historyPage.total === 1 ? "instantánea" : "instantáneas"}
+              </span>
+              <div className="flex gap-2">
+                {historyPage.page > 1 ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link
+                      href={financePageHref({
+                        fromDate: range.fromDate,
+                        toDate: range.toDate,
+                        year: range.year,
+                        page,
+                        historialPagina: historyPage.page - 1,
+                      })}
+                    >
+                      Anterior
+                    </Link>
+                  </Button>
+                ) : null}
+                {historyPage.page < historyPage.totalPages ? (
+                  <Button asChild variant="outline" size="sm">
+                    <Link
+                      href={financePageHref({
+                        fromDate: range.fromDate,
+                        toDate: range.toDate,
+                        year: range.year,
+                        page,
+                        historialPagina: historyPage.page + 1,
+                      })}
+                    >
+                      Siguiente
+                    </Link>
+                  </Button>
+                ) : null}
+              </div>
+            </nav>
+          </>
         )}
       </section>
     </div>

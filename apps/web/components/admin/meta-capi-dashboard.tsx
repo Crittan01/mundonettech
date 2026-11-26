@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import type { MetaCapiEventStatus } from "@mundonettech/db";
 import type { MetaCapiEventView } from "@mundonettech/integrations";
@@ -9,8 +9,9 @@ import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { reconcileMetaCapiAction } from "@/lib/actions/admin-meta-capi";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 const statusLabels: Record<MetaCapiEventStatus, string> = {
   PENDING: "Pendiente",
@@ -32,11 +33,11 @@ const failureLabels: Record<string, string> = {
   CREDENTIAL_REJECTED: "Meta rechazó la credencial",
   CREDENTIAL_REVOKED: "Credencial revocada",
   CREDENTIAL_IDENTITY_CHANGED: "La identidad de la credencial cambió",
-  PAYLOAD_REJECTED: "Meta rechazó el request",
-  REQUEST_HASH_MISMATCH: "El request sellado no coincide",
-  REQUEST_INVALID: "El request persistido no es válido",
+  PAYLOAD_REJECTED: "Meta rechazó la solicitud",
+  REQUEST_HASH_MISMATCH: "La solicitud sellada no coincide",
+  REQUEST_INVALID: "La solicitud persistida no es válida",
   CLAIM_EXPIRED: "El reclamo expiró sin confirmación",
-  OUTBOX_RETRY_EXHAUSTED: "El worker agotó los reintentos de despacho",
+  OUTBOX_RETRY_EXHAUSTED: "El proceso agotó los reintentos de despacho",
 };
 
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
@@ -53,12 +54,26 @@ function money(valueCents: string): string {
 
 function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
   const [state, action, pending] = useActionState(reconcileMetaCapiAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
   const defaultResolution =
     event.status === "UNCERTAIN" ? "CONFIRMED_SENT" : event.retryable ? "RETRY" : "DISCARD";
   const [resolution, setResolution] = useState<string>(defaultResolution);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
     <form
-      action={action}
+      ref={formRef}
+      onSubmit={(submitEvent) => {
+        submitEvent.preventDefault();
+        if (pending) return;
+        const formData = new FormData(submitEvent.currentTarget);
+        startTransition(() => action(formData));
+      }}
       className="mt-4 space-y-3 rounded-lg bg-secondary/40 p-4"
       aria-busy={pending}
     >
@@ -66,12 +81,11 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] sm:items-end">
         <div className="space-y-2">
           <Label htmlFor={`resolution-${event.id}`}>Resolución</Label>
-          <select
+          <Select
             id={`resolution-${event.id}`}
             name="resolution"
             value={resolution}
             onChange={(changeEvent) => setResolution(changeEvent.target.value)}
-            className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
             disabled={pending}
           >
             {event.status === "UNCERTAIN" ? (
@@ -79,7 +93,7 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
             ) : null}
             {event.retryable ? <option value="RETRY">Autorizar reintento idéntico</option> : null}
             <option value="DISCARD">Descartar sin reenvío</option>
-          </select>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor={`reference-${event.id}`}>Referencia de conciliación</Label>
@@ -96,7 +110,8 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
             aria-describedby={`reference-help-${event.id}`}
           />
           <p id={`reference-help-${event.id}`} className="text-xs text-muted-foreground">
-            ID de evidencia de Events Manager o del ticket operativo, sin datos personales.
+            ID de evidencia del administrador de eventos de Meta o del caso operativo, sin datos
+            personales.
           </p>
         </div>
         <Button type="submit" variant="outline" disabled={pending}>
@@ -120,7 +135,7 @@ export function MetaCapiDashboard({
       <div className="rounded-xl border border-border bg-card p-8 text-center">
         <h3 className="text-lg font-semibold">Todavía no hay eventos Meta CAPI</h3>
         <p className="mt-2 text-sm text-muted-foreground">
-          Los eventos Purchase aparecerán después de un pago confirmado con consentimiento
+          Los eventos de compra aparecerán después de un pago confirmado con consentimiento
           publicitario vigente y una credencial Meta activa.
         </p>
       </div>
@@ -132,8 +147,12 @@ export function MetaCapiDashboard({
         <li key={event.id} className="rounded-xl border border-border bg-card p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="font-semibold">Purchase · {event.orderNumber}</h3>
-              <p className="mt-1 text-xs break-all text-muted-foreground">{event.eventId}</p>
+              <h3 className="font-semibold">
+                {event.eventName} · {event.orderNumber}
+              </h3>
+              <p className="mt-1 text-xs break-all text-muted-foreground">
+                ID de evento: {event.eventId}
+              </p>
             </div>
             <span className="rounded-md border border-border px-2 py-1 text-xs font-medium">
               {statusLabels[event.status]}

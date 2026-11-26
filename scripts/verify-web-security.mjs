@@ -27,6 +27,7 @@ function verifySecurityHeaders(
   {
     allowIsolatedNonePolicy = false,
     expectedReferrerPolicy = "strict-origin-when-cross-origin",
+    expectedGeolocation = "()",
   } = {},
 ) {
   const csp = response.headers.get("content-security-policy") ?? "";
@@ -71,9 +72,11 @@ function verifySecurityHeaders(
     response.headers.get("referrer-policy") === expectedReferrerPolicy,
     `${label}: invalid referrer policy.`,
   );
+  const permissionsPolicy = response.headers.get("permissions-policy") ?? "";
   requireCondition(
-    (response.headers.get("permissions-policy") ?? "").includes("camera=()"),
-    `${label}: missing permissions policy.`,
+    permissionsPolicy.includes("camera=()") &&
+      permissionsPolicy.includes(`geolocation=${expectedGeolocation}`),
+    `${label}: invalid permissions policy (expected geolocation=${expectedGeolocation}).`,
   );
   requireCondition(
     response.headers.get("cross-origin-opener-policy") === "same-origin",
@@ -543,12 +546,11 @@ export async function verifyWebSecurity(
       transactionalPath.startsWith("/pedido/") ||
       transactionalPath.startsWith("/propuesta/") ||
       transactionalPath.startsWith("/recibo/");
-    const response = await request(
-      origin,
-      transactionalPath,
-      {},
-      isTokenRoute ? { expectedReferrerPolicy: "no-referrer" } : {},
-    );
+    const headerOptions = {
+      ...(isTokenRoute ? { expectedReferrerPolicy: "no-referrer" } : {}),
+      ...(transactionalPath === "/checkout" ? { expectedGeolocation: "(self)" } : {}),
+    };
+    const response = await request(origin, transactionalPath, {}, headerOptions);
     if (transactionalPath === "/carrito") {
       requireCondition(response.ok, "Normal GET /carrito without Origin must remain available.");
     }
@@ -560,6 +562,14 @@ export async function verifyWebSecurity(
     requireCondition(
       (response.headers.get("cache-control") ?? "").includes("no-store"),
       `${transactionalPath}: transactional surface must carry no-store.`,
+    );
+  }
+
+  for (const checkoutSubpath of ["/checkout/inexistente", "/checkout.svg"]) {
+    const response = await request(origin, checkoutSubpath);
+    requireCondition(
+      response.status === 404,
+      `${checkoutSubpath}: unexpected status ${response.status} (must return 404 with geolocation=()).`,
     );
   }
 
@@ -1091,8 +1101,12 @@ export async function verifyWebSecurity(
 
   for (const postOnlyPath of [
     "/api/jobs/orders",
+    "/api/jobs/cms-publish",
+    "/api/jobs/domain-events",
+    "/api/jobs/health",
     "/api/jobs/channels",
     "/api/webhooks/wompi",
+    "/api/webhooks/resend",
     "/api/webhooks/mercado-libre",
     "/api/metrics/funnel",
   ]) {

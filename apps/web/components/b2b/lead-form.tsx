@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useActionState, useState, type ChangeEvent } from "react";
+import { startTransition, useActionState, useRef, useState, type ChangeEvent } from "react";
 
 import { FieldErrors, FormMessage } from "@/components/auth/form-message";
 import { TurnstileField } from "@/components/auth/turnstile-field";
@@ -26,7 +26,7 @@ type TextField = keyof typeof initialTextValues;
 
 export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string }) {
   const [state, action, pending] = useActionState(captureB2bOpportunityAction, initialActionState);
-  const [submissionId] = useState(() => crypto.randomUUID());
+  const submissionIdRef = useRef<string | null>(null);
   const [values, setValues] = useState(initialTextValues);
   const [dataProcessingAccepted, setDataProcessingAccepted] = useState(false);
 
@@ -43,20 +43,33 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
       <section className="rounded-xl border border-success bg-card p-6" aria-live="polite">
         <h2 className="text-xl font-semibold">Solicitud registrada</h2>
         <p className="mt-2 text-muted-foreground">{state.message}</p>
-        <Link href="/productos" className="mt-5 inline-flex font-medium text-primary underline">
+        <Link
+          href="/productos"
+          className="mt-5 inline-flex min-h-11 items-center rounded-sm font-medium text-primary underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
+        >
           Seguir explorando el catálogo
         </Link>
       </section>
     );
   }
   return (
-    <form action={action} className="space-y-6" aria-busy={pending}>
-      <input type="hidden" name="submissionId" value={submissionId} />
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        submissionIdRef.current ??= crypto.randomUUID();
+        formData.set("submissionId", submissionIdRef.current);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-6"
+      aria-busy={pending}
+    >
       <div aria-hidden="true" className="absolute -left-[10000px]">
         <label htmlFor="b2b-website">No completes este campo</label>
         <input id="b2b-website" name="website" type="text" tabIndex={-1} autoComplete="off" />
       </div>
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Datos de la empresa</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -108,7 +121,7 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
           </div>
         </div>
       </fieldset>
-      <fieldset className="space-y-4">
+      <fieldset className="space-y-4" disabled={pending}>
         <legend className="text-lg font-semibold">Contacto comercial</legend>
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-2">
@@ -185,12 +198,17 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
           maxLength={5000}
           rows={5}
           placeholder="Cuéntanos productos, cantidades, referencias y fecha estimada de compra."
+          disabled={pending}
           required
           aria-invalid={state.fieldErrors?.requirements ? true : undefined}
-          aria-describedby={state.fieldErrors?.requirements ? "b2b-requirements-error" : undefined}
+          aria-describedby={
+            state.fieldErrors?.requirements
+              ? "b2b-requirements-help b2b-requirements-error"
+              : "b2b-requirements-help"
+          }
         />
         <FieldErrors id="b2b-requirements-error" messages={state.fieldErrors?.requirements} />
-        <p className="text-xs text-muted-foreground">
+        <p id="b2b-requirements-help" className="text-xs text-muted-foreground">
           No incluyas contraseñas, datos de tarjetas ni información sensible innecesaria.
         </p>
       </div>
@@ -202,6 +220,7 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
           checked={dataProcessingAccepted}
           onChange={(event) => setDataProcessingAccepted(event.target.checked)}
           className="mt-1 size-4 shrink-0 accent-primary"
+          disabled={pending}
           required
         />
         <span>
@@ -210,19 +229,27 @@ export function B2bLeadForm({ siteKey, nonce }: { siteKey: string; nonce: string
             href="/legal/tratamiento-datos-personales"
             className="text-primary underline"
             target="_blank"
+            rel="noopener noreferrer"
           >
             política de tratamiento de datos
+            <span className="sr-only"> (se abre en una nueva pestaña)</span>
           </Link>{" "}
           y la{" "}
-          <Link href="/legal/privacidad" className="text-primary underline" target="_blank">
+          <Link
+            href="/legal/privacidad"
+            className="text-primary underline"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             política de privacidad
+            <span className="sr-only"> (se abre en una nueva pestaña)</span>
           </Link>
           .
         </span>
       </label>
       <TurnstileField siteKey={siteKey} nonce={nonce} action="b2b_lead" state={state} />
       <FormMessage state={state} />
-      <Button type="submit" size="lg" disabled={pending}>
+      <Button type="submit" size="lg" disabled={pending} aria-busy={pending}>
         {pending ? "Registrando solicitud…" : "Solicitar propuesta comercial"}
       </Button>
     </form>

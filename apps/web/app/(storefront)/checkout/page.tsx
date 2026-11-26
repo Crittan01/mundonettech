@@ -16,9 +16,16 @@ export default async function CheckoutPage() {
   const preview = await readCheckoutPreview();
   return (
     <div className="space-y-8">
-      <div>
+      <div className="space-y-2">
+        <Link
+          href="/carrito"
+          prefetch={false}
+          className="inline-flex text-sm font-medium text-primary hover:underline"
+        >
+          ← Volver al carrito
+        </Link>
         <h1 className="text-3xl font-bold tracking-tight">Finalizar compra</h1>
-        <p className="mt-2 text-muted-foreground">
+        <p className="text-muted-foreground">
           Tres pasos para confirmar tu pedido con datos DANE, impuestos sellados y stock reservado
           de forma atómica.
         </p>

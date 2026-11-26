@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useActionState, useRef, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -82,6 +82,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
   }
 
   function advanceOrEncrypt() {
+    if (pending) return;
     if (step < 3) {
       continueForward();
       return;
@@ -153,6 +154,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
             name="accountName"
             defaultValue={values?.accountName ?? ""}
             maxLength={120}
+            disabled={pending}
             required
           />
           <p className="text-xs text-muted-foreground">
@@ -169,6 +171,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
             spellCheck={false}
             minLength={20}
             maxLength={255}
+            disabled={pending}
             required
           />
         </div>
@@ -185,9 +188,24 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
         className="space-y-4"
       >
         <legend className="mb-3 font-semibold">Material secreto</legend>
-        <SecretField id="wompi-private-key" name="privateKey" label="Llave privada Wompi" />
-        <SecretField id="wompi-integrity" name="integritySecret" label="Secreto de integridad" />
-        <SecretField id="wompi-events" name="eventsSecret" label="Secreto de eventos" />
+        <SecretField
+          id="wompi-private-key"
+          name="privateKey"
+          label="Llave privada Wompi"
+          disabled={pending}
+        />
+        <SecretField
+          id="wompi-integrity"
+          name="integritySecret"
+          label="Secreto de integridad"
+          disabled={pending}
+        />
+        <SecretField
+          id="wompi-events"
+          name="eventsSecret"
+          label="Secreto de eventos"
+          disabled={pending}
+        />
         <p className="text-xs text-muted-foreground">
           Estos tres valores se cifran con AES-256-GCM antes de persistirse. Nunca se muestran de
           nuevo ni se incluyen en descriptores o auditoría.
@@ -220,7 +238,12 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
           </div>
         </dl>
         <label className="flex items-start gap-3 text-sm">
-          <input type="checkbox" required className="mt-1 size-4 accent-primary" />
+          <input
+            type="checkbox"
+            required
+            disabled={pending}
+            className="mt-1 size-4 accent-primary"
+          />
           <span>Confirmo que las llaves pertenecen a la cuenta y al ambiente seleccionados.</span>
         </label>
       </fieldset>
@@ -234,7 +257,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
         >
           Anterior
         </Button>
-        <Button type="button" onClick={advanceOrEncrypt} disabled={pending}>
+        <Button type="submit" disabled={pending}>
           {step < 3 ? "Continuar" : pending ? "Cifrando…" : "Cifrar y guardar credencial"}
         </Button>
       </div>
@@ -244,9 +267,27 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
 
 export function CredentialRotationForm({ credential }: { credential: IntegrationCredentialView }) {
   const [state, action, pending] = useActionState(rotateWompiCredentialAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
   const values = state.values;
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
-    <form action={action} className="space-y-4" aria-busy={pending}>
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-4"
+      aria-busy={pending}
+    >
       <input type="hidden" name="credentialId" value={credential.id} />
       <div className="space-y-2">
         <Label htmlFor={`public-${credential.id}`}>Nueva llave pública</Label>
@@ -291,7 +332,16 @@ export function CredentialRotationForm({ credential }: { credential: Integration
 export function ReencryptCredentialForm({ credentialId }: { credentialId: string }) {
   const [state, action, pending] = useActionState(reencryptCredentialAction, initialActionState);
   return (
-    <form action={action} className="space-y-3" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="credentialId" value={credentialId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Recifrando…" : "Recifrar con clave activa"}
@@ -303,8 +353,26 @@ export function ReencryptCredentialForm({ credentialId }: { credentialId: string
 
 export function RevokeCredentialForm({ credentialId }: { credentialId: string }) {
   const [state, action, pending] = useActionState(revokeCredentialAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   return (
-    <form action={action} className="space-y-3" aria-busy={pending}>
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="credentialId" value={credentialId} />
       <div className="space-y-2">
         <Label htmlFor={`confirmation-${credentialId}`}>Confirmación irreversible</Label>

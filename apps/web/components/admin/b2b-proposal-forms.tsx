@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ import {
   runB2bCopilotAction,
   type B2bIssueActionState,
 } from "@/lib/actions/admin-b2b";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 export function B2bProposalBuilder({
   opportunityId,
@@ -28,18 +28,37 @@ export function B2bProposalBuilder({
   readonly defaultExpiry: string;
 }) {
   const [state, action, pending] = useActionState(createB2bProposalAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
   const [rows, setRows] = useState(() => [
     { id: crypto.randomUUID(), sku: "", quantity: "1", unitPrice: "" },
   ]);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+      setRows([{ id: crypto.randomUUID(), sku: "", quantity: "1", unitPrice: "" }]);
+    }
+  }, [state]);
   function update(id: string, field: "sku" | "quantity" | "unitPrice", value: string) {
     setRows((current) => current.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
   }
   return (
-    <form action={action} className="space-y-5" aria-busy={pending}>
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-5"
+      aria-busy={pending}
+    >
       <input type="hidden" name="opportunityId" value={opportunityId} />
       <input type="hidden" name="expectedVersion" value={expectedVersion} />
       <div className="space-y-3">
-        <div className="grid gap-3 text-sm font-medium sm:grid-cols-[1fr_100px_180px_auto]">
+        <div className="hidden gap-3 text-sm font-medium sm:grid sm:grid-cols-[1fr_100px_180px_auto]">
           <span>SKU</span>
           <span>Cantidad</span>
           <span>Precio unitario COP</span>
@@ -58,6 +77,7 @@ export function B2bProposalBuilder({
                 value={row.sku}
                 onChange={(event) => update(row.id, "sku", event.target.value)}
                 maxLength={64}
+                disabled={pending}
                 required
               />
             </div>
@@ -72,6 +92,7 @@ export function B2bProposalBuilder({
                 step={1}
                 value={row.quantity}
                 onChange={(event) => update(row.id, "quantity", event.target.value)}
+                disabled={pending}
                 required
               />
             </div>
@@ -85,16 +106,18 @@ export function B2bProposalBuilder({
                 placeholder="Lista o catálogo"
                 value={row.unitPrice}
                 onChange={(event) => update(row.id, "unitPrice", event.target.value)}
+                disabled={pending}
               />
             </div>
             <Button
               type="button"
               variant="outline"
               size="sm"
+              aria-label={`Eliminar fila ${index + 1}`}
               onClick={() =>
                 setRows((current) => current.filter((candidate) => candidate.id !== row.id))
               }
-              disabled={rows.length === 1}
+              disabled={pending || rows.length === 1}
             >
               Eliminar
             </Button>
@@ -110,7 +133,7 @@ export function B2bProposalBuilder({
             { id: crypto.randomUUID(), sku: "", quantity: "1", unitPrice: "" },
           ])
         }
-        disabled={rows.length >= 100}
+        disabled={pending || rows.length >= 100}
       >
         Añadir otra variante
       </Button>
@@ -122,6 +145,7 @@ export function B2bProposalBuilder({
             name="expiresAt"
             type="datetime-local"
             defaultValue={state.values?.expiresAt ?? defaultExpiry}
+            disabled={pending}
             required
           />
         </div>
@@ -134,6 +158,7 @@ export function B2bProposalBuilder({
             maxLength={2000}
             rows={3}
             placeholder="Forma de pago, entrega u otras condiciones revisadas."
+            disabled={pending}
           />
         </div>
       </div>
@@ -173,7 +198,15 @@ export function B2bProposalLifecycleForms({
     <div className="space-y-3">
       <div className="flex flex-wrap gap-3">
         {status === "DRAFT" ? (
-          <form action={issueAction}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (issuing) return;
+              const formData = new FormData(event.currentTarget);
+              startTransition(() => issueAction(formData));
+            }}
+            aria-busy={issuing}
+          >
             <input type="hidden" name="opportunityId" value={opportunityId} />
             <input type="hidden" name="proposalId" value={proposalId} />
             <input
@@ -187,7 +220,15 @@ export function B2bProposalLifecycleForms({
           </form>
         ) : null}
         {["DRAFT", "SENT", "EXPIRED"].includes(status) ? (
-          <form action={cancelAction}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (cancelling) return;
+              const formData = new FormData(event.currentTarget);
+              startTransition(() => cancelAction(formData));
+            }}
+            aria-busy={cancelling}
+          >
             <input type="hidden" name="opportunityId" value={opportunityId} />
             <input type="hidden" name="proposalId" value={proposalId} />
             <input
@@ -215,10 +256,11 @@ export function B2bProposalLifecycleForms({
           <a
             href={issueState.proposalUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="inline-flex text-sm font-medium text-primary underline"
           >
             Abrir propuesta
+            <span className="sr-only"> (se abre en una nueva pestaña)</span>
           </a>
           <p className="text-xs text-muted-foreground">
             Por seguridad no podrás recuperar el token después de recargar; solo su hash queda
@@ -239,7 +281,16 @@ export function B2bCloseOpportunityForm({
 }) {
   const [state, action, pending] = useActionState(closeB2bOpportunityAction, initialActionState);
   return (
-    <form action={action} className="flex flex-wrap items-end gap-3" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="flex flex-wrap items-end gap-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="opportunityId" value={opportunityId} />
       <input type="hidden" name="expectedVersion" value={expectedVersion} />
       <div className="space-y-2">
@@ -249,6 +300,7 @@ export function B2bCloseOpportunityForm({
           name="status"
           fullWidth={false}
           defaultValue="LOST"
+          disabled={pending}
         >
           <option value="LOST">Perdida</option>
           <option value="CANCELLED">Cancelada</option>
@@ -273,7 +325,16 @@ export function B2bCopilotForm({
 }) {
   const [state, action, pending] = useActionState(runB2bCopilotAction, initialActionState);
   return (
-    <form action={action} className="flex flex-wrap items-end gap-3" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="flex flex-wrap items-end gap-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="opportunityId" value={opportunityId} />
       <input type="hidden" name="requestId" value={state.values?.requestId ?? requestId} />
       <div className="space-y-2">
@@ -283,6 +344,7 @@ export function B2bCopilotForm({
           name="credentialId"
           fullWidth={false}
           defaultValue={state.values?.credentialId ?? credentials[0]?.id}
+          disabled={pending}
           required
         >
           {credentials.map((credential) => (

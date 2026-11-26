@@ -1,10 +1,22 @@
-import { formatCopCents } from "@mundonettech/core";
+import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
 import { OperationsService } from "@mundonettech/db";
 import Link from "next/link";
 
-import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { NotificationReadForm } from "@/components/admin/notification-read-form";
+import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
+import {
+  fulfillmentStatusLabels,
+  orderFulfillmentStatusLabels,
+  paymentAttemptStatusLabels,
+  paymentProviderLabels,
+  paymentTransactionStatusLabels,
+  refundStatusLabels,
+  shipmentStatusLabels,
+} from "@/lib/admin-presenters";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -17,52 +29,96 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
 
-const statusLabels: Record<string, string> = {
-  UNFULFILLED: "Sin despachar",
-  PARTIALLY_FULFILLED: "Despacho parcial",
-  REQUESTED: "Solicitado",
-  APPROVED: "Aprobado",
-  PROCESSING: "En ejecución",
-  FAILED: "Fallido",
-  PENDING: "Pendiente",
-  PICKING: "En alistamiento",
-  PACKED: "Empacado",
-  LABELLED: "Con guía",
-  RECONCILING: "En conciliación",
-  READY: "Listo",
-  SHIPPED: "Despachado",
-};
+const allowedSeverities = ["INFO", "WARNING", "CRITICAL"] as const;
+type NotificationSeverityFilter = (typeof allowedSeverities)[number];
 
-const severityLabels: Record<string, string> = {
+const severityLabels: Record<NotificationSeverityFilter, string> = {
   INFO: "Informativa",
   WARNING: "Atención",
   CRITICAL: "Crítica",
 };
 
-const providerLabels: Record<string, string> = {
-  BANK_TRANSFER: "Transferencia bancaria",
-  COD: "Contraentrega (discrepancia)",
-};
+function parsePositivePage(value: string | undefined, maxPage = 10_000): number {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed)) return maxPage;
+  return Math.max(1, Math.min(maxPage, parsed));
+}
 
-export default async function TodayPage() {
+function todayNotificationsHref(options: {
+  unreadOnly: boolean;
+  severity?: NotificationSeverityFilter;
+  page: number;
+}): string {
+  const params = new URLSearchParams();
+  if (options.unreadOnly) params.set("sinLeer", "1");
+  if (options.severity) params.set("severidad", options.severity);
+  if (options.page > 1) params.set("pagina", String(options.page));
+  const qs = params.toString();
+  return qs ? `/admin/hoy?${qs}` : "/admin/hoy";
+}
+
+function labelFor<T extends string>(map: Record<T, string>, value: string): string {
+  return (
+    (map as Record<string, string | undefined>)[value] ??
+    (value === "PROCESSING" ? "En proceso" : value)
+  );
+}
+
+function formatShipmentState(
+  fulfillmentStatus: string | null | undefined,
+  shipmentStatus: string,
+): string {
+  if (fulfillmentStatus) {
+    return labelFor(orderFulfillmentStatusLabels, fulfillmentStatus);
+  }
+  return labelFor(shipmentStatusLabels, shipmentStatus);
+}
+
+function formatPaymentState(status: string): string {
+  return (
+    (paymentAttemptStatusLabels as Record<string, string | undefined>)[status] ??
+    (paymentTransactionStatusLabels as Record<string, string | undefined>)[status] ??
+    (refundStatusLabels as Record<string, string | undefined>)[status] ??
+    (status === "PROCESSING" ? "En proceso" : status)
+  );
+}
+
+export default async function TodayPage({ searchParams }: PageProps<"/admin/hoy">) {
   const session = await requireAdminPage();
-  const snapshot = await new OperationsService(getDatabase()).snapshot(session.profile.id);
-  const unread = snapshot.notifications.filter((notification) => notification.readAt === null);
-  const { permissions } = snapshot;
+  const raw = await searchParams;
+  const requestedPage = parsePositivePage(single(raw.pagina));
+  const unreadOnly = single(raw.sinLeer)?.trim() === "1";
+  const rawSeverity = single(raw.severidad)?.trim() ?? "";
+  const severity: NotificationSeverityFilter | undefined = (
+    allowedSeverities as readonly string[]
+  ).includes(rawSeverity)
+    ? (rawSeverity as NotificationSeverityFilter)
+    : undefined;
+
+  const snapshot = await new OperationsService(getDatabase()).snapshot(session.profile.id, {
+    notificationsPage: requestedPage,
+    notificationsPageSize: 20,
+    ...(unreadOnly ? { unreadOnly: true } : {}),
+    ...(severity ? { severity } : {}),
+  });
+  const { permissions, totals, notificationsPagination } = snapshot;
+  const hasNotificationFilters = unreadOnly || severity !== undefined;
   const summaryCards: Array<readonly [string, number]> = [
     ...(permissions.orders
       ? ([
-          ["Pedidos por alistar", snapshot.pendingOrders.length],
-          ["Envíos fuera de promesa", snapshot.lateShipments.length],
+          ["Pedidos por alistar", totals.pendingOrders],
+          ["Envíos fuera de promesa", totals.lateShipments],
         ] as const)
       : []),
     ...(permissions.payments
       ? ([
-          ["Pagos manuales por revisar", snapshot.pendingPayments.length],
-          ["Reembolsos por revisar", snapshot.pendingRefunds.length],
+          ["Pagos manuales por revisar", totals.pendingPayments],
+          ["Reembolsos por revisar", totals.pendingRefunds],
         ] as const)
       : []),
-    ["Notificaciones sin leer", unread.length],
+    ["Notificaciones sin leer", totals.unreadNotifications],
   ];
   return (
     <div className="space-y-10">
@@ -93,22 +149,44 @@ export default async function TodayPage() {
           <h2 className="font-semibold">Integraciones que requieren intervención</h2>
           <p className="mt-2 text-sm text-muted-foreground">
             {snapshot.failedOutbox} eventos agotaron sus reintentos. Revisa la notificación crítica
-            asociada antes de reprogramar el worker; ningún evento se reenvía ciegamente.
+            asociada antes de reprogramar el proceso en segundo plano; ningún evento se reenvía
+            ciegamente.
           </p>
         </section>
       ) : null}
       {permissions.orders ? (
         <>
           <section aria-labelledby="today-orders" className="space-y-4">
-            <h2 id="today-orders" className="text-xl font-semibold">
-              Pedidos pagados por alistar
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 id="today-orders" className="text-xl font-semibold">
+                  Pedidos pagados por alistar
+                </h2>
+                {snapshot.pendingOrders.length < totals.pendingOrders ? (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Mostrando {numberFormatter.format(snapshot.pendingOrders.length)} de{" "}
+                    {numberFormatter.format(totals.pendingOrders)}
+                  </p>
+                ) : null}
+              </div>
+              {hasAdminPermission(session.profile.role, "orders:read") ? (
+                <Link
+                  href="/admin/pedidos"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver todos los pedidos
+                </Link>
+              ) : null}
+            </div>
             {snapshot.pendingOrders.length === 0 ? (
               <Empty>No hay pedidos pagados pendientes de alistamiento.</Empty>
             ) : (
               <ul className="grid gap-3 lg:grid-cols-2">
                 {snapshot.pendingOrders.map((order) => (
-                  <li key={order.id} className="rounded-xl border border-border bg-card p-5">
+                  <li
+                    key={order.id}
+                    className="min-w-0 rounded-xl border border-border bg-card p-5"
+                  >
                     <div className="flex flex-wrap justify-between gap-3">
                       <div>
                         <Link
@@ -118,7 +196,8 @@ export default async function TodayPage() {
                           {order.orderNumber}
                         </Link>
                         <p className="mt-1 text-sm text-muted-foreground">
-                          {order.recipientName} · {statusLabels[order.fulfillmentStatus]} ·{" "}
+                          {order.recipientName} ·{" "}
+                          {labelFor(fulfillmentStatusLabels, order.fulfillmentStatus)} ·{" "}
                           {dateFormatter.format(new Date(order.createdAt))}
                         </p>
                       </div>
@@ -130,9 +209,27 @@ export default async function TodayPage() {
             )}
           </section>
           <section aria-labelledby="today-shipments" className="space-y-4">
-            <h2 id="today-shipments" className="text-xl font-semibold">
-              Promesas de entrega vencidas
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 id="today-shipments" className="text-xl font-semibold">
+                  Promesas de entrega vencidas
+                </h2>
+                {snapshot.lateShipments.length < totals.lateShipments ? (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Mostrando {numberFormatter.format(snapshot.lateShipments.length)} de{" "}
+                    {numberFormatter.format(totals.lateShipments)}
+                  </p>
+                ) : null}
+              </div>
+              {hasAdminPermission(session.profile.role, "fulfillment:read") ? (
+                <Link
+                  href="/admin/logistica"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver logística
+                </Link>
+              ) : null}
+            </div>
             {snapshot.lateShipments.length === 0 ? (
               <Empty>No hay envíos fuera de su promesa de entrega.</Empty>
             ) : (
@@ -146,9 +243,8 @@ export default async function TodayPage() {
                       {shipment.orderNumber}
                     </Link>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {statusLabels[shipment.fulfillmentStatus ?? shipment.status] ??
-                        shipment.status}{" "}
-                      · Prometido para {dateFormatter.format(new Date(shipment.promisedAt))}
+                      {formatShipmentState(shipment.fulfillmentStatus, shipment.status)} · Prometido
+                      para {dateFormatter.format(new Date(shipment.promisedAt))}
                     </p>
                   </li>
                 ))}
@@ -160,9 +256,27 @@ export default async function TodayPage() {
       {permissions.payments ? (
         <>
           <section aria-labelledby="today-payments" className="space-y-4">
-            <h2 id="today-payments" className="text-xl font-semibold">
-              Pagos manuales por revisar
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 id="today-payments" className="text-xl font-semibold">
+                  Pagos manuales por revisar
+                </h2>
+                {snapshot.pendingPayments.length < totals.pendingPayments ? (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Mostrando {numberFormatter.format(snapshot.pendingPayments.length)} de{" "}
+                    {numberFormatter.format(totals.pendingPayments)}
+                  </p>
+                ) : null}
+              </div>
+              {hasAdminPermission(session.profile.role, "payments:read") ? (
+                <Link
+                  href="/admin/pagos"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver todos los pagos
+                </Link>
+              ) : null}
+            </div>
             {snapshot.pendingPayments.length === 0 ? (
               <Empty>No hay transferencias ni remesas COD pendientes de validación.</Empty>
             ) : (
@@ -180,8 +294,12 @@ export default async function TodayPage() {
                         {payment.orderNumber}
                       </Link>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {providerLabels[payment.provider] ?? payment.provider} ·{" "}
-                        {statusLabels[payment.status] ?? payment.status} ·{" "}
+                        {payment.provider === "COD"
+                          ? "Contraentrega (discrepancia)"
+                          : (paymentProviderLabels[
+                              payment.provider as keyof typeof paymentProviderLabels
+                            ] ?? payment.provider)}{" "}
+                        · {formatPaymentState(payment.status)} ·{" "}
                         {dateFormatter.format(new Date(payment.createdAt))}
                       </p>
                     </div>
@@ -192,9 +310,27 @@ export default async function TodayPage() {
             )}
           </section>
           <section aria-labelledby="today-refunds" className="space-y-4">
-            <h2 id="today-refunds" className="text-xl font-semibold">
-              Reembolsos por revisar
-            </h2>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 id="today-refunds" className="text-xl font-semibold">
+                  Reembolsos por revisar
+                </h2>
+                {snapshot.pendingRefunds.length < totals.pendingRefunds ? (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Mostrando {numberFormatter.format(snapshot.pendingRefunds.length)} de{" "}
+                    {numberFormatter.format(totals.pendingRefunds)}
+                  </p>
+                ) : null}
+              </div>
+              {hasAdminPermission(session.profile.role, "payments:read") ? (
+                <Link
+                  href="/admin/pagos#refunds"
+                  className="text-sm font-medium text-primary underline underline-offset-4"
+                >
+                  Ver reembolsos
+                </Link>
+              ) : null}
+            </div>
             {snapshot.pendingRefunds.length === 0 ? (
               <Empty>No hay reembolsos pendientes de aprobación, ejecución o conciliación.</Empty>
             ) : (
@@ -212,7 +348,7 @@ export default async function TodayPage() {
                         {refund.orderNumber}
                       </Link>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {statusLabels[refund.status] ?? refund.status} ·{" "}
+                        {labelFor(refundStatusLabels, refund.status)} ·{" "}
                         {dateFormatter.format(new Date(refund.createdAt))}
                       </p>
                     </div>
@@ -226,20 +362,63 @@ export default async function TodayPage() {
       ) : null}
       <section aria-labelledby="today-notifications" className="space-y-4">
         <h2 id="today-notifications" className="text-xl font-semibold">
-          Notificaciones operativas
+          Notificaciones operativas ({numberFormatter.format(totals.notifications)})
         </h2>
+        <form
+          key={`${unreadOnly ? "1" : "0"}|${severity ?? ""}`}
+          action="/admin/hoy"
+          className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
+        >
+          <Select
+            name="sinLeer"
+            defaultValue={unreadOnly ? "1" : ""}
+            aria-label="Filtrar notificaciones por lectura"
+            fullWidth={false}
+          >
+            <option value="">Todas las notificaciones</option>
+            <option value="1">Solo sin leer</option>
+          </Select>
+          <Select
+            name="severidad"
+            defaultValue={severity ?? ""}
+            aria-label="Filtrar notificaciones por severidad"
+            fullWidth={false}
+          >
+            <option value="">Todas las severidades</option>
+            {allowedSeverities.map((level) => (
+              <option key={level} value={level}>
+                {severityLabels[level]}
+              </option>
+            ))}
+          </Select>
+          <Button type="submit" variant="outline">
+            Filtrar
+          </Button>
+          {hasNotificationFilters ? (
+            <Link
+              href="/admin/hoy"
+              className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+            >
+              Limpiar
+            </Link>
+          ) : null}
+        </form>
         {snapshot.notifications.length === 0 ? (
-          <Empty>No hay notificaciones operativas activas.</Empty>
+          <Empty>
+            {hasNotificationFilters
+              ? "No hay notificaciones que coincidan con estos filtros."
+              : "No hay notificaciones operativas activas."}
+          </Empty>
         ) : (
           <ul className="space-y-3">
             {snapshot.notifications.map((notification) => (
               <li
                 key={notification.id}
-                className="rounded-xl border border-border bg-card p-5 aria-[current=true]:bg-secondary/40"
-                aria-current={notification.readAt !== null}
+                data-read={notification.readAt !== null ? "true" : undefined}
+                className="rounded-xl border border-border bg-card p-5 data-[read=true]:bg-secondary/40"
               >
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="max-w-3xl">
+                  <div className="max-w-3xl min-w-0">
                     <p className="text-xs font-medium text-muted-foreground">
                       {severityLabels[notification.severity] ?? notification.severity} ·{" "}
                       {dateFormatter.format(new Date(notification.createdAt))}
@@ -254,13 +433,56 @@ export default async function TodayPage() {
                     <p className="mt-2 text-sm text-muted-foreground">{notification.message}</p>
                   </div>
                   {notification.readAt === null ? (
-                    <NotificationReadForm notificationId={notification.id} />
+                    <NotificationReadForm
+                      notificationId={notification.id}
+                      title={notification.title}
+                    />
                   ) : null}
                 </div>
               </li>
             ))}
           </ul>
         )}
+        {notificationsPagination.total > 0 ? (
+          <nav
+            aria-label="Paginación de notificaciones operativas"
+            className="flex flex-wrap items-center justify-between gap-3"
+          >
+            <span className="text-sm text-muted-foreground">
+              Página {notificationsPagination.page} de {notificationsPagination.totalPages} ·{" "}
+              {numberFormatter.format(notificationsPagination.total)}{" "}
+              {notificationsPagination.total === 1 ? "notificación" : "notificaciones"}
+            </span>
+            <div className="flex gap-2">
+              {notificationsPagination.page > 1 ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    href={todayNotificationsHref({
+                      unreadOnly,
+                      ...(severity ? { severity } : {}),
+                      page: notificationsPagination.page - 1,
+                    })}
+                  >
+                    Anterior
+                  </Link>
+                </Button>
+              ) : null}
+              {notificationsPagination.page < notificationsPagination.totalPages ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    href={todayNotificationsHref({
+                      unreadOnly,
+                      ...(severity ? { severity } : {}),
+                      page: notificationsPagination.page + 1,
+                    })}
+                  >
+                    Siguiente
+                  </Link>
+                </Button>
+              ) : null}
+            </div>
+          </nav>
+        ) : null}
       </section>
     </div>
   );

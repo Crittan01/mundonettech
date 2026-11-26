@@ -1,14 +1,14 @@
 "use client";
 
 import type { CatalogProductBaseInput, CatalogVariantInput } from "@mundonettech/db";
-import { useActionState } from "react";
+import { startTransition, useActionState, useEffect, useRef } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 import {
   createCatalogProductAction,
   removeCatalogAttributeAction,
@@ -44,8 +44,17 @@ type ProductDefaults = Omit<CatalogProductBaseInput, "trackSerial"> & {
   hasInventoryHistory?: boolean;
 };
 
+const attributeValueTypeLabels: Record<string, string> = {
+  TEXT: "Texto",
+  INTEGER: "Entero",
+  DECIMAL: "Decimal",
+  BOOLEAN: "Sí / No",
+  URL: "Enlace URL",
+  JSON: "Estructura JSON",
+};
+
 const textareaClass =
-  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50";
 
 function TextField({
   id,
@@ -53,6 +62,7 @@ function TextField({
   label,
   defaultValue = "",
   required = false,
+  disabled = false,
   maxLength,
   type = "text",
   min,
@@ -63,6 +73,7 @@ function TextField({
   label: string;
   defaultValue?: string | undefined;
   required?: boolean;
+  disabled?: boolean;
   maxLength?: number;
   type?: string;
   min?: string;
@@ -78,6 +89,7 @@ function TextField({
         type={type}
         defaultValue={defaultValue}
         required={required}
+        disabled={disabled}
         maxLength={maxLength}
         min={min}
         inputMode={inputMode}
@@ -92,12 +104,14 @@ function VariantFields({
   idPrefix,
   statusName = "status",
   defaultIsDefault = false,
+  disabled = false,
 }: {
   variant?: Partial<CatalogVariantInput> | undefined;
   values?: Record<string, string> | undefined;
   idPrefix: string;
   statusName?: string;
   defaultIsDefault?: boolean;
+  disabled?: boolean;
 }) {
   const defaultChecked = values
     ? ["on", "true"].includes(values.isDefault ?? "")
@@ -112,6 +126,7 @@ function VariantFields({
         label="SKU"
         defaultValue={values?.sku ?? variant?.sku}
         required
+        disabled={disabled}
         maxLength={64}
       />
       <TextField
@@ -121,14 +136,16 @@ function VariantFields({
         defaultValue={values?.priceCents ?? variant?.priceCents}
         inputMode="numeric"
         required
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-cost`}
         name="costCents"
         label="Costo (centavos COP)"
-        defaultValue={values?.costCents ?? variant?.costCents}
+        defaultValue={variant?.costCents}
         inputMode="numeric"
         required
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-compare`}
@@ -136,18 +153,21 @@ function VariantFields({
         label="Precio anterior (centavos COP)"
         defaultValue={values?.compareAtPriceCents ?? variant?.compareAtPriceCents ?? ""}
         inputMode="numeric"
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-gtin`}
         name="gtin"
         label="GTIN"
         defaultValue={values?.gtin ?? variant?.gtin ?? ""}
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-ean`}
         name="ean"
         label="EAN-8/13"
         defaultValue={values?.ean ?? variant?.ean ?? ""}
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-mpn`}
@@ -155,6 +175,7 @@ function VariantFields({
         label="MPN"
         defaultValue={values?.mpn ?? variant?.mpn ?? ""}
         maxLength={64}
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-weight`}
@@ -163,6 +184,7 @@ function VariantFields({
         defaultValue={values?.weightGrams ?? (variant ? String(variant.weightGrams) : "")}
         inputMode="numeric"
         required
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-length`}
@@ -173,6 +195,7 @@ function VariantFields({
         }
         inputMode="numeric"
         required
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-width`}
@@ -181,6 +204,7 @@ function VariantFields({
         defaultValue={values?.widthMillimeters ?? (variant ? String(variant.widthMillimeters) : "")}
         inputMode="numeric"
         required
+        disabled={disabled}
       />
       <TextField
         id={`${idPrefix}-height`}
@@ -191,6 +215,7 @@ function VariantFields({
         }
         inputMode="numeric"
         required
+        disabled={disabled}
       />
       <div className="space-y-2">
         <Label htmlFor={`${idPrefix}-status`}>Estado</Label>
@@ -199,7 +224,7 @@ function VariantFields({
           id={`${idPrefix}-status`}
           name={statusName}
           defaultValue={statusDefault}
-          focusRing={false}
+          disabled={disabled}
         >
           <option value="ACTIVE">Activa</option>
           <option value="INACTIVE">Inactiva</option>
@@ -212,6 +237,7 @@ function VariantFields({
           name="isDefault"
           value="true"
           defaultChecked={defaultChecked}
+          disabled={disabled}
           className="size-4 accent-primary"
         />
         Variante principal
@@ -234,15 +260,30 @@ export function CatalogProductForm({
   );
   const values = state.status === "error" ? state.values : undefined;
   return (
-    <form action={action} className="space-y-6 rounded-xl border border-border bg-card p-5">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-6 rounded-xl border border-border bg-card p-5"
+    >
       {product ? <input type="hidden" name="productId" value={product.id} /> : null}
-      <ProductBaseFields references={references} product={product} values={values} />
+      <ProductBaseFields
+        references={references}
+        product={product}
+        values={values}
+        disabled={pending}
+      />
       {mode === "create" ? (
         <VariantFields
           idPrefix="initial-variant"
           values={values}
           statusName="variantStatus"
           defaultIsDefault
+          disabled={pending}
         />
       ) : null}
       <Button type="submit" disabled={pending}>
@@ -257,10 +298,12 @@ function ProductBaseFields({
   references,
   product,
   values,
+  disabled = false,
 }: {
   references: References;
   product?: ProductDefaults | undefined;
   values?: Record<string, string> | undefined;
+  disabled?: boolean;
 }) {
   const brandDefault = values?.brandId ?? product?.brandId ?? "";
   const categoryDefault = values?.categoryId ?? product?.categoryId ?? "";
@@ -284,6 +327,7 @@ function ProductBaseFields({
         label="Slug"
         defaultValue={values?.slug ?? product?.slug}
         required
+        disabled={disabled}
         maxLength={160}
       />
       <TextField
@@ -292,6 +336,7 @@ function ProductBaseFields({
         label="Nombre"
         defaultValue={values?.name ?? product?.name}
         required
+        disabled={disabled}
         maxLength={200}
       />
       <div className="space-y-2 sm:col-span-2">
@@ -303,6 +348,7 @@ function ProductBaseFields({
           defaultValue={shortDefault}
           maxLength={500}
           rows={3}
+          disabled={disabled}
           className={textareaClass}
         />
       </div>
@@ -315,6 +361,7 @@ function ProductBaseFields({
           defaultValue={descriptionDefault}
           maxLength={50_000}
           rows={5}
+          disabled={disabled}
           className={textareaClass}
         />
       </div>
@@ -325,8 +372,8 @@ function ProductBaseFields({
           id="product-brand"
           name="brandId"
           defaultValue={brandDefault}
+          disabled={disabled}
           required
-          focusRing={false}
         >
           <option value="" disabled>
             Selecciona una marca
@@ -345,8 +392,8 @@ function ProductBaseFields({
           id="product-category"
           name="categoryId"
           defaultValue={categoryDefault}
+          disabled={disabled}
           required
-          focusRing={false}
         >
           <option value="" disabled>
             Selecciona una categoría
@@ -366,8 +413,8 @@ function ProductBaseFields({
           id="product-tax"
           name="taxGroupId"
           defaultValue={taxDefault}
+          disabled={disabled}
           required
-          focusRing={false}
         >
           <option value="" disabled>
             Selecciona un grupo
@@ -386,7 +433,7 @@ function ProductBaseFields({
           id="product-status"
           name="status"
           defaultValue={statusDefault}
-          focusRing={false}
+          disabled={disabled}
         >
           <option value="DRAFT">Borrador</option>
           <option value="ACTIVE">Activo</option>
@@ -400,7 +447,7 @@ function ProductBaseFields({
           id="product-authenticity"
           name="authenticity"
           defaultValue={authenticityDefault}
-          focusRing={false}
+          disabled={disabled}
         >
           <option value="ORIGINAL">Original</option>
           <option value="CERTIFIED_COMPATIBLE">Compatible certificado</option>
@@ -414,7 +461,7 @@ function ProductBaseFields({
           id="product-retract"
           name="retractPolicy"
           defaultValue={retractDefault}
-          focusRing={false}
+          disabled={disabled}
         >
           <option value="STANDARD">Estándar</option>
           <option value="LEGAL_EXCEPTION_REVIEW">Revisión de excepción legal</option>
@@ -427,6 +474,7 @@ function ProductBaseFields({
         defaultValue={values?.warrantyMonths ?? String(product?.warrantyMonths ?? 12)}
         inputMode="numeric"
         required
+        disabled={disabled}
       />
       <div className="space-y-1 self-end">
         {serialLocked ? (
@@ -436,7 +484,8 @@ function ProductBaseFields({
           <input
             key={`product-serial-${String(trackSerialChecked)}`}
             type="checkbox"
-            {...(serialLocked ? { disabled: true } : { name: "trackSerial" })}
+            {...(serialLocked ? {} : { name: "trackSerial" })}
+            disabled={serialLocked || disabled}
             defaultChecked={trackSerialChecked}
             className="size-4 accent-primary"
           />
@@ -454,6 +503,7 @@ function ProductBaseFields({
         label="Título SEO"
         defaultValue={values?.seoTitle ?? product?.seoTitle ?? ""}
         maxLength={200}
+        disabled={disabled}
       />
       <TextField
         id="product-seo-description"
@@ -461,6 +511,7 @@ function ProductBaseFields({
         label="Descripción SEO"
         defaultValue={values?.seoDescription ?? product?.seoDescription ?? ""}
         maxLength={300}
+        disabled={disabled}
       />
     </fieldset>
   );
@@ -474,12 +525,35 @@ export function CatalogVariantForm({
   variant?: CatalogVariantInput;
 }) {
   const [state, action, pending] = useActionState(upsertCatalogVariantAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (!variant && state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state, variant]);
   const values = state.status === "error" ? state.values : undefined;
   return (
-    <form action={action} className="space-y-4 rounded-xl border border-border bg-card p-5">
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-4 rounded-xl border border-border bg-card p-5"
+    >
       <input type="hidden" name="productId" value={productId} />
       {variant?.id ? <input type="hidden" name="variantId" value={variant.id} /> : null}
-      <VariantFields variant={variant} values={values} idPrefix={variant?.id ?? "new-variant"} />
+      <VariantFields
+        variant={variant}
+        values={values}
+        idPrefix={variant?.id ?? "new-variant"}
+        disabled={pending}
+      />
       <Button type="submit" variant="outline" disabled={pending}>
         {pending ? "Guardando…" : variant ? "Guardar variante" : "Crear variante"}
       </Button>
@@ -498,24 +572,41 @@ export function CatalogAttributeForm({
   entry?: { id: string; attributeId: string; rawValue: string };
 }) {
   const [state, action, pending] = useActionState(upsertCatalogAttributeAction, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (!entry && state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [entry, state]);
   const values = state.status === "error" ? state.values : undefined;
   const idPrefix = entry?.id ?? "new-attr";
   const selectedAttribute = values?.attributeId ?? entry?.attributeId ?? "";
   const valueDefault = values?.value ?? entry?.rawValue ?? "";
   return (
-    <form action={action} className="space-y-3 rounded-xl border border-border bg-card p-4">
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-3 rounded-xl border border-border bg-card p-4"
+    >
       <input type="hidden" name="productId" value={productId} />
       {entry?.id ? <input type="hidden" name="attributeValueId" value={entry.id} /> : null}
       <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
         <div className="space-y-2">
           <Label htmlFor={`${idPrefix}-attribute`}>Atributo</Label>
           <Select
-            key={`${idPrefix}-attribute-${selectedAttribute}`}
             id={`${idPrefix}-attribute`}
             name="attributeId"
             defaultValue={selectedAttribute}
+            disabled={pending}
             required
-            focusRing={false}
           >
             <option value="" disabled>
               Selecciona un atributo
@@ -523,7 +614,8 @@ export function CatalogAttributeForm({
             {attributes.map((attribute) => (
               <option key={attribute.id} value={attribute.id}>
                 {attribute.name}
-                {attribute.unit ? ` (${attribute.unit})` : ""} · {attribute.valueType}
+                {attribute.unit ? ` (${attribute.unit})` : ""} ·{" "}
+                {attributeValueTypeLabels[attribute.valueType] ?? attribute.valueType}
               </option>
             ))}
           </Select>
@@ -531,10 +623,10 @@ export function CatalogAttributeForm({
         <div className="space-y-2">
           <Label htmlFor={`${idPrefix}-value`}>Valor</Label>
           <Input
-            key={`${idPrefix}-value-${valueDefault}`}
             id={`${idPrefix}-value`}
             name="value"
             defaultValue={valueDefault}
+            disabled={pending}
             required
             placeholder="Ej.: Apple M3, 256, true o https://..."
           />
@@ -561,7 +653,16 @@ export function CatalogAttributeRemoveForm({
 }) {
   const [state, action, pending] = useActionState(removeCatalogAttributeAction, initialActionState);
   return (
-    <form action={action} className="space-y-2">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-2"
+    >
       <input type="hidden" name="productId" value={productId} />
       <input type="hidden" name="attributeValueId" value={attributeValueId} />
       <Button
@@ -589,23 +690,40 @@ export function CatalogCompatibilityForm({
     upsertCatalogCompatibilityAction,
     initialActionState,
   );
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [state]);
   const values = state.status === "error" ? state.values : undefined;
   const deviceDefault = values?.deviceId ?? "";
   const fitDefault = values?.fit ?? "EXACT";
   const notesDefault = values?.notes ?? "";
   return (
-    <form action={action} className="space-y-3 rounded-xl border border-border bg-card p-4">
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-3 rounded-xl border border-border bg-card p-4"
+    >
       <input type="hidden" name="productId" value={productId} />
       <div className="grid gap-3 sm:grid-cols-3">
         <div className="space-y-2">
           <Label htmlFor="compat-device">Dispositivo</Label>
           <Select
-            key={`compat-device-${deviceDefault}`}
             id="compat-device"
             name="deviceId"
             defaultValue={deviceDefault}
+            disabled={pending}
             required
-            focusRing={false}
           >
             <option value="" disabled>
               Selecciona un dispositivo
@@ -620,13 +738,7 @@ export function CatalogCompatibilityForm({
         </div>
         <div className="space-y-2">
           <Label htmlFor="compat-fit">Ajuste</Label>
-          <Select
-            key={`compat-fit-${fitDefault}`}
-            id="compat-fit"
-            name="fit"
-            defaultValue={fitDefault}
-            focusRing={false}
-          >
+          <Select id="compat-fit" name="fit" defaultValue={fitDefault} disabled={pending}>
             <option value="EXACT">Compatibilidad directa</option>
             <option value="ADAPTER">Requiere adaptador</option>
             <option value="NOT_COMPATIBLE">No compatible</option>
@@ -635,11 +747,11 @@ export function CatalogCompatibilityForm({
         <div className="space-y-2">
           <Label htmlFor="compat-notes">Notas (opcional)</Label>
           <Input
-            key={`compat-notes-${notesDefault}`}
             id="compat-notes"
             name="notes"
             defaultValue={notesDefault}
             maxLength={500}
+            disabled={pending}
             placeholder="Ej.: Conector USB-C directo"
           />
         </div>
@@ -666,7 +778,16 @@ export function CatalogCompatibilityRemoveForm({
     initialActionState,
   );
   return (
-    <form action={action} className="space-y-2">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-2"
+    >
       <input type="hidden" name="productId" value={productId} />
       <input type="hidden" name="compatibilityId" value={compatibilityId} />
       <Button

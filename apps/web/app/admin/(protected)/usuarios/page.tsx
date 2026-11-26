@@ -1,10 +1,14 @@
-import { canAssignAdminRole, isAdminRole, maskEmail } from "@mundonettech/core";
+import { canAssignAdminRole, hasAdminPermission, isAdminRole, maskEmail } from "@mundonettech/core";
 import Link from "next/link";
 
 import { AdministratorEditor, InviteAdministratorForm } from "@/components/admin/admin-user-forms";
-import { StepUpPrompt } from "@/components/admin/security-manager";
+import { CmsStepUp } from "@/components/admin/cms-step-up";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { roleLabels } from "@/lib/admin-presenters";
-import { getDatabaseClock } from "@/lib/database-clock";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -20,15 +24,18 @@ function pageHref(params: Record<string, string>, page: number): string {
 export default async function AdministratorsPage({ searchParams }: PageProps<"/admin/usuarios">) {
   const session = await requireAdminPage("users:read");
   const params = await searchParams;
-  const q = typeof params.q === "string" ? params.q.trim().slice(0, 100) : "";
-  const role =
-    typeof params.role === "string" && isAdminRole(params.role) ? params.role : undefined;
-  const status = ["INVITED", "ACTIVE", "SUSPENDED"].includes(String(params.status))
-    ? (params.status as "INVITED" | "ACTIVE" | "SUSPENDED")
+  const q = (single(params.q) ?? "").trim().slice(0, 100);
+  const rawRole = single(params.role) ?? "";
+  const role = rawRole && isAdminRole(rawRole) ? rawRole : undefined;
+  const rawStatus = single(params.status) ?? "";
+  const status = ["INVITED", "ACTIVE", "SUSPENDED"].includes(rawStatus)
+    ? (rawStatus as "INVITED" | "ACTIVE" | "SUSPENDED")
     : undefined;
+  const rawPage = single(params.page)?.trim() ?? "";
+  const parsedPage = /^[1-9]\d*$/.test(rawPage) ? Number.parseInt(rawPage, 10) : 1;
   const requestedPage = Math.max(
     1,
-    Math.min(10_000, Number.parseInt(String(params.page ?? "1"), 10) || 1),
+    Math.min(10_000, Number.isSafeInteger(parsedPage) ? parsedPage : 1),
   );
   const where = {
     deletedAt: null,
@@ -44,14 +51,7 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
       : {}),
   };
   const db = getDatabase();
-  const [now, factors, total] = await Promise.all([
-    getDatabaseClock(db),
-    session.supabase.auth.mfa.listFactors(),
-    db.adminUser.count({ where }),
-  ]);
-  const verifiedFactor = factors.data?.totp.find((item) => item.status === "verified");
-  const recentMfa =
-    session.lastMfaAt !== null && now.getTime() - session.lastMfaAt.getTime() <= 10 * 60 * 1000;
+  const total = await db.adminUser.count({ where });
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(requestedPage, totalPages);
   const users = await db.adminUser.findMany({
@@ -65,6 +65,10 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
     ...(role ? { role } : {}),
     ...(status ? { status } : {}),
   };
+  const hasFilters = Boolean(q || role || status);
+  const canWrite = hasAdminPermission(session.profile.role, "users:write");
+  const canReadOwnSecurity = hasAdminPermission(session.profile.role, "security:read_own");
+  const canReadAudit = hasAdminPermission(session.profile.role, "audit:read");
   return (
     <div className="space-y-8">
       <div>
@@ -72,55 +76,87 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
         <p className="mt-2 text-muted-foreground">
           Invitaciones, roles y estados protegidos por anillos y MFA reciente.
         </p>
+        {canReadOwnSecurity || canReadAudit ? (
+          <div className="mt-4 flex flex-wrap gap-4 text-sm">
+            {canReadOwnSecurity ? (
+              <Link className="text-primary underline" href="/admin/seguridad">
+                Configurar mi seguridad y MFA
+              </Link>
+            ) : null}
+            {canReadAudit ? (
+              <>
+                <Link className="text-primary underline" href="/admin/auditoria">
+                  Consultar registros de auditoría
+                </Link>
+                <Link className="text-primary underline" href="/admin/salud">
+                  Ver estado de salud y respaldos
+                </Link>
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </div>
-      {!recentMfa && verifiedFactor ? <StepUpPrompt factorId={verifiedFactor.id} /> : null}
-      <details className="rounded-xl border border-border bg-card">
-        <summary className="cursor-pointer p-4 font-semibold">Invitar un administrador</summary>
-        <div className="p-4 pt-0">
-          <InviteAdministratorForm actorRole={session.profile.role} labels={roleLabels} />
+      {canWrite ? (
+        <>
+          <CmsStepUp session={session} />
+          <details className="rounded-xl border border-border bg-card">
+            <summary className="cursor-pointer p-4 font-semibold">Invitar un administrador</summary>
+            <div className="p-4 pt-0">
+              <InviteAdministratorForm actorRole={session.profile.role} labels={roleLabels} />
+            </div>
+          </details>
+        </>
+      ) : (
+        <p className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+          Vista de solo lectura: tu rol permite consultar administradores, pero no invitar ni
+          modificar cuentas.
+        </p>
+      )}
+      <form
+        key={`${q}|${role ?? ""}|${status ?? ""}`}
+        className="flex flex-wrap items-end gap-3"
+        action="/admin/usuarios"
+      >
+        <div className="w-full space-y-2 sm:w-auto">
+          <Label htmlFor="user-search">Buscar</Label>
+          <Input
+            id="user-search"
+            name="q"
+            defaultValue={q}
+            maxLength={100}
+            placeholder="Buscar por correo o nombre"
+            className="w-full min-w-0 sm:w-64"
+          />
         </div>
-      </details>
-      <form className="flex flex-wrap gap-3" action="/admin/usuarios">
-        <label className="sr-only" htmlFor="user-search">
-          Buscar
-        </label>
-        <input
-          id="user-search"
-          name="q"
-          defaultValue={q}
-          placeholder="Buscar por correo o nombre"
-          className="h-10 min-w-64 rounded-md border border-input bg-background px-3 text-sm"
-        />
-        <select
-          name="role"
-          defaultValue={role ?? ""}
-          aria-label="Filtrar por rol"
-          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-        >
-          <option value="">Todos los roles</option>
-          {Object.entries(roleLabels).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-        <select
-          name="status"
-          defaultValue={status ?? ""}
-          aria-label="Filtrar por estado"
-          className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-        >
-          <option value="">Todos los estados</option>
-          <option value="ACTIVE">Activos</option>
-          <option value="INVITED">Invitados</option>
-          <option value="SUSPENDED">Suspendidos</option>
-        </select>
-        <button
-          type="submit"
-          className="rounded-md bg-primary px-4 text-sm text-primary-foreground"
-        >
-          Filtrar
-        </button>
+        <div className="space-y-2">
+          <Label htmlFor="user-role">Filtrar por rol</Label>
+          <Select id="user-role" name="role" fullWidth={false} defaultValue={role ?? ""}>
+            <option value="">Todos los roles</option>
+            {Object.entries(roleLabels).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </Select>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="user-status">Filtrar por estado</Label>
+          <Select id="user-status" name="status" fullWidth={false} defaultValue={status ?? ""}>
+            <option value="">Todos los estados</option>
+            <option value="ACTIVE">Activos</option>
+            <option value="INVITED">Invitados</option>
+            <option value="SUSPENDED">Suspendidos</option>
+          </Select>
+        </div>
+        <Button type="submit">Filtrar</Button>
+        {hasFilters ? (
+          <Link
+            href="/admin/usuarios"
+            className="inline-flex h-11 items-center px-2 text-sm text-primary underline"
+          >
+            Limpiar filtros
+          </Link>
+        ) : null}
       </form>
       {users.length ? (
         <div className="space-y-4">
@@ -129,7 +165,7 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
               <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">
                 <div>
                   <h2 className="font-semibold">{user.displayName}</h2>
-                  <p className="text-sm text-muted-foreground">
+                  <p className="text-sm break-all text-muted-foreground">
                     {maskEmail(user.email)} · {roleLabels[user.role]}
                   </p>
                 </div>
@@ -141,7 +177,11 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
                       : "Suspendido"}
                 </span>
               </div>
-              {user.id === session.profile.id ? (
+              {!canWrite ? (
+                <p className="mt-4 text-sm text-muted-foreground">
+                  Solo lectura: tu rol no permite modificar cuentas administrativas.
+                </p>
+              ) : user.id === session.profile.id ? (
                 <p className="mt-4 text-sm text-muted-foreground">
                   Tu propia cuenta solo se administra mediante otro superadministrador autorizado.
                 </p>
@@ -169,14 +209,17 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
           </p>
         </section>
       )}
-      <nav className="flex items-center justify-between" aria-label="Paginación">
+      <nav
+        className="flex flex-wrap items-center justify-between gap-3"
+        aria-label="Paginación de usuarios administrativos"
+      >
         <span className="text-sm text-muted-foreground">
           Página {page} de {totalPages} · {total} registros
         </span>
         <div className="flex gap-2">
           {page > 1 ? (
             <Link
-              className="rounded-md border border-border px-3 py-2 text-sm"
+              className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
               href={pageHref(filters, page - 1)}
             >
               Anterior
@@ -184,7 +227,7 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
           ) : null}
           {page < totalPages ? (
             <Link
-              className="rounded-md border border-border px-3 py-2 text-sm"
+              className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
               href={pageHref(filters, page + 1)}
             >
               Siguiente

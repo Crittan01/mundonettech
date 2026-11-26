@@ -35,7 +35,7 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
     ["Páginas vistas", snapshot.totals.pageViews],
     ["Vistas de producto", snapshot.totals.productViews],
     ["Adiciones al carrito", snapshot.totals.cartAdditions],
-    ["Checkouts iniciados", snapshot.totals.checkoutStarts],
+    ["Finalizaciones de compra iniciadas", snapshot.totals.checkoutStarts],
     ["Pedidos confirmados", snapshot.totals.ordersConfirmed],
     ["Pedidos pagados", snapshot.totals.ordersPaid],
   ] as const;
@@ -47,7 +47,7 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
           <h1 className="text-3xl font-bold">Dashboard del embudo</h1>
           <p className="mt-2 max-w-3xl text-muted-foreground">
             Contadores diarios agregados en America/Bogota, sin cookies, identificadores de sesión,
-            direcciones IP ni eventos RUM individuales en PostgreSQL.
+            direcciones IP ni eventos de telemetría por visita individuales en PostgreSQL.
           </p>
         </div>
         <nav aria-label="Periodo del embudo" className="flex gap-2">
@@ -56,7 +56,7 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
               key={period}
               href={`/admin/dashboard?days=${period}`}
               aria-current={days === period ? "page" : undefined}
-              className="rounded-md border border-border px-3 py-2 text-sm aria-current:bg-secondary"
+              className="rounded-md border border-border px-3 py-2 text-sm font-medium aria-[current=page]:bg-primary aria-[current=page]:text-primary-foreground"
             >
               {period} días
             </Link>
@@ -103,7 +103,7 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
         <dl className="mt-4 grid gap-4 sm:grid-cols-3">
           {[
             ["Producto → carrito", snapshot.productToCartBps],
-            ["Checkout → pedido", snapshot.checkoutToOrderBps],
+            ["Finalización de compra → pedido", snapshot.checkoutToOrderBps],
             ["Pedido → pago", snapshot.orderToPaidBps],
           ].map(([label, value]) => (
             <div key={label as string}>
@@ -117,20 +117,31 @@ export default async function FunnelDashboardPage({ searchParams }: PageProps<"/
         <h2 id="daily-title" className="text-xl font-semibold">
           Serie diaria
         </h2>
-        <div className="overflow-x-auto rounded-xl border border-border">
+        <div
+          role="region"
+          aria-label="Tabla de serie diaria del embudo"
+          tabIndex={0}
+          className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
           <table className="w-full min-w-[760px] text-left text-sm">
             <caption className="sr-only">
               Contadores agregados por día en el periodo seleccionado
             </caption>
             <thead className="bg-secondary">
               <tr>
-                {["Día", "Páginas", "Producto", "Carritos", "Checkouts", "Pedidos", "Pagos"].map(
-                  (heading) => (
-                    <th key={heading} scope="col" className="p-3">
-                      {heading}
-                    </th>
-                  ),
-                )}
+                {[
+                  "Día",
+                  "Páginas",
+                  "Producto",
+                  "Carritos",
+                  "Finalizaciones de compra",
+                  "Pedidos",
+                  "Pagos",
+                ].map((heading) => (
+                  <th key={heading} scope="col" className="p-3">
+                    {heading}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>

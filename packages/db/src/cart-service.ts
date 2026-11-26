@@ -1516,9 +1516,26 @@ export class CartService {
     ) {
       throw new CartValidationError("Invalid assisted cart status.");
     }
+    const now = await databaseNow(this.db);
     const where: Prisma.CartWhereInput = {
       kind: "ASSISTED",
-      ...(options.status ? { status: options.status } : {}),
+      ...(options.status === "ACTIVE"
+        ? {
+            status: "ACTIVE",
+            expiresAt: { gt: now },
+            OR: [{ assistedClaimedAt: { not: null } }, { assistedExpiresAt: { gt: now } }],
+          }
+        : options.status === "EXPIRED"
+          ? {
+              OR: [
+                { status: "EXPIRED" },
+                { status: "ACTIVE", expiresAt: { lte: now } },
+                { status: "ACTIVE", assistedClaimedAt: null, assistedExpiresAt: { lte: now } },
+              ],
+            }
+          : options.status
+            ? { status: options.status }
+            : {}),
     };
     const total = await this.db.cart.count({ where });
     const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / pageSize)));
@@ -1540,7 +1557,14 @@ export class CartService {
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
-    return { items, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+    return {
+      items,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      evaluatedAt: now,
+    };
   }
 
   async issueAssistedToken(input: {

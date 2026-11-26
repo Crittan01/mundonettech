@@ -1,16 +1,24 @@
 import { randomUUID } from "node:crypto";
 
 import { hasAdminPermission, maskEmail } from "@mundonettech/core";
+import type { EmailEventStatus } from "@mundonettech/db";
 import { defaultEmailTemplate, emailTemplateKeys } from "@mundonettech/integrations";
+import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { EmailTemplateForm, type EmailTemplateView } from "@/components/admin/email-template-form";
+import { EmptyState as Empty } from "@/components/admin/empty-state";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { emailTemplateLabels, emailTopicLabels } from "@/lib/admin-presenters";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Comunicaciones transaccionales" };
 
-const statusLabels: Record<string, string> = {
+const statusLabels: Record<EmailEventStatus, string> = {
   QUEUED: "En cola",
   SENDING: "Enviando",
   SENT: "Enviado",
@@ -23,30 +31,65 @@ const statusLabels: Record<string, string> = {
   FAILED: "Fallido",
 };
 
+const allowedEventStates = Object.keys(statusLabels) as EmailEventStatus[];
+const allowedTopics = Object.keys(emailTopicLabels);
+
 const templateStatusLabels: Record<string, string> = {
   DRAFT: "Borrador",
   PUBLISHED: "Publicada",
   ARCHIVED: "Archivada",
 };
 
-export default async function CommunicationsPage() {
+function communicationsHref(q: string, estado: string, tema: string, page: number): string {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (estado) params.set("estado", estado);
+  if (tema) params.set("tema", tema);
+  if (page > 1) params.set("page", String(page));
+  const qs = params.toString();
+  return qs ? `/admin/comunicaciones?${qs}` : "/admin/comunicaciones";
+}
+
+export default async function CommunicationsPage({
+  searchParams,
+}: PageProps<"/admin/comunicaciones">) {
   const session = await requireAdminPage("communications:read");
+  const raw = await searchParams;
+  const q = (single(raw.q) ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 100);
+  const rawEstado = single(raw.estado) ?? "";
+  const estado = allowedEventStates.includes(rawEstado as EmailEventStatus)
+    ? (rawEstado as EmailEventStatus)
+    : "";
+  const rawTema = single(raw.tema) ?? "";
+  const tema = allowedTopics.includes(rawTema) ? rawTema : "";
+  const rawPage = single(raw.page)?.trim() ?? "";
+  const parsedPage = /^[1-9]\d*$/.test(rawPage) ? Number.parseInt(rawPage, 10) : 1;
+  const requestedPage = Math.max(
+    1,
+    Math.min(10_000, Number.isSafeInteger(parsedPage) ? parsedPage : 1),
+  );
+  const pageSize = 25;
+
+  const eventWhere = {
+    ...(estado ? { status: estado } : {}),
+    ...(tema ? { topic: tema } : {}),
+    ...(q
+      ? {
+          OR: [
+            { order: { orderNumber: { contains: q, mode: "insensitive" as const } } },
+            { templateKey: { contains: q, mode: "insensitive" as const } },
+            { topic: { contains: q, mode: "insensitive" as const } },
+          ],
+        }
+      : {}),
+  };
+
   const db = getDatabase();
-  const [events, templates] = await Promise.all([
-    db.emailEvent.findMany({
-      select: {
-        id: true,
-        templateKey: true,
-        topic: true,
-        status: true,
-        attemptCount: true,
-        recipientEmail: true,
-        anonymizedAt: true,
-        lastError: true,
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 100,
-    }),
+  const [total, templates] = await Promise.all([
+    db.emailEvent.count({ where: eventWhere }),
     db.emailTemplateOverride.findMany({
       select: {
         id: true,
@@ -59,6 +102,30 @@ export default async function CommunicationsPage() {
       take: 100,
     }),
   ]);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const events =
+    total > 0
+      ? await db.emailEvent.findMany({
+          where: eventWhere,
+          select: {
+            id: true,
+            templateKey: true,
+            topic: true,
+            status: true,
+            attemptCount: true,
+            recipientEmail: true,
+            anonymizedAt: true,
+            lastError: true,
+            order: { select: { id: true, orderNumber: true } },
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+        })
+      : [];
+
   const defaults = Object.fromEntries(
     emailTemplateKeys
       .filter((key) => key !== "lifecycle.campaign")
@@ -76,6 +143,9 @@ export default async function CommunicationsPage() {
       }),
   );
   const canWrite = hasAdminPermission(session.profile.role, "communications:write");
+  const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
+  const hasFilters = Boolean(q || estado || tema);
+
   return (
     <div className="space-y-10">
       <div>
@@ -102,16 +172,16 @@ export default async function CommunicationsPage() {
           Versiones personalizadas
         </h2>
         {templates.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
+          <Empty>
             Las plantillas predeterminadas están vigentes; aún no hay versiones personalizadas.
-          </p>
+          </Empty>
         ) : (
           <ul className="space-y-3">
             {templates.map((template) => (
               <li key={template.id} className="rounded-xl border border-border bg-card p-4">
                 <h3 className="font-semibold">
-                  {template.templateKey} · versión {template.version} ·{" "}
-                  {templateStatusLabels[template.status] ?? template.status}
+                  {emailTemplateLabels[template.templateKey] ?? template.templateKey} · versión{" "}
+                  {template.version} · {templateStatusLabels[template.status] ?? template.status}
                 </h3>
                 <p className="mt-1 text-sm text-muted-foreground">{template.subject}</p>
               </li>
@@ -123,10 +193,61 @@ export default async function CommunicationsPage() {
         <h2 id="email-events" className="text-xl font-semibold">
           Eventos recientes
         </h2>
+        <form
+          key={`${q}|${estado}|${tema}`}
+          action="/admin/comunicaciones"
+          className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
+        >
+          <label htmlFor="comm-q" className="sr-only">
+            Buscar eventos de correo
+          </label>
+          <Input
+            id="comm-q"
+            name="q"
+            defaultValue={q}
+            maxLength={100}
+            placeholder="Número de pedido, clave de plantilla o tema"
+            className="min-w-56 flex-1"
+          />
+          <Select
+            name="estado"
+            defaultValue={estado}
+            aria-label="Filtrar por estado de envío"
+            fullWidth={false}
+          >
+            <option value="">Todos los estados</option>
+            {allowedEventStates.map((st) => (
+              <option key={st} value={st}>
+                {statusLabels[st]}
+              </option>
+            ))}
+          </Select>
+          <Select name="tema" defaultValue={tema} aria-label="Filtrar por tema" fullWidth={false}>
+            <option value="">Todos los temas</option>
+            {allowedTopics.map((tp) => (
+              <option key={tp} value={tp}>
+                {emailTopicLabels[tp]}
+              </option>
+            ))}
+          </Select>
+          <Button type="submit" variant="outline">
+            Filtrar
+          </Button>
+          {hasFilters ? (
+            <Link
+              href="/admin/comunicaciones"
+              className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+            >
+              Limpiar
+            </Link>
+          ) : null}
+        </form>
         {events.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-            Aún no hay correos transaccionales registrados.
-          </p>
+          <Empty>
+            {hasFilters
+              ? "No hay correos que coincidan con estos filtros."
+              : "Aún no hay correos transaccionales registrados."}
+          </Empty>
         ) : (
           <ul className="space-y-3">
             {events.map((event) => (
@@ -134,7 +255,21 @@ export default async function CommunicationsPage() {
                 <div className="flex flex-wrap justify-between gap-3">
                   <div>
                     <h3 className="font-semibold">
-                      {event.templateKey} · {event.topic}
+                      {emailTemplateLabels[event.templateKey] ?? event.templateKey} ·{" "}
+                      {emailTopicLabels[event.topic] ?? event.topic}
+                      {event.order ? (
+                        <>
+                          {" "}
+                          ·{" "}
+                          {canReadOrders ? (
+                            <Link href={`/admin/pedidos/${event.order.id}`} className="underline">
+                              {event.order.orderNumber}
+                            </Link>
+                          ) : (
+                            event.order.orderNumber
+                          )}
+                        </>
+                      ) : null}
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {event.anonymizedAt ? "Cuenta anonimizada" : maskEmail(event.recipientEmail)}{" "}
@@ -146,12 +281,36 @@ export default async function CommunicationsPage() {
                   </span>
                 </div>
                 {event.lastError ? (
-                  <p className="mt-2 text-sm text-muted-foreground">{event.lastError}</p>
+                  <p className="mt-2 text-sm wrap-break-word text-muted-foreground">
+                    {event.lastError}
+                  </p>
                 ) : null}
               </li>
             ))}
           </ul>
         )}
+        {total > 0 ? (
+          <nav
+            aria-label="Paginación de eventos de correo"
+            className="flex items-center justify-between"
+          >
+            <span className="text-sm text-muted-foreground">
+              Página {page} de {totalPages} · {total} {total === 1 ? "correo" : "correos"}
+            </span>
+            <div className="flex gap-2">
+              {page > 1 ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link href={communicationsHref(q, estado, tema, page - 1)}>Anterior</Link>
+                </Button>
+              ) : null}
+              {page < totalPages ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link href={communicationsHref(q, estado, tema, page + 1)}>Siguiente</Link>
+                </Button>
+              ) : null}
+            </div>
+          </nav>
+        ) : null}
       </section>
     </div>
   );

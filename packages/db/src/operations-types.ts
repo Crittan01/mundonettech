@@ -137,6 +137,20 @@ export interface OperationsSnapshot {
   readonly pendingRefunds: OperationalQueueRefund[];
   readonly failedOutbox: number;
   readonly notifications: OperationalNotification[];
+  readonly totals: {
+    readonly pendingOrders: number;
+    readonly lateShipments: number;
+    readonly pendingPayments: number;
+    readonly pendingRefunds: number;
+    readonly notifications: number;
+    readonly unreadNotifications: number;
+  };
+  readonly notificationsPagination: {
+    readonly page: number;
+    readonly pageSize: number;
+    readonly total: number;
+    readonly totalPages: number;
+  };
 }
 
 export interface AdminOrderListItem {

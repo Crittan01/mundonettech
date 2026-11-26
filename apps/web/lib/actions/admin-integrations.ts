@@ -229,7 +229,9 @@ export async function revokeCredentialAction(
     }
     await getIntegrationCredentialVault().revoke(id.data, audit.actorAdminUserId, audit);
     revalidatePath("/admin/integraciones");
-    return actionSuccess("Credencial revocada. Los nuevos pagos ya no podrán usarla.");
+    return actionSuccess(
+      "Credencial revocada. Las nuevas operaciones en este ambiente ya no podrán usarla.",
+    );
   } catch (error) {
     return failure(error);
   }

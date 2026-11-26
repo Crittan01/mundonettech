@@ -13,6 +13,7 @@ import {
   formSnapshot,
   type ActionState,
 } from "@/lib/action-state";
+import { normalizePhoneE164, phoneInputPattern } from "@/lib/form-validation";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 import { clearActivityCookies, clearCustomerCartCookie } from "@/lib/security/activity-cookies";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
@@ -46,11 +47,45 @@ const addressFields = [
   "isDefault",
 ] as const;
 
+const phoneValidationMessage =
+  "Ingresa un teléfono válido en Colombia (10 dígitos) o formato internacional (+57…).";
+
+const requiredPhoneSchema = z
+  .string()
+  .trim()
+  .min(8, phoneValidationMessage)
+  .max(24, phoneValidationMessage)
+  .regex(phoneInputPattern, phoneValidationMessage)
+  .transform((value, ctx) => {
+    try {
+      return normalizePhoneE164(value);
+    } catch {
+      ctx.addIssue({ code: "custom", message: phoneValidationMessage });
+      return z.NEVER;
+    }
+  });
+
+const optionalPhoneSchema = z
+  .string()
+  .trim()
+  .transform((value, ctx) => {
+    if (value === "") return "";
+    const parsed = requiredPhoneSchema.safeParse(value);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: "custom",
+        message: parsed.error.issues[0]?.message ?? phoneValidationMessage,
+      });
+      return z.NEVER;
+    }
+    return parsed.data;
+  });
+
 const profileSchema = z.object({
   expectedUpdatedAt: z.string().max(64),
-  givenName: z.string().trim().max(100),
-  familyName: z.string().trim().max(100),
-  phoneE164: z.union([z.literal(""), z.string().regex(/^\+[1-9][0-9]{7,14}$/)]),
+  givenName: z.string().trim().max(100, "Máximo 100 caracteres."),
+  familyName: z.string().trim().max(100, "Máximo 100 caracteres."),
+  phoneE164: optionalPhoneSchema,
   marketingEmail: z.boolean(),
   advertising: z.boolean(),
 });
@@ -58,16 +93,34 @@ const profileSchema = z.object({
 const addressSchema = z.object({
   addressId: z.union([z.literal(""), z.string().uuid()]),
   expectedUpdatedAt: z.string().max(64),
-  label: z.string().trim().min(2).max(80),
-  recipientName: z.string().trim().min(2).max(200),
-  phoneE164: z.string().regex(/^\+[1-9][0-9]{7,14}$/),
-  departmentCode: z.string().regex(/^[0-9]{2}$/),
-  municipalityCode: z.string().regex(/^[0-9]{5}$/),
-  addressLine1: z.string().trim().min(3).max(200),
-  addressLine2: z.string().trim().max(200),
-  neighborhood: z.string().trim().max(120),
-  postalCode: z.union([z.literal(""), z.string().regex(/^[0-9]{6}$/)]),
-  deliveryNotes: z.string().trim().max(500),
+  label: z
+    .string()
+    .trim()
+    .min(2, "Ingresa un nombre de al menos 2 caracteres.")
+    .max(80, "Máximo 80 caracteres."),
+  recipientName: z
+    .string()
+    .trim()
+    .min(2, "Ingresa el nombre de quien recibe.")
+    .max(200, "Máximo 200 caracteres."),
+  phoneE164: requiredPhoneSchema,
+  departmentCode: z.string().regex(/^[0-9]{2}$/, "Selecciona un departamento válido."),
+  municipalityCode: z.string().regex(/^[0-9]{5}$/, "Selecciona un municipio válido."),
+  addressLine1: z
+    .string()
+    .trim()
+    .min(3, "Ingresa una dirección de al menos 3 caracteres.")
+    .max(200, "Máximo 200 caracteres."),
+  addressLine2: z.string().trim().max(200, "Máximo 200 caracteres."),
+  neighborhood: z.string().trim().max(120, "Máximo 120 caracteres."),
+  postalCode: z
+    .string()
+    .trim()
+    .refine(
+      (value) => value === "" || /^[0-9]{6}$/.test(value),
+      "El código postal debe tener exactamente 6 dígitos.",
+    ),
+  deliveryNotes: z.string().trim().max(500, "Máximo 500 caracteres."),
   isDefault: z.boolean(),
 });
 
@@ -92,7 +145,18 @@ function isNextRedirect(error: unknown): boolean {
 function failure(error: unknown, values: Record<string, string>): ActionState {
   if (isNextRedirect(error)) throw error;
   if (error instanceof z.ZodError) {
-    return actionError("Revisa los campos: hay datos incompletos o con formato inválido.", values);
+    const fieldErrors: Record<string, string[]> = {};
+    for (const issue of error.issues) {
+      const key = typeof issue.path[0] === "string" ? issue.path[0] : "";
+      if (key) {
+        fieldErrors[key] = [...(fieldErrors[key] ?? []), issue.message];
+      }
+    }
+    const base = actionError(
+      "Revisa los campos: hay datos incompletos o con formato inválido.",
+      values,
+    );
+    return Object.keys(fieldErrors).length > 0 ? { ...base, fieldErrors } : base;
   }
   if (error instanceof AccountError) {
     const messages = {
@@ -119,10 +183,10 @@ export async function updateProfileAction(
     const raw = closedFormObject(formData, profileFields);
     if (!raw) throw new z.ZodError([]);
     const input = profileSchema.parse({
-      expectedUpdatedAt: raw.expectedUpdatedAt,
-      givenName: raw.givenName,
-      familyName: raw.familyName,
-      phoneE164: raw.phoneE164,
+      expectedUpdatedAt: raw.expectedUpdatedAt ?? "",
+      givenName: raw.givenName ?? "",
+      familyName: raw.familyName ?? "",
+      phoneE164: raw.phoneE164 ?? "",
       marketingEmail: raw.marketingEmail === "on",
       advertising: raw.advertising === "on",
     });
@@ -166,18 +230,18 @@ export async function saveAddressAction(
     const raw = closedFormObject(formData, addressFields);
     if (!raw) throw new z.ZodError([]);
     const input = addressSchema.parse({
-      addressId: raw.addressId,
-      expectedUpdatedAt: raw.expectedUpdatedAt,
-      label: raw.label,
-      recipientName: raw.recipientName,
-      phoneE164: raw.phoneE164,
-      departmentCode: raw.departmentCode,
-      municipalityCode: raw.municipalityCode,
-      addressLine1: raw.addressLine1,
-      addressLine2: raw.addressLine2,
-      neighborhood: raw.neighborhood,
-      postalCode: raw.postalCode,
-      deliveryNotes: raw.deliveryNotes,
+      addressId: raw.addressId ?? "",
+      expectedUpdatedAt: raw.expectedUpdatedAt ?? "",
+      label: raw.label ?? "",
+      recipientName: raw.recipientName ?? "",
+      phoneE164: raw.phoneE164 ?? "",
+      departmentCode: raw.departmentCode ?? "",
+      municipalityCode: raw.municipalityCode ?? "",
+      addressLine1: raw.addressLine1 ?? "",
+      addressLine2: raw.addressLine2 ?? "",
+      neighborhood: raw.neighborhood ?? "",
+      postalCode: raw.postalCode ?? "",
+      deliveryNotes: raw.deliveryNotes ?? "",
       isDefault: raw.isDefault === "on",
     });
     const address = {
@@ -217,7 +281,10 @@ export async function deleteAddressAction(
   try {
     const { profile } = await requireCustomerPage();
     const raw = closedFormObject(formData, ["addressId"]);
-    const addressId = z.string().uuid().parse(raw?.addressId);
+    const addressId = z
+      .string()
+      .uuid()
+      .parse(raw?.addressId ?? "");
     await accountService().deleteAddress(profile.id, addressId);
     revalidateAccount();
     return actionSuccess("Dirección eliminada de forma permanente.");
@@ -237,7 +304,14 @@ export async function anonymizeAccountAction(
     const { user, profile } = await requireCustomerPage();
     authUserId = user?.id ?? null;
     const raw = closedFormObject(formData, ["confirmation"]);
-    const confirmation = z.literal("ELIMINAR MI CUENTA").parse(raw?.confirmation);
+    if (!raw) throw new z.ZodError([]);
+    const confirmation = z
+      .object({
+        confirmation: z.literal("ELIMINAR MI CUENTA", {
+          error: "Escribe exactamente ELIMINAR MI CUENTA en mayúsculas.",
+        }),
+      })
+      .parse({ confirmation: raw.confirmation ?? "" }).confirmation;
     const context = await getRequestSecurityContext();
     const result = await accountService().anonymize(profile.id, confirmation, context);
     affectedReviewProductSlugs = result.affectedReviewProductSlugs;

@@ -20,6 +20,22 @@ import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-a
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const snapshotFields = new Set(["transition", "status"]);
+const returnStatusLabels: Record<string, string> = {
+  REQUESTED: "Solicitada",
+  AWAITING_RETURN: "Esperando devolución",
+  RECEIVED: "Recibida en bodega",
+  COMPLETED: "Completada",
+  REJECTED: "Rechazada",
+  CANCELLED: "Cancelada",
+};
+const warrantyStatusLabels: Record<string, string> = {
+  REQUESTED: "Solicitada",
+  UNDER_REVIEW: "En revisión técnica",
+  APPROVED: "Aprobada",
+  RESOLVED: "Resuelta",
+  REJECTED: "Rechazada",
+  CANCELLED: "Cancelada",
+};
 function safeSnapshot(formData: FormData): Record<string, string> {
   return Object.fromEntries(
     Object.entries(formSnapshot(formData)).filter(
@@ -97,13 +113,14 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
   return actionError("No pudimos completar la moderación. Recarga e inténtalo de nuevo.", values);
 }
 
-function revalidateAdmin(): void {
+function revalidateAdmin(orderId?: string | null): void {
   revalidatePath("/admin/posventa");
   revalidatePath("/admin/resenas");
   revalidatePath("/admin/pedidos");
   revalidatePath("/admin/pagos");
   revalidatePath("/admin/finanzas");
   revalidatePath("/admin/hoy");
+  if (orderId) revalidatePath(`/admin/pedidos/${orderId}`);
 }
 
 export async function transitionReturnAction(
@@ -127,11 +144,12 @@ export async function transitionReturnAction(
       note: z.string().trim().max(500).parse(formString(formData, "note")),
       audit: auditContext,
     });
-    revalidateAdmin();
+    revalidateAdmin(result.orderId);
+    const label = returnStatusLabels[result.status] ?? result.status;
     return actionSuccess(
       result.replayed
         ? "La transición ya estaba aplicada."
-        : `Devolución actualizada a ${result.status}.`,
+        : `Devolución actualizada a ${label} (${result.status}).`,
     );
   } catch (error) {
     return failure(error, values);
@@ -159,11 +177,12 @@ export async function transitionWarrantyAction(
       note: z.string().trim().max(500).parse(formString(formData, "note")),
       audit: auditContext,
     });
-    revalidateAdmin();
+    revalidateAdmin(result.orderId);
+    const label = warrantyStatusLabels[result.status] ?? result.status;
     return actionSuccess(
       result.replayed
         ? "La transición ya estaba aplicada."
-        : `Garantía actualizada a ${result.status}.`,
+        : `Garantía actualizada a ${label} (${result.status}).`,
     );
   } catch (error) {
     return failure(error, values);
@@ -196,7 +215,7 @@ export async function replySupportAdminAction(
         .parse(formString(formData, "idempotencyKey")),
       audit: auditContext,
     });
-    revalidateAdmin();
+    revalidateAdmin(result.orderId);
     return actionSuccess(
       result.replayed
         ? "La respuesta ya estaba registrada."
@@ -219,7 +238,7 @@ export async function closeSupportAdminAction(
       expectedVersion: expectedVersion(formData),
       audit: auditContext,
     });
-    revalidateAdmin();
+    revalidateAdmin(result.orderId);
     return actionSuccess(
       result.replayed ? "La PQR ya estaba cerrada." : "PQR cerrada con auditoría.",
     );
@@ -250,14 +269,14 @@ export async function moderateReviewAction(
       ),
       audit: auditContext,
     });
-    revalidateAdmin();
+    revalidateAdmin(result.orderId);
     updateTag("reviews");
     updateTag(`reviews:${result.productSlug}`);
     revalidatePath(`/producto/${result.productSlug}`);
     return actionSuccess(
       result.replayed
         ? "La moderación ya estaba aplicada."
-        : `Reseña ${result.status === "PUBLISHED" ? "publicada" : "rechazada"} con auditoría.`,
+        : `Reseña ${result.status === "PUBLISHED" ? "publicada" : "rechazada"} (${result.status}) con auditoría.`,
     );
   } catch (error) {
     return failure(error, values);

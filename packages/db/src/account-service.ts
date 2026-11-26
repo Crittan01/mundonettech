@@ -789,6 +789,45 @@ export class AccountService {
     });
   }
 
+  async listOrdersPage(
+    customerId: string,
+    options: { readonly page?: number; readonly pageSize?: number } = {},
+  ) {
+    assertUuid(customerId, "customerId");
+    const requestedPage = options.page ?? 1;
+    const pageSize = options.pageSize ?? 10;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 25
+    ) {
+      throw new AccountError("VALIDATION", "Order pagination options are invalid.");
+    }
+    const active = await this.db.customer.findFirst({
+      where: { id: customerId, status: "ACTIVE", deletedAt: null },
+      select: { id: true },
+    });
+    if (!active) throw new AccountError("NOT_FOUND", "Active customer account not found.");
+    const total = await this.db.order.count({ where: { customerId } });
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const items = await this.db.order.findMany({
+      where: { customerId },
+      omit: {
+        acceptanceIpHash: true,
+        acceptanceUserAgentHash: true,
+      },
+      include: { items: { select: { id: true, titleSnapshot: true, quantity: true } } },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    });
+    return { items, total, page, pageSize, totalPages };
+  }
+
   async getOrder(customerId: string, orderId: string) {
     assertUuid(customerId, "customerId");
     assertUuid(orderId, "orderId");

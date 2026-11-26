@@ -1,9 +1,21 @@
 import { formatCopCents } from "@mundonettech/core";
-import type { PostSaleService } from "@mundonettech/db";
+import type {
+  FulfillmentStatus,
+  OrderStatus,
+  PaymentStatus,
+  PostSaleService,
+  ReturnRequestStatus,
+  ReviewStatus,
+  ShipmentStatus,
+  SupportTicketStatus,
+  WarrantyClaimStatus,
+  WarrantyRemedy,
+} from "@mundonettech/db";
 import { addColombianCalendarMonths, evaluateRetractWindow } from "@mundonettech/legal-co";
 import Link from "next/link";
 
 import {
+  GuestOrderSignOutButton,
   ReviewForm,
   ReturnRequestForm,
   SupportReplyForm,
@@ -20,44 +32,74 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 
-const statusLabels: Record<string, string> = {
+const orderStatusLabels: Record<OrderStatus, string> = {
   PENDING: "Pendiente",
   CONFIRMED: "Confirmado",
   CANCELLED: "Cancelado",
   COMPLETED: "Completado",
-  REQUESTED: "Solicitud recibida",
-  AWAITING_RETURN: "Aprobada; espera recepción del producto",
-  RECEIVED: "Producto recibido",
-  REJECTED: "Rechazada",
-  UNDER_REVIEW: "En revisión técnica",
-  APPROVED: "Aprobada",
-  RESOLVED: "Resuelta",
-  OPEN: "Abierta",
-  IN_PROGRESS: "En gestión",
-  WAITING_CUSTOMER: "Espera tu respuesta",
-  CLOSED: "Cerrada",
-  PUBLISHED: "Publicada",
+};
+
+const paymentStatusLabels: Record<PaymentStatus, string> = {
   UNPAID: "Pago pendiente",
-  PAID: "Pagado",
   PARTIALLY_PAID: "Pago parcial",
+  PAID: "Pagado",
   PARTIALLY_REFUNDED: "Reembolso parcial",
   REFUNDED: "Reembolsado",
+  FAILED: "Pago fallido",
+};
+
+const fulfillmentStatusLabels: Record<FulfillmentStatus, string> = {
   UNFULFILLED: "Sin despachar",
   PARTIALLY_FULFILLED: "Despacho parcial",
   FULFILLED: "Despachado",
-  SHIPPED: "En camino",
-  DELIVERED: "Entregado",
+  CANCELLED: "Cancelado",
 };
 
-const remedyLabels: Record<string, string> = {
+const shipmentStatusLabels: Record<ShipmentStatus, string> = {
+  PENDING: "Pendiente",
+  READY: "Listo para despacho",
+  SHIPPED: "En camino",
+  DELIVERED: "Entregado",
+  CANCELLED: "Cancelado",
+};
+
+const returnStatusLabels: Record<ReturnRequestStatus, string> = {
+  REQUESTED: "Solicitud recibida",
+  AWAITING_RETURN: "Aprobada; espera recepción del producto",
+  RECEIVED: "Producto recibido",
+  COMPLETED: "Completado",
+  REJECTED: "Rechazada",
+  CANCELLED: "Cancelado",
+};
+
+const warrantyStatusLabels: Record<WarrantyClaimStatus, string> = {
+  REQUESTED: "Solicitud recibida",
+  UNDER_REVIEW: "En revisión técnica",
+  APPROVED: "Aprobada",
+  REJECTED: "Rechazada",
+  RESOLVED: "Resuelta",
+  CANCELLED: "Cancelado",
+};
+
+const ticketStatusLabels: Record<SupportTicketStatus, string> = {
+  OPEN: "Abierta",
+  IN_PROGRESS: "En gestión",
+  WAITING_CUSTOMER: "Espera tu respuesta",
+  RESOLVED: "Resuelta",
+  CLOSED: "Cerrada",
+};
+
+const reviewStatusLabels: Record<ReviewStatus, string> = {
+  PENDING: "Pendiente",
+  PUBLISHED: "Publicada",
+  REJECTED: "Rechazada",
+};
+
+const remedyLabels: Record<WarrantyRemedy, string> = {
   REFUND: "Reembolso",
   REPAIR: "Reparación",
   REPLACEMENT: "Reemplazo",
 };
-
-function label(status: string): string {
-  return statusLabels[status] ?? status;
-}
 
 type OrderData = Awaited<ReturnType<PostSaleService["getOrder"]>>;
 
@@ -192,7 +234,10 @@ export function OrderPostSaleView({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           {channel.channel === "account" ? (
-            <Link href="/mi-cuenta/pedidos" className="text-sm font-medium underline">
+            <Link
+              href="/mi-cuenta/pedidos"
+              className="inline-flex min-h-11 items-center rounded-sm text-sm font-medium underline outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            >
               ← Volver a pedidos
             </Link>
           ) : null}
@@ -204,20 +249,15 @@ export function OrderPostSaleView({
         {channel.channel === "guest" ? (
           <form action={signOutGuestOrderAction}>
             <input type="hidden" name="token" value={channel.token} />
-            <button
-              type="submit"
-              className="rounded-md border border-input px-3 py-2 text-sm font-medium"
-            >
-              Cerrar acceso de invitado
-            </button>
+            <GuestOrderSignOutButton />
           </form>
         ) : null}
       </div>
       <section aria-label="Resumen del pedido" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          ["Estado", label(order.orderStatus)],
-          ["Pago", label(order.paymentStatus)],
-          ["Entrega", label(order.fulfillmentStatus)],
+          ["Estado", orderStatusLabels[order.orderStatus]],
+          ["Pago", paymentStatusLabels[order.paymentStatus]],
+          ["Entrega", fulfillmentStatusLabels[order.fulfillmentStatus]],
           ["Total", formatCopCents(order.totalCents)],
         ].map(([name, value]) => (
           <article key={name} className="rounded-xl border border-border bg-card p-5">
@@ -230,7 +270,12 @@ export function OrderPostSaleView({
         <h2 id="order-items-title" className="text-2xl font-semibold">
           Productos y entregas
         </h2>
-        <div className="overflow-x-auto rounded-xl border border-border">
+        <div
+          role="region"
+          aria-label="Tabla de productos comprados y entregas"
+          tabIndex={0}
+          className="overflow-x-auto rounded-xl border border-border outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
           <table className="w-full min-w-[700px] text-left text-sm">
             <caption className="sr-only">Productos comprados, cantidades y totales</caption>
             <thead className="bg-secondary">
@@ -266,7 +311,7 @@ export function OrderPostSaleView({
                     {item.shipmentItems.length
                       ? item.shipmentItems.map((delivery) => (
                           <span key={delivery.id} className="block">
-                            {delivery.quantity} · {label(delivery.shipment.status)}
+                            {delivery.quantity} · {shipmentStatusLabels[delivery.shipment.status]}
                             {delivery.shipment.deliveredAt
                               ? ` · ${dateFormatter.format(delivery.shipment.deliveredAt)}`
                               : ""}
@@ -293,7 +338,8 @@ export function OrderPostSaleView({
             {order.returnRequests.map((request) => (
               <li key={request.id} className="rounded-xl border border-border bg-card p-5">
                 <p className="font-semibold">
-                  {request.kind === "REFUND" ? "Retracto" : "Cambio"} · {label(request.status)}
+                  {request.kind === "REFUND" ? "Retracto" : "Cambio"} ·{" "}
+                  {returnStatusLabels[request.status]}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
                   Radicada {dateFormatter.format(request.createdAt)} ·{" "}
@@ -309,7 +355,6 @@ export function OrderPostSaleView({
         )}
         {deliveries.length ? (
           <ReturnRequestForm
-            key={order.returnRequests.length}
             channel={channel}
             deliveries={deliveries}
             idempotencyKey={`${idempotencySeed}:return`}
@@ -334,11 +379,11 @@ export function OrderPostSaleView({
               return (
                 <li key={claim.id} className="rounded-xl border border-border bg-card p-5">
                   <p className="font-semibold">
-                    {label(claim.status)} · {unit?.serial ?? "Serial consultado"}
+                    {warrantyStatusLabels[claim.status]} · {unit?.serial ?? "Serial consultado"}
                   </p>
                   <p className="mt-1 text-sm text-muted-foreground">
                     Vigencia calculada hasta {dateFormatter.format(claim.warrantyDueAt)} · Remedio:{" "}
-                    {remedyLabels[claim.remedy] ?? claim.remedy}
+                    {remedyLabels[claim.remedy]}
                   </p>
                   <p className="mt-3 text-sm whitespace-pre-wrap">{claim.issueDescription}</p>
                   {claim.resolutionNote ? (
@@ -353,7 +398,6 @@ export function OrderPostSaleView({
         )}
         {warrantyUnits.length ? (
           <WarrantyClaimForm
-            key={order.warrantyClaims.length}
             channel={channel}
             units={warrantyUnits.map((unit) => ({
               id: unit.id,
@@ -389,7 +433,7 @@ export function OrderPostSaleView({
               {item.reviews.map((review) => (
                 <div key={review.id} className="rounded-xl border border-border bg-card p-5">
                   <p className="font-semibold">
-                    {review.title} · {review.rating}/5 · {label(review.status)}
+                    {review.title} · {review.rating}/5 · {reviewStatusLabels[review.status]}
                   </p>
                   <p className="mt-2 text-sm whitespace-pre-wrap">{review.body}</p>
                   {review.moderationNote ? (
@@ -414,6 +458,9 @@ export function OrderPostSaleView({
         <h2 id="support-title" className="text-2xl font-semibold">
           PQR y seguimiento
         </h2>
+        {order.supportTickets.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No hay PQR asociadas a este pedido.</p>
+        ) : null}
         {order.supportTickets.map((ticket) => (
           <article
             key={ticket.id}
@@ -421,7 +468,7 @@ export function OrderPostSaleView({
           >
             <div>
               <h3 className="font-semibold">
-                {ticket.ticketNumber} · {label(ticket.status)}
+                {ticket.ticketNumber} · {ticketStatusLabels[ticket.status]}
               </h3>
               <p className="mt-1 text-sm text-muted-foreground">
                 {ticket.subject} · Responder antes de {dateFormatter.format(ticket.slaDueAt)}
@@ -448,11 +495,7 @@ export function OrderPostSaleView({
             ) : null}
           </article>
         ))}
-        <SupportTicketForm
-          key={order.supportTickets.length}
-          channel={channel}
-          idempotencyKey={`${idempotencySeed}:support`}
-        />
+        <SupportTicketForm channel={channel} idempotencyKey={`${idempotencySeed}:support`} />
       </section>
     </div>
   );

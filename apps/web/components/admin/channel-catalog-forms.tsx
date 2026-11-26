@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useState } from "react";
 
 import { formatCopCentsForInput } from "@mundonettech/core";
 import type {
@@ -29,12 +29,14 @@ function OfferFields({
   values,
   targetNetCents,
   fulfillment,
+  disabled = false,
 }: {
   readonly suffix: string;
   readonly offer?: ChannelOfferView | undefined;
   readonly values?: Record<string, string> | undefined;
   readonly targetNetCents?: string | undefined;
   readonly fulfillment?: boolean | undefined;
+  readonly disabled?: boolean;
 }) {
   const [mode, setMode] = useState(values?.pricingMode ?? offer?.pricingMode ?? "FORMULA");
   const value = (key: string, fallback = "") => values?.[key] ?? fallback;
@@ -50,6 +52,7 @@ function OfferFields({
             className="flex py-2"
             value={mode}
             onChange={(event) => setMode(event.target.value as "FORMULA" | "MANUAL")}
+            disabled={disabled}
           >
             <option value="FORMULA">Fórmula por neto objetivo</option>
             <option value="MANUAL">Manual</option>
@@ -63,6 +66,7 @@ function OfferFields({
             compact
             className="flex py-2"
             defaultValue={value("listingTypeId", offer?.listingTypeId ?? "gold_special")}
+            disabled={disabled}
           >
             <option value="gold_special">Clásica</option>
             <option value="gold_pro">Premium</option>
@@ -79,6 +83,7 @@ function OfferFields({
               "logisticType",
               offer?.logisticType ?? (fulfillment ? "FULFILLMENT" : "CROSS_DOCKING"),
             )}
+            disabled={disabled}
           >
             <option value="CROSS_DOCKING">Bodega local / Flex</option>
             <option value="FULFILLMENT">Mercado Libre Full</option>
@@ -98,6 +103,7 @@ function OfferFields({
               "targetNetCop",
               formatCopCentsForInput(offer?.targetNetCents ?? targetNetCents ?? null),
             )}
+            disabled={disabled}
             required
           />
         </div>
@@ -116,6 +122,7 @@ function OfferFields({
               "manualPriceCop",
               formatCopCentsForInput(offer?.manualPriceCents ?? null),
             )}
+            disabled={disabled}
             required
           />
         </div>
@@ -131,6 +138,7 @@ function OfferFields({
             maxLength={4}
             placeholder="Ej.: 1000 = 10 %"
             defaultValue={value("commissionBps", offer ? String(offer.commissionBps) : "")}
+            disabled={disabled}
             required
           />
         </div>
@@ -147,6 +155,7 @@ function OfferFields({
               "fixedFeeCop",
               formatCopCentsForInput(offer?.fixedFeeCents ?? null),
             )}
+            disabled={disabled}
             required
           />
         </div>
@@ -163,6 +172,7 @@ function OfferFields({
               "shippingCostCop",
               formatCopCentsForInput(offer?.shippingCostCents ?? null),
             )}
+            disabled={disabled}
             required
           />
         </div>
@@ -198,7 +208,16 @@ export function ChannelListingCreateForm({
     );
   }
   return (
-    <form action={action} className="space-y-4" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-4"
+      aria-busy={pending}
+    >
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="listing-account">Cuenta vendedora</Label>
@@ -208,6 +227,7 @@ export function ChannelListingCreateForm({
             compact
             className="flex py-2"
             defaultValue={state.values?.accountId ?? accounts[0]?.id}
+            disabled={pending}
             required
           >
             {accounts.map((account) => (
@@ -226,6 +246,7 @@ export function ChannelListingCreateForm({
             className="flex py-2"
             value={variantId}
             onChange={(event) => setVariantId(event.target.value)}
+            disabled={pending}
             required
           >
             {variants.map((variant) => (
@@ -247,6 +268,7 @@ export function ChannelListingCreateForm({
             pattern="MCO[0-9]+"
             maxLength={32}
             defaultValue={state.values?.externalCategoryId}
+            disabled={pending}
             required
           />
         </div>
@@ -258,6 +280,7 @@ export function ChannelListingCreateForm({
             name="familyName"
             maxLength={200}
             defaultValue={state.values?.familyName ?? selected.productName}
+            disabled={pending}
             required
           />
           <p className="text-xs text-muted-foreground">
@@ -273,6 +296,7 @@ export function ChannelListingCreateForm({
             name="sellerStoreId"
             maxLength={64}
             defaultValue={state.values?.sellerStoreId}
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -282,6 +306,7 @@ export function ChannelListingCreateForm({
             name="sellerNetworkNodeId"
             maxLength={64}
             defaultValue={state.values?.sellerNetworkNodeId}
+            disabled={pending}
           />
         </div>
       </div>
@@ -291,6 +316,7 @@ export function ChannelListingCreateForm({
         values={state.values}
         targetNetCents={selected.priceCents}
         fulfillment={selected.localQuantity === 0 && selected.fullQuantity > 0}
+        disabled={pending}
       />
       <FormMessage state={state} />
       <Button type="submit" disabled={pending}>
@@ -310,10 +336,24 @@ export function ChannelOfferEditForm({ offer }: { readonly offer: ChannelOfferVi
   return (
     <details className="rounded-lg border border-border p-4">
       <summary className="cursor-pointer text-sm font-medium">Editar precio y tarifas</summary>
-      <form action={action} className="mt-4 space-y-4" aria-busy={pending}>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (pending) return;
+          const formData = new FormData(event.currentTarget);
+          startTransition(() => action(formData));
+        }}
+        className="mt-4 space-y-4"
+        aria-busy={pending}
+      >
         <input type="hidden" name="offerId" value={offer.id} />
         <input type="hidden" name="version" value={expectedVersion} />
-        <OfferFields suffix={`edit-${offer.id}`} offer={offer} values={state.values} />
+        <OfferFields
+          suffix={`edit-${offer.id}`}
+          offer={offer}
+          values={state.values}
+          disabled={pending}
+        />
         <FormMessage state={state} />
         <Button type="submit" variant="outline" disabled={pending}>
           {pending ? "Guardando cambios…" : "Guardar y programar precio"}
@@ -329,13 +369,23 @@ export function ChannelOfferAddForm({ listing }: { readonly listing: ChannelList
   return (
     <details className="rounded-lg border border-border p-4">
       <summary className="cursor-pointer text-sm font-medium">Añadir condición de venta</summary>
-      <form action={action} className="mt-4 space-y-4" aria-busy={pending}>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (pending) return;
+          const formData = new FormData(event.currentTarget);
+          startTransition(() => action(formData));
+        }}
+        className="mt-4 space-y-4"
+        aria-busy={pending}
+      >
         <input type="hidden" name="listingId" value={listing.id} />
         <OfferFields
           suffix={`add-${listing.id}`}
           values={state.values}
           targetNetCents={reference?.targetNetCents ?? reference?.priceCents ?? "0"}
           fulfillment={!listing.offers.some((offer) => offer.logisticType === "FULFILLMENT")}
+          disabled={pending}
         />
         <FormMessage state={state} />
         <Button type="submit" variant="outline" disabled={pending}>
@@ -374,7 +424,16 @@ function SyncButton({
     initialActionState,
   );
   return (
-    <form action={action} className="space-y-3" aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      className="space-y-3"
+      aria-busy={pending}
+    >
       <input type="hidden" name="listingId" value={listingId} />
       <input type="hidden" name="offerId" value={offerId ?? ""} />
       <input type="hidden" name="kind" value={kind} />
@@ -483,7 +542,14 @@ export function ChannelListingSyncActions({ listing }: { readonly listing: Chann
 export function ProcessChannelJobsButton() {
   const [state, action, pending] = useActionState(processChannelSyncJobsAction, initialActionState);
   return (
-    <form action={action} aria-busy={pending}>
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        startTransition(() => action());
+      }}
+      aria-busy={pending}
+    >
       <Button type="submit" variant="outline" disabled={pending}>
         {pending ? "Procesando trabajos…" : "Procesar trabajos pendientes"}
       </Button>

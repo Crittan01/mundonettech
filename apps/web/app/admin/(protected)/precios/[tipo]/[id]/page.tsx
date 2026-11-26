@@ -12,6 +12,7 @@ import {
   WholesaleTierForm,
 } from "@/components/admin/pricing-forms";
 import { bogotaInputValue, formatBogotaDate } from "@/lib/admin-pricing-presenters";
+import { productStatusLabels, wholesaleScopeLabels } from "@/lib/admin-presenters";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -56,7 +57,7 @@ export default async function EditPricingPage({
         >
           Volver a precios
         </Link>
-        <h1 className="mt-3 text-3xl font-bold">{title}</h1>
+        <h1 className="mt-3 text-3xl font-bold break-all">{title}</h1>
         <p className="mt-2 text-muted-foreground">
           Registro{" "}
           {type === "mayoristas"
@@ -86,7 +87,9 @@ export default async function EditPricingPage({
                   ? wholesale.active
                     ? "Activa"
                     : "Inactiva"
-                  : (coupon ?? bundle)!.status}
+                  : ((productStatusLabels as Record<string, string | undefined>)[
+                      (coupon ?? bundle)!.status
+                    ] ?? (coupon ?? bundle)!.status)}
               </dd>
             </div>
             <div>
@@ -97,7 +100,11 @@ export default async function EditPricingPage({
               <>
                 <div>
                   <dt className="inline font-medium">Alcance: </dt>
-                  <dd className="inline">{wholesale.scope}</dd>
+                  <dd className="inline">
+                    {(wholesaleScopeLabels as Record<string, string | undefined>)[
+                      wholesale.scope
+                    ] ?? wholesale.scope}
+                  </dd>
                 </div>
                 <div>
                   <dt className="inline font-medium">Cantidad mínima: </dt>

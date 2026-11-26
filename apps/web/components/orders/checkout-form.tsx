@@ -2,22 +2,51 @@
 
 import { formatCopCents } from "@mundonettech/core";
 import Link from "next/link";
-import { startTransition, useActionState, useMemo, useRef, useState } from "react";
+import { startTransition, useActionState, useEffect, useMemo, useRef, useState } from "react";
 
-import { FormMessage } from "@/components/auth/form-message";
+import { FieldErrors, FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { confirmCheckoutAction, quoteLocalDeliveryAction } from "@/lib/actions/checkout";
 import { initialActionState } from "@/lib/action-state";
 import type { StorefrontCheckoutPreview } from "@/lib/checkout";
+
+const flexPromiseDateFormatter = new Intl.DateTimeFormat("es-CO", {
+  timeZone: "America/Bogota",
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
+function describedBy(...ids: (string | false | null | undefined)[]): string | undefined {
+  const joined = ids.filter(Boolean).join(" ");
+  return joined || undefined;
+}
 
 const steps = [
   { number: 1, label: "Contacto y dirección" },
   { number: 2, label: "Entrega" },
   { number: 3, label: "Pago y confirmación" },
 ] as const;
+
+const stepOneFieldKeys = new Set([
+  "email",
+  "givenName",
+  "familyName",
+  "recipientName",
+  "phoneE164",
+  "buyerDocumentType",
+  "buyerDocumentNumber",
+  "buyerTaxRegime",
+  "departmentCode",
+  "municipalityCode",
+  "addressLine1",
+  "addressLine2",
+  "neighborhood",
+  "postalCode",
+]);
 
 const initialFlexQuoteState = { status: "idle", message: "", quotes: [] } as const;
 
@@ -31,47 +60,128 @@ export function CheckoutForm({
   const [state, action, pending] = useActionState(confirmCheckoutAction, initialActionState);
   const [step, setStep] = useState(1);
   const [localError, setLocalError] = useState("");
+  const values = state.values;
+  const customer = preview.customer;
+  const savedAddresses = useMemo(
+    () => (customer?.authenticated ? (preview.savedAddresses ?? []) : []),
+    [customer?.authenticated, preview.savedAddresses],
+  );
+  const defaultSavedAddress = savedAddresses.find((addr) => addr.isDefault) ?? savedAddresses[0];
+  const defaultRecipient =
+    defaultSavedAddress?.recipientName ??
+    (customer?.givenName && customer?.familyName
+      ? `${customer.givenName} ${customer.familyName}`
+      : "");
+
+  const [selectedAddressId, setSelectedAddressId] = useState(defaultSavedAddress?.id ?? "");
+  const [email, setEmail] = useState(values?.email ?? customer?.email ?? "");
+  const [givenName, setGivenName] = useState(values?.givenName ?? customer?.givenName ?? "");
+  const [familyName, setFamilyName] = useState(values?.familyName ?? customer?.familyName ?? "");
+  const [recipientName, setRecipientName] = useState(values?.recipientName ?? defaultRecipient);
+  const [phoneE164, setPhoneE164] = useState(
+    values?.phoneE164 ?? defaultSavedAddress?.phoneE164 ?? customer?.phoneE164 ?? "",
+  );
+  const [buyerDocumentType, setBuyerDocumentType] = useState(values?.buyerDocumentType ?? "13");
+  const [buyerDocumentNumber, setBuyerDocumentNumber] = useState(values?.buyerDocumentNumber ?? "");
+  const [buyerTaxRegime, setBuyerTaxRegime] = useState(values?.buyerTaxRegime ?? "");
+  const [departmentCode, setDepartmentCode] = useState(
+    values?.departmentCode ?? defaultSavedAddress?.departmentCode ?? "",
+  );
+  const [municipalityCode, setMunicipalityCode] = useState(
+    values?.municipalityCode ?? defaultSavedAddress?.municipalityCode ?? "",
+  );
+  const [addressLine1, setAddressLine1] = useState(
+    values?.addressLine1 ?? defaultSavedAddress?.addressLine1 ?? "",
+  );
+  const [addressLine2, setAddressLine2] = useState(
+    values?.addressLine2 ?? defaultSavedAddress?.addressLine2 ?? "",
+  );
+  const [neighborhood, setNeighborhood] = useState(
+    values?.neighborhood ?? defaultSavedAddress?.neighborhood ?? "",
+  );
+  const [postalCode, setPostalCode] = useState(
+    values?.postalCode ?? defaultSavedAddress?.postalCode ?? "",
+  );
+  const [deliveryNotes, setDeliveryNotes] = useState(
+    values?.deliveryNotes ?? defaultSavedAddress?.deliveryNotes ?? "",
+  );
+  const [termsAccepted, setTermsAccepted] = useState(values?.termsAccepted === "true");
+  const [dataProcessingAccepted, setDataProcessingAccepted] = useState(
+    values?.dataProcessingAccepted === "true",
+  );
+  const [advertisingAccepted, setAdvertisingAccepted] = useState(
+    values?.advertisingAccepted === "on" || values?.advertisingAccepted === "true",
+  );
+
   const [method, setMethod] = useState<"HOME_DELIVERY" | "LOCAL_DELIVERY" | "CLICK_COLLECT">(
-    state.values?.fulfillmentMethod === "CLICK_COLLECT"
+    values?.fulfillmentMethod === "CLICK_COLLECT"
       ? "CLICK_COLLECT"
-      : state.values?.fulfillmentMethod === "LOCAL_DELIVERY"
+      : values?.fulfillmentMethod === "LOCAL_DELIVERY"
         ? "LOCAL_DELIVERY"
         : "HOME_DELIVERY",
   );
-  const [flexZoneId, setFlexZoneId] = useState(state.values?.localDeliveryZoneId ?? "");
-  const [deliveryLatitude, setDeliveryLatitude] = useState(state.values?.deliveryLatitude ?? "");
-  const [deliveryLongitude, setDeliveryLongitude] = useState(state.values?.deliveryLongitude ?? "");
+  const [flexZoneId, setFlexZoneId] = useState(values?.localDeliveryZoneId ?? "");
+  const [deliveryLatitude, setDeliveryLatitude] = useState(values?.deliveryLatitude ?? "");
+  const [deliveryLongitude, setDeliveryLongitude] = useState(values?.deliveryLongitude ?? "");
   const [quotesStale, setQuotesStale] = useState(false);
   const [locating, setLocating] = useState(false);
+  const [geoError, setGeoError] = useState("");
   const [quoteState, quoteAction, quotePending] = useActionState(
     quoteLocalDeliveryAction,
     initialFlexQuoteState,
   );
-  const [departmentCode, setDepartmentCode] = useState(state.values?.departmentCode ?? "");
-  const [municipalityCode, setMunicipalityCode] = useState(state.values?.municipalityCode ?? "");
   const [locationId, setLocationId] = useState(
-    state.values?.clickCollectLocationId ??
+    values?.clickCollectLocationId ??
       preview.pickupLocations.find((location) => location.available)?.id ??
       "",
   );
   const [paymentMethod, setPaymentMethod] = useState<
     "WOMPI" | "COD" | "BANK_TRANSFER" | "STORE_CREDIT"
   >(
-    ["WOMPI", "BANK_TRANSFER", "STORE_CREDIT"].includes(state.values?.paymentMethod ?? "")
-      ? (state.values?.paymentMethod as "WOMPI" | "BANK_TRANSFER" | "STORE_CREDIT")
+    ["WOMPI", "BANK_TRANSFER", "STORE_CREDIT"].includes(values?.paymentMethod ?? "")
+      ? (values?.paymentMethod as "WOMPI" | "BANK_TRANSFER" | "STORE_CREDIT")
       : "COD",
   );
   const [wompiCredentialId, setWompiCredentialId] = useState(
-    state.values?.wompiCredentialId ?? preview.paymentMethods.wompiAccounts[0]?.id ?? "",
+    values?.wompiCredentialId ?? preview.paymentMethods.wompiAccounts[0]?.id ?? "",
   );
   const sections = useRef<Record<number, HTMLElement | null>>({});
+  const stepHeadingRefs = useRef<Record<number, HTMLHeadingElement | null>>({});
+  const errorContainerRef = useRef<HTMLDivElement>(null);
   const checkoutForm = useRef<HTMLFormElement>(null);
-  const values = state.values;
-  const customer = preview.customer;
-  const defaultRecipient =
-    customer?.givenName && customer?.familyName
-      ? `${customer.givenName} ${customer.familyName}`
-      : "";
+  const lastStepRef = useRef(step);
+  const lastErrorStateRef = useRef(state);
+
+  const [prevState, setPrevState] = useState(state);
+  if (prevState !== state) {
+    setPrevState(state);
+    if (state.status === "error") {
+      const hasStepOneFieldError = Object.keys(state.fieldErrors ?? {}).some((key) =>
+        stepOneFieldKeys.has(key),
+      );
+      const mentionsStepOne =
+        /correo|teléfono|documento|dirección|departamento|municipio|cuenta registrada|inicia sesión/i.test(
+          state.message,
+        );
+      if (hasStepOneFieldError || mentionsStepOne) {
+        setStep(1);
+      }
+    }
+  }
+
+  useEffect(() => {
+    const isNewError = state !== lastErrorStateRef.current && state.status === "error";
+    lastErrorStateRef.current = state;
+    if (isNewError) {
+      lastStepRef.current = step;
+      errorContainerRef.current?.focus();
+      return;
+    }
+    if (lastStepRef.current !== step) {
+      lastStepRef.current = step;
+      stepHeadingRefs.current[step]?.focus();
+    }
+  }, [state, step]);
 
   const municipalities = useMemo(
     () => preview.municipalities.filter((entry) => entry.departmentCode === departmentCode),
@@ -110,43 +220,105 @@ export function CheckoutForm({
     preview.clickAndCollectEnabled &&
     preview.pickupLocations.some((location) => location.available);
 
-  function field(name: string, fallback = ""): string {
-    return values?.[name] ?? fallback;
+  function handleSelectSavedAddress(nextAddressId: string) {
+    setSelectedAddressId(nextAddressId);
+    if (!nextAddressId) {
+      setRecipientName("");
+      setPhoneE164("");
+      setDepartmentCode("");
+      setMunicipalityCode("");
+      setAddressLine1("");
+      setAddressLine2("");
+      setNeighborhood("");
+      setPostalCode("");
+      setDeliveryNotes("");
+      setQuotesStale(true);
+      setLocalError("");
+      return;
+    }
+    const chosen = savedAddresses.find((entry) => entry.id === nextAddressId);
+    if (!chosen) return;
+    setRecipientName(chosen.recipientName);
+    setPhoneE164(chosen.phoneE164);
+    setDepartmentCode(chosen.departmentCode);
+    setMunicipalityCode(chosen.municipalityCode);
+    setAddressLine1(chosen.addressLine1);
+    setAddressLine2(chosen.addressLine2 ?? "");
+    setNeighborhood(chosen.neighborhood ?? "");
+    setPostalCode(chosen.postalCode ?? "");
+    setDeliveryNotes(chosen.deliveryNotes ?? "");
+    setQuotesStale(true);
+    setLocalError("");
   }
 
   function quoteFlex() {
     const currentForm = checkoutForm.current;
     if (!currentForm) return;
     setLocalError("");
+    setGeoError("");
     setQuotesStale(false);
     startTransition(() => quoteAction(new FormData(currentForm)));
   }
 
   function locateForFlex() {
+    if (!window.isSecureContext) {
+      setGeoError(
+        "La geolocalización requiere una conexión segura (HTTPS). Ingresa las coordenadas manualmente.",
+      );
+      return;
+    }
     if (!navigator.geolocation) {
-      setLocalError("Tu navegador no ofrece geolocalización. Ingresa las coordenadas manualmente.");
+      setGeoError("Tu navegador no ofrece geolocalización. Ingresa las coordenadas manualmente.");
       return;
     }
     setLocating(true);
+    setGeoError("");
     setLocalError("");
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        setDeliveryLatitude(position.coords.latitude.toFixed(6));
-        setDeliveryLongitude(position.coords.longitude.toFixed(6));
+        const { latitude, longitude } = position.coords;
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+          setGeoError(
+            "Recibimos coordenadas no válidas del navegador. Ingresa las coordenadas manualmente.",
+          );
+          setLocating(false);
+          return;
+        }
+        setDeliveryLatitude(latitude.toFixed(6));
+        setDeliveryLongitude(longitude.toFixed(6));
         setQuotesStale(true);
         setLocating(false);
       },
-      () => {
-        setLocalError("No pudimos obtener tu ubicación. Ingresa las coordenadas manualmente.");
+      (error) => {
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            setGeoError(
+              "Permiso de ubicación denegado. Habilítalo en tu navegador o ingresa las coordenadas manualmente.",
+            );
+            break;
+          case error.POSITION_UNAVAILABLE:
+            setGeoError(
+              "No fue posible determinar tu ubicación actual. Ingresa las coordenadas manualmente.",
+            );
+            break;
+          case error.TIMEOUT:
+            setGeoError(
+              "Se agotó el tiempo al consultar tu ubicación. Inténtalo de nuevo o ingresa las coordenadas manualmente.",
+            );
+            break;
+          default:
+            setGeoError("No pudimos obtener tu ubicación. Ingresa las coordenadas manualmente.");
+            break;
+        }
         setLocating(false);
       },
       { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
     );
   }
 
-  function validateSection(number: number): boolean {
+  function validateVisibleSection(number: number): boolean {
     const section = sections.current[number];
-    if (!section) return true;
+    if (!section || section.hidden) return true;
     const controls = Array.from(
       section.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
         "input, select, textarea",
@@ -155,7 +327,8 @@ export function CheckoutForm({
       (control) =>
         !control.disabled &&
         control.type !== "hidden" &&
-        (step !== 1 || !control.closest("[data-destination-fields]")),
+        !control.closest("[hidden]") &&
+        (number !== 1 || !canPickup || !control.closest("[data-destination-fields]")),
     );
     for (const control of controls) {
       if (!control.checkValidity()) {
@@ -166,34 +339,75 @@ export function CheckoutForm({
     return true;
   }
 
+  function findMissingStepOneDeliveryFields(): string[] {
+    const missing: string[] = [];
+    if (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      missing.push("correo electrónico");
+    }
+    if (givenName.trim().length < 2) missing.push("nombres");
+    if (familyName.trim().length < 2) missing.push("apellidos");
+    if (recipientName.trim().length < 2) missing.push("persona que recibe");
+    if (phoneE164.trim().length < 8) missing.push("teléfono");
+    if (!buyerDocumentType) missing.push("tipo de documento");
+    if (!/^[A-Za-z0-9.-]{3,30}$/.test(buyerDocumentNumber.trim())) {
+      missing.push("número de documento");
+    }
+    if (preview.taxRegime === "RESPONSABLE_IVA" && !buyerTaxRegime) {
+      missing.push("régimen de IVA");
+    }
+    if (!departmentCode) missing.push("departamento");
+    if (!municipalityCode) missing.push("municipio");
+    if (addressLine1.trim().length < 5) missing.push("dirección (mínimo 5 caracteres)");
+    if (postalCode.trim() !== "" && !/^[0-9]{6}$/.test(postalCode.trim())) {
+      missing.push("código postal de 6 dígitos");
+    }
+    return missing;
+  }
+
   function continueForward() {
     setLocalError("");
-    if (!validateSection(step)) return;
+    if (!validateVisibleSection(step)) return;
+    if (step === 1 && postalCode.trim() !== "" && !/^[0-9]{6}$/.test(postalCode.trim())) {
+      setLocalError("El código postal opcional debe tener exactamente seis dígitos numéricos.");
+      return;
+    }
     if (step === 2 && method === "CLICK_COLLECT" && !selectedLocation?.available) {
       setLocalError("Selecciona una sede con stock completo para tu pedido.");
       return;
     }
-    if (step === 2 && method !== "CLICK_COLLECT" && !validateSection(1)) {
-      setLocalError(
-        "Completa tu tipo y número de documento y datos de contacto antes de continuar con entrega por transportista.",
-      );
-      setStep(1);
-      return;
+    if (step === 2 && method !== "CLICK_COLLECT") {
+      const missingFields = findMissingStepOneDeliveryFields();
+      if (missingFields.length > 0) {
+        setLocalError(
+          `Para continuar con entrega a domicilio o Flex, completa en el paso 1: ${missingFields.join(", ")}.`,
+        );
+        setStep(1);
+        return;
+      }
     }
     if (step === 2 && method === "LOCAL_DELIVERY" && (!selectedFlexQuote || quotesStale)) {
       setLocalError("Cotiza una zona Flex vigente para las coordenadas antes de continuar.");
       return;
     }
     if (step === 2 && method === "CLICK_COLLECT" && !reviewFingerprint) {
-      setLocalError("La sede seleccionada cambió. Recarga el checkout antes de continuar.");
+      setLocalError("La sede seleccionada cambió. Recarga esta página antes de continuar.");
       return;
     }
     setStep((current) => Math.min(3, current + 1));
   }
 
   function completeCheckout() {
+    if (pending || !submissionId || !reviewFingerprint) return;
     setLocalError("");
-    if (!validateSection(3)) return;
+    if (method !== "CLICK_COLLECT") {
+      const missingFields = findMissingStepOneDeliveryFields();
+      if (missingFields.length > 0) {
+        setLocalError(`Revisa en el paso 1: ${missingFields.join(", ")}.`);
+        setStep(1);
+        return;
+      }
+    }
+    if (!validateVisibleSection(3)) return;
     const currentForm = checkoutForm.current;
     if (!currentForm) return;
     startTransition(() => action(new FormData(currentForm)));
@@ -201,7 +415,19 @@ export function CheckoutForm({
 
   return (
     <div className="grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_340px]">
-      <form ref={checkoutForm} action={action} className="space-y-6" noValidate aria-busy={pending}>
+      <form
+        ref={checkoutForm}
+        action={action}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (pending) return;
+          if (step < 3) continueForward();
+          else completeCheckout();
+        }}
+        className="space-y-6"
+        noValidate
+        aria-busy={pending}
+      >
         <input type="hidden" name="submissionId" value={submissionId} />
         <input type="hidden" name="reviewFingerprint" value={reviewFingerprint} />
         <input
@@ -215,7 +441,7 @@ export function CheckoutForm({
             <input type="hidden" name="deliveryLongitude" value="" />
           </>
         ) : null}
-        <ol aria-label="Progreso del checkout" className="grid gap-2 sm:grid-cols-3">
+        <ol aria-label="Progreso de la compra" className="grid gap-2 sm:grid-cols-3">
           {steps.map((item) => (
             <li key={item.number}>
               <button
@@ -223,7 +449,11 @@ export function CheckoutForm({
                 onClick={() => item.number < step && setStep(item.number)}
                 disabled={item.number >= step || pending}
                 aria-current={step === item.number ? "step" : undefined}
-                className="w-full rounded-lg border border-border bg-card p-3 text-left text-sm disabled:opacity-70 aria-current:border-primary aria-current:text-primary"
+                className={`w-full rounded-lg border bg-card p-3 text-left text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background aria-[current=step]:border-primary aria-[current=step]:text-primary aria-[current=step]:opacity-100 ${
+                  item.number < step
+                    ? "cursor-pointer border-input hover:bg-accent hover:text-accent-foreground"
+                    : "border-border"
+                } ${item.number > step ? "opacity-70" : ""}`.trim()}
               >
                 <span className="block text-xs font-medium">Paso {item.number}</span>
                 <span className="mt-1 block font-semibold">{item.label}</span>
@@ -241,13 +471,39 @@ export function CheckoutForm({
           className="space-y-5 rounded-xl border border-border bg-card p-5"
         >
           <div>
-            <h2 id="checkout-contact" className="text-xl font-bold">
+            <h2
+              ref={(node) => {
+                stepHeadingRefs.current[1] = node;
+              }}
+              id="checkout-contact"
+              tabIndex={-1}
+              className="text-xl font-bold outline-hidden"
+            >
               Datos de contacto y destino
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
               Usaremos estos datos para el comprobante, la entrega y la atención del pedido.
             </p>
           </div>
+          {savedAddresses.length > 0 ? (
+            <div className="space-y-2 rounded-lg border border-border bg-secondary/30 p-4">
+              <Label htmlFor="saved-address-selector">Usar una dirección guardada</Label>
+              <Select
+                id="saved-address-selector"
+                value={selectedAddressId}
+                onChange={(event) => handleSelectSavedAddress(event.target.value)}
+                disabled={pending}
+              >
+                <option value="">Ingresar otra dirección manualmente</option>
+                {savedAddresses.map((addr) => (
+                  <option key={addr.id} value={addr.id}>
+                    {addr.label}
+                    {addr.isDefault ? " (Predeterminada)" : ""} — {addr.addressLine1}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          ) : null}
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2 sm:col-span-2">
               <Label htmlFor="checkout-email">Correo electrónico</Label>
@@ -256,17 +512,24 @@ export function CheckoutForm({
                 name="email"
                 type="email"
                 autoComplete="email"
-                defaultValue={field("email", customer?.email ?? "")}
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
                 readOnly={customer?.authenticated === true}
                 aria-readonly={customer?.authenticated === true ? "true" : undefined}
+                aria-invalid={state.fieldErrors?.email ? true : undefined}
+                aria-describedby={describedBy(
+                  customer?.authenticated && "checkout-email-help",
+                  state.fieldErrors?.email && "checkout-email-error",
+                )}
                 maxLength={320}
                 required
               />
               {customer?.authenticated ? (
-                <p className="text-xs text-muted-foreground">
+                <p id="checkout-email-help" className="text-xs text-muted-foreground">
                   Compra vinculada a tu cuenta activa.
                 </p>
               ) : null}
+              <FieldErrors id="checkout-email-error" messages={state.fieldErrors?.email} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-given-name">Nombres</Label>
@@ -274,11 +537,17 @@ export function CheckoutForm({
                 id="checkout-given-name"
                 name="givenName"
                 autoComplete="given-name"
-                defaultValue={field("givenName", customer?.givenName ?? "")}
+                value={givenName}
+                onChange={(event) => setGivenName(event.target.value)}
                 minLength={2}
                 maxLength={100}
                 required
+                aria-invalid={state.fieldErrors?.givenName ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.givenName && "checkout-given-name-error",
+                )}
               />
+              <FieldErrors id="checkout-given-name-error" messages={state.fieldErrors?.givenName} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-family-name">Apellidos</Label>
@@ -286,10 +555,19 @@ export function CheckoutForm({
                 id="checkout-family-name"
                 name="familyName"
                 autoComplete="family-name"
-                defaultValue={field("familyName", customer?.familyName ?? "")}
+                value={familyName}
+                onChange={(event) => setFamilyName(event.target.value)}
                 minLength={2}
                 maxLength={100}
                 required
+                aria-invalid={state.fieldErrors?.familyName ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.familyName && "checkout-family-name-error",
+                )}
+              />
+              <FieldErrors
+                id="checkout-family-name-error"
+                messages={state.fieldErrors?.familyName}
               />
             </div>
             <div className="space-y-2">
@@ -298,10 +576,22 @@ export function CheckoutForm({
                 id="checkout-recipient"
                 name="recipientName"
                 autoComplete="name"
-                defaultValue={field("recipientName", defaultRecipient)}
+                value={recipientName}
+                onChange={(event) => {
+                  setRecipientName(event.target.value);
+                  setSelectedAddressId("");
+                }}
                 minLength={2}
                 maxLength={200}
                 required
+                aria-invalid={state.fieldErrors?.recipientName ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.recipientName && "checkout-recipient-error",
+                )}
+              />
+              <FieldErrors
+                id="checkout-recipient-error"
+                messages={state.fieldErrors?.recipientName}
               />
             </div>
             <div className="space-y-2">
@@ -311,28 +601,41 @@ export function CheckoutForm({
                 name="phoneE164"
                 type="tel"
                 autoComplete="tel"
-                defaultValue={field("phoneE164", customer?.phoneE164 ?? "")}
+                value={phoneE164}
+                onChange={(event) => {
+                  setPhoneE164(event.target.value);
+                  setSelectedAddressId("");
+                }}
                 placeholder="3001234567"
                 minLength={8}
                 maxLength={24}
                 required
+                aria-invalid={state.fieldErrors?.phoneE164 ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.phoneE164 && "checkout-phone-error",
+                )}
               />
+              <FieldErrors id="checkout-phone-error" messages={state.fieldErrors?.phoneE164} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-document-type">Tipo de documento</Label>
               <Select
                 id="checkout-document-type"
                 name="buyerDocumentType"
-                className="flex py-2"
-                defaultValue={field("buyerDocumentType", "13")}
+                value={buyerDocumentType}
+                onChange={(event) => setBuyerDocumentType(event.target.value)}
                 required={
                   preview.taxRegime === "RESPONSABLE_IVA" ||
                   (!preview.clickAndCollectEnabled && method !== "CLICK_COLLECT") ||
                   (step !== 1 && method !== "CLICK_COLLECT")
                 }
+                aria-invalid={state.fieldErrors?.buyerDocumentType ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.buyerDocumentType && "checkout-document-type-error",
+                )}
               >
                 {preview.taxRegime !== "RESPONSABLE_IVA" && preview.clickAndCollectEnabled ? (
-                  <option value="">Sin especificar (solo recogida en tienda)</option>
+                  <option value="">Sin especificar (solo recogida en sede)</option>
                 ) : null}
                 <option value="13">Cédula de ciudadanía</option>
                 <option value="31">NIT</option>
@@ -345,6 +648,10 @@ export function CheckoutForm({
                 <option value="50">NIT de otro país</option>
                 <option value="91">NUIP</option>
               </Select>
+              <FieldErrors
+                id="checkout-document-type-error"
+                messages={state.fieldErrors?.buyerDocumentType}
+              />
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-document-number">Número de documento</Label>
@@ -352,7 +659,8 @@ export function CheckoutForm({
                 id="checkout-document-number"
                 name="buyerDocumentNumber"
                 autoComplete="off"
-                defaultValue={field("buyerDocumentNumber")}
+                value={buyerDocumentNumber}
+                onChange={(event) => setBuyerDocumentNumber(event.target.value)}
                 pattern="[A-Za-z0-9.-]{3,30}"
                 minLength={3}
                 maxLength={30}
@@ -361,10 +669,19 @@ export function CheckoutForm({
                   (!preview.clickAndCollectEnabled && method !== "CLICK_COLLECT") ||
                   (step !== 1 && method !== "CLICK_COLLECT")
                 }
+                aria-invalid={state.fieldErrors?.buyerDocumentNumber ? true : undefined}
+                aria-describedby={describedBy(
+                  "checkout-document-number-help",
+                  state.fieldErrors?.buyerDocumentNumber && "checkout-document-number-error",
+                )}
               />
-              <p className="text-xs text-muted-foreground">
+              <p id="checkout-document-number-help" className="text-xs text-muted-foreground">
                 Se usa para la guía de transporte y, cuando aplique, la factura electrónica.
               </p>
+              <FieldErrors
+                id="checkout-document-number-error"
+                messages={state.fieldErrors?.buyerDocumentNumber}
+              />
             </div>
             {preview.taxRegime === "RESPONSABLE_IVA" ? (
               <div className="space-y-2 sm:col-span-2">
@@ -372,14 +689,22 @@ export function CheckoutForm({
                 <Select
                   id="checkout-buyer-tax-regime"
                   name="buyerTaxRegime"
-                  className="flex py-2"
-                  defaultValue={field("buyerTaxRegime")}
+                  value={buyerTaxRegime}
+                  onChange={(event) => setBuyerTaxRegime(event.target.value)}
                   required
+                  aria-invalid={state.fieldErrors?.buyerTaxRegime ? true : undefined}
+                  aria-describedby={describedBy(
+                    state.fieldErrors?.buyerTaxRegime && "checkout-buyer-tax-regime-error",
+                  )}
                 >
                   <option value="">Selecciona el régimen</option>
                   <option value="NO_RESPONSABLE_IVA">No responsable de IVA</option>
                   <option value="RESPONSABLE_IVA">Responsable de IVA</option>
                 </Select>
+                <FieldErrors
+                  id="checkout-buyer-tax-regime-error"
+                  messages={state.fieldErrors?.buyerTaxRegime}
+                />
               </div>
             ) : null}
           </div>
@@ -393,14 +718,18 @@ export function CheckoutForm({
               <Select
                 id="checkout-department"
                 name="departmentCode"
-                className="flex py-2"
                 value={departmentCode}
                 onChange={(event) => {
                   setDepartmentCode(event.target.value);
                   setMunicipalityCode("");
+                  setSelectedAddressId("");
                   setQuotesStale(true);
                 }}
                 required={method !== "CLICK_COLLECT"}
+                aria-invalid={state.fieldErrors?.departmentCode ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.departmentCode && "checkout-department-error",
+                )}
               >
                 <option value="">Selecciona un departamento</option>
                 {preview.departments.map((department) => (
@@ -409,20 +738,29 @@ export function CheckoutForm({
                   </option>
                 ))}
               </Select>
+              <FieldErrors
+                id="checkout-department-error"
+                messages={state.fieldErrors?.departmentCode}
+              />
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-municipality">Municipio o territorio</Label>
               <Select
                 id="checkout-municipality"
                 name="municipalityCode"
-                className="flex py-2"
                 key={departmentCode}
                 value={municipalityCode}
                 onChange={(event) => {
                   setMunicipalityCode(event.target.value);
+                  setSelectedAddressId("");
                   setQuotesStale(true);
                 }}
+                disabled={!departmentCode}
                 required={method !== "CLICK_COLLECT"}
+                aria-invalid={state.fieldErrors?.municipalityCode ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.municipalityCode && "checkout-municipality-error",
+                )}
               >
                 <option value="">Selecciona un municipio</option>
                 {municipalities.map((municipality) => (
@@ -431,6 +769,10 @@ export function CheckoutForm({
                   </option>
                 ))}
               </Select>
+              <FieldErrors
+                id="checkout-municipality-error"
+                messages={state.fieldErrors?.municipalityCode}
+              />
             </div>
             <div className="space-y-2 sm:col-span-2">
               <Label htmlFor="checkout-address">Dirección</Label>
@@ -438,11 +780,20 @@ export function CheckoutForm({
                 id="checkout-address"
                 name="addressLine1"
                 autoComplete="address-line1"
-                defaultValue={field("addressLine1")}
+                value={addressLine1}
+                onChange={(event) => {
+                  setAddressLine1(event.target.value);
+                  setSelectedAddressId("");
+                }}
                 minLength={method !== "CLICK_COLLECT" ? 5 : undefined}
                 maxLength={200}
                 required={method !== "CLICK_COLLECT"}
+                aria-invalid={state.fieldErrors?.addressLine1 ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.addressLine1 && "checkout-address-error",
+                )}
               />
+              <FieldErrors id="checkout-address-error" messages={state.fieldErrors?.addressLine1} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="checkout-address-2">Complemento (opcional)</Label>
@@ -450,8 +801,20 @@ export function CheckoutForm({
                 id="checkout-address-2"
                 name="addressLine2"
                 autoComplete="address-line2"
-                defaultValue={field("addressLine2")}
+                value={addressLine2}
+                onChange={(event) => {
+                  setAddressLine2(event.target.value);
+                  setSelectedAddressId("");
+                }}
                 maxLength={200}
+                aria-invalid={state.fieldErrors?.addressLine2 ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.addressLine2 && "checkout-address-2-error",
+                )}
+              />
+              <FieldErrors
+                id="checkout-address-2-error"
+                messages={state.fieldErrors?.addressLine2}
               />
             </div>
             <div className="space-y-2">
@@ -460,8 +823,20 @@ export function CheckoutForm({
                 id="checkout-neighborhood"
                 name="neighborhood"
                 autoComplete="address-level3"
-                defaultValue={field("neighborhood")}
+                value={neighborhood}
+                onChange={(event) => {
+                  setNeighborhood(event.target.value);
+                  setSelectedAddressId("");
+                }}
                 maxLength={120}
+                aria-invalid={state.fieldErrors?.neighborhood ? true : undefined}
+                aria-describedby={describedBy(
+                  state.fieldErrors?.neighborhood && "checkout-neighborhood-error",
+                )}
+              />
+              <FieldErrors
+                id="checkout-neighborhood-error"
+                messages={state.fieldErrors?.neighborhood}
               />
             </div>
             <div className="space-y-2">
@@ -471,9 +846,25 @@ export function CheckoutForm({
                 name="postalCode"
                 inputMode="numeric"
                 autoComplete="postal-code"
-                defaultValue={field("postalCode")}
-                pattern={method !== "CLICK_COLLECT" ? "[0-9]{6}" : undefined}
+                value={postalCode}
+                onChange={(event) => {
+                  setPostalCode(event.target.value);
+                  setSelectedAddressId("");
+                }}
+                pattern={postalCode.trim().length > 0 ? "[0-9]{6}" : undefined}
                 maxLength={6}
+                aria-invalid={state.fieldErrors?.postalCode ? true : undefined}
+                aria-describedby={describedBy(
+                  "checkout-postal-code-help",
+                  state.fieldErrors?.postalCode && "checkout-postal-code-error",
+                )}
+              />
+              <p id="checkout-postal-code-help" className="text-xs text-muted-foreground">
+                Seis dígitos numéricos (ej. 110231).
+              </p>
+              <FieldErrors
+                id="checkout-postal-code-error"
+                messages={state.fieldErrors?.postalCode}
               />
             </div>
           </div>
@@ -488,7 +879,14 @@ export function CheckoutForm({
           className="space-y-5 rounded-xl border border-border bg-card p-5"
         >
           <div>
-            <h2 id="checkout-delivery" className="text-xl font-bold">
+            <h2
+              ref={(node) => {
+                stepHeadingRefs.current[2] = node;
+              }}
+              id="checkout-delivery"
+              tabIndex={-1}
+              className="text-xl font-bold outline-hidden"
+            >
               Elige cómo recibir tu pedido
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -496,66 +894,72 @@ export function CheckoutForm({
               stock queda reservado por {preview.reservationMinutes} minutos al confirmar.
             </p>
           </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex cursor-pointer gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
-              <input
-                type="radio"
-                name="fulfillmentMethod"
-                value="HOME_DELIVERY"
-                checked={method === "HOME_DELIVERY"}
-                onChange={() => setMethod("HOME_DELIVERY")}
-                className="mt-1 size-4 accent-primary"
-                required
-              />
-              <span>
-                <span className="block font-semibold">Envío a domicilio</span>
-                <span className="mt-1 block text-sm text-muted-foreground">
-                  {formatCopCents(preview.homeDelivery.shippingCents)} · tarifa estándar configurada
-                </span>
-              </span>
-            </label>
-            {preview.localDeliveryEnabled ? (
+          <fieldset>
+            <legend className="sr-only">Modalidad de entrega</legend>
+            <div className="grid gap-3 sm:grid-cols-2">
               <label className="flex cursor-pointer gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
                 <input
                   type="radio"
                   name="fulfillmentMethod"
-                  value="LOCAL_DELIVERY"
-                  checked={method === "LOCAL_DELIVERY"}
-                  onChange={() => setMethod("LOCAL_DELIVERY")}
-                  className="mt-1 size-4 accent-primary"
+                  value="HOME_DELIVERY"
+                  checked={method === "HOME_DELIVERY"}
+                  onChange={() => setMethod("HOME_DELIVERY")}
+                  className="mt-1 size-4 shrink-0 accent-primary"
                   required
                 />
                 <span>
-                  <span className="block font-semibold">Entrega Flex local</span>
+                  <span className="block font-semibold">Envío a domicilio</span>
                   <span className="mt-1 block text-sm text-muted-foreground">
-                    Cotización por cobertura y horario de corte
+                    {formatCopCents(preview.homeDelivery.shippingCents)} · tarifa estándar
+                    configurada
                   </span>
                 </span>
               </label>
-            ) : null}
-            <label
-              className={`flex gap-3 rounded-xl border border-border p-4 has-checked:border-primary ${canPickup ? "cursor-pointer" : "opacity-60"}`}
-            >
-              <input
-                type="radio"
-                name="fulfillmentMethod"
-                value="CLICK_COLLECT"
-                checked={method === "CLICK_COLLECT"}
-                onChange={() => setMethod("CLICK_COLLECT")}
-                disabled={!canPickup}
-                className="mt-1 size-4 accent-primary"
-                required
-              />
-              <span>
-                <span className="block font-semibold">Click & Collect</span>
-                <span className="mt-1 block text-sm text-muted-foreground">
-                  {canPickup
-                    ? "Gratis · recoge en una sede con stock"
-                    : "No hay sedes con stock completo"}
+              {preview.localDeliveryEnabled ? (
+                <label className="flex cursor-pointer gap-3 rounded-xl border border-border p-4 has-checked:border-primary">
+                  <input
+                    type="radio"
+                    name="fulfillmentMethod"
+                    value="LOCAL_DELIVERY"
+                    checked={method === "LOCAL_DELIVERY"}
+                    onChange={() => setMethod("LOCAL_DELIVERY")}
+                    className="mt-1 size-4 shrink-0 accent-primary"
+                    required
+                  />
+                  <span>
+                    <span className="block font-semibold">Entrega Flex local</span>
+                    <span className="mt-1 block text-sm text-muted-foreground">
+                      Cotización por cobertura y horario de corte
+                    </span>
+                  </span>
+                </label>
+              ) : null}
+              <label
+                className={`flex gap-3 rounded-xl border border-border p-4 has-checked:border-primary ${canPickup ? "cursor-pointer" : "opacity-60"}`}
+              >
+                <input
+                  type="radio"
+                  name="fulfillmentMethod"
+                  value="CLICK_COLLECT"
+                  checked={method === "CLICK_COLLECT"}
+                  onChange={() => setMethod("CLICK_COLLECT")}
+                  disabled={!canPickup}
+                  className="mt-1 size-4 shrink-0 accent-primary"
+                  required
+                />
+                <span>
+                  <span className="block font-semibold">
+                    Recogida en sede<span className="sr-only"> (Click &amp; Collect)</span>
+                  </span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    {canPickup
+                      ? "Gratis · recoge en una sede con stock"
+                      : "No hay sedes con stock completo"}
+                  </span>
                 </span>
-              </span>
-            </label>
-          </div>
+              </label>
+            </div>
+          </fieldset>
           {method === "LOCAL_DELIVERY" ? (
             <fieldset className="space-y-4 rounded-xl border border-border p-4">
               <legend className="px-1 text-sm font-medium">Cotización Flex por coordenadas</legend>
@@ -574,11 +978,20 @@ export function CheckoutForm({
                     value={deliveryLatitude}
                     onChange={(event) => {
                       setDeliveryLatitude(event.target.value);
+                      setGeoError("");
                       setQuotesStale(true);
                     }}
                     placeholder="4.711000"
                     maxLength={24}
                     required
+                    aria-invalid={state.fieldErrors?.deliveryLatitude ? true : undefined}
+                    aria-describedby={describedBy(
+                      state.fieldErrors?.deliveryLatitude && "delivery-latitude-error",
+                    )}
+                  />
+                  <FieldErrors
+                    id="delivery-latitude-error"
+                    messages={state.fieldErrors?.deliveryLatitude}
                   />
                 </div>
                 <div className="space-y-2">
@@ -591,11 +1004,20 @@ export function CheckoutForm({
                     value={deliveryLongitude}
                     onChange={(event) => {
                       setDeliveryLongitude(event.target.value);
+                      setGeoError("");
                       setQuotesStale(true);
                     }}
                     placeholder="-74.072100"
                     maxLength={24}
                     required
+                    aria-invalid={state.fieldErrors?.deliveryLongitude ? true : undefined}
+                    aria-describedby={describedBy(
+                      state.fieldErrors?.deliveryLongitude && "delivery-longitude-error",
+                    )}
+                  />
+                  <FieldErrors
+                    id="delivery-longitude-error"
+                    messages={state.fieldErrors?.deliveryLongitude}
                   />
                 </div>
               </div>
@@ -605,13 +1027,24 @@ export function CheckoutForm({
                   variant="outline"
                   onClick={locateForFlex}
                   disabled={locating || quotePending}
+                  aria-busy={locating}
                 >
                   {locating ? "Obteniendo ubicación…" : "Usar mi ubicación"}
                 </Button>
-                <Button type="button" onClick={quoteFlex} disabled={quotePending || locating}>
+                <Button
+                  type="button"
+                  onClick={quoteFlex}
+                  disabled={quotePending || locating}
+                  aria-busy={quotePending}
+                >
                   {quotePending ? "Cotizando…" : "Cotizar Flex"}
                 </Button>
               </div>
+              {geoError ? (
+                <p role="alert" className="text-sm text-destructive">
+                  {geoError}
+                </p>
+              ) : null}
               {quotePending ? (
                 <p role="status" className="text-sm text-muted-foreground">
                   Consultando cobertura y tarifa vigentes…
@@ -630,12 +1063,16 @@ export function CheckoutForm({
                 </p>
               ) : null}
               {quotesStale && flexQuotes.length ? (
-                <p role="alert" className="text-sm text-warning">
+                <p
+                  role="alert"
+                  className="rounded-lg border border-warning bg-warning/15 p-3 text-sm font-medium text-foreground"
+                >
                   Las coordenadas o el municipio cambiaron. Cotiza nuevamente antes de continuar.
                 </p>
               ) : null}
               {flexQuotes.length ? (
-                <div className="space-y-3" aria-label="Zonas Flex disponibles">
+                <fieldset aria-label="Zonas Flex disponibles" className="space-y-3">
+                  <legend className="text-sm font-medium">Zonas Flex disponibles</legend>
                   {flexQuotes.map((quote) => (
                     <label
                       key={quote.zoneId}
@@ -646,7 +1083,7 @@ export function CheckoutForm({
                         name="localDeliveryZoneOption"
                         checked={selectedZoneId === quote.zoneId}
                         onChange={() => setFlexZoneId(quote.zoneId)}
-                        className="mt-1 size-4 accent-primary"
+                        className="mt-1 size-4 shrink-0 accent-primary"
                       />
                       <span>
                         <span className="block font-semibold">
@@ -654,16 +1091,12 @@ export function CheckoutForm({
                         </span>
                         <span className="mt-1 block text-sm text-muted-foreground">
                           Entrega estimada:{" "}
-                          {new Intl.DateTimeFormat("es-CO", {
-                            timeZone: "America/Bogota",
-                            dateStyle: "medium",
-                            timeStyle: "short",
-                          }).format(new Date(quote.deliveryPromiseAt))}
+                          {flexPromiseDateFormatter.format(new Date(quote.deliveryPromiseAt))}
                         </span>
                       </span>
                     </label>
                   ))}
-                </div>
+                </fieldset>
               ) : null}
             </fieldset>
           ) : null}
@@ -683,7 +1116,7 @@ export function CheckoutForm({
                     onChange={() => setLocationId(location.id)}
                     disabled={!location.available}
                     required={method === "CLICK_COLLECT"}
-                    className="mt-1 size-4 accent-primary"
+                    className="mt-1 size-4 shrink-0 accent-primary"
                   />
                   <span>
                     <span className="block font-semibold">{location.name}</span>
@@ -705,14 +1138,22 @@ export function CheckoutForm({
           )}
           <div className="space-y-2">
             <Label htmlFor="checkout-notes">Notas para la entrega o recogida (opcional)</Label>
-            <textarea
+            <Textarea
               id="checkout-notes"
               name="deliveryNotes"
-              defaultValue={field("deliveryNotes")}
+              value={deliveryNotes}
+              onChange={(event) => {
+                setDeliveryNotes(event.target.value);
+                setSelectedAddressId("");
+              }}
               maxLength={500}
               rows={3}
-              className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-invalid={state.fieldErrors?.deliveryNotes ? true : undefined}
+              aria-describedby={describedBy(
+                state.fieldErrors?.deliveryNotes && "checkout-notes-error",
+              )}
             />
+            <FieldErrors id="checkout-notes-error" messages={state.fieldErrors?.deliveryNotes} />
           </div>
         </section>
 
@@ -725,7 +1166,14 @@ export function CheckoutForm({
           className="space-y-5 rounded-xl border border-border bg-card p-5"
         >
           <div>
-            <h2 id="checkout-review" className="text-xl font-bold">
+            <h2
+              ref={(node) => {
+                stepHeadingRefs.current[3] = node;
+              }}
+              id="checkout-review"
+              tabIndex={-1}
+              className="text-xl font-bold outline-hidden"
+            >
               Revisa y confirma
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -742,14 +1190,14 @@ export function CheckoutForm({
                   value="WOMPI"
                   checked={paymentMethod === "WOMPI"}
                   onChange={() => setPaymentMethod("WOMPI")}
-                  className="mt-1 size-4 accent-primary"
+                  className="mt-1 size-4 shrink-0 accent-primary"
                   required
                 />
                 <span>
                   <span className="block font-semibold">Wompi</span>
                   <span className="mt-1 block text-sm text-muted-foreground">
-                    Continúa en el Web Checkout seguro de Wompi. La orden se marca pagada solo tras
-                    un evento firmado o una consulta verificada en servidor.
+                    Continúa en el pago seguro de Wompi. La orden se marca pagada solo tras un
+                    evento firmado o una consulta verificada en servidor.
                   </span>
                 </span>
               </label>
@@ -762,7 +1210,6 @@ export function CheckoutForm({
                   name="wompiCredentialId"
                   value={wompiCredentialId}
                   onChange={(event) => setWompiCredentialId(event.target.value)}
-                  className="flex py-2"
                   required
                 >
                   {preview.paymentMethods.wompiAccounts.map((account) => (
@@ -782,7 +1229,7 @@ export function CheckoutForm({
                 value="COD"
                 checked={paymentMethod === "COD"}
                 onChange={() => setPaymentMethod("COD")}
-                className="mt-1 size-4 accent-primary"
+                className="mt-1 size-4 shrink-0 accent-primary"
                 required
               />
               <span>
@@ -801,7 +1248,7 @@ export function CheckoutForm({
                   value="BANK_TRANSFER"
                   checked={paymentMethod === "BANK_TRANSFER"}
                   onChange={() => setPaymentMethod("BANK_TRANSFER")}
-                  className="mt-1 size-4 accent-primary"
+                  className="mt-1 size-4 shrink-0 accent-primary"
                   required
                 />
                 <span>
@@ -821,7 +1268,7 @@ export function CheckoutForm({
                   value="STORE_CREDIT"
                   checked={paymentMethod === "STORE_CREDIT"}
                   onChange={() => setPaymentMethod("STORE_CREDIT")}
-                  className="mt-1 size-4 accent-primary"
+                  className="mt-1 size-4 shrink-0 accent-primary"
                   required
                 />
                 <span>
@@ -844,7 +1291,7 @@ export function CheckoutForm({
                   ? "Envío a domicilio"
                   : method === "LOCAL_DELIVERY"
                     ? `Entrega Flex ${selectedFlexQuote?.zoneCode ?? ""}`
-                    : "Click & Collect"}
+                    : `Recogida en sede (${selectedLocation?.name ?? "por confirmar"})`}
               </dd>
             </div>
             <div>
@@ -879,8 +1326,9 @@ export function CheckoutForm({
                 type="checkbox"
                 name="termsAccepted"
                 value="true"
-                defaultChecked={values?.termsAccepted === "true"}
-                className="mt-1 size-4 accent-primary"
+                checked={termsAccepted}
+                onChange={(event) => setTermsAccepted(event.target.checked)}
+                className="mt-1 size-4 shrink-0 accent-primary"
                 required
               />
               <span>
@@ -888,9 +1336,11 @@ export function CheckoutForm({
                 <Link
                   href="/legal/terminos-y-condiciones"
                   target="_blank"
-                  className="text-primary hover:underline"
+                  rel="noopener noreferrer"
+                  className="text-primary underline underline-offset-4"
                 >
                   términos y condiciones de compra
+                  <span className="sr-only"> (se abre en una nueva pestaña)</span>
                 </Link>{" "}
                 y la promesa de entrega informada.
               </span>
@@ -900,8 +1350,9 @@ export function CheckoutForm({
                 type="checkbox"
                 name="dataProcessingAccepted"
                 value="true"
-                defaultChecked={values?.dataProcessingAccepted === "true"}
-                className="mt-1 size-4 accent-primary"
+                checked={dataProcessingAccepted}
+                onChange={(event) => setDataProcessingAccepted(event.target.checked)}
+                className="mt-1 size-4 shrink-0 accent-primary"
                 required
               />
               <span>
@@ -909,30 +1360,32 @@ export function CheckoutForm({
                 <Link
                   href="/legal/privacidad"
                   target="_blank"
-                  className="text-primary hover:underline"
+                  rel="noopener noreferrer"
+                  className="text-primary underline underline-offset-4"
                 >
                   aviso de privacidad
+                  <span className="sr-only"> (se abre en una nueva pestaña)</span>
                 </Link>{" "}
                 y la{" "}
                 <Link
                   href="/legal/tratamiento-datos-personales"
                   target="_blank"
-                  className="text-primary hover:underline"
+                  rel="noopener noreferrer"
+                  className="text-primary underline underline-offset-4"
                 >
                   política de tratamiento de datos personales
+                  <span className="sr-only"> (se abre en una nueva pestaña)</span>
                 </Link>
                 . No se activa mercadeo por esta compra.
               </span>
             </label>
             <label className="flex items-start gap-3 text-sm">
               <input
-                key={`advertising-${String(values?.advertisingAccepted === "on" || values?.advertisingAccepted === "true")}`}
                 type="checkbox"
                 name="advertisingAccepted"
-                defaultChecked={
-                  values?.advertisingAccepted === "on" || values?.advertisingAccepted === "true"
-                }
-                className="mt-1 size-4 accent-primary"
+                checked={advertisingAccepted}
+                onChange={(event) => setAdvertisingAccepted(event.target.checked)}
+                className="mt-1 size-4 shrink-0 accent-primary"
               />
               <span>
                 Opcional: autorizo compartir con Meta identificadores seudonimizados y los datos de
@@ -948,7 +1401,7 @@ export function CheckoutForm({
             {localError}
           </p>
         ) : null}
-        <div id="checkout-error" tabIndex={-1} className="outline-none">
+        <div ref={errorContainerRef} id="checkout-error" tabIndex={-1} className="outline-hidden">
           <FormMessage state={state} />
         </div>
         <div className="flex flex-wrap justify-between gap-3">
@@ -964,15 +1417,15 @@ export function CheckoutForm({
             Anterior
           </Button>
           {step < 3 ? (
-            <Button key="continue" type="button" onClick={continueForward} disabled={pending}>
+            <Button key="continue" type="submit" disabled={pending}>
               Continuar al paso {step + 1}
             </Button>
           ) : (
             <Button
               key="submit"
-              type="button"
-              onClick={completeCheckout}
+              type="submit"
               disabled={pending || !submissionId || !reviewFingerprint}
+              aria-busy={pending}
               aria-describedby="checkout-confirmation-note"
             >
               {pending ? "Registrando e iniciando el pago…" : "Registrar pedido e iniciar pago"}
