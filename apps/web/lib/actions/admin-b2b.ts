@@ -154,35 +154,36 @@ function revalidate(opportunityId?: string): void {
 
 type B2bAuditContext = Awaited<ReturnType<typeof audit>>;
 
-const b2bSnapshotFields = new Set([
-  "priceListId",
-  "itemId",
-  "organizationId",
-  "opportunityId",
-  "proposalId",
-  "credentialId",
-  "requestId",
-  "expectedVersion",
-  "expectedOrganizationVersion",
-  "expectedPriceListVersion",
-  "expectedOpportunityVersion",
-  "code",
-  "name",
-  "description",
-  "validFrom",
-  "validTo",
-  "sku",
-  "quantity",
-  "unitPrice",
-  "expiresAt",
-  "status",
-]);
+const b2bSnapshotLimits: Record<string, number> = {
+  priceListId: 256,
+  itemId: 256,
+  organizationId: 256,
+  opportunityId: 256,
+  proposalId: 256,
+  credentialId: 256,
+  requestId: 256,
+  expectedVersion: 256,
+  expectedOrganizationVersion: 256,
+  expectedPriceListVersion: 256,
+  expectedOpportunityVersion: 256,
+  code: 256,
+  name: 256,
+  description: 500,
+  validFrom: 256,
+  validTo: 256,
+  sku: 256,
+  quantity: 256,
+  unitPrice: 256,
+  expiresAt: 256,
+  status: 256,
+};
 
 function b2bSnapshot(formData: FormData): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(formSnapshot(formData)).filter(
-      ([key, value]) => b2bSnapshotFields.has(key) && value.length <= 256,
-    ),
+    Object.entries(formSnapshot(formData)).filter(([key, value]) => {
+      const limit = b2bSnapshotLimits[key];
+      return limit !== undefined && value.length <= limit;
+    }),
   );
 }
 
@@ -363,7 +364,7 @@ export async function issueB2bProposalAction(
       proposalUrl: `${getPublicSiteUrl()}/propuesta/${issued.token}`,
     };
   } catch (error) {
-    return failure(error, values);
+    return failure(error, error instanceof AdminAuthorizationError ? undefined : values);
   }
 }
 

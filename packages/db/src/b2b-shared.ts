@@ -14,6 +14,7 @@ import {
   AdminActorAuthorizationError,
   assertAdminActorInTransaction,
   databaseNow,
+  isAdminSelfDealingCustomer,
   recordAdminAction,
   type DatabaseExecutor,
 } from "./primitives.js";
@@ -181,6 +182,59 @@ export async function b2bActor(
   }
 }
 
+async function b2bSelfDealing(
+  tx: Prisma.TransactionClient,
+  audit: B2bAudit,
+  targetType: string,
+  targetId: string,
+): Promise<boolean> {
+  const actor = await tx.adminUser.findUnique({
+    where: { id: audit.actorAdminUserId },
+    select: { authUserId: true, email: true },
+  });
+  if (!actor) return false;
+  const actorEmail = normalizeEmail(actor.email);
+  let contacts: Array<{ id: string; customerId: string | null; email: string | null }> = [];
+  if (targetType === "Organization") {
+    contacts = await tx.contact.findMany({
+      where: { organizationId: targetId, status: "ACTIVE", deletedAt: null },
+      select: { id: true, customerId: true, email: true },
+      take: 200,
+    });
+  } else if (targetType === "Opportunity") {
+    const opportunity = await tx.opportunity.findUnique({
+      where: { id: targetId },
+      select: { contact: { select: { id: true, customerId: true, email: true } } },
+    });
+    if (opportunity?.contact) contacts = [opportunity.contact];
+  } else if (targetType === "OpportunityProposal") {
+    const proposal = await tx.opportunityProposal.findUnique({
+      where: { id: targetId },
+      select: {
+        opportunity: {
+          select: { contact: { select: { id: true, customerId: true, email: true } } },
+        },
+      },
+    });
+    if (proposal?.opportunity.contact) contacts = [proposal.opportunity.contact];
+  }
+  for (const contact of contacts) {
+    if (await isAdminSelfDealingCustomer(tx, actor, contact)) return true;
+  }
+  if (contacts.length > 0) {
+    const matched = await tx.contactIdentity.findFirst({
+      where: {
+        contactId: { in: contacts.map((contact) => contact.id) },
+        kind: "EMAIL",
+        normalizedValue: actorEmail,
+      },
+      select: { id: true },
+    });
+    return matched !== null;
+  }
+  return false;
+}
+
 export async function b2bLog(
   tx: Prisma.TransactionClient,
   audit: B2bAudit,
@@ -189,7 +243,8 @@ export async function b2bLog(
   targetId: string,
   metadata: Prisma.JsonObject = {},
 ): Promise<void> {
-  await recordAdminAction(tx, audit, action, targetType, targetId, metadata);
+  const selfDealing = await b2bSelfDealing(tx, audit, targetType, targetId);
+  await recordAdminAction(tx, audit, action, targetType, targetId, metadata, { selfDealing });
 }
 
 function canonicalProposal(proposal: ProposalContentSource): string {

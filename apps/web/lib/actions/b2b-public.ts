@@ -1,6 +1,11 @@
 "use server";
 
-import { B2bError } from "@mundonettech/db";
+import {
+  B2bError,
+  consumeOperationRateLimit,
+  CrmError,
+  OperationRateLimitError,
+} from "@mundonettech/db";
 import { revalidatePath, updateTag } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
@@ -9,6 +14,7 @@ import { actionError, actionSuccess, formString, type ActionState } from "@/lib/
 import { b2bService, hashProposalToken, receiptTokenForProposal, sha256 } from "@/lib/b2b";
 import { orderService } from "@/lib/checkout";
 import { checkoutMutationMessage } from "@/lib/checkout-errors";
+import { getDatabase } from "@/lib/db";
 import {
   normalizePhoneE164,
   optionalTrimmedText as optionalText,
@@ -106,6 +112,15 @@ function validationFailure(
 }
 
 function b2bFailure(error: unknown, values: Record<string, string>): ActionState {
+  if (error instanceof OperationRateLimitError) {
+    return actionError(
+      `Demasiadas solicitudes. Espera ${error.retryAfterSeconds} segundos e inténtalo de nuevo.`,
+      values,
+    );
+  }
+  if (error instanceof CrmError) {
+    return actionError("Revisa los campos obligatorios y los formatos ingresados.", values);
+  }
   if (error instanceof B2bError) {
     const messages = {
       VALIDATION: "Revisa los datos comerciales, cantidades, precios y vigencia ingresados.",
@@ -155,6 +170,13 @@ export async function captureB2bOpportunityAction(
     const privacy = legalDocument("privacidad");
     const dataProcessing = legalDocument("tratamiento-datos-personales");
     const security = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "b2b.opportunity.capture",
+      subject: { type: "IP" },
+      ipHash: security.ipHash,
+      limit: 10,
+      windowSeconds: 900,
+    });
     const acceptanceProofHash = sha256(
       JSON.stringify({
         legalName: input.legalName,
@@ -213,6 +235,14 @@ export async function acceptB2bProposalAction(
   const input = parsed.data;
   let receiptUrl: string;
   try {
+    const security = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "b2b.proposal.accept",
+      subject: { type: "IP" },
+      ipHash: security.ipHash,
+      limit: 20,
+      windowSeconds: 900,
+    });
     const proposal = await b2bService().getPublicProposal(hashProposalToken(input.token));
     if (!proposal || proposal.id !== input.proposalId || !proposal.available || !proposal.cartId) {
       return actionError(
@@ -223,7 +253,6 @@ export async function acceptB2bProposalAction(
     const terms = legalDocument("terminos-y-condiciones");
     const privacy = legalDocument("privacidad");
     const dataProcessing = legalDocument("tratamiento-datos-personales");
-    const security = await getRequestSecurityContext();
     const acceptanceProofHash = sha256(
       JSON.stringify({
         proposalId: proposal.id,

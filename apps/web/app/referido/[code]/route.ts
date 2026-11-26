@@ -1,8 +1,10 @@
 import { normalizeReferralCode } from "@mundonettech/core";
+import { consumeOperationRateLimit, OperationRateLimitError } from "@mundonettech/db";
 
 import { getDatabase } from "@/lib/db";
 import { getPublicSiteUrl } from "@/lib/integrations";
 import { storeReferralCode } from "@/lib/security/referral";
+import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const headers = {
   "Cache-Control": "no-store",
@@ -22,6 +24,14 @@ export async function GET(_request: Request, { params }: { params: Promise<{ cod
   const { code } = await params;
   try {
     const normalized = normalizeReferralCode(code);
+    const security = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "growth.referral.lookup",
+      subject: { type: "IP" },
+      ipHash: security.ipHash,
+      limit: 60,
+      windowSeconds: 300,
+    });
     const exists = await getDatabase().referralCode.findFirst({
       where: {
         code: normalized,
@@ -41,7 +51,13 @@ export async function GET(_request: Request, { params }: { params: Promise<{ cod
         Location: `${getPublicSiteUrl()}/mi-cuenta/beneficios?codigo=${encodeURIComponent(normalized)}`,
       },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof OperationRateLimitError) {
+      return new Response("Demasiadas solicitudes", {
+        status: 429,
+        headers: { ...headers, "Retry-After": String(error.retryAfterSeconds) },
+      });
+    }
     return new Response("Enlace de referido no disponible", { status: 404, headers });
   }
 }

@@ -303,6 +303,20 @@ export class PaymentService {
           ...(referral ? [`growth-customer:${referral.referrerCustomerId}`] : []),
           `store-credit:${order.customerId}`,
         ]);
+        const verifiedReferral = await tx.referral.findUnique({
+          where: { referredCustomerId: order.customerId },
+          select: { referrerCustomerId: true },
+        });
+        if (
+          verifiedReferral &&
+          verifiedReferral.referrerCustomerId !== referral?.referrerCustomerId
+        ) {
+          const retry = new Error("Referral attribution changed concurrently.") as Error & {
+            code: string;
+          };
+          retry.code = "40001";
+          throw retry;
+        }
         const account = await tx.storeCreditAccount.findUnique({
           where: { customerId_currency: { customerId: order.customerId, currency: "COP" } },
         });

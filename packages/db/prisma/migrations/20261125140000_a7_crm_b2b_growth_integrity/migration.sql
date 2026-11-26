@@ -1,3 +1,54 @@
+ALTER TABLE "IdentityMergeCandidate"
+  DROP CONSTRAINT "IdentityMergeCandidate_state_consistent",
+  ADD CONSTRAINT "IdentityMergeCandidate_state_consistent" CHECK (
+    ("status" = 'PENDING' AND "sourceSnapshot" IS NULL AND "targetSnapshot" IS NULL AND "mergedAt" IS NULL AND "rejectedAt" IS NULL AND "reversedAt" IS NULL AND "mergedByAdminUserId" IS NULL AND "rejectedByAdminUserId" IS NULL AND "reversedByAdminUserId" IS NULL) OR
+    ("status" = 'REJECTED' AND "sourceSnapshot" IS NULL AND "targetSnapshot" IS NULL AND "rejectedAt" IS NOT NULL AND ("rejectedByAdminUserId" IS NOT NULL OR "resolutionNote" = '[contenido suprimido por retención]') AND "resolutionNote" IS NOT NULL AND "mergedAt" IS NULL AND "reversedAt" IS NULL) OR
+    ("status" IN ('MERGED', 'REVERSED') AND jsonb_typeof("sourceSnapshot") = 'object' AND jsonb_typeof("targetSnapshot") = 'object' AND "mergedTargetVersion" IS NOT NULL AND "mergedSourceVersion" IS NOT NULL AND "mergedAt" IS NOT NULL AND "mergedByAdminUserId" IS NOT NULL) AND
+    ("status" <> 'REVERSED' OR ("reversedAt" IS NOT NULL AND "reversedByAdminUserId" IS NOT NULL))
+  );
+
+CREATE OR REPLACE FUNCTION "enforce_support_ticket_state"() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE
+  anonymizing_contact BOOLEAN;
+BEGIN
+  IF TG_OP = 'DELETE' OR NEW."ticketNumber" IS DISTINCT FROM OLD."ticketNumber" OR NEW."orderId" IS DISTINCT FROM OLD."orderId" OR
+     NEW."requesterCustomerId" IS DISTINCT FROM OLD."requesterCustomerId" OR NEW."requesterGuestSessionId" IS DISTINCT FROM OLD."requesterGuestSessionId" OR
+     NEW."idempotencyKey" IS DISTINCT FROM OLD."idempotencyKey" OR NEW."requestHash" IS DISTINCT FROM OLD."requestHash" OR
+     NEW."kind" IS DISTINCT FROM OLD."kind" OR NEW."subject" IS DISTINCT FROM OLD."subject" OR NEW."slaDueAt" IS DISTINCT FROM OLD."slaDueAt" OR
+     NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR NEW."version" <> OLD."version" + 1 THEN
+    RAISE EXCEPTION 'Support identity and SLA are immutable and versions must be monotonic' USING ERRCODE = '55000';
+  END IF;
+  anonymizing_contact := NEW."contactEmailSnapshot" IS DISTINCT FROM OLD."contactEmailSnapshot" AND
+    to_jsonb(NEW) - ARRAY['contactEmailSnapshot', 'version', 'updatedAt'] IS NOT DISTINCT FROM
+    to_jsonb(OLD) - ARRAY['contactEmailSnapshot', 'version', 'updatedAt'];
+  IF NEW."contactEmailSnapshot" IS DISTINCT FROM OLD."contactEmailSnapshot" AND NOT (
+    EXISTS (
+      SELECT 1 FROM "Customer" WHERE "id" = NEW."requesterCustomerId" AND "status" = 'ANONYMIZED' AND "email" = NEW."contactEmailSnapshot"
+    ) OR EXISTS (
+      SELECT 1 FROM "Order" purchase
+      JOIN "Customer" buyer ON buyer."id" = purchase."customerId"
+      WHERE purchase."id" = NEW."orderId" AND buyer."status" = 'ANONYMIZED' AND buyer."email" = NEW."contactEmailSnapshot"
+    )
+  ) THEN
+    RAISE EXCEPTION 'Support contact can only be removed by account anonymization' USING ERRCODE = '55000';
+  END IF;
+  IF NEW."status" IS DISTINCT FROM OLD."status" AND NOT (
+    (OLD."status" = 'OPEN' AND NEW."status" IN ('IN_PROGRESS', 'WAITING_CUSTOMER', 'RESOLVED', 'CLOSED')) OR
+    (OLD."status" = 'IN_PROGRESS' AND NEW."status" IN ('OPEN', 'WAITING_CUSTOMER', 'RESOLVED', 'CLOSED')) OR
+    (OLD."status" = 'WAITING_CUSTOMER' AND NEW."status" IN ('OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED')) OR
+    (OLD."status" = 'RESOLVED' AND NEW."status" IN ('IN_PROGRESS', 'CLOSED'))
+  ) THEN RAISE EXCEPTION 'Invalid support ticket transition' USING ERRCODE = '55000'; END IF;
+  IF OLD."status" = 'CLOSED' AND NOT anonymizing_contact THEN
+    RAISE EXCEPTION 'Closed support tickets are immutable' USING ERRCODE = '55000';
+  END IF;
+  IF (NEW."status" = 'RESOLVED' AND NEW."resolvedAt" IS NULL) OR (NEW."status" = 'CLOSED' AND NEW."closedAt" IS NULL) THEN
+    RAISE EXCEPTION 'Support resolution timestamps are inconsistent' USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION "validate_copilot_output_zero_pii"(value JSONB) RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, public AS $$
   SELECT value IS NULL OR (
@@ -69,6 +120,12 @@ BEGIN
   PERFORM pg_advisory_xact_lock(hashtextextended('b2b-price-list:' || OLD."id"::text, 0));
   IF TG_OP = 'DELETE' OR NEW."id" IS DISTINCT FROM OLD."id" OR NEW."createdAt" IS DISTINCT FROM OLD."createdAt" OR NEW."version" < OLD."version" THEN
     RAISE EXCEPTION 'Price list history and versions are protected' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."status" = 'ACTIVE' AND NOT (
+    (NEW."status" = 'ACTIVE' AND to_jsonb(NEW) - ARRAY['updatedAt'] IS NOT DISTINCT FROM to_jsonb(OLD) - ARRAY['updatedAt']) OR
+    (NEW."status" = 'ARCHIVED' AND to_jsonb(NEW) - ARRAY['status', 'deletedAt', 'version', 'updatedAt'] IS NOT DISTINCT FROM to_jsonb(OLD) - ARRAY['status', 'deletedAt', 'version', 'updatedAt'])
+  ) THEN
+    RAISE EXCEPTION 'An active price list can only be archived' USING ERRCODE = '55000';
   END IF;
   IF OLD."status" <> 'DRAFT' AND (NEW."code" IS DISTINCT FROM OLD."code" OR NEW."currency" IS DISTINCT FROM OLD."currency") THEN
     RAISE EXCEPTION 'An active price list identity cannot change' USING ERRCODE = '55000';
@@ -148,12 +205,38 @@ $$;
 
 CREATE FUNCTION "validate_crm_organization_reference"() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+DECLARE
+  org_id UUID;
 BEGIN
-  IF NEW."organizationId" IS NULL THEN RETURN NEW; END IF;
   IF TG_TABLE_NAME = 'Contact' THEN
-    IF NEW."status" <> 'ACTIVE' THEN RETURN NEW; END IF;
+    IF TG_OP = 'UPDATE' AND OLD."organizationId" IS NOT NULL AND NEW."organizationId" IS DISTINCT FROM OLD."organizationId" AND NEW."status" = 'ACTIVE' AND NEW."deletedAt" IS NULL THEN
+      FOR org_id IN
+        SELECT DISTINCT id FROM unnest(ARRAY[OLD."organizationId", NEW."organizationId"]) AS id
+        WHERE id IS NOT NULL ORDER BY 1
+      LOOP
+        PERFORM pg_advisory_xact_lock(hashtextextended('crm-organization:' || org_id::text, 0));
+      END LOOP;
+      IF EXISTS (
+        SELECT 1 FROM "Opportunity"
+        WHERE "contactId" = OLD."id" AND "organizationId" = OLD."organizationId"
+      ) THEN
+        RAISE EXCEPTION 'Active contacts with linked opportunities cannot change organization' USING ERRCODE = '23514';
+      END IF;
+    END IF;
+    IF NEW."organizationId" IS NULL OR NEW."status" <> 'ACTIVE' OR NEW."deletedAt" IS NOT NULL THEN
+      RETURN NEW;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('crm-organization:' || NEW."organizationId"::text, 0));
+    IF NOT EXISTS (SELECT 1 FROM "Organization" WHERE "id" = NEW."organizationId" AND "deletedAt" IS NULL FOR SHARE) THEN
+      RAISE EXCEPTION 'CRM references require an active organization' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
   END IF;
+  IF NEW."organizationId" IS NULL THEN RETURN NEW; END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('crm-organization:' || NEW."organizationId"::text, 0));
+  IF NOT EXISTS (SELECT 1 FROM "Organization" WHERE "id" = NEW."organizationId" AND "deletedAt" IS NULL FOR SHARE) THEN
+    RAISE EXCEPTION 'CRM references require an active organization' USING ERRCODE = '23514';
+  END IF;
   IF TG_TABLE_NAME = 'Opportunity' THEN
     IF NOT EXISTS (
       SELECT 1 FROM "Contact" WHERE "id" = NEW."contactId" AND "organizationId" = NEW."organizationId" AND "status" = 'ACTIVE' AND "deletedAt" IS NULL FOR SHARE
@@ -161,13 +244,10 @@ BEGIN
       RAISE EXCEPTION 'Opportunities require an active contact from the same organization' USING ERRCODE = '23514';
     END IF;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM "Organization" WHERE "id" = NEW."organizationId" AND "deletedAt" IS NULL FOR SHARE) THEN
-    RAISE EXCEPTION 'CRM references require an active organization' USING ERRCODE = '23514';
-  END IF;
   RETURN NEW;
 END;
 $$;
-CREATE TRIGGER "Contact_validate_organization" BEFORE INSERT OR UPDATE OF "organizationId" ON "Contact"
+CREATE TRIGGER "Contact_validate_organization" BEFORE INSERT OR UPDATE OF "organizationId", "status", "deletedAt" ON "Contact"
 FOR EACH ROW EXECUTE FUNCTION "validate_crm_organization_reference"();
 CREATE TRIGGER "Opportunity_validate_organization" BEFORE INSERT OR UPDATE OF "organizationId", "contactId" ON "Opportunity"
 FOR EACH ROW EXECUTE FUNCTION "validate_crm_organization_reference"();
@@ -183,8 +263,11 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended('b2b-opportunity:' || OLD."opportunityId"::text, 0));
   END IF;
   IF TG_OP = 'INSERT' THEN
-    IF EXISTS (SELECT 1 FROM "Opportunity" WHERE "id" = NEW."opportunityId" AND "status" IN ('WON', 'LOST', 'CANCELLED') FOR SHARE) THEN
-      RAISE EXCEPTION 'Closed opportunities cannot create proposals' USING ERRCODE = '23514';
+    IF NEW."status" <> 'DRAFT' THEN
+      RAISE EXCEPTION 'Proposals must start as drafts' USING ERRCODE = '23514';
+    END IF;
+    IF EXISTS (SELECT 1 FROM "Opportunity" WHERE "id" = NEW."opportunityId" AND ("status" IN ('WON', 'LOST', 'CANCELLED') OR "anonymizedAt" IS NOT NULL) FOR SHARE) THEN
+      RAISE EXCEPTION 'Closed or anonymized opportunities cannot create proposals' USING ERRCODE = '23514';
     END IF;
     IF NEW."priceListId" IS NULL THEN
       IF NEW."priceListCodeSnapshot" IS NOT NULL OR NEW."priceListVersionSnapshot" IS NOT NULL THEN
@@ -192,7 +275,13 @@ BEGIN
       END IF;
     ELSE
       PERFORM pg_advisory_xact_lock(hashtextextended('b2b-price-list:' || NEW."priceListId"::text, 0));
-      IF NOT EXISTS (SELECT 1 FROM "PriceList" WHERE "id" = NEW."priceListId" FOR SHARE) THEN
+      IF NOT EXISTS (
+        SELECT 1 FROM "PriceList" WHERE "id" = NEW."priceListId" AND "status" = 'ACTIVE' AND "deletedAt" IS NULL AND
+          ((NEW."priceListCodeSnapshot" IS NULL AND NEW."priceListVersionSnapshot" IS NULL) OR
+           ("code" = NEW."priceListCodeSnapshot" AND "version" = NEW."priceListVersionSnapshot")) AND
+          ("validFrom" IS NULL OR "validFrom" <= CURRENT_TIMESTAMP) AND ("validTo" IS NULL OR "validTo" > CURRENT_TIMESTAMP)
+        FOR SHARE
+      ) THEN
         RAISE EXCEPTION 'Proposal price list snapshot must reference its current active source' USING ERRCODE = '23514';
       END IF;
     END IF;
@@ -284,7 +373,9 @@ BEGIN
     COALESCE(sum("taxCents"), 0), COALESCE(sum("lineTotalCents"), 0)
     INTO item_count, catalog_total, discount_total, tax_total, merchandise_total
     FROM "OpportunityProposalItem" WHERE "proposalId" = proposal_id;
-  IF parent."totalCents" <= 0 OR (item_count > 0 AND (
+  IF parent."totalCents" <= 0 OR
+    (parent."status" IN ('SENT', 'CONVERTED') AND item_count = 0) OR
+    (item_count > 0 AND (
     merchandise_total <= 0 OR parent."subtotalCents" <> catalog_total OR
     parent."discountCents" <> discount_total OR parent."taxCents" <> tax_total OR
     parent."totalCents" <> merchandise_total + tax_total + parent."shippingCents"
@@ -307,6 +398,7 @@ BEGIN
   IF linked_opportunity IS NOT NULL THEN
     PERFORM pg_advisory_xact_lock(hashtextextended('b2b-opportunity:' || linked_opportunity::text, 0));
     IF NEW."kind" <> 'B2B' OR NEW."accessTokenHash" IS DISTINCT FROM OLD."accessTokenHash" OR
+       (NEW."customerId" IS DISTINCT FROM OLD."customerId" AND NOT (OLD."status" = 'ACTIVE' AND NEW."status" = 'CONVERTED' AND OLD."customerId" IS NULL)) OR
        NEW."couponId" IS DISTINCT FROM OLD."couponId" OR NEW."subtotalCents" IS DISTINCT FROM OLD."subtotalCents" OR
        NEW."wholesaleDiscountCents" IS DISTINCT FROM OLD."wholesaleDiscountCents" OR NEW."bundleDiscountCents" IS DISTINCT FROM OLD."bundleDiscountCents" OR
        NEW."couponDiscountCents" IS DISTINCT FROM OLD."couponDiscountCents" OR NEW."totalCents" IS DISTINCT FROM OLD."totalCents" OR
@@ -498,15 +590,60 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION "validate_customer_segment"() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('customer-segment:' || (CASE WHEN TG_OP = 'INSERT' THEN NEW."id" ELSE OLD."id" END)::text, 0));
+  IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'Customer segments cannot be deleted' USING ERRCODE = '55000'; END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW."status" <> 'DRAFT' OR NEW."version" <> 0 THEN RAISE EXCEPTION 'Customer segments start as drafts' USING ERRCODE = '23514'; END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW."id" IS DISTINCT FROM OLD."id" OR NEW."createdByAdminUserId" IS DISTINCT FROM OLD."createdByAdminUserId" OR NEW."createdAt" IS DISTINCT FROM OLD."createdAt" THEN
+    RAISE EXCEPTION 'Customer segment identity is immutable' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."status" = 'ARCHIVED' THEN RAISE EXCEPTION 'Archived customer segments are immutable' USING ERRCODE = '55000'; END IF;
+  IF NEW."status" = 'ARCHIVED' AND EXISTS (
+    SELECT 1 FROM "LifecycleJourney" WHERE "segmentId" = NEW."id" AND "status" IN ('ACTIVE', 'PAUSED')
+  ) THEN
+    RAISE EXCEPTION 'Archive active or paused lifecycle journeys before archiving a segment' USING ERRCODE = '55000';
+  END IF;
+  IF OLD."status" = 'ACTIVE' THEN
+    IF NEW."status" = 'ACTIVE' THEN
+      IF to_jsonb(NEW) - ARRAY['lastRefreshedAt', 'updatedAt'] IS DISTINCT FROM to_jsonb(OLD) - ARRAY['lastRefreshedAt', 'updatedAt'] THEN
+        RAISE EXCEPTION 'Active customer segments only accept refresh timestamps' USING ERRCODE = '55000';
+      END IF;
+      RETURN NEW;
+    END IF;
+    IF NEW."status" <> 'ARCHIVED' OR to_jsonb(NEW) - ARRAY['status', 'version', 'updatedByAdminUserId', 'archivedAt', 'updatedAt'] IS DISTINCT FROM to_jsonb(OLD) - ARRAY['status', 'version', 'updatedByAdminUserId', 'archivedAt', 'updatedAt'] THEN
+      RAISE EXCEPTION 'Active customer segments can only be archived' USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF NEW."status" = 'DRAFT' THEN RETURN NEW; END IF;
+  IF NEW."status" NOT IN ('ACTIVE', 'ARCHIVED') OR
+     to_jsonb(NEW) - ARRAY['status', 'version', 'updatedByAdminUserId', 'activatedAt', 'archivedAt', 'updatedAt'] IS DISTINCT FROM
+     to_jsonb(OLD) - ARRAY['status', 'version', 'updatedByAdminUserId', 'activatedAt', 'archivedAt', 'updatedAt'] THEN
+    RAISE EXCEPTION 'Draft activation cannot change the segment definition' USING ERRCODE = '55000';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION "validate_lifecycle_journey"() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
-DECLARE step_count INTEGER; minimum_position INTEGER; maximum_position INTEGER;
+DECLARE step_count INTEGER; minimum_position INTEGER; maximum_position INTEGER; seg_id UUID;
 BEGIN
   IF TG_OP = 'INSERT' THEN
     PERFORM pg_advisory_xact_lock(hashtextextended('customer-segment:' || NEW."segmentId"::text, 0));
     PERFORM pg_advisory_xact_lock(hashtextextended('lifecycle-journey:' || NEW."id"::text, 0));
   ELSE
-    PERFORM pg_advisory_xact_lock(hashtextextended('customer-segment:' || OLD."segmentId"::text, 0));
+    FOR seg_id IN
+      SELECT DISTINCT id FROM unnest(ARRAY[OLD."segmentId", CASE WHEN TG_OP = 'UPDATE' THEN NEW."segmentId" ELSE NULL END]) AS id
+      WHERE id IS NOT NULL ORDER BY 1
+    LOOP
+      PERFORM pg_advisory_xact_lock(hashtextextended('customer-segment:' || seg_id::text, 0));
+    END LOOP;
     PERFORM pg_advisory_xact_lock(hashtextextended('lifecycle-journey:' || OLD."id"::text, 0));
   END IF;
   IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'Lifecycle journeys cannot be deleted' USING ERRCODE = '55000'; END IF;
@@ -561,7 +698,8 @@ BEGIN
   IF NEW."htmlBody" ~* '<\/?(script|iframe|object|embed|form|meta|link|base|svg|style)([^a-z0-9_-]|$)' OR
      NEW."htmlBody" ~* '[[:space:]/]on[a-z]+[[:space:]]*=' OR
      NEW."htmlBody" ~* '(javascript|vbscript)[[:space:]]*:' OR
-     NEW."htmlBody" ~* 'data[[:space:]]*:[[:space:]]*text/html' OR
+     NEW."htmlBody" ~* 'data[[:space:]]*:[[:space:]]*(text/html|image/svg\+xml|application/xhtml\+xml)' OR
+     NEW."htmlBody" ~* '(href|src|action|xlink:href)[[:space:]]*=[[:space:]]*["'']?[[:space:]]*(&#x?[0-9a-f]+;?|&colon;|&tab;|&newline;)' OR
      NEW."htmlBody" ~* 'expression[[:space:]]*\(' THEN
     RAISE EXCEPTION 'Lifecycle email HTML contains active content' USING ERRCODE = '23514';
   END IF;
@@ -697,7 +835,9 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION "enforce_support_ticket_state"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "validate_copilot_output_zero_pii"(JSONB) FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION "validate_customer_segment"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "enforce_price_list_item_mutable"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "enforce_price_list_state"() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION "enforce_organization_price_list"() FROM PUBLIC, anon, authenticated, service_role;

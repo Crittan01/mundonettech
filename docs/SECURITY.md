@@ -170,7 +170,7 @@ pnpm admin:bootstrap
 - La credencial `meta` es única por ambiente, se cifra con AES-256-GCM y se administra con `integrations:write` + step-up MFA. El token solo se revela en servidor y viaja en `Authorization`; el endpoint Graph es fijo fuera de `LOCAL`, los códigos de prueba se prohíben en PRD y `release:verify` exige attestación Meta.
 - `MetaCapiEvent` vincula orden pagada, cliente, consentimiento `ADVERTISING` y credencial mediante FK/triggers. `Purchase` usa `event_id = purchase:<orderId>`, event_time del pago y request hash inmutable. El outbox solo transporta UUIDs; no se envían IP, agente, dirección, documento, correo/teléfono en claro ni cookies publicitarias.
 - Consentimiento se valida al encolar y despachar; revocación/anonimización cancela pendientes y purga de inmediato los hashes de eventos inciertos. Los hashes SHA-256 de contacto/ID externo se eliminan en todo estado terminal. Rechazo determinista, rate limit acotado, incertidumbre y claims vencidos no se reintentan ciegamente: confirmar recepción, descartar sin envío o reintentar exige `integrations:write`, MFA, evidencia no PII, mismo request hash y `AdminActionLog`.
-- `MetaCapiEvent` mantiene RLS forzada sin políticas y Data API revocada. Las alertas `meta.capi` se filtran por `integrations:read`; la postura total es 133 tablas y 2.306 denegaciones reales (`ADR-029`, `ADR-045`, `ADR-046`, `ADR-047`, `ADR-048`).
+- `MetaCapiEvent` mantiene RLS forzada sin políticas y Data API revocada. Las alertas `meta.capi` se filtran por `integrations:read`; la postura total certificada es 133 tablas, 16 funciones RPC y 2.309 denegaciones reales (`ADR-029`, `ADR-045`..`ADR-052`).
 
 
 ## 22. Superficie server, cuotas y cargas binarias

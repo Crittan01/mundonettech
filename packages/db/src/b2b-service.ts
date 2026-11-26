@@ -358,6 +358,15 @@ export class B2bService {
       if (!organization) {
         organization = await tx.organization.create({ data: organizationInput });
       }
+      await acquireOperationLocks(tx, [`crm-organization:${organization.id}`]);
+      const lockedOrgs = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Organization"
+        WHERE "id" = ${organization.id}::uuid AND "deletedAt" IS NULL
+        FOR SHARE
+      `;
+      if (!lockedOrgs[0]) {
+        throw retryableLockDivergenceError("The organization was archived concurrently.");
+      }
       let contact = await tx.contact.findFirst({
         where: {
           organizationId: organization.id,
@@ -383,14 +392,6 @@ export class B2bService {
         } else {
           contact = null;
         }
-      }
-      const lockedOrgs = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "Organization"
-        WHERE "id" = ${organization.id}::uuid AND "deletedAt" IS NULL
-        FOR SHARE
-      `;
-      if (!lockedOrgs[0]) {
-        throw retryableLockDivergenceError("The organization was archived concurrently.");
       }
       if (!contact) {
         contact = await tx.contact.create({
@@ -567,7 +568,14 @@ export class B2bService {
 
   async listPriceLists(): Promise<readonly B2bPriceListView[]> {
     const records = await this.db.priceList.findMany({
-      include: { _count: { select: { items: true, organizations: true } } },
+      include: {
+        _count: {
+          select: {
+            items: true,
+            organizations: { where: { deletedAt: null } },
+          },
+        },
+      },
       orderBy: [{ createdAt: "desc" }, { code: "asc" }],
       take: 500,
     });
@@ -745,6 +753,12 @@ export class B2bService {
       });
       if (assigned > 0) {
         throw new B2bError("CONFLICT", "Unassign organizations before archiving the price list.");
+      }
+      const openProposals = await tx.opportunityProposal.count({
+        where: { priceListId: id, status: { in: ["DRAFT", "SENT"] } },
+      });
+      if (openProposals > 0) {
+        throw new B2bError("CONFLICT", "Close open proposals before archiving the price list.");
       }
       const now = await b2bNow(tx);
       const record = await tx.priceList.update({
@@ -971,7 +985,8 @@ export class B2bService {
       }
       const variant = bySku.get(input.sku)!;
       const listPrice = listPrices.get(variant.id);
-      const priceCeiling = listPrice ?? variant.priceCents;
+      const boundedByList = listPrice !== undefined && listPrice < variant.priceCents;
+      const priceCeiling = boundedByList ? listPrice : variant.priceCents;
       const unitPriceCents =
         input.unitPriceCents === undefined
           ? priceCeiling
@@ -979,9 +994,9 @@ export class B2bService {
       if (unitPriceCents > priceCeiling) {
         throw new B2bError(
           "VALIDATION",
-          listPrice === undefined
-            ? `The negotiated price for ${input.sku} exceeds its catalog price.`
-            : `The negotiated price for ${input.sku} exceeds its assigned price list ceiling.`,
+          boundedByList
+            ? `The negotiated price for ${input.sku} exceeds its assigned price list ceiling.`
+            : `The negotiated price for ${input.sku} exceeds its catalog price.`,
         );
       }
       const gross = b2bMoney(variant.priceCents * BigInt(input.quantity), "line gross");
@@ -1236,6 +1251,26 @@ export class B2bService {
       const now = await b2bNow(tx);
       if (proposal.expiresAt <= now)
         throw new B2bError("EXPIRED", "Create a new version with a future expiry.");
+      if (proposal.priceListId) {
+        await acquireOperationLocks(tx, [`b2b-price-list:${proposal.priceListId}`]);
+        const list = await tx.priceList.findUnique({ where: { id: proposal.priceListId } });
+        if (
+          !list ||
+          list.deletedAt !== null ||
+          list.status !== "ACTIVE" ||
+          (proposal.priceListCodeSnapshot !== null &&
+            list.code !== proposal.priceListCodeSnapshot) ||
+          (proposal.priceListVersionSnapshot !== null &&
+            list.version !== proposal.priceListVersionSnapshot) ||
+          (list.validFrom !== null && list.validFrom > now) ||
+          (list.validTo !== null && list.validTo <= now)
+        ) {
+          throw new B2bError(
+            "CONFLICT",
+            "The proposal price list is no longer active or valid; create a new version.",
+          );
+        }
+      }
       const previous = await tx.opportunityProposal.findMany({
         where: { opportunityId: proposal.opportunityId, status: { in: ["SENT", "EXPIRED"] } },
         select: { id: true, cartId: true },

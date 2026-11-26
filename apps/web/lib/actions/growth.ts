@@ -1,13 +1,15 @@
 "use server";
 
-import { GrowthError } from "@mundonettech/db";
+import { consumeOperationRateLimit, GrowthError, OperationRateLimitError } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { actionError, actionSuccess, closedFormObject, type ActionState } from "@/lib/action-state";
+import { getDatabase } from "@/lib/db";
 import { growthService } from "@/lib/growth";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 import { clearReferralCode } from "@/lib/security/referral";
+import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 function isNextRedirect(error: unknown): boolean {
   return (
@@ -25,6 +27,12 @@ function failure(
   operation: "create" | "attribute" = "attribute",
 ): ActionState {
   if (isNextRedirect(error)) throw error;
+  if (error instanceof OperationRateLimitError) {
+    return actionError(
+      `Demasiadas solicitudes. Espera ${error.retryAfterSeconds} segundos e inténtalo de nuevo.`,
+      values,
+    );
+  }
   if (error instanceof GrowthError) {
     if (operation === "create") {
       const messages = {
@@ -59,6 +67,14 @@ export async function createReferralCodeAction(
     if (!closedFormObject(formData, [])) {
       return actionError("Revisa los campos de la solicitud.");
     }
+    const security = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "growth.referral.create",
+      subject: { type: "IP" },
+      ipHash: security.ipHash,
+      limit: 10,
+      windowSeconds: 900,
+    });
     const result = await growthService().createReferralCode(profile.id);
     revalidatePath("/mi-cuenta/beneficios");
     return actionSuccess(`Tu código ${result.code} está listo para compartir.`);
@@ -78,11 +94,22 @@ export async function attributeReferralAction(
     if (!raw) {
       return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.");
     }
-    const parsed = referralCodeSchema.safeParse((raw.code ?? "").trim());
+    const trimmedCode = (raw.code ?? "").trim().slice(0, 32);
+    const parsed = referralCodeSchema.safeParse(trimmedCode);
     if (!parsed.success) {
-      return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.");
+      return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.", {
+        code: trimmedCode,
+      });
     }
     values = { code: parsed.data };
+    const security = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "growth.referral.attribute",
+      subject: { type: "IP" },
+      ipHash: security.ipHash,
+      limit: 20,
+      windowSeconds: 900,
+    });
     const result = await growthService().attributeReferral(profile.id, parsed.data);
     await clearReferralCode();
     revalidatePath("/mi-cuenta/beneficios");

@@ -63,7 +63,14 @@ const mocks = {
 type ServerAction = (previous: ActionState, formData: FormData) => Promise<ActionState>;
 const moduleMocks: Record<string, unknown> = {
   "@mundonettech/core": core,
-  "@mundonettech/db": db,
+  "@mundonettech/db": {
+    ...db,
+    consumeOperationRateLimit: vi.fn(async () => ({
+      allowed: true,
+      retryAfterSeconds: 0,
+      remaining: 19,
+    })),
+  },
   "next/cache": { revalidatePath: mocks.revalidatePath, updateTag: mocks.updateTag },
   "next/navigation": { redirect: mocks.redirect },
   "@/lib/action-state": {
@@ -77,6 +84,7 @@ const moduleMocks: Record<string, unknown> = {
     cartForMutation: mocks.cartForMutation,
     claimAssistedCart: mocks.claimAssistedCart,
     existingCartReference: mocks.existingCartReference,
+    transferGuestCartToCustomer: vi.fn(async () => undefined),
   },
   "@/lib/cart-errors": { cartMutationMessage: () => "No pudimos actualizar el carrito." },
   "@/lib/db": { getDatabase: () => ({}) },
@@ -561,7 +569,7 @@ describe("A2 — autenticación cliente y mensajes uniformes", () => {
     });
 
     expect(mocks.redirect).toHaveBeenLastCalledWith(next);
-    expect(mocks.consumeReferralPath).toHaveBeenCalledOnce();
+    expect(mocks.consumeReferralPath).not.toHaveBeenCalled();
     expect(mocks.synchronizeCustomerProfile).toHaveBeenCalledWith(customerId, "cliente@example.co");
     expect(authRequestJar.has("customer_auth_request")).toBe(false);
     const replay = await verifyRealCustomerOtpAction(idle, verification);

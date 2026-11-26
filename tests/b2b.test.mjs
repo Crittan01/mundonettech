@@ -71,9 +71,9 @@ function idempotency() {
   return { keyHash: bytes(), subjectHash: bytes(), requestHash: bytes(), expiresAt: future(1) };
 }
 
-async function captureLead() {
+async function captureLead(overrides = {}) {
   const suffix = randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase();
-  const email = `b2b-${suffix.toLowerCase()}@example.test`;
+  const email = overrides.email ?? `b2b-${suffix.toLowerCase()}@example.test`;
   const input = {
     legalName: `Comercializadora ${suffix}`,
     commercialName: `B2B ${suffix}`,
@@ -88,6 +88,7 @@ async function captureLead() {
     acceptanceIpHash: bytes(),
     acceptanceUserAgentHash: bytes(),
     idempotency: idempotency(),
+    ...overrides,
   };
   const result = await service.captureOpportunity(input);
   return { input, opportunityId: result.opportunityId, captureInput: input };
@@ -1366,5 +1367,174 @@ describe("A2 — B2B audit before/after, redaction and conflict atomicity", () =
     ]) {
       assert.equal(proposalMetadata.includes(forbidden), false, forbidden);
     }
+  });
+
+  it("moves and reverses B2B opportunities onto an org-less target, blocks cross-org merges, clamps ceiling on catalog drops and enforces expired price lists", async () => {
+    const lead = await captureLead();
+    const detail = await service.getOpportunity(lead.opportunityId);
+    const sourceContact = await db.contact.findUniqueOrThrow({ where: { id: detail.contact.id } });
+    const orglessTarget = await crm.createContact(
+      {
+        givenName: "Destino",
+        familyName: "SinOrg",
+        email: lead.input.email,
+        phoneE164: "+573187776655",
+        source: "admin-crm",
+      },
+      audit,
+    );
+    await crm.verifyContact(
+      {
+        contactId: orglessTarget.id,
+        expectedVersion: orglessTarget.version,
+        level: "DUAL_CHANNEL_VERIFIED",
+      },
+      audit,
+    );
+    await crm.detectDuplicates({ contactId: sourceContact.id }, audit);
+    const candidate = await db.identityMergeCandidate.findFirstOrThrow({
+      where: {
+        status: "PENDING",
+        sourceContactId: sourceContact.id,
+        targetContactId: orglessTarget.id,
+      },
+      include: { sourceContact: true, targetContact: true },
+    });
+    const merged = await merges.merge(
+      {
+        candidateId: candidate.id,
+        expectedVersion: candidate.version,
+        expectedSourceVersion: candidate.sourceContact.version,
+        expectedTargetVersion: candidate.targetContact.version,
+        note: "Mover oportunidad B2B hacia destino sin organización previa.",
+      },
+      audit,
+    );
+    assert.deepEqual(merged.candidate.movedOpportunityIds, [lead.opportunityId]);
+    assert.equal((await service.getOpportunity(lead.opportunityId)).contact.id, orglessTarget.id);
+    await merges.reverse(
+      {
+        candidateId: candidate.id,
+        expectedVersion: merged.candidate.version,
+        note: "Reversar oportunidad B2B al contacto original.",
+      },
+      audit,
+    );
+    assert.equal((await service.getOpportunity(lead.opportunityId)).contact.id, sourceContact.id);
+
+    const otherOrg = await crm.createOrganization({ legalName: "Otra Empresa B2B SAS" }, audit);
+    const crossOrgTarget = await crm.createContact(
+      {
+        organizationId: otherOrg.id,
+        givenName: "Destino",
+        familyName: "OtraOrg",
+        email: lead.input.email,
+        phoneE164: "+573187776656",
+        source: "admin-crm",
+      },
+      audit,
+    );
+    await crm.verifyContact(
+      {
+        contactId: crossOrgTarget.id,
+        expectedVersion: crossOrgTarget.version,
+        level: "DUAL_CHANNEL_VERIFIED",
+      },
+      audit,
+    );
+    await crm.detectDuplicates({ contactId: sourceContact.id }, audit);
+    const crossCand = await db.identityMergeCandidate.findFirstOrThrow({
+      where: {
+        status: "PENDING",
+        sourceContactId: sourceContact.id,
+        targetContactId: crossOrgTarget.id,
+      },
+      include: { sourceContact: true, targetContact: true },
+    });
+    await assert.rejects(
+      merges.merge(
+        {
+          candidateId: crossCand.id,
+          expectedVersion: crossCand.version,
+          expectedSourceVersion: crossCand.sourceContact.version,
+          expectedTargetVersion: crossCand.targetContact.version,
+          note: "Intento de fusión entre organizaciones incompatibles.",
+        },
+        audit,
+      ),
+      (error) => error.code === "CONFLICT",
+    );
+
+    const dropPriceList = await service.createPriceList(
+      {
+        code: `DROP-${++priceListSequence}`,
+        name: "Lista techo clamped",
+        description: "Verifica recorte al precio vigente del catálogo.",
+        validTo: new Date(Date.now() + 2_000),
+      },
+      audit,
+    );
+    await service.upsertPriceListItem(
+      dropPriceList.id,
+      dropPriceList.version,
+      { sku: catalog.sku, unitPriceCents: "90000" },
+      audit,
+    );
+    const afterItem = await db.priceList.findUniqueOrThrow({ where: { id: dropPriceList.id } });
+    const activeDropList = await service.activatePriceList(
+      dropPriceList.id,
+      afterItem.version,
+      audit,
+    );
+    const orgBeforeAssign = await db.organization.findUniqueOrThrow({
+      where: { id: detail.organization.id },
+    });
+    await service.assignOrganizationPriceList(
+      detail.organization.id,
+      orgBeforeAssign.version,
+      activeDropList.id,
+      activeDropList.version,
+      audit,
+    );
+
+    const originalVariant = await db.productVariant.findUniqueOrThrow({
+      where: { id: catalog.variantId },
+    });
+    try {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: 80_000n },
+      });
+      const currentOpp = await service.getOpportunity(lead.opportunityId);
+      const clampedDraft = await service.createProposal({
+        opportunityId: lead.opportunityId,
+        expectedVersion: currentOpp.version,
+        expiresAt: future(48),
+        items: [{ sku: catalog.sku, quantity: 1 }],
+        audit,
+      });
+      assert.equal(clampedDraft.items[0].unitPriceCents, 80_000n);
+
+      await new Promise((resolve) => setTimeout(resolve, 2_200));
+      const oppBeforeIssue = await service.getOpportunity(lead.opportunityId);
+      await assert.rejects(
+        service.issueProposal(clampedDraft.id, oppBeforeIssue.version, audit),
+        (error) => error instanceof B2bError && error.code === "CONFLICT",
+      );
+    } finally {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: originalVariant.priceCents },
+      });
+    }
+
+    const adminEmail = (await db.adminUser.findUniqueOrThrow({ where: { id: adminId } })).email;
+    const selfLead = await captureLead({ email: adminEmail });
+    const selfOpp = await service.getOpportunity(selfLead.opportunityId);
+    await service.closeOpportunity(selfLead.opportunityId, selfOpp.version, "LOST", audit);
+    const selfLog = await db.adminActionLog.findFirstOrThrow({
+      where: { action: "B2B_OPPORTUNITY_CLOSED", targetId: selfLead.opportunityId },
+    });
+    assert.equal(selfLog.selfDealing, true);
   });
 });

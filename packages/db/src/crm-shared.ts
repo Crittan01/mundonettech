@@ -257,6 +257,35 @@ async function crmAuditContacts(
   return [];
 }
 
+export async function crmSelfDealingContacts(
+  tx: Prisma.TransactionClient,
+  audit: CrmAudit,
+  contactIds: readonly string[],
+): Promise<boolean> {
+  if (contactIds.length === 0) return false;
+  const actor = await tx.adminUser.findUnique({
+    where: { id: audit.actorAdminUserId },
+    select: { authUserId: true, email: true },
+  });
+  if (!actor) return false;
+  const contacts = await tx.contact.findMany({
+    where: { id: { in: [...contactIds] } },
+    select: { id: true, customerId: true, email: true },
+  });
+  for (const contact of contacts) {
+    if (await isAdminSelfDealingCustomer(tx, actor, contact)) return true;
+  }
+  const previousActorIdentity = await tx.contactIdentity.findFirst({
+    where: {
+      contactId: { in: [...contactIds] },
+      kind: "EMAIL",
+      normalizedValue: normalizeEmail(actor.email),
+    },
+    select: { id: true },
+  });
+  return previousActorIdentity !== null;
+}
+
 export async function crmSelfDealing(
   tx: Prisma.TransactionClient,
   audit: CrmAudit,

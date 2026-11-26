@@ -402,7 +402,7 @@ export const securitySurfaceManifest = {
     updateAdministratorAction: [],
   },
   "apps/web/lib/actions/b2b-public.ts": {
-    captureB2bOpportunityAction: [],
+    captureB2bOpportunityAction: ["verifyTurnstileToken"],
     acceptB2bProposalAction: [],
   },
   "apps/web/lib/actions/cart.ts": {
@@ -429,8 +429,8 @@ export const securitySurfaceManifest = {
     signOutCustomerAction: [],
   },
   "apps/web/lib/actions/growth.ts": {
-    createReferralCodeAction: [],
-    attributeReferralAction: [],
+    createReferralCodeAction: ["requireCustomerPage"],
+    attributeReferralAction: ["requireCustomerPage"],
   },
   "apps/web/lib/actions/payments.ts": {
     startReceiptPaymentAction: [],

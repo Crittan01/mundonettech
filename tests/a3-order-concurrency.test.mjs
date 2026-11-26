@@ -2245,4 +2245,108 @@ describe("A7 — direct SQL write-skew barriers for B2B and lifecycle", () => {
       await Promise.allSettled([insertion]);
     }
   });
+
+  it("serializes concurrent checkout with profile consent revocation and B2B lead capture with org update without deadlocks", async () => {
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `a7-race-checkout-${randomUUID()}@example.test`,
+        givenName: "Carrera",
+        familyName: "Consentimiento",
+        phoneE164: "+573114445566",
+        status: "ACTIVE",
+      },
+    });
+    await db.consent.create({
+      data: {
+        customerId: customer.id,
+        purpose: "MARKETING_EMAIL",
+        status: "GRANTED",
+        source: "a7-race",
+        policyVersion: "2026-01",
+        proofHash: hash(),
+      },
+    });
+    const cart = await carts.createStorefrontCart({
+      accessTokenHash: hash(),
+      customerId: customer.id,
+      expiresAt: future(24),
+    });
+    await carts.addVariant({ cartId: cart.id }, catalog.variantId, 1);
+    const preview = await orders.preview({ cartId: cart.id });
+    const accounts = new AccountService(db, { privacyPolicyVersion: "2026-01" });
+    const [checkoutResult, profileResult] = await Promise.all([
+      orders.checkout({
+        cart: { cartId: cart.id },
+        contact: {
+          email: customer.email,
+          givenName: "Carrera",
+          familyName: "Consentimiento",
+          recipientName: "Carrera Consentimiento",
+          phoneE164: "3114445566",
+          buyerDocumentType: "13",
+          buyerDocumentNumber: "1020309988",
+          termsVersion: "2026-01",
+          privacyPolicyVersion: "2026-01",
+          acceptanceProofHash: hash(),
+          acceptanceIpHash: hash(),
+          acceptanceUserAgentHash: hash(),
+        },
+        fulfillment: {
+          method: "HOME_DELIVERY",
+          departmentCode: "11",
+          municipalityCode: "11001",
+          addressLine1: "Calle 85 # 12-34",
+        },
+        idempotency: idempotency(),
+        receiptAccessTokenHash: hash(),
+        expectedReviewFingerprint: preview.homeDelivery.reviewFingerprint,
+      }),
+      accounts.updateProfile(
+        customer.id,
+        {
+          givenName: "Carrera",
+          familyName: "Actualizada",
+          phoneE164: "+573114445566",
+          marketingEmail: false,
+          advertising: false,
+        },
+        customer.updatedAt,
+        { ipHash: hash(), userAgentHash: hash() },
+      ),
+    ]);
+    assert.ok(checkoutResult.orderId);
+    assert.equal(profileResult.familyName, "Actualizada");
+
+    const crm = new CrmService(db);
+    const taxId = `900${Math.floor(Math.random() * 800000 + 100000)}-${Math.floor(Math.random() * 9)}`;
+    const org = await crm.createOrganization({ legalName: "Carrera Org B2B SAS", taxId }, audit);
+    const [captured, updatedOrg] = await Promise.all([
+      b2b.captureOpportunity({
+        legalName: "Carrera Org B2B SAS",
+        commercialName: "Carrera B2B",
+        taxId,
+        givenName: "Elena",
+        familyName: "Soto",
+        email: `b2b-race-${randomUUID()}@example.test`,
+        phoneE164: "+573125556677",
+        requirements: "Compra concurrente B2B sobre organización existente.",
+        privacyPolicyVersion: "2026-01",
+        acceptanceProofHash: hash(),
+        acceptanceIpHash: hash(),
+        acceptanceUserAgentHash: hash(),
+        idempotency: idempotency(),
+      }),
+      crm.updateOrganization(
+        {
+          organizationId: org.id,
+          expectedVersion: org.version,
+          legalName: "Carrera Org B2B Actualizada SAS",
+        },
+        audit,
+      ),
+    ]);
+    assert.ok(captured.opportunityId);
+    assert.equal(updatedOrg.legalName, "Carrera Org B2B Actualizada SAS");
+  });
 });

@@ -23,6 +23,8 @@ export interface CustomerAnonymizationLockScope {
   readonly cartIds: readonly string[];
   readonly couponIds: readonly string[];
   readonly orderIds: readonly string[];
+  readonly segmentIds: readonly string[];
+  readonly referralCounterpartyIds: readonly string[];
   readonly ticketIds: readonly string[];
   readonly reviewIds: readonly string[];
 }
@@ -37,15 +39,42 @@ export function sameSortedIds(left: readonly string[], right: readonly string[])
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+async function peekEnteredSegmentIds(
+  tx: Prisma.TransactionClient,
+  customerIds: readonly string[],
+): Promise<string[]> {
+  if (customerIds.length === 0) return [];
+  const rows = await tx.$queryRaw<Array<{ segmentId: string }>>`
+    WITH latest AS (
+      SELECT DISTINCT ON (membership."segmentId", membership."customerId")
+        membership."segmentId",
+        membership."status"
+      FROM "CustomerSegmentMembership" membership
+      WHERE membership."customerId" = ANY(${[...customerIds]}::uuid[])
+      ORDER BY membership."segmentId", membership."customerId", membership."sequence" DESC
+    )
+    SELECT DISTINCT "segmentId" FROM latest WHERE "status" = 'ENTERED' ORDER BY "segmentId"
+  `;
+  return rows.map((row) => row.segmentId);
+}
+
 export async function peekCustomerAnonymizationScope(
   tx: Prisma.TransactionClient,
   customerIds: readonly string[],
 ): Promise<CustomerAnonymizationLockScope> {
   const uniqueCustomerIds = [...new Set(customerIds)].sort(compareStrings);
   if (uniqueCustomerIds.length === 0) {
-    return { cartIds: [], couponIds: [], orderIds: [], ticketIds: [], reviewIds: [] };
+    return {
+      cartIds: [],
+      couponIds: [],
+      orderIds: [],
+      segmentIds: [],
+      referralCounterpartyIds: [],
+      ticketIds: [],
+      reviewIds: [],
+    };
   }
-  const [carts, orders, tickets, reviews] = await Promise.all([
+  const [carts, orders, segmentIds, attributedReferrals, tickets, reviews] = await Promise.all([
     tx.$queryRaw<Array<{ id: string; couponId: string | null }>>`
       SELECT "id", "couponId" FROM "Cart"
       WHERE "customerId" = ANY(${uniqueCustomerIds}::uuid[]) AND "status" = 'ACTIVE'
@@ -56,6 +85,17 @@ export async function peekCustomerAnonymizationScope(
       WHERE "customerId" = ANY(${uniqueCustomerIds}::uuid[]) AND "anonymizedAt" IS NULL
       ORDER BY "id"
     `,
+    peekEnteredSegmentIds(tx, uniqueCustomerIds),
+    tx.referral.findMany({
+      where: {
+        status: "ATTRIBUTED",
+        OR: [
+          { referrerCustomerId: { in: uniqueCustomerIds } },
+          { referredCustomerId: { in: uniqueCustomerIds } },
+        ],
+      },
+      select: { referrerCustomerId: true, referredCustomerId: true },
+    }),
     tx.supportTicket.findMany({
       where: {
         OR: [
@@ -92,6 +132,14 @@ export async function peekCustomerAnonymizationScope(
       ...reservedUsages.map((usage) => usage.couponId),
     ]),
   ].sort(compareStrings);
+  const customerIdSet = new Set(uniqueCustomerIds);
+  const referralCounterpartyIds = [
+    ...new Set(
+      attributedReferrals
+        .flatMap((referral) => [referral.referrerCustomerId, referral.referredCustomerId])
+        .filter((id) => !customerIdSet.has(id)),
+    ),
+  ].sort(compareStrings);
   const anonymizedEmails = new Set(
     uniqueCustomerIds.map((id) => `anon-${id.replaceAll("-", "")}@anonymized.invalid`),
   );
@@ -104,6 +152,8 @@ export async function peekCustomerAnonymizationScope(
     cartIds,
     couponIds,
     orderIds: orders.map((order) => order.id),
+    segmentIds,
+    referralCounterpartyIds,
     ticketIds,
     reviewIds,
   };
@@ -119,7 +169,15 @@ export async function acquireCustomerContactLockHierarchy(
 ): Promise<{ readonly customers: Customer[]; readonly contacts: Contact[] }> {
   const uniqueCustomerIds = [...new Set(input.customerIds)].sort(compareStrings);
   const uniqueContactIds = [...new Set(input.contactIds)].sort(compareStrings);
-  const { cartIds, couponIds, orderIds, ticketIds, reviewIds } = input.scope;
+  const {
+    cartIds,
+    couponIds,
+    orderIds,
+    segmentIds,
+    referralCounterpartyIds,
+    ticketIds,
+    reviewIds,
+  } = input.scope;
 
   // Level 1: coupon-redemption:<couponId> (sorted) -> Cart FOR UPDATE (sorted by id)
   if (couponIds.length > 0) {
@@ -151,18 +209,26 @@ export async function acquireCustomerContactLockHierarchy(
     `;
   }
 
+  // Level 2.5: customer-segment:<segmentId> (sorted) before growth-customer (strict acyclic order)
+  if (segmentIds.length > 0) {
+    await acquireOperationLocks(
+      tx,
+      segmentIds.map((id) => `customer-segment:${id}`),
+    );
+  }
+
   // Level 3: ALL customer-level advisory locks in ONE sorted call -> Customer FOR UPDATE (sorted by id)
   let customers: Customer[] = [];
   if (uniqueCustomerIds.length > 0) {
-    await acquireOperationLocks(
-      tx,
-      uniqueCustomerIds.flatMap((id) => [
+    await acquireOperationLocks(tx, [
+      ...uniqueCustomerIds.flatMap((id) => [
         `crm-customer:${id}`,
         `customer-account:${id}`,
         `growth-customer:${id}`,
         `store-credit:${id}`,
       ]),
-    );
+      ...referralCounterpartyIds.map((id) => `growth-customer:${id}`),
+    ]);
     customers = await tx.$queryRaw<Customer[]>`
       SELECT * FROM "Customer"
       WHERE "id" = ANY(${uniqueCustomerIds}::uuid[])
@@ -414,7 +480,22 @@ export class AccountService {
     }
     const audit = this.audit(auditInput);
     return inInventoryTransaction(this.db, async (tx) => {
+      const peekSegments = !values.marketingEmail
+        ? await peekEnteredSegmentIds(tx, [customerId])
+        : [];
+      if (peekSegments.length > 0) {
+        await acquireOperationLocks(
+          tx,
+          peekSegments.map((id) => `customer-segment:${id}`),
+        );
+      }
       const customer = await this.lockActiveCustomer(tx, customerId);
+      if (!values.marketingEmail) {
+        const verifiedSegments = await peekEnteredSegmentIds(tx, [customerId]);
+        if (hasNewIds(peekSegments, verifiedSegments)) {
+          throw retryableLockDivergenceError("Customer segment membership changed concurrently.");
+        }
+      }
       const [latestConsent, latestAdvertisingConsent] = await Promise.all([
         tx.consent.findFirst({
           where: {
@@ -504,7 +585,7 @@ export class AccountService {
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
-      if (!values.marketingEmail) {
+      if (currentlyGranted && !values.marketingEmail) {
         await tx.emailEvent.updateMany({
           where: {
             customerId,
@@ -515,13 +596,13 @@ export class AccountService {
         });
         await tx.$executeRaw`
           UPDATE "AbandonedCart" SET
-            "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
+            "lastReminderActivityAt" = "lastActivityAt",
             "lastReminderOutcome" = 'NO_CONSENT'
           WHERE "customerId" = ${customerId}::uuid AND "status" = 'DETECTED'
         `;
         await revokeCustomerLifecycleConsentInTransaction(tx, customerId, now);
       }
-      if (!values.advertising) {
+      if (currentlyAdvertisingGranted && !values.advertising) {
         await cancelPendingMetaCapiForCustomerInTransaction(tx, customerId, now);
       }
       await tx.$executeRaw`
@@ -768,6 +849,8 @@ export class AccountService {
         hasNewIds(peekScope.cartIds, verifiedScope.cartIds) ||
         hasNewIds(peekScope.couponIds, verifiedScope.couponIds) ||
         hasNewIds(peekScope.orderIds, verifiedScope.orderIds) ||
+        hasNewIds(peekScope.segmentIds, verifiedScope.segmentIds) ||
+        hasNewIds(peekScope.referralCounterpartyIds, verifiedScope.referralCounterpartyIds) ||
         hasNewIds(peekScope.ticketIds, verifiedScope.ticketIds) ||
         hasNewIds(peekScope.reviewIds, verifiedScope.reviewIds) ||
         (!options.skipCrmCascade && !sameSortedIds(peekContactIds, verifiedContactIds))

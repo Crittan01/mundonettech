@@ -110,6 +110,10 @@ const rpcProbes = [
     name: "validate_imei",
     sql: "SELECT public.validate_imei('353915105440112')",
   },
+  {
+    name: "validate_copilot_output_zero_pii",
+    sql: "SELECT public.validate_copilot_output_zero_pii(NULL)",
+  },
 ];
 
 async function verifySchemaCoverage(client) {
@@ -246,13 +250,15 @@ async function ensureMatrixFixtures(client) {
                   ? `AND EXISTS (SELECT 1 FROM public."Customer" customer WHERE customer."id" = t."customerId" AND customer."loyaltyPoints" = t."balanceAfter")`
                   : table === "LifecycleStep"
                     ? `AND EXISTS (SELECT 1 FROM public."LifecycleJourney" journey WHERE journey."id" = t."journeyId" AND journey."status" = 'DRAFT')`
-                    : ["BackupRun", "DisasterRecoveryDrill"].includes(table)
-                      ? `AND t."status" = 'RUNNING'`
-                      : table === "RecoveryBucketCheck"
-                        ? `AND EXISTS (SELECT 1 FROM public."BackupRun" parent WHERE parent."id" = t."backupRunId" AND parent."status" = 'RUNNING')`
-                        : ["CustomerSegment", "LifecycleJourney"].includes(table)
-                          ? `AND t."status" = 'DRAFT'`
-                          : "";
+                    : table === "PriceListItem"
+                      ? `AND EXISTS (SELECT 1 FROM public."PriceList" list WHERE list."id" = t."priceListId" AND list."status" = 'DRAFT')`
+                      : ["BackupRun", "DisasterRecoveryDrill"].includes(table)
+                        ? `AND t."status" = 'RUNNING'`
+                        : table === "RecoveryBucketCheck"
+                          ? `AND EXISTS (SELECT 1 FROM public."BackupRun" parent WHERE parent."id" = t."backupRunId" AND parent."status" = 'RUNNING')`
+                          : ["CustomerSegment", "LifecycleJourney", "PriceList"].includes(table)
+                            ? `AND t."status" = 'DRAFT'`
+                            : "";
     const freshRow = await client.query(
       `SELECT t."id"
        FROM public."${table}" t

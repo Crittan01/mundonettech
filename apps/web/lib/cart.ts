@@ -164,6 +164,27 @@ export async function checkoutCartReference(): Promise<{
   return { accessTokenHash };
 }
 
+export async function transferGuestCartToCustomer(customerId: string): Promise<void> {
+  const token = await tokenFromCookie();
+  if (!token) return;
+  const accessTokenHash = hashCartToken(token);
+  const record = await getDatabase().cart.findUnique({
+    where: { accessTokenHash },
+    select: { customerId: true, status: true, kind: true },
+  });
+  if (
+    !record ||
+    record.status !== "ACTIVE" ||
+    record.kind === "B2B" ||
+    record.customerId !== null
+  ) {
+    return;
+  }
+  await cartService()
+    .assignCustomer({ accessTokenHash }, customerId)
+    .catch(() => undefined);
+}
+
 export async function clearCartAccessToken(): Promise<void> {
   const store = await cookies();
   store.set(cartTokenCookie, "", { ...sessionCookieOptions, maxAge: 0, expires: new Date(0) });

@@ -472,4 +472,61 @@ describe("F5.1 — abandoned-cart recovery with privacy enforcement", () => {
     );
     assert.equal(providerCalls.length, 0);
   });
+
+  it("marks cleared, modified, and expired carts as STALE without sending and syncs DETECTED abandoned carts on assignCustomer", async () => {
+    const cleared = await makeAbandoned();
+    await db.cartItem.deleteMany({ where: { cartId: cleared.cart.id } });
+    await db.cart.update({
+      where: { id: cleared.cart.id },
+      data: { itemCount: 0, subtotalCents: 0n, couponDiscountCents: 0n, totalCents: 0n },
+    });
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: cleared.abandoned.id } }))
+        .lastReminderOutcome,
+      "STALE",
+    );
+
+    const modified = await makeAbandoned();
+    await worker.runBatch(10);
+    await carts.addVariant({ cartId: modified.cart.id }, catalog.variantId, 1);
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: modified.abandoned.id } }))
+        .lastReminderOutcome,
+      "STALE",
+    );
+
+    const expired = await makeAbandoned();
+    await db.$executeRawUnsafe(`ALTER TABLE "Cart" DISABLE TRIGGER "Cart_set_updated_at"`);
+    try {
+      await db.$executeRaw`UPDATE "Cart" SET "expiresAt" = CURRENT_TIMESTAMP - INTERVAL '5 minutes' WHERE "id" = ${expired.cart.id}::uuid`;
+    } finally {
+      await db.$executeRawUnsafe(`ALTER TABLE "Cart" ENABLE TRIGGER "Cart_set_updated_at"`);
+    }
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: expired.abandoned.id } }))
+        .lastReminderOutcome,
+      "STALE",
+    );
+    assert.equal(providerCalls.length, 0);
+
+    const guest = await makeAbandoned({ guest: true });
+    const assignedCustomer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `assigned-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+        givenName: "Cliente",
+        familyName: "Asignado",
+      },
+    });
+    await carts.assignCustomer({ cartId: guest.cart.id }, assignedCustomer.id);
+    const syncedAbandoned = await db.abandonedCart.findUniqueOrThrow({
+      where: { id: guest.abandoned.id },
+    });
+    assert.equal(syncedAbandoned.customerId, assignedCustomer.id);
+    assert.equal(syncedAbandoned.contactEmail, assignedCustomer.email);
+  });
 });

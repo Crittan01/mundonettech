@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   hasAdminPermission,
@@ -132,7 +132,7 @@ export async function lifecycleLog(
       action,
       targetType,
       targetId,
-      requestId: audit.requestId ?? null,
+      requestId: audit.requestId ?? randomUUID(),
       ipHash: auditHash(audit.ipHash, "ipHash"),
       userAgentHash: audit.userAgentHash ? auditHash(audit.userAgentHash, "userAgentHash") : null,
       metadata: sanitizeAuditValue(metadata) as Prisma.InputJsonValue,

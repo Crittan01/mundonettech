@@ -164,12 +164,20 @@ export class LifecycleService {
     const values = this.input(input);
     return inInventoryTransaction(this.db, async (tx) => {
       await lifecycleActor(tx, audit, "crm:write");
-      await acquireOperationLocks(tx, [
-        `customer-segment:${values.segmentId}`,
-        `lifecycle-journey:${input.journeyId}`,
-      ]);
+      const peek = await tx.lifecycleJourney.findUnique({
+        where: { id: input.journeyId },
+        select: { segmentId: true },
+      });
+      if (!peek) throw new LifecycleError("NOT_FOUND", "Lifecycle journey not found.");
+      const segmentLocks = [...new Set([peek.segmentId, values.segmentId])]
+        .sort()
+        .map((id) => `customer-segment:${id}`);
+      await acquireOperationLocks(tx, [...segmentLocks, `lifecycle-journey:${input.journeyId}`]);
       const current = await tx.lifecycleJourney.findUnique({ where: { id: input.journeyId } });
       if (!current) throw new LifecycleError("NOT_FOUND", "Lifecycle journey not found.");
+      if (current.segmentId !== peek.segmentId) {
+        throw retryableLockDivergenceError("The journey segment changed concurrently.");
+      }
       if (current.status !== "DRAFT" || current.version !== input.expectedVersion) {
         throw new LifecycleError("CONFLICT", "The journey changed or is no longer a draft.");
       }
@@ -245,6 +253,20 @@ export class LifecycleService {
         const segment = await this.assertSegment(tx, current.segmentId, true);
         segmentVersion = segment.version;
       }
+      const archiveEnrollments =
+        input.action === "ARCHIVE"
+          ? await tx.lifecycleEnrollment.findMany({
+              where: { journeyId: current.id, status: "ACTIVE" },
+              select: { id: true, customerId: true },
+              orderBy: { id: "asc" },
+            })
+          : [];
+      if (archiveEnrollments.length > 0) {
+        await acquireOperationLocks(
+          tx,
+          archiveEnrollments.map((enrollment) => `growth-customer:${enrollment.customerId}`),
+        );
+      }
       const status = {
         ACTIVATE: "ACTIVE",
         PAUSE: "PAUSED",
@@ -263,21 +285,42 @@ export class LifecycleService {
       });
       let cancelled = 0;
       if (input.action === "RESUME") {
-        const deferredEmails = await tx.emailEvent.findMany({
+        const pausedOutbox = await tx.domainOutbox.findMany({
           where: {
-            lifecycleMessage: {
-              enrollment: { journeyId: current.id, status: "ACTIVE" },
-            },
-            status: { in: ["QUEUED", "SENDING"] },
-            lastError: null,
-            nextAttemptAt: { gt: now },
+            eventType: "email.requested.v1",
+            aggregateType: "EmailEvent",
+            processedAt: null,
+            failedAt: null,
+            claimedBy: null,
+            lastError: "PAUSED",
+            availableAt: { gt: now },
           },
-          select: { id: true },
+          select: { aggregateId: true },
         });
+        const pausedOutboxIds = pausedOutbox.map((item) => item.aggregateId);
+        const deferredEmails =
+          pausedOutboxIds.length > 0
+            ? await tx.emailEvent.findMany({
+                where: {
+                  id: { in: pausedOutboxIds },
+                  lifecycleMessage: {
+                    enrollment: { journeyId: current.id, status: "ACTIVE" },
+                  },
+                  status: { in: ["QUEUED", "SENDING"] },
+                  lastError: null,
+                  nextAttemptAt: { gt: now },
+                },
+                select: { id: true },
+              })
+            : [];
         if (deferredEmails.length > 0) {
           const emailIds = deferredEmails.map((item) => item.id);
           await tx.emailEvent.updateMany({
-            where: { id: { in: emailIds }, status: { in: ["QUEUED", "SENDING"] }, lastError: null },
+            where: {
+              id: { in: emailIds },
+              status: { in: ["QUEUED", "SENDING"] },
+              lastError: null,
+            },
             data: { nextAttemptAt: now },
           });
           await tx.domainOutbox.updateMany({
@@ -288,6 +331,7 @@ export class LifecycleService {
               processedAt: null,
               failedAt: null,
               claimedBy: null,
+              lastError: "PAUSED",
               availableAt: { gt: now },
             },
             data: { availableAt: now },
@@ -295,18 +339,7 @@ export class LifecycleService {
         }
       }
       if (input.action === "ARCHIVE") {
-        const enrollments = await tx.lifecycleEnrollment.findMany({
-          where: { journeyId: current.id, status: "ACTIVE" },
-          select: { id: true, customerId: true },
-          orderBy: { id: "asc" },
-        });
-        if (enrollments.length > 0) {
-          await acquireOperationLocks(
-            tx,
-            enrollments.map((enrollment) => `growth-customer:${enrollment.customerId}`),
-          );
-        }
-        for (const enrollment of enrollments) {
+        for (const enrollment of archiveEnrollments) {
           if (await cancelLifecycleEnrollment(tx, enrollment.id, now, "JOURNEY_ARCHIVED")) {
             cancelled += 1;
           }
@@ -692,8 +725,14 @@ export class LifecycleService {
           if (outcome === "DISPATCHED") result.dispatched += 1;
           if (outcome === "CANCELLED") result.cancelled += 1;
           if (outcome === "HELD") result.held += 1;
-        } catch {
-          continue;
+        } catch (error) {
+          if (
+            (error instanceof LifecycleError && error.code === "CONFLICT") ||
+            (error as { code?: unknown } | null)?.code === "40001"
+          ) {
+            continue;
+          }
+          throw error;
         }
       }
     }
@@ -703,7 +742,7 @@ export class LifecycleService {
   private async enrollDueJourneys(limit: number): Promise<number> {
     let enrolled = 0;
     let cursor: string | null = null;
-    for (;;) {
+    while (enrolled < limit) {
       const journeys: Array<{ id: string }> = await this.db.lifecycleJourney.findMany({
         where: { status: "ACTIVE", ...(cursor ? { id: { gt: cursor } } : {}) },
         select: { id: true },
@@ -711,16 +750,24 @@ export class LifecycleService {
         take: 20,
       });
       for (const journey of journeys) {
+        const remaining = limit - enrolled;
+        if (remaining <= 0) return enrolled;
         try {
-          enrolled += (await this.enrollForJourney(journey.id, limit)).enrolled;
+          enrolled += (await this.enrollForJourney(journey.id, remaining)).enrolled;
         } catch (error) {
-          if (error instanceof LifecycleError && error.code === "CONFLICT") continue;
+          if (
+            (error instanceof LifecycleError && error.code === "CONFLICT") ||
+            (error as { code?: unknown } | null)?.code === "40001"
+          ) {
+            continue;
+          }
           throw error;
         }
       }
       if (journeys.length < 20) return enrolled;
       cursor = journeys[journeys.length - 1]!.id;
     }
+    return enrolled;
   }
 
   async runScheduledWork(limit = 100) {
@@ -811,7 +858,16 @@ export class LifecycleService {
       where: {
         enrollmentId: message.enrollmentId,
         id: { not: message.id },
-        status: { in: ["SCHEDULED", "DISPATCHING", "QUEUED"] },
+        OR: [
+          { status: { in: ["SCHEDULED", "DISPATCHING"] } },
+          {
+            status: "QUEUED",
+            OR: [
+              { emailEvent: null },
+              { emailEvent: { status: { notIn: ["SENT", "DELIVERY_DELAYED", "DELIVERED"] } } },
+            ],
+          },
+        ],
       },
       data: { status: "CANCELLED", processedAt: now, lastError: null },
     });

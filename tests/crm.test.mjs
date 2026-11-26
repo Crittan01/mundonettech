@@ -1191,4 +1191,216 @@ describe("CRM 360 production behavior", () => {
       false,
     );
   });
+
+  it("erases PENDING merge candidates and CLOSED guest PQR tickets on self-service anonymization, avoids P2002 on retired identities and preserves verification invariants", async () => {
+    const email = `self-erase-${randomUUID()}@example.test`;
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email,
+        givenName: "Sofía",
+        familyName: "Vargas",
+        phoneE164: "+573168889900",
+        status: "ACTIVE",
+      },
+    });
+    const synced = await crm.syncCustomerContact(customer.id);
+    const duplicate = await createContact({ email });
+    const pendingCandidate = await candidateFor(synced, duplicate);
+
+    const closedOrderId = randomUUID();
+    await sql.query(
+      `INSERT INTO "DaneDepartment" ("code", "name") VALUES ('11', 'Bogotá') ON CONFLICT ("code") DO NOTHING`,
+    );
+    await sql.query(
+      `INSERT INTO "DaneMunicipality" ("code", "departmentCode", "name", "locationType")
+       VALUES ('11001', '11', 'Bogotá, D.C.', 'Municipio') ON CONFLICT ("code") DO NOTHING`,
+    );
+    await db.order.create({
+      data: {
+        id: closedOrderId,
+        orderNumber: `CRM-${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`,
+        customerId: customer.id,
+        orderStatus: "COMPLETED",
+        paymentStatus: "PAID",
+        fulfillmentStatus: "FULFILLED",
+        completedAt: new Date(),
+        fulfillmentMethod: "HOME_DELIVERY",
+        taxRegime: "NO_RESPONSABLE_IVA",
+        uvtValueCents: 5_237_400n,
+        uvtYear: 2026,
+        emailSnapshot: email,
+        recipientNameSnapshot: "Sofía Vargas",
+        phoneE164Snapshot: "+573168889900",
+        departmentCode: "11",
+        departmentNameSnapshot: "Bogotá",
+        municipalityCode: "11001",
+        municipalityNameSnapshot: "Bogotá, D.C.",
+        addressLine1Snapshot: "Calle 100 # 15-20",
+        deliveryPromiseAt: future(48),
+        reservationKey: `crm-pqr-${randomUUID()}`,
+        reservationExpiresAt: future(2),
+        termsVersion: "2026-01",
+        privacyPolicyVersion: "2026-01",
+        acceptanceProofHash: bytes(),
+        acceptedAt: new Date(),
+        confirmedAt: new Date(),
+        buyerDocumentTypeSnapshot: "13",
+        buyerDocumentNumberSnapshot: "1020304055",
+        subtotalCents: 100_000n,
+        discountCents: 0n,
+        taxCents: 0n,
+        shippingCents: 0n,
+        totalCents: 100_000n,
+      },
+    });
+    const challenge = await db.guestOrderChallenge.create({
+      data: {
+        orderId: closedOrderId,
+        idempotencyKey: `crm-pqr-ch-${randomUUID()}`,
+        codeHash: bytes(),
+        requestIpHash: bytes(),
+        status: "CONSUMED",
+        providerMessageId: `msg-${randomUUID()}`,
+        lastSentAt: new Date(),
+        expiresAt: future(1),
+        consumedAt: new Date(),
+      },
+    });
+    const guestSession = await db.guestOrderSession.create({
+      data: {
+        orderId: closedOrderId,
+        challengeId: challenge.id,
+        tokenHash: bytes(),
+        expiresAt: future(24),
+      },
+    });
+    const closedGuestTicket = await db.supportTicket.create({
+      data: {
+        ticketNumber: `PQR-2026-${randomUUID()}`,
+        orderId: closedOrderId,
+        requesterGuestSessionId: guestSession.id,
+        idempotencyKey: `crm-pqr-tk-${randomUUID()}`,
+        requestHash: bytes(),
+        kind: "QUERY",
+        status: "CLOSED",
+        subject: "Consulta cerrada",
+        contactEmailSnapshot: email,
+        slaDueAt: future(240),
+        resolvedAt: new Date(),
+        closedAt: new Date(),
+      },
+    });
+
+    const accounts = new AccountService(db, { privacyPolicyVersion: "2026-01" });
+    await accounts.anonymize(customer.id, "ELIMINAR MI CUENTA", {
+      ipHash: bytes(),
+      userAgentHash: bytes(),
+    });
+    const rejectedCandidate = await db.identityMergeCandidate.findUniqueOrThrow({
+      where: { id: pendingCandidate.id },
+    });
+    assert.equal(rejectedCandidate.status, "REJECTED");
+    assert.equal(rejectedCandidate.rejectedByAdminUserId, null);
+    assert.equal(rejectedCandidate.resolutionNote, "[contenido suprimido por retención]");
+    const redactedTicket = await db.supportTicket.findUniqueOrThrow({
+      where: { id: closedGuestTicket.id },
+    });
+    assert.match(redactedTicket.contactEmailSnapshot, /^anon-[0-9a-f]{32}@anonymized\.invalid$/);
+
+    const sharedEmail = `retired-merge-${randomUUID()}@example.test`;
+    const recycledPhone = "+573170001122";
+    const targetContact = await createContact({ email: sharedEmail, phoneE164: recycledPhone });
+    const verifiedTarget = await crm.verifyContact(
+      {
+        contactId: targetContact.id,
+        expectedVersion: targetContact.version,
+        level: "DUAL_CHANNEL_VERIFIED",
+      },
+      audit,
+    );
+    const updatedTarget = await crm.updateContact(
+      {
+        contactId: verifiedTarget.id,
+        expectedVersion: verifiedTarget.version,
+        givenName: "Laura",
+        familyName: "Rodríguez",
+        email: sharedEmail,
+        phoneE164: null,
+      },
+      audit,
+    );
+    assert.equal(updatedTarget.verificationLevel, "SINGLE_CHANNEL_VERIFIED");
+    const sourceContact = await createContact({ email: sharedEmail, phoneE164: recycledPhone });
+    const cand = await candidateFor(sourceContact, updatedTarget);
+    const sRow = await db.contact.findUniqueOrThrow({ where: { id: cand.sourceContactId } });
+    const tRow = await db.contact.findUniqueOrThrow({ where: { id: cand.targetContactId } });
+    await merges.merge(
+      {
+        candidateId: cand.id,
+        expectedVersion: cand.version,
+        expectedSourceVersion: sRow.version,
+        expectedTargetVersion: tRow.version,
+        note: "Fusión con identidad telefónica retirada previamente en el destino.",
+      },
+      audit,
+    );
+    const afterMerge = await db.contact.findUniqueOrThrow({ where: { id: tRow.id } });
+    assert.equal(afterMerge.phoneE164, recycledPhone);
+    const clearedEmail = await crm.updateContact(
+      {
+        contactId: afterMerge.id,
+        expectedVersion: afterMerge.version,
+        givenName: afterMerge.givenName,
+        familyName: afterMerge.familyName,
+        email: null,
+        phoneE164: recycledPhone,
+      },
+      audit,
+    );
+    assert.equal(clearedEmail.email, null);
+    assert.equal(clearedEmail.verificationLevel, "SINGLE_CHANNEL_VERIFIED");
+    const unverifiedPhone = await crm.updateContact(
+      {
+        contactId: clearedEmail.id,
+        expectedVersion: clearedEmail.version,
+        givenName: clearedEmail.givenName,
+        familyName: clearedEmail.familyName,
+        email: null,
+        phoneE164: "+573179990000",
+      },
+      audit,
+    );
+    assert.equal(unverifiedPhone.verificationLevel, "UNVERIFIED");
+
+    const orgA = await crm.createOrganization({ legalName: "Org Con Oportunidad A" }, audit);
+    const orgB = await crm.createOrganization({ legalName: "Org Con Oportunidad B" }, audit);
+    const oppContact = await createContact({ organizationId: orgA.id });
+    await db.opportunity.create({
+      data: {
+        organizationId: orgA.id,
+        contactId: oppContact.id,
+        source: "crm-test",
+        requirements: "Compra corporativa de verificación.",
+        privacyPolicyVersion: "2026-01",
+        acceptanceProofHash: bytes(),
+        acceptedAt: new Date(),
+      },
+    });
+    await assert.rejects(
+      crm.updateContact(
+        {
+          contactId: oppContact.id,
+          expectedVersion: oppContact.version,
+          givenName: oppContact.givenName,
+          familyName: oppContact.familyName,
+          email: oppContact.email,
+          phoneE164: oppContact.phoneE164,
+          organizationId: orgB.id,
+        },
+        audit,
+      ),
+      (error) => error instanceof CrmError && error.code === "CONFLICT",
+    );
+  });
 });

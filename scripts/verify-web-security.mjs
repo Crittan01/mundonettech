@@ -581,7 +581,12 @@ export async function verifyWebSecurity(
     verifyNoStoreNoIndexNosniff(response, sitemapPath);
   }
 
-  const invalidReferral = await request(origin, "/referido/codigo-invalido");
+  const invalidReferral = await request(
+    origin,
+    "/referido/codigo-invalido",
+    {},
+    { expectedReferrerPolicy: "no-referrer" },
+  );
   requireCondition(invalidReferral.status === 404, "/referido/codigo-invalido: must return 404.");
   requireCondition(
     !invalidReferral.headers.has("set-cookie"),
@@ -623,9 +628,10 @@ export async function verifyWebSecurity(
     "/api/health/ready",
   ];
   for (const path of getOnlyPaths) {
-    const headerOptions = path.startsWith("/api/recibos/")
-      ? { expectedReferrerPolicy: "no-referrer" }
-      : {};
+    const headerOptions =
+      path.startsWith("/api/recibos/") || path.startsWith("/referido/")
+        ? { expectedReferrerPolicy: "no-referrer" }
+        : {};
     for (const method of ["HEAD", "POST", "OPTIONS"]) {
       await requestMethodNotAllowed(origin, path, method, "GET", headerOptions);
     }

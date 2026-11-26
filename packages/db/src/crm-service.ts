@@ -1,6 +1,9 @@
 import {
+  adminRoles,
   contactPairKey,
   deriveContactVerificationLevel,
+  hasAdminPermission,
+  isAdminRole,
   normalizeContactIdentity,
   normalizeContactPhone,
   normalizeEmail,
@@ -126,18 +129,34 @@ export class CrmService {
     now: Date,
   ) {
     if (exceptValue === normalizedValue) return;
-    await tx.contactIdentity.updateMany({
-      where: { contactId, kind, normalizedValue, retiredAt: null },
-      data: { retiredAt: now },
-    });
+    await tx.$executeRaw`
+      WITH RECURSIVE lineage AS (
+        SELECT "id" FROM "Contact" WHERE "id" = ${contactId}::uuid
+        UNION
+        SELECT contact."id" FROM "Contact" contact
+        JOIN lineage parent ON contact."mergedIntoContactId" = parent."id"
+      )
+      UPDATE "ContactIdentity"
+      SET "retiredAt" = ${now}
+      WHERE "contactId" IN (SELECT "id" FROM lineage)
+        AND "kind" = ${kind}::"ContactIdentityKind"
+        AND "normalizedValue" = ${normalizedValue}
+        AND "retiredAt" IS NULL
+    `;
   }
 
   private async verificationLevel(
     tx: Prisma.TransactionClient,
     contactId: string,
+    activeEmail: string | null,
+    activePhone: string | null,
   ): Promise<ContactVerificationLevel> {
     const identities = await tx.$queryRaw<
-      Array<{ kind: ContactIdentityKindValue; verifiedAt: Date | null }>
+      Array<{
+        kind: ContactIdentityKindValue;
+        normalizedValue: string;
+        verifiedAt: Date | null;
+      }>
     >`
       WITH RECURSIVE lineage AS (
         SELECT "id" FROM "Contact" WHERE "id" = ${contactId}::uuid
@@ -145,14 +164,28 @@ export class CrmService {
         SELECT contact."id" FROM "Contact" contact
         JOIN lineage parent ON contact."mergedIntoContactId" = parent."id"
       )
-      SELECT identity."kind", identity."verifiedAt"
+      SELECT identity."kind", identity."normalizedValue", identity."verifiedAt"
       FROM "ContactIdentity" identity
       JOIN lineage ON lineage."id" = identity."contactId"
       WHERE identity."retiredAt" IS NULL
     `;
     return deriveContactVerificationLevel({
-      emailVerified: identities.some((item) => item.kind === "EMAIL" && item.verifiedAt !== null),
-      phoneVerified: identities.some((item) => item.kind === "PHONE" && item.verifiedAt !== null),
+      emailVerified:
+        activeEmail !== null &&
+        identities.some(
+          (item) =>
+            item.kind === "EMAIL" &&
+            item.normalizedValue === activeEmail &&
+            item.verifiedAt !== null,
+        ),
+      phoneVerified:
+        activePhone !== null &&
+        identities.some(
+          (item) =>
+            item.kind === "PHONE" &&
+            item.normalizedValue === activePhone &&
+            item.verifiedAt !== null,
+        ),
       identityVerified: identities.some(
         (item) => item.kind === "DOCUMENT" && item.verifiedAt !== null,
       ),
@@ -307,6 +340,9 @@ export class CrmService {
     }
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:write");
+      if (values.organizationId) {
+        await acquireOperationLocks(tx, [`crm-organization:${values.organizationId}`]);
+      }
       await this.assertOrganization(tx, values.organizationId);
       const [now, retentionReviewAt] = await Promise.all([
         crmNow(tx),
@@ -467,7 +503,12 @@ export class CrmService {
         now,
       );
     }
-    const verificationLevel = await this.verificationLevel(tx, activeTarget.id);
+    const verificationLevel = await this.verificationLevel(
+      tx,
+      activeTarget.id,
+      normalizedEmail,
+      effectivePhone,
+    );
     return tx.contact.update({
       where: { id: activeTarget.id },
       data: {
@@ -501,6 +542,23 @@ export class CrmService {
     if (values.customerId) throw new CrmError("VALIDATION", "Customer links are system managed.");
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:write");
+      const peek = await tx.contact.findUnique({
+        where: { id: input.contactId },
+        select: { organizationId: true },
+      });
+      const orgLocks = [
+        ...new Set(
+          [peek?.organizationId ?? null, values.organizationId].filter(
+            (id): id is string => id !== null,
+          ),
+        ),
+      ].sort();
+      if (orgLocks.length > 0) {
+        await acquireOperationLocks(
+          tx,
+          orgLocks.map((id) => `crm-organization:${id}`),
+        );
+      }
       await acquireOperationLocks(tx, [`crm-contact:${input.contactId}`]);
       const rows = await tx.$queryRaw<
         Contact[]
@@ -509,8 +567,23 @@ export class CrmService {
       if (!current || current.status !== "ACTIVE" || current.deletedAt) {
         throw new CrmError("NOT_FOUND", "Active contact not found.");
       }
+      if ((peek?.organizationId ?? null) !== current.organizationId) {
+        throw retryableLockDivergenceError("The contact organization changed concurrently.");
+      }
       if (current.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The contact changed in another session.");
+      }
+      if (values.organizationId !== current.organizationId && current.organizationId !== null) {
+        const linkedOpportunity = await tx.opportunity.findFirst({
+          where: { contactId: current.id, organizationId: current.organizationId },
+          select: { id: true },
+        });
+        if (linkedOpportunity) {
+          throw new CrmError(
+            "CONFLICT",
+            "Cannot change organization while B2B opportunities are linked to this contact.",
+          );
+        }
       }
       await this.assertOrganization(tx, values.organizationId);
       const now = await crmNow(tx);
@@ -528,7 +601,12 @@ export class CrmService {
           values.phoneE164,
           now,
         );
-      const verificationLevel = await this.verificationLevel(tx, current.id);
+      const verificationLevel = await this.verificationLevel(
+        tx,
+        current.id,
+        values.email,
+        values.phoneE164,
+      );
       const updated = await tx.contact.update({
         where: { id: current.id },
         data: {
@@ -579,6 +657,13 @@ export class CrmService {
       }
       const now = await crmNow(tx);
       if (
+        !["SINGLE_CHANNEL_VERIFIED", "DUAL_CHANNEL_VERIFIED", "IDENTITY_VERIFIED"].includes(
+          input.level,
+        )
+      ) {
+        throw new CrmError("VALIDATION", "Unsupported verification level.");
+      }
+      if (
         input.level === "SINGLE_CHANNEL_VERIFIED" &&
         input.channel !== "EMAIL" &&
         input.channel !== "PHONE"
@@ -601,9 +686,21 @@ export class CrmService {
       if (input.level === "IDENTITY_VERIFIED") {
         if (!input.document)
           throw new CrmError("VALIDATION", "A reviewed document identifier is required.");
-        await this.upsertIdentity(tx, contact.id, "DOCUMENT", input.document, now);
+        try {
+          await this.upsertIdentity(tx, contact.id, "DOCUMENT", input.document, now);
+        } catch (error) {
+          if (error instanceof TypeError || error instanceof RangeError) {
+            throw new CrmError("VALIDATION", error.message);
+          }
+          throw error;
+        }
       }
-      const verificationLevel = await this.verificationLevel(tx, contact.id);
+      const verificationLevel = await this.verificationLevel(
+        tx,
+        contact.id,
+        contact.email,
+        contact.phoneE164,
+      );
       const updated = await tx.contact.update({
         where: { id: contact.id },
         data: {
@@ -849,20 +946,14 @@ export class CrmService {
 
   private async assertAssignee(tx: Prisma.TransactionClient, adminUserId: string | null) {
     if (!adminUserId) return;
-    const admin = await tx.adminUser.findFirst({
-      where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
-      select: { role: true },
-    });
-    if (
-      !admin ||
-      ![
-        "SUPERADMIN",
-        "OPERATIONS_MANAGER",
-        "STORE_MANAGER",
-        "CUSTOMER_SUPPORT",
-        "FINANCE_ANALYST",
-      ].includes(admin.role)
-    ) {
+    const rows = await tx.$queryRaw<Array<{ role: string }>>`
+      SELECT "role"::text AS "role"
+      FROM "AdminUser"
+      WHERE "id" = ${adminUserId}::uuid AND "status" = 'ACTIVE' AND "deletedAt" IS NULL
+      FOR SHARE
+    `;
+    const admin = rows[0];
+    if (!admin || !isAdminRole(admin.role) || !hasAdminPermission(admin.role, "crm:read")) {
       throw new CrmError("VALIDATION", "The task assignee is not an active CRM operator.");
     }
   }
@@ -996,19 +1087,12 @@ export class CrmService {
   }
 
   async listTaskAssignees() {
+    const crmRoles = adminRoles.filter((role) => hasAdminPermission(role, "crm:read"));
     return this.db.adminUser.findMany({
       where: {
         status: "ACTIVE",
         deletedAt: null,
-        role: {
-          in: [
-            "SUPERADMIN",
-            "OPERATIONS_MANAGER",
-            "STORE_MANAGER",
-            "CUSTOMER_SUPPORT",
-            "FINANCE_ANALYST",
-          ],
-        },
+        role: { in: [...crmRoles] },
       },
       select: { id: true, displayName: true, role: true },
       orderBy: [{ displayName: "asc" }, { id: "asc" }],
@@ -1145,6 +1229,21 @@ export class CrmService {
             `
           : [];
       const activeContactsById = new Map(lockedContacts.map((contact) => [contact.id, contact]));
+      const activeIdentitiesByContact = new Map<string, Map<string, ContactIdentityKindValue>>();
+      if (lockedContacts.length > 0) {
+        const currentIdentities = await tx.contactIdentity.findMany({
+          where: {
+            contactId: { in: lockedContacts.map((contact) => contact.id) },
+            retiredAt: null,
+          },
+          select: { contactId: true, kind: true, normalizedValue: true },
+        });
+        for (const identity of currentIdentities) {
+          const map = activeIdentitiesByContact.get(identity.contactId) ?? new Map();
+          map.set(`${identity.kind}:${identity.normalizedValue}`, identity.kind);
+          activeIdentitiesByContact.set(identity.contactId, map);
+        }
+      }
       const resolved: Array<{ id: string; pairKey: string; created: boolean }> = [];
       for (const [pairKey, entry] of sortedPairs) {
         if (resolved.length >= limit) break;
@@ -1161,6 +1260,16 @@ export class CrmService {
         const leftContact = activeContactsById.get(entry.leftId);
         const rightContact = activeContactsById.get(entry.rightId);
         if (!leftContact || !rightContact) continue;
+        const leftIdentities = activeIdentitiesByContact.get(leftContact.id);
+        const rightIdentities = activeIdentitiesByContact.get(rightContact.id);
+        if (!leftIdentities || !rightIdentities) continue;
+        const verifiedReasons = new Set<string>();
+        for (const [identityKey, kind] of leftIdentities.entries()) {
+          if (rightIdentities.has(identityKey)) {
+            verifiedReasons.add(`${kind}_EXACT`);
+          }
+        }
+        if (verifiedReasons.size === 0) continue;
         const contacts = [leftContact, rightContact];
         contacts.sort(
           (left, right) =>
@@ -1176,7 +1285,7 @@ export class CrmService {
             sourceContactId: source.id,
             targetContactId: target.id,
             matchScore: 10000,
-            matchReasons: [...entry.reasons].sort(),
+            matchReasons: [...verifiedReasons].sort(),
           },
         });
         resolved.push({ id: candidate.id, pairKey, created: true });

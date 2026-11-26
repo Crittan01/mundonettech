@@ -293,7 +293,12 @@ export function CrmVerificationForm({
       <input type="hidden" name="expectedVersion" value={version} />
       <div className="space-y-2">
         <Label htmlFor="verification-level">Nivel a verificar</Label>
-        <Select id="verification-level" name="level" disabled={pending}>
+        <Select
+          id="verification-level"
+          name="level"
+          defaultValue={state.values?.level ?? "SINGLE_CHANNEL_VERIFIED"}
+          disabled={pending}
+        >
           <option value="SINGLE_CHANNEL_VERIFIED">Un canal</option>
           <option value="DUAL_CHANNEL_VERIFIED">Correo y teléfono</option>
           <option value="IDENTITY_VERIFIED">Identidad documental</option>
@@ -301,7 +306,12 @@ export function CrmVerificationForm({
       </div>
       <div className="space-y-2">
         <Label htmlFor="verification-channel">Canal, si es individual</Label>
-        <Select id="verification-channel" name="channel" disabled={pending}>
+        <Select
+          id="verification-channel"
+          name="channel"
+          defaultValue={state.values?.channel ?? "EMAIL"}
+          disabled={pending}
+        >
           <option value="EMAIL">Correo</option>
           <option value="PHONE">Teléfono</option>
         </Select>
@@ -423,7 +433,12 @@ export function CrmActivityForm({ contactId }: { contactId: string }) {
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-2">
           <Label htmlFor="activity-kind">Tipo</Label>
-          <Select id="activity-kind" name="kind" disabled={pending}>
+          <Select
+            id="activity-kind"
+            name="kind"
+            defaultValue={state.values?.kind ?? "NOTE"}
+            disabled={pending}
+          >
             <option value="NOTE">Nota</option>
             <option value="CALL">Llamada</option>
             <option value="EMAIL">Correo</option>
@@ -584,7 +599,12 @@ export function CrmSuppressionForm({ contactId, version }: { contactId: string; 
       <input type="hidden" name="expectedVersion" value={version} />
       <div className="space-y-2">
         <Label htmlFor="suppression-reason">Fundamento de supresión</Label>
-        <Select id="suppression-reason" name="reason" disabled={pending}>
+        <Select
+          id="suppression-reason"
+          name="reason"
+          defaultValue={state.values?.reason ?? "DATA_SUBJECT_REQUEST"}
+          disabled={pending}
+        >
           <option value="DATA_SUBJECT_REQUEST">Solicitud del titular</option>
           <option value="RETENTION_EXPIRED">Retención vencida</option>
           <option value="OPERATIONAL_REVIEW">Revisión operativa</option>

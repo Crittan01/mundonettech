@@ -2694,4 +2694,135 @@ describe("A7 — CRM, B2B, loyalty and lifecycle structural integrity", () => {
       );
     });
   });
+
+  it("enforces hardened A7 proposal, contact org reactivation, segment archive and lifecycle HTML triggers", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA7Opportunity(client);
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "OpportunityProposal" (
+           "id", "opportunityId", "version", "status", "contentHash", "subtotalCents", "discountCents", "taxCents",
+           "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
+           "reservationMinutes", "expiresAt", "createdByAdminUserId", "publicTokenHash", "issuedAt"
+         ) VALUES ($1, $2, 1, 'SENT', $3, 100000, 0, 0, 0, 100000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
+           CURRENT_TIMESTAMP + INTERVAL '1 day', $4, $5, CURRENT_TIMESTAMP)`,
+        [
+          randomUUID(),
+          fixture.opportunityId,
+          randomBytes(32),
+          fixture.adminUserId,
+          randomBytes(32),
+        ],
+        "23514",
+      );
+
+      const zeroItemProposalId = randomUUID();
+      await client.query(
+        `INSERT INTO "OpportunityProposal" (
+           "id", "opportunityId", "version", "contentHash", "subtotalCents", "discountCents", "taxCents",
+           "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
+           "reservationMinutes", "expiresAt", "createdByAdminUserId"
+         ) VALUES ($1, $2, 1, $3, 0, 0, 0, 0, 0, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
+           CURRENT_TIMESTAMP + INTERVAL '1 day', $4)`,
+        [zeroItemProposalId, fixture.opportunityId, randomBytes(32), fixture.adminUserId],
+      );
+      const b2bCartId = randomUUID();
+      await client.query(
+        `INSERT INTO "Cart" ("id", "accessTokenHash", "kind", "expiresAt") VALUES ($1, $2, 'B2B', CURRENT_TIMESTAMP + INTERVAL '1 day')`,
+        [b2bCartId, randomBytes(32)],
+      );
+      const zeroItemSp = `a7_zero_${randomUUID().replaceAll("-", "")}`;
+      await client.query(`SAVEPOINT ${zeroItemSp}`);
+      let zeroItemError;
+      try {
+        await client.query(
+          `UPDATE "OpportunityProposal" SET "status" = 'SENT', "publicTokenHash" = $2, "cartId" = $3, "issuedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+          [zeroItemProposalId, randomBytes(32), b2bCartId],
+        );
+        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+      } catch (caught) {
+        zeroItemError = caught;
+      } finally {
+        await client.query(`ROLLBACK TO SAVEPOINT ${zeroItemSp}`);
+        await client.query(`RELEASE SAVEPOINT ${zeroItemSp}`);
+      }
+      assert.ok(zeroItemError, "Expected 0-item SENT proposal to fail balance check");
+      assert.equal(zeroItemError.code, "23514", zeroItemError.message);
+
+      const archivedOrgId = randomUUID();
+      const targetOrgId = randomUUID();
+      await client.query(
+        `INSERT INTO "Organization" ("id", "legalName") VALUES ($1, 'Archived Reactivate Org'), ($2, 'Target Active Org')`,
+        [archivedOrgId, targetOrgId],
+      );
+      const mergedContactId = randomUUID();
+      const targetContactId = randomUUID();
+      await client.query(
+        `INSERT INTO "Contact" ("id", "organizationId", "source", "retentionReviewAt")
+         VALUES ($1, $2, 'a7-test', CURRENT_TIMESTAMP + INTERVAL '30 days'),
+                ($3, $4, 'a7-test', CURRENT_TIMESTAMP + INTERVAL '30 days')`,
+        [mergedContactId, archivedOrgId, targetContactId, targetOrgId],
+      );
+      await client.query(
+        `UPDATE "Contact" SET "status" = 'MERGED', "mergedIntoContactId" = $2, "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [mergedContactId, targetContactId],
+      );
+      await client.query(
+        `UPDATE "Organization" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [archivedOrgId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "Contact" SET "status" = 'ACTIVE', "mergedIntoContactId" = NULL, "deletedAt" = NULL WHERE "id" = $1`,
+        [mergedContactId],
+        "23514",
+      );
+
+      const segmentId = randomUUID();
+      await client.query(
+        `INSERT INTO "CustomerSegment" ("id", "name", "definition", "definitionHash", "status", "createdByAdminUserId", "updatedByAdminUserId")
+         VALUES ($1, 'Seg A7 Guard', '{"rfmClass":"PROSPECT"}'::jsonb, $2, 'DRAFT', $3, $3)`,
+        [segmentId, randomBytes(32), fixture.adminUserId],
+      );
+      await client.query(
+        `UPDATE "CustomerSegment" SET "status" = 'ACTIVE', "activatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [segmentId],
+      );
+      const journeyId = randomUUID();
+      await client.query(
+        `INSERT INTO "LifecycleJourney" ("id", "name", "segmentId", "status", "createdByAdminUserId", "updatedByAdminUserId")
+         VALUES ($1, 'Journey A7 Guard', $2, 'DRAFT', $3, $3)`,
+        [journeyId, segmentId, fixture.adminUserId],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "LifecycleStep" ("journeyId", "position", "offsetMinutes", "subject", "htmlBody", "textBody", "variables")
+         VALUES ($1, 0, 0, 'Test', '<a href="&#106;avascript:alert(1)">x</a>{{unsubscribeUrl}}', '{{unsubscribeUrl}}', '["unsubscribeUrl"]'::jsonb)`,
+        [journeyId],
+        "23514",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "LifecycleStep" ("journeyId", "position", "offsetMinutes", "subject", "htmlBody", "textBody", "variables")
+         VALUES ($1, 0, 0, 'Test', '<a href="data:image/svg+xml;base64,PHN2Zz4=">x</a>{{unsubscribeUrl}}', '{{unsubscribeUrl}}', '["unsubscribeUrl"]'::jsonb)`,
+        [journeyId],
+        "23514",
+      );
+      await client.query(
+        `INSERT INTO "LifecycleStep" ("journeyId", "position", "offsetMinutes", "subject", "htmlBody", "textBody", "variables")
+         VALUES ($1, 0, 0, 'Test', '<p>Ok {{unsubscribeUrl}}</p>', '{{unsubscribeUrl}}', '["unsubscribeUrl"]'::jsonb)`,
+        [journeyId],
+      );
+      await client.query(
+        `UPDATE "LifecycleJourney" SET "status" = 'ACTIVE', "segmentVersion" = 0, "activatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [journeyId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "CustomerSegment" SET "status" = 'ARCHIVED', "archivedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [segmentId],
+        "55000",
+      );
+    });
+  });
 });

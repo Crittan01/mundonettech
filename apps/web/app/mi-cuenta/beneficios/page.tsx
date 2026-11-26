@@ -10,6 +10,7 @@ import { AttributeReferralForm, CreateReferralCodeForm } from "@/components/acco
 import { growthService } from "@/lib/growth";
 import { getPublicSiteUrl } from "@/lib/integrations";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
+import { readReferralCode } from "@/lib/security/referral";
 
 export const metadata = { title: "Puntos y referidos", robots: { index: false, follow: false } };
 
@@ -29,7 +30,8 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
   const raw = await searchParams;
   const parsedCode = codeSchema.safeParse(single(raw.codigo).trim());
   const overview = await growthService().getAccountOverview(profile.id);
-  const initialCode = parsedCode.success ? parsedCode.data.toUpperCase() : "";
+  const cookieCode = parsedCode.success ? null : await readReferralCode();
+  const initialCode = parsedCode.success ? parsedCode.data.toUpperCase() : (cookieCode ?? "");
   const shareUrl = overview.referralCode
     ? `${getPublicSiteUrl()}/referido/${encodeURIComponent(overview.referralCode)}`
     : null;

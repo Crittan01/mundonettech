@@ -61,7 +61,10 @@ function future(hours = 72) {
   return new Date(Date.now() + hours * 3_600_000);
 }
 
-async function makeCustomer(status = "ACTIVE") {
+let customerSeq = 1_000_000;
+
+async function makeCustomer(status = "ACTIVE", overrides = {}) {
+  const seq = ++customerSeq;
   const email = `growth-${randomUUID()}@example.test`;
   return db.customer.create({
     data: {
@@ -70,12 +73,14 @@ async function makeCustomer(status = "ACTIVE") {
       status,
       givenName: "Cliente",
       familyName: "Crecimiento",
-      phoneE164: "+573001234567",
+      phoneE164: `+57300${seq}`,
+      ...overrides,
     },
   });
 }
 
-async function createOrder(customer, quantity = 1) {
+async function createOrder(customer, quantity = 1, contactOverrides = {}) {
+  const digits = (customer.phoneE164 ?? `+57300${++customerSeq}`).replace(/\D/g, "").slice(-10);
   const cart = await carts.createStorefrontCart({
     accessTokenHash: hash(),
     customerId: customer.id,
@@ -90,14 +95,15 @@ async function createOrder(customer, quantity = 1) {
       givenName: "Cliente",
       familyName: "Crecimiento",
       recipientName: "Cliente Crecimiento",
-      phoneE164: "3001234567",
+      phoneE164: digits,
       buyerDocumentType: "13",
-      buyerDocumentNumber: "1020304050",
+      buyerDocumentNumber: `102${digits.slice(-7)}`,
       termsVersion: "2026-01",
       privacyPolicyVersion: "2026-01",
       acceptanceProofHash: hash(),
       acceptanceIpHash: hash(),
       acceptanceUserAgentHash: hash(),
+      ...contactOverrides,
     },
     fulfillment: {
       method: "HOME_DELIVERY",
@@ -779,5 +785,64 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     const admin = await growth.getAdminOverview(adminId);
     const overviewReferral = admin.referrals.find((entry) => entry.id === attributed.id);
     assert.equal(overviewReferral?.referrerEmail, "Cuenta anonimizada");
+  });
+
+  it("blocks self-referrals across shared phone, shared document at payout, and merged CRM lineage", async () => {
+    const sharedPhone = "+573195554433";
+    const referrerPhone = await makeCustomer("ACTIVE", { phoneE164: sharedPhone });
+    const referredPhone = await makeCustomer("ACTIVE", { phoneE164: sharedPhone });
+    const { code: phoneCode } = await growth.createReferralCode(referrerPhone.id);
+    await assert.rejects(
+      growth.attributeReferral(referredPhone.id, phoneCode),
+      (error) => error instanceof GrowthError && error.code === "CONFLICT",
+    );
+
+    const referrerDoc = await makeCustomer();
+    const referredDoc = await makeCustomer();
+    const { code: docCode } = await growth.createReferralCode(referrerDoc.id);
+    await growth.attributeReferral(referredDoc.id, docCode);
+    const sharedDocument = "9012345678";
+    const firstOrder = await createOrder(referrerDoc, 1, { buyerDocumentNumber: sharedDocument });
+    await payOrder(firstOrder.orderId, firstOrder.totalCents, referrerDoc.id);
+    const referredOrder = await createOrder(referredDoc, 1, {
+      buyerDocumentNumber: sharedDocument,
+    });
+    await payOrder(referredOrder.orderId, referredOrder.totalCents, referredDoc.id);
+    const blockedDocReferral = await db.referral.findUniqueOrThrow({
+      where: { referredCustomerId: referredDoc.id },
+    });
+    assert.equal(blockedDocReferral.status, "REJECTED");
+    assert.equal(await balance(referrerDoc.id), 1);
+    assert.equal(await balance(referredDoc.id), 1);
+
+    const referrerCrm = await makeCustomer();
+    const referredCrm = await makeCustomer();
+    const crm = new CrmService(db);
+    const c1 = await crm.syncCustomerContact(referrerCrm.id);
+    const c2 = await crm.syncCustomerContact(referredCrm.id);
+    const sharedDocValue = `CC-SHARED-${randomUUID().slice(0, 8).toUpperCase()}`;
+    await crm.verifyContact(
+      {
+        contactId: c1.id,
+        expectedVersion: c1.version,
+        level: "IDENTITY_VERIFIED",
+        document: sharedDocValue,
+      },
+      audit,
+    );
+    await crm.verifyContact(
+      {
+        contactId: c2.id,
+        expectedVersion: c2.version,
+        level: "IDENTITY_VERIFIED",
+        document: sharedDocValue,
+      },
+      audit,
+    );
+    const { code: crmCode } = await growth.createReferralCode(referrerCrm.id);
+    await assert.rejects(
+      growth.attributeReferral(referredCrm.id, crmCode),
+      (error) => error instanceof GrowthError && error.code === "CONFLICT",
+    );
   });
 });

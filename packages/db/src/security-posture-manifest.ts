@@ -4558,7 +4558,7 @@ export const securityPostureManifest = {
       deleteAction: null,
       validated: true,
       definition:
-        'CHECK (status = \'PENDING\'::"IdentityMergeStatus" AND "sourceSnapshot" IS NULL AND "targetSnapshot" IS NULL AND "mergedAt" IS NULL AND "rejectedAt" IS NULL AND "reversedAt" IS NULL AND "mergedByAdminUserId" IS NULL AND "rejectedByAdminUserId" IS NULL AND "reversedByAdminUserId" IS NULL OR status = \'REJECTED\'::"IdentityMergeStatus" AND "sourceSnapshot" IS NULL AND "targetSnapshot" IS NULL AND "rejectedAt" IS NOT NULL AND "rejectedByAdminUserId" IS NOT NULL AND "resolutionNote" IS NOT NULL AND "mergedAt" IS NULL AND "reversedAt" IS NULL OR (status = ANY (ARRAY[\'MERGED\'::"IdentityMergeStatus", \'REVERSED\'::"IdentityMergeStatus"])) AND jsonb_typeof("sourceSnapshot") = \'object\'::text AND jsonb_typeof("targetSnapshot") = \'object\'::text AND "mergedTargetVersion" IS NOT NULL AND "mergedSourceVersion" IS NOT NULL AND "mergedAt" IS NOT NULL AND "mergedByAdminUserId" IS NOT NULL AND (status <> \'REVERSED\'::"IdentityMergeStatus" OR "reversedAt" IS NOT NULL AND "reversedByAdminUserId" IS NOT NULL))',
+        'CHECK (status = \'PENDING\'::"IdentityMergeStatus" AND "sourceSnapshot" IS NULL AND "targetSnapshot" IS NULL AND "mergedAt" IS NULL AND "rejectedAt" IS NULL AND "reversedAt" IS NULL AND "mergedByAdminUserId" IS NULL AND "rejectedByAdminUserId" IS NULL AND "reversedByAdminUserId" IS NULL OR status = \'REJECTED\'::"IdentityMergeStatus" AND "sourceSnapshot" IS NULL AND "targetSnapshot" IS NULL AND "rejectedAt" IS NOT NULL AND ("rejectedByAdminUserId" IS NOT NULL OR "resolutionNote"::text = \'[contenido suprimido por retención]\'::text) AND "resolutionNote" IS NOT NULL AND "mergedAt" IS NULL AND "reversedAt" IS NULL OR (status = ANY (ARRAY[\'MERGED\'::"IdentityMergeStatus", \'REVERSED\'::"IdentityMergeStatus"])) AND jsonb_typeof("sourceSnapshot") = \'object\'::text AND jsonb_typeof("targetSnapshot") = \'object\'::text AND "mergedTargetVersion" IS NOT NULL AND "mergedSourceVersion" IS NOT NULL AND "mergedAt" IS NOT NULL AND "mergedByAdminUserId" IS NOT NULL AND (status <> \'REVERSED\'::"IdentityMergeStatus" OR "reversedAt" IS NOT NULL AND "reversedByAdminUserId" IS NOT NULL))',
     },
     {
       table: "IdentityMergeCandidate",
@@ -19691,7 +19691,7 @@ export const securityPostureManifest = {
       deferrable: false,
       initiallyDeferred: false,
       definition:
-        'CREATE TRIGGER "Contact_validate_organization" BEFORE INSERT OR UPDATE OF "organizationId" ON "Contact" FOR EACH ROW EXECUTE FUNCTION validate_crm_organization_reference()',
+        'CREATE TRIGGER "Contact_validate_organization" BEFORE INSERT OR UPDATE OF "organizationId",status,"deletedAt" ON "Contact" FOR EACH ROW EXECUTE FUNCTION validate_crm_organization_reference()',
     },
     {
       table: "ContactActivity",

@@ -1496,14 +1496,14 @@ describe("F0.3 — persisted integration credential vault", () => {
 });
 
 describe("F0.5 — complete RLS and Data API matrix over persisted fixtures", () => {
-  it("denies all 2306 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
+  it("denies all 2309 RLS SQL-grant and PostgREST role operations across tables and RPCs", async () => {
     const { runRlsMatrix } = await import("../scripts/rls-matrix.mjs");
     const summary = await runRlsMatrix(databaseUrl);
     assert.equal(summary.tables, 133);
-    assert.equal(summary.functions, 15);
+    assert.equal(summary.functions, 16);
     assert.equal(summary.rlsOperations, 665);
-    assert.equal(summary.dataApiOperations, 1641);
-    assert.equal(summary.operations, 2306);
+    assert.equal(summary.dataApiOperations, 1644);
+    assert.equal(summary.operations, 2309);
     assert.ok(summary.results.every((result) => result.passed));
   });
 });

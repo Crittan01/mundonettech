@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 
-import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
+import { hasAdminPermission, isAdminRole, normalizeEmail } from "@mundonettech/core";
 import {
   AdminActorAuthorizationError,
   assertAdminActorInTransaction,
   hasUniqueViolation,
+  isAdminSelfDealingCustomer,
   Prisma,
   type IntegrationCredential,
   type IntegrationEnvironment,
@@ -198,15 +199,46 @@ export class B2bCopilotService {
     }
   }
 
+  private async copilotSelfDealing(
+    tx: Prisma.TransactionClient,
+    actorId: string,
+    opportunityId: string,
+  ): Promise<boolean> {
+    const actor = await tx.adminUser.findUnique({
+      where: { id: actorId },
+      select: { authUserId: true, email: true },
+    });
+    if (!actor) return false;
+    const opportunity = await tx.opportunity.findUnique({
+      where: { id: opportunityId },
+      select: { contact: { select: { id: true, customerId: true, email: true } } },
+    });
+    if (!opportunity?.contact) return false;
+    if (await isAdminSelfDealingCustomer(tx, actor, opportunity.contact)) return true;
+    const matched = await tx.contactIdentity.findFirst({
+      where: {
+        contactId: opportunity.contact.id,
+        kind: "EMAIL",
+        normalizedValue: normalizeEmail(actor.email),
+      },
+      select: { id: true },
+    });
+    return matched !== null;
+  }
+
   private async completeRun(options: {
     readonly runId: string;
+    readonly opportunityId: string;
     readonly audit: B2bCopilotAudit;
     readonly status: "SUCCEEDED" | "FAILED";
     readonly output?: B2bCopilotSuggestion;
     readonly failureCode?: string;
+    readonly allowRevokedActorFailure?: boolean;
   }) {
     await this.db.$transaction(async (tx) => {
-      await this.lockedActor(tx, options.audit.actorAdminUserId);
+      if (!options.allowRevokedActorFailure) {
+        await this.lockedActor(tx, options.audit.actorAdminUserId);
+      }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const updated = await tx.opportunityCopilotRun.updateMany({
         where: { id: options.runId, status: "REQUESTED" },
@@ -229,6 +261,11 @@ export class B2bCopilotService {
       if (updated.count !== 1) {
         throw new B2bCopilotError("CONFLICT", "The Copilot run was completed concurrently.");
       }
+      const selfDealing = await this.copilotSelfDealing(
+        tx,
+        options.audit.actorAdminUserId,
+        options.opportunityId,
+      );
       await tx.adminActionLog.create({
         data: {
           actorAdminUserId: options.audit.actorAdminUserId,
@@ -241,6 +278,7 @@ export class B2bCopilotService {
           userAgentHash: options.audit.userAgentHash
             ? Uint8Array.from(options.audit.userAgentHash)
             : null,
+          selfDealing,
           metadata: {
             status: options.status,
             ...(options.failureCode ? { failureCode: options.failureCode } : {}),
@@ -259,6 +297,9 @@ export class B2bCopilotService {
     assertUuid(input.opportunityId, "opportunityId");
     assertUuid(input.requestId, "requestId");
     assertUuid(input.credentialId, "credentialId");
+    if (input.audit.requestId !== undefined) {
+      assertUuid(input.audit.requestId, "audit.requestId");
+    }
     const actor = await this.actor(input.audit);
     const existing = await this.db.opportunityCopilotRun.findUnique({
       where: { id: input.requestId },
@@ -313,6 +354,16 @@ export class B2bCopilotService {
     const inputHash = Uint8Array.from(
       createHash("sha256").update(JSON.stringify(aggregate)).digest(),
     );
+    await this.db.$transaction(async (tx) => {
+      await this.lockedActor(tx, actor.id);
+      const duplicate = await tx.opportunityCopilotRun.findUnique({
+        where: { id: input.requestId },
+        select: { id: true },
+      });
+      if (duplicate) {
+        throw new B2bCopilotError("CONFLICT", "This Copilot request already exists.");
+      }
+    });
     let plaintext: Uint8Array | undefined;
     let created = false;
     try {
@@ -331,6 +382,7 @@ export class B2bCopilotService {
             requestedByAdminUserId: actor.id,
           },
         });
+        const selfDealing = await this.copilotSelfDealing(tx, actor.id, input.opportunityId);
         await tx.adminActionLog.create({
           data: {
             actorAdminUserId: actor.id,
@@ -342,6 +394,7 @@ export class B2bCopilotService {
             userAgentHash: input.audit.userAgentHash
               ? Uint8Array.from(input.audit.userAgentHash)
               : null,
+            selfDealing,
             metadata: { opportunityId: input.opportunityId, credentialId: credential.id },
           },
         });
@@ -354,6 +407,7 @@ export class B2bCopilotService {
       const suggestion = await provider.suggest(aggregate);
       await this.completeRun({
         runId: input.requestId,
+        opportunityId: input.opportunityId,
         audit: input.audit,
         status: "SUCCEEDED",
         output: suggestion,
@@ -366,12 +420,19 @@ export class B2bCopilotService {
       };
     } catch (error) {
       if (created) {
-        const failureCode = error instanceof GeminiProviderError ? error.code : "PROVIDER_FAILURE";
+        const failureCode =
+          error instanceof GeminiProviderError
+            ? error.code
+            : error instanceof B2bCopilotError && error.code === "FORBIDDEN"
+              ? "ACTOR_REVOKED"
+              : "PROVIDER_FAILURE";
         await this.completeRun({
           runId: input.requestId,
+          opportunityId: input.opportunityId,
           audit: input.audit,
           status: "FAILED",
           failureCode,
+          allowRevokedActorFailure: true,
         }).catch(() => undefined);
       }
       if (error instanceof CredentialNotFoundError || error instanceof CredentialRevokedError) {

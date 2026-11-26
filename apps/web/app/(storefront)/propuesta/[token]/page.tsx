@@ -8,6 +8,7 @@ import {
   maskPhone,
   opportunityProposalStatusLabels,
 } from "@mundonettech/core";
+import { CartStateError } from "@mundonettech/db";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
@@ -37,10 +38,15 @@ export default async function ProposalPage({ params }: PageProps<"/propuesta/[to
     throw error;
   }
   if (!proposal) notFound();
-  const preview =
-    proposal.available && proposal.cartId
-      ? await orderService().preview({ cartId: proposal.cartId })
-      : null;
+  let preview = null;
+  if (proposal.available && proposal.cartId) {
+    try {
+      preview = await orderService().preview({ cartId: proposal.cartId });
+    } catch (error) {
+      if (!(error instanceof CartStateError)) throw error;
+      preview = null;
+    }
+  }
   const canAccept = Boolean(preview?.cart.canContinue);
   if (preview && preview.homeDelivery.totalCents !== proposal.totalCents) {
     throw new Error("Proposal and checkout totals diverge.");
@@ -148,14 +154,14 @@ export default async function ProposalPage({ params }: PageProps<"/propuesta/[to
             Abrir recibo del pedido
           </Link>
         </section>
-      ) : !proposal.available ? (
+      ) : !proposal.available || !preview ? (
         <section role="alert" className="rounded-xl border border-warning bg-card p-6">
           <h2 className="text-xl font-semibold">Esta versión no admite aceptación</h2>
           <p className="mt-2 text-muted-foreground">
             Solicita a tu asesor un enlace vigente. No se creó ningún pedido desde esta pantalla.
           </p>
         </section>
-      ) : !canAccept || !preview ? (
+      ) : !canAccept ? (
         <section role="alert" className="rounded-xl border border-warning bg-card p-6">
           <h2 className="text-xl font-semibold">La disponibilidad cambió</h2>
           <p className="mt-2 text-muted-foreground">

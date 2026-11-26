@@ -226,10 +226,10 @@ describe("F5.2 — RFM and LTV over real capture and refund ledgers", () => {
     const report = await analytics.list(admin.id, { limit: 100 });
     const row = report.items.find((item) => item.customerId === catalog.customerId);
     assert.ok(row);
-    assert.equal(row.frequency, 2);
+    assert.equal(row.frequency, 1);
     assert.equal(row.ltvCents, "145000");
     assert.equal(row.refundExcessCents, "0");
-    assert.equal(row.rfmClass, "POTENTIAL");
+    assert.equal(row.rfmClass, "NEW");
     const finance = new FinanceService(db, {
       uvtValueCents: 5_237_400n,
       uvtYear: 2026,
@@ -243,5 +243,89 @@ describe("F5.2 — RFM and LTV over real capture and refund ledgers", () => {
     assert.equal(financial.summary.voidedCents, "195000");
     assert.equal(financial.summary.refundedCents, "50000");
     assert.equal(financial.summary.netRevenueCents, row.ltvCents);
+  });
+
+  it("keeps a customer whose only capture was 100% voided as PROSPECT with zero frequency and null recency", async () => {
+    const { randomBytes } = await import("node:crypto");
+    const voidOnlyCustomer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `rfm-void-only-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+      },
+    });
+    await sql.query("BEGIN");
+    try {
+      const voidedInventory = await seedInventoryFixture(sql, catalog);
+      const voidedCartId = randomUUID();
+      const voidedCartItemId = randomUUID();
+      await sql.query(
+        `INSERT INTO "Cart" (
+          "id", "accessTokenHash", "customerId", "subtotalCents",
+          "couponDiscountCents", "totalCents", "itemCount", "priceRevalidatedAt", "expiresAt"
+        ) VALUES ($1, $2, $3, 100000, 0, 100000, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '30 days')`,
+        [voidedCartId, randomBytes(32), voidOnlyCustomer.id],
+      );
+      await sql.query(
+        `INSERT INTO "CartItem" (
+          "id", "cartId", "variantId", "quantity", "productNameSnapshot", "productSlugSnapshot",
+          "skuSnapshot", "unitPriceCents", "couponDiscountCents", "lineTotalCents"
+        ) VALUES ($1, $2, $3, 1, 'Audífonos TÁCTILES Pro', $4, $5, 100000, 0, 100000)`,
+        [
+          voidedCartItemId,
+          voidedCartId,
+          catalog.variantId,
+          `product-${catalog.productId}`,
+          catalog.sku,
+        ],
+      );
+      const voidedCheckout = await seedCheckoutFixture(sql, {
+        catalog: { ...catalog, customerId: voidOnlyCustomer.id },
+        inventory: voidedInventory,
+        pricing: { ...pricing, cartId: voidedCartId, cartItemId: voidedCartItemId, couponId: null },
+        adminId: admin.id,
+      });
+      const credential = await sql.query(
+        `SELECT "id" FROM "IntegrationCredential" WHERE "provider" = 'wompi' LIMIT 1`,
+      );
+      const wompiAttemptId = randomUUID();
+      await sql.query(
+        `INSERT INTO "PaymentAttempt" (
+          "id", "orderId", "provider", "environment", "status", "idempotencyKey", "requestHash",
+          "reference", "amountCents", "credentialId", "providerStatus", "completedAt"
+        ) VALUES ($1, $2, 'WOMPI', 'LOCAL', 'SUCCEEDED', $3, $4, $5, 100000, $6, 'APPROVED', CURRENT_TIMESTAMP)`,
+        [
+          wompiAttemptId,
+          voidedCheckout.orderId,
+          `rfm-void-only-${randomUUID()}`,
+          randomBytes(32),
+          randomUUID(),
+          credential.rows[0].id,
+        ],
+      );
+      await sql.query(
+        `INSERT INTO "PaymentTransaction" (
+          "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+        ) VALUES ($1, 'WOMPI', 'CAPTURE', 'SUCCEEDED', 100000, $2, $3, CURRENT_TIMESTAMP)`,
+        [wompiAttemptId, `capture-only-${randomUUID()}`, randomBytes(32)],
+      );
+      await sql.query(
+        `INSERT INTO "PaymentTransaction" (
+          "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+        ) VALUES ($1, 'WOMPI', 'VOID', 'SUCCEEDED', 100000, $2, $3, CURRENT_TIMESTAMP)`,
+        [wompiAttemptId, `void-only-${randomUUID()}`, randomBytes(32)],
+      );
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK");
+      throw error;
+    }
+    const report = await analytics.list(admin.id, { limit: 100 });
+    const row = report.items.find((item) => item.customerId === voidOnlyCustomer.id);
+    assert.ok(row);
+    assert.equal(row.rfmClass, "PROSPECT");
+    assert.equal(row.frequency, 0);
+    assert.equal(row.recencyDays, null);
+    assert.equal(row.ltvCents, "0");
   });
 });

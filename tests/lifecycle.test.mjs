@@ -831,7 +831,7 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
     }
   });
 
-  it("revalidates consent after HTTP before recording provider acceptance", async () => {
+  it("preserves provider acceptance when consent is revoked mid-HTTP while cancelling enrollment and reconciling webhooks", async () => {
     const { customer, consent } = await makeCustomer();
     const { journey } = await createAutomation("Journey revocación durante proveedor");
     await lifecycle.runScheduledWork(20);
@@ -867,16 +867,47 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
         },
       });
       releaseSend();
-      assert.equal((await pending).status, "SUPPRESSED");
-      assert.equal(
-        (await db.emailEvent.findUniqueOrThrow({ where: { id: emailEvent.id } })).status,
-        "SUPPRESSED",
-      );
+      const sendResult = await pending;
+      assert.equal(sendResult.status, "SENT");
+      const persistedEmail = await db.emailEvent.findUniqueOrThrow({
+        where: { id: emailEvent.id },
+      });
+      assert.equal(persistedEmail.status, "SENT");
+      assert.ok(persistedEmail.providerMessageId);
+      assert.ok(persistedEmail.sentAt);
       const enrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
         where: { journeyId_customerId: { journeyId: journey.id, customerId: customer.id } },
       });
       assert.equal(enrollment.status, "CANCELLED");
       assert.equal(enrollment.exitReason, "CONSENT_REVOKED");
+
+      const id = `msg_${randomUUID().replaceAll("-", "")}`;
+      const timestamp = Math.floor(Date.now() / 1000);
+      const body = JSON.stringify({
+        type: "email.bounced",
+        data: {
+          email_id: persistedEmail.providerMessageId,
+          created_at: new Date(timestamp * 1000).toISOString(),
+        },
+      });
+      const signature = createHmac("sha256", Buffer.from("b".repeat(32), "base64"))
+        .update(`${id}.${timestamp}.${body}`)
+        .digest("base64");
+      const webhookResult = await email.processWebhook({
+        body,
+        id,
+        timestamp: String(timestamp),
+        signature: `v1,${signature}`,
+      });
+      assert.equal(webhookResult.status, "BOUNCED");
+      assert.equal(
+        (await db.emailEvent.findUniqueOrThrow({ where: { id: emailEvent.id } })).status,
+        "BOUNCED",
+      );
+      const suppression = await db.emailSuppression.findFirst({
+        where: { sourceEventId: emailEvent.id, reason: "BOUNCE" },
+      });
+      assert.ok(suppression);
     } finally {
       releaseSend?.();
       emailSendWait = null;
@@ -1017,5 +1048,98 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
       orderBy: { sequence: "asc" },
     });
     assert.equal(history.at(-1)?.status, "EXITED");
+  });
+
+  it("preserves already-delivered prior steps when cancelling a multi-step enrollment and ignores paused emails on unmatched webhooks", async () => {
+    const { customer } = await makeCustomer();
+    const journeySteps = steps();
+    journeySteps.push({
+      ...journeySteps[0],
+      position: 1,
+      offsetMinutes: 60,
+      subject: "Segundo paso preservando entrega previa",
+    });
+    const { journey } = await createAutomation("Journey preservar entregado", journeySteps);
+    await lifecycle.runScheduledWork(20);
+    await worker.runBatch(100);
+    await worker.runBatch(100);
+    const step1Email = await db.emailEvent.findFirstOrThrow({
+      where: {
+        lifecycleMessage: { enrollment: { journeyId: journey.id, customerId: customer.id } },
+      },
+    });
+    assert.equal(step1Email.status, "SENT");
+    const deliveredId = `msg_${randomUUID().replaceAll("-", "")}`;
+    const deliveredTs = Math.floor(Date.now() / 1000);
+    const deliveredBody = JSON.stringify({
+      type: "email.delivered",
+      data: {
+        email_id: step1Email.providerMessageId,
+        created_at: new Date(deliveredTs * 1000).toISOString(),
+      },
+    });
+    const deliveredSig = createHmac("sha256", Buffer.from("b".repeat(32), "base64"))
+      .update(`${deliveredId}.${deliveredTs}.${deliveredBody}`)
+      .digest("base64");
+    await email.processWebhook({
+      body: deliveredBody,
+      id: deliveredId,
+      timestamp: String(deliveredTs),
+      signature: `v1,${deliveredSig}`,
+    });
+    await lifecycle.transitionJourney(
+      { journeyId: journey.id, expectedVersion: journey.version, action: "ARCHIVE" },
+      audit,
+    );
+    const messages = await db.lifecycleMessage.findMany({
+      where: { enrollment: { journeyId: journey.id, customerId: customer.id } },
+      include: { emailEvent: true },
+      orderBy: { scheduledAt: "asc" },
+    });
+    assert.equal(messages[0].status, "QUEUED");
+    assert.equal(messages[0].emailEvent?.status, "DELIVERED");
+    assert.equal(messages[1].status, "CANCELLED");
+
+    const { customer: pausedCustomer } = await makeCustomer();
+    const { journey: pausedJourney } = await createAutomation("Journey pausado webhook");
+    await lifecycle.runScheduledWork(20);
+    await worker.runBatch(100);
+    const queuedPausedEmail = await db.emailEvent.findFirstOrThrow({
+      where: {
+        lifecycleMessage: {
+          enrollment: { journeyId: pausedJourney.id, customerId: pausedCustomer.id },
+        },
+      },
+    });
+    await lifecycle.transitionJourney(
+      { journeyId: pausedJourney.id, expectedVersion: pausedJourney.version, action: "PAUSE" },
+      audit,
+    );
+    await email.send(queuedPausedEmail.id);
+    const pausedAfter = await db.emailEvent.findUniqueOrThrow({
+      where: { id: queuedPausedEmail.id },
+    });
+    assert.equal(pausedAfter.status, "SENDING");
+    assert.equal(pausedAfter.attemptCount, 0);
+    const unknownId = `msg_${randomUUID().replaceAll("-", "")}`;
+    const unknownTs = Math.floor(Date.now() / 1000);
+    const unknownBody = JSON.stringify({
+      type: "email.delivered",
+      data: {
+        email_id: `unknown-${randomUUID()}`,
+        created_at: new Date(unknownTs * 1000).toISOString(),
+      },
+    });
+    const unknownSig = createHmac("sha256", Buffer.from("b".repeat(32), "base64"))
+      .update(`${unknownId}.${unknownTs}.${unknownBody}`)
+      .digest("base64");
+    const unmatched = await email.processWebhook({
+      body: unknownBody,
+      id: unknownId,
+      timestamp: String(unknownTs),
+      signature: `v1,${unknownSig}`,
+    });
+    assert.equal(unmatched.status, "IGNORED");
+    assert.equal(unmatched.eventId, null);
   });
 });

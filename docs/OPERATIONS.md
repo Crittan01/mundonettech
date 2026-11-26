@@ -92,7 +92,7 @@ make check            # docs/Git/idioma/fronteras/AST/caché/seguridad/env/anti-
 pnpm test             # Vitest + integración Node sobre PG17 real + matriz RLS/Data API
 pnpm test:unit        # contratos Vitest de guardas, catálogo, WAC, seriales, CSV, IVA, Flex, UBL, Meta CAPI y proveedores
 pnpm test:integration # catálogo, inventario, checkout, RLS, bóveda, OAuth/User Products, packs/órdenes/ME2/Flex/Full, Meta CAPI, Shipping, Email, DIAN y DR real
-pnpm test:rls         # matriz autónoma sobre PG17 real (2.306 denegaciones bajo SAVEPOINT/ROLLBACK)
+pnpm test:rls         # matriz autónoma sobre PG17 real (2.309 denegaciones bajo SAVEPOINT/ROLLBACK)
 pnpm build            # build productivo + empaquetado standalone completo
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e         # build + servidor standalone 127.0.0.1:4110 + Chromium + axe
@@ -102,7 +102,7 @@ pnpm test:k6          # contención real stock/cupones/checkout/pagos + invarian
 pnpm audit:dependencies # vulnerabilidades altas/críticas en dependencias productivas
 ```
 
-En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 2.306 casos reales: 665 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 1.641 operaciones sobre `anon`, `authenticated` y `service_role` en las 133 tablas y 15 funciones RPC.
+En local, `pnpm test:integration` y `pnpm test:rls` levantan un contenedor PG 17 desechable (`*_mundonettech` en `:54428`) con contraseña aleatoria si `TEST_DATABASE_URL` no está definida, y lo eliminan al terminar. En CI usan el servicio aislado `TEST_DATABASE_URL`. `scripts/rls-matrix.mjs` verifica cobertura exacta contra `pg_class`, siembra fixtures válidos dentro de una transacción revertida y prueba 2.309 casos reales: 665 operaciones (`SELECT`, `SELECT FOR UPDATE`, `UPDATE`, `DELETE`, `INSERT`) con grants SQL explícitos sobre un rol `NOBYPASSRLS` y 1.644 operaciones sobre `anon`, `authenticated` y `service_role` en las 133 tablas y 16 funciones RPC.
 
 `verify-security-posture` contrasta además el manifiesto exacto de constraints, FK, funciones, índices, triggers y migraciones, y las suites A3 ejecutan mutantes y carreras reales de checkout, pagos, envíos y canales. En Supabase, `service_role*` puede conservar su `BYPASSRLS` nativo porque la plataforma prohíbe alterarlo; la postura solo lo admite con `NOSUPERUSER` y ACL Data API completamente revocadas. PostgreSQL limpio exige `NOBYPASSRLS` a los tres roles (`ADR-048`).
 

@@ -19,7 +19,7 @@ import {
   crmLog,
   crmNow,
   crmRetentionMonths,
-  crmSelfDealing,
+  crmSelfDealingContacts,
   crmVersion,
   redactCrmActivitiesInTransaction,
   redactCrmMergeHistoryInTransaction,
@@ -168,6 +168,8 @@ export class CrmRetentionService {
         hasNewIds(peekScope.cartIds, verifiedScope.cartIds) ||
         hasNewIds(peekScope.couponIds, verifiedScope.couponIds) ||
         hasNewIds(peekScope.orderIds, verifiedScope.orderIds) ||
+        hasNewIds(peekScope.segmentIds, verifiedScope.segmentIds) ||
+        hasNewIds(peekScope.referralCounterpartyIds, verifiedScope.referralCounterpartyIds) ||
         hasNewIds(peekScope.ticketIds, verifiedScope.ticketIds) ||
         hasNewIds(peekScope.reviewIds, verifiedScope.reviewIds)
       ) {
@@ -226,7 +228,7 @@ export class CrmRetentionService {
           );
         }
       }
-      const selfDealing = await crmSelfDealing(tx, audit, "Contact", requested.id);
+      const selfDealing = await crmSelfDealingContacts(tx, audit, lineageIds);
       const lockedCustomerMap = new Map(
         locked.customers.map((customer) => [customer.id, customer]),
       );
@@ -252,6 +254,7 @@ export class CrmRetentionService {
           title: "[tarea suprimida por retención]",
           description: null,
           redactedAt: now,
+          version: { increment: 1 },
         },
       });
       const redactedMergeCount = await redactCrmMergeHistoryInTransaction(tx, lineageIds);
@@ -380,7 +383,7 @@ export class CrmRetentionService {
           throw error;
         }
         try {
-          await inInventoryTransaction(this.db, async (tx) => {
+          const deferredId = await inInventoryTransaction(this.db, async (tx) => {
             await crmActor(tx, audit, "crm:suppress");
             await acquireOperationLocks(tx, [`crm-contact:${contact.id}`]);
             const rows = await tx.$queryRaw<
@@ -388,7 +391,7 @@ export class CrmRetentionService {
             >`SELECT * FROM "Contact" WHERE "id" = ${contact.id}::uuid FOR UPDATE SKIP LOCKED`;
             const current = rows[0];
             if (!current || current.status !== "ACTIVE" || current.version !== contact.version)
-              return;
+              return null;
             const reviewRows = await tx.$queryRaw<Array<{ retentionReviewAt: Date }>>`
               SELECT CURRENT_TIMESTAMP + INTERVAL '30 days' AS "retentionReviewAt"
             `;
@@ -403,8 +406,9 @@ export class CrmRetentionService {
               reason: "ACTIVE_OBLIGATIONS",
               retentionMonths: this.retentionMonths,
             });
-            deferred.push(current.id);
+            return current.id;
           });
+          if (deferredId) deferred.push(deferredId);
         } catch (deferError) {
           if (deferError instanceof CrmError && deferError.code === "FORBIDDEN") {
             throw deferError;
