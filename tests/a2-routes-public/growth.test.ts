@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { OperationRateLimitError } from "../../packages/db/dist/index.js";
 import {
   EmailNotFoundError,
   EmailValidationError,
@@ -7,13 +8,24 @@ import {
 import { expectMethodAllowlist, expectNoStoreNoIndex } from "./test-helpers";
 
 const mocks = vi.hoisted(() => ({
+  consumeOperationRateLimit: vi.fn(),
   findReferral: vi.fn(),
   getPublicSiteUrl: vi.fn(() => "https://mundonettech.co"),
+  getRequestSecurityContext: vi.fn(),
   storeReferralCode: vi.fn(),
   unsubscribe: vi.fn(),
   unsubscribeTopic: vi.fn(),
 }));
 
+vi.mock("@mundonettech/db", async () => {
+  const actual = await vi.importActual<typeof import("../../packages/db/dist/index.js")>(
+    "../../packages/db/dist/index.js",
+  );
+  return {
+    ...actual,
+    consumeOperationRateLimit: mocks.consumeOperationRateLimit,
+  };
+});
 vi.mock("@/lib/db", () => ({
   getDatabase: () => ({ referralCode: { findFirst: mocks.findReferral } }),
 }));
@@ -25,6 +37,9 @@ vi.mock("@/lib/integrations", () => ({
   getPublicSiteUrl: mocks.getPublicSiteUrl,
 }));
 vi.mock("@/lib/security/referral", () => ({ storeReferralCode: mocks.storeReferralCode }));
+vi.mock("@/lib/security/request-context", () => ({
+  getRequestSecurityContext: mocks.getRequestSecurityContext,
+}));
 
 import * as unsubscribeRoute from "../../apps/web/app/email/baja/[token]/route";
 import * as referralRoute from "../../apps/web/app/referido/[code]/route";
@@ -63,6 +78,15 @@ function unsubscribePost(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.consumeOperationRateLimit.mockResolvedValue({
+    allowed: true,
+    retryAfterSeconds: 0,
+    remaining: 59,
+  });
+  mocks.getRequestSecurityContext.mockResolvedValue({
+    ipHash: new Uint8Array(32),
+    userAgentHash: null,
+  });
   mocks.findReferral.mockResolvedValue({ id: "referral-id" });
   mocks.storeReferralCode.mockResolvedValue(validCode);
   mocks.unsubscribe.mockResolvedValue({ eventId: "event-id", topic: "lifecycle", replayed: false });
@@ -86,6 +110,7 @@ describe("referral route", () => {
     expect(response.headers.get("location")).toBe(
       `https://mundonettech.co/mi-cuenta/beneficios?codigo=${validCode}`,
     );
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   });
 
   it("does not set a cookie for an inactive or unknown code", async () => {
@@ -108,6 +133,15 @@ describe("referral route", () => {
     const response = await referralRequest(validCode);
     expect(response.status).toBe(404);
     expect(await response.text()).not.toContain("secret");
+  });
+
+  it("returns 429 with Retry-After when the IP rate limit is exceeded", async () => {
+    mocks.consumeOperationRateLimit.mockRejectedValueOnce(new OperationRateLimitError(120, 0));
+    const response = await referralRequest(validCode);
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("120");
+    expectNoStoreNoIndex(response);
+    expect(mocks.findReferral).not.toHaveBeenCalled();
   });
 
   it("rejects every non-GET method without side effects", async () => {

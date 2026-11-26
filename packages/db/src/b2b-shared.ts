@@ -3,21 +3,21 @@ import { createHash } from "node:crypto";
 import {
   assertCartQuantity,
   assertMoney,
-  hasAdminPermission,
-  isAdminRole,
   normalizeContactPhone,
   normalizeEmail,
   type AdminPermission,
 } from "@mundonettech/core";
 
-import type {
-  AdminUser,
-  OpportunityProposal,
-  OpportunityProposalItem,
-  Prisma,
-} from "./generated/client.js";
+import type { OpportunityProposal, OpportunityProposalItem, Prisma } from "./generated/client.js";
 import { assertUuid } from "./inventory-shared.js";
-import { databaseNow, recordAdminAction, type DatabaseExecutor } from "./primitives.js";
+import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
+  databaseNow,
+  isAdminSelfDealingCustomer,
+  recordAdminAction,
+  type DatabaseExecutor,
+} from "./primitives.js";
 import type { B2bAudit } from "./b2b-types.js";
 
 export type B2bErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN" | "EXPIRED";
@@ -168,17 +168,71 @@ export async function b2bActor(
   tx: Prisma.TransactionClient,
   audit: B2bAudit,
   permission: B2bPermission,
-): Promise<AdminUser> {
+): Promise<void> {
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
   b2bHash(audit.ipHash, "ipHash");
   if (audit.userAgentHash !== null) b2bHash(audit.userAgentHash, "userAgentHash");
-  const actor = await tx.adminUser.findFirst({
-    where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-  });
-  if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
-    throw new B2bError("FORBIDDEN", "The administrator is not authorized for B2B operations.");
+  try {
+    await assertAdminActorInTransaction(tx, audit.actorAdminUserId, permission);
+  } catch (error) {
+    if (error instanceof AdminActorAuthorizationError) {
+      throw new B2bError("FORBIDDEN", "The administrator is not authorized for B2B operations.");
+    }
+    throw error;
   }
-  return actor;
+}
+
+async function b2bSelfDealing(
+  tx: Prisma.TransactionClient,
+  audit: B2bAudit,
+  targetType: string,
+  targetId: string,
+): Promise<boolean> {
+  const actor = await tx.adminUser.findUnique({
+    where: { id: audit.actorAdminUserId },
+    select: { authUserId: true, email: true },
+  });
+  if (!actor) return false;
+  const actorEmail = normalizeEmail(actor.email);
+  let contacts: Array<{ id: string; customerId: string | null; email: string | null }> = [];
+  if (targetType === "Organization") {
+    contacts = await tx.contact.findMany({
+      where: { organizationId: targetId, status: "ACTIVE", deletedAt: null },
+      select: { id: true, customerId: true, email: true },
+      take: 200,
+    });
+  } else if (targetType === "Opportunity") {
+    const opportunity = await tx.opportunity.findUnique({
+      where: { id: targetId },
+      select: { contact: { select: { id: true, customerId: true, email: true } } },
+    });
+    if (opportunity?.contact) contacts = [opportunity.contact];
+  } else if (targetType === "OpportunityProposal") {
+    const proposal = await tx.opportunityProposal.findUnique({
+      where: { id: targetId },
+      select: {
+        opportunity: {
+          select: { contact: { select: { id: true, customerId: true, email: true } } },
+        },
+      },
+    });
+    if (proposal?.opportunity.contact) contacts = [proposal.opportunity.contact];
+  }
+  for (const contact of contacts) {
+    if (await isAdminSelfDealingCustomer(tx, actor, contact)) return true;
+  }
+  if (contacts.length > 0) {
+    const matched = await tx.contactIdentity.findFirst({
+      where: {
+        contactId: { in: contacts.map((contact) => contact.id) },
+        kind: "EMAIL",
+        normalizedValue: actorEmail,
+      },
+      select: { id: true },
+    });
+    return matched !== null;
+  }
+  return false;
 }
 
 export async function b2bLog(
@@ -189,7 +243,8 @@ export async function b2bLog(
   targetId: string,
   metadata: Prisma.JsonObject = {},
 ): Promise<void> {
-  await recordAdminAction(tx, audit, action, targetType, targetId, metadata);
+  const selfDealing = await b2bSelfDealing(tx, audit, targetType, targetId);
+  await recordAdminAction(tx, audit, action, targetType, targetId, metadata, { selfDealing });
 }
 
 function canonicalProposal(proposal: ProposalContentSource): string {

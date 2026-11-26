@@ -117,18 +117,21 @@ test("operational vault, communications and fiscal views stay accessible with MF
 }) => {
   await authenticateAdmin(page);
   await page.goto("/admin/integraciones");
-  const provider = page.getByLabel("Proveedor", { exact: true });
-  const submitCredential = page
-    .getByRole("region", { name: "Conectar logística, correo, facturación, Gemini o Meta" })
-    .getByRole("button", { name: "Cifrar y guardar credencial" });
+  const credentialRegion = page.getByRole("region", {
+    name: "Conectar logística, correo, facturación, Gemini o Meta",
+  });
+  const provider = credentialRegion.getByLabel("Proveedor", { exact: true });
+  const submitCredential = credentialRegion.getByRole("button", {
+    name: "Cifrar y guardar credencial",
+  });
   await provider.selectOption("resend");
   await page.getByLabel("Nombre operativo de la integración").fill(resendAccount);
   await page.getByLabel("Endpoint de envío").fill("https://api.resend.com/emails?origen=anterior");
   await provider.selectOption("gemini");
-  await expect(page.getByLabel("Base oficial de modelos")).toHaveValue(
+  await expect(credentialRegion.getByLabel("Base oficial de modelos")).toHaveValue(
     "https://generativelanguage.googleapis.com/v1beta/models",
   );
-  await expect(page.getByLabel("Llave API de Gemini")).toHaveValue("");
+  await expect(credentialRegion.getByLabel("Llave API de Gemini")).toHaveValue("");
   await provider.selectOption("resend");
   await expect(page.getByLabel("Endpoint de envío")).toHaveValue("https://api.resend.com/emails");
   await page.getByLabel("Llave API de Resend").fill("llave-invalida");
@@ -143,10 +146,10 @@ test("operational vault, communications and fiscal views stay accessible with MF
     page.getByRole("alert").filter({ hasText: "Los campos no cumplen el contrato del proveedor" }),
   ).toContainText("Los campos no cumplen el contrato del proveedor");
   await provider.selectOption("gemini");
-  await expect(page.getByLabel("Base oficial de modelos")).toHaveValue(
+  await expect(credentialRegion.getByLabel("Base oficial de modelos")).toHaveValue(
     "https://generativelanguage.googleapis.com/v1beta/models",
   );
-  await expect(page.getByLabel("Modelo habilitado", { exact: false })).toHaveValue("");
+  await expect(credentialRegion.getByLabel("Modelo habilitado", { exact: false })).toHaveValue("");
   await provider.selectOption("resend");
   await expect(page.getByLabel("Endpoint de envío")).toHaveValue("https://api.resend.com/emails");
   await page.getByLabel("Nombre operativo de la integración").fill(resendAccount);

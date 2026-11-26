@@ -12,7 +12,7 @@ import {
 
 import type { AdminUser, Contact, Prisma } from "./generated/client.js";
 import { acquireOperationLocks, assertUuid } from "./inventory-shared.js";
-import { databaseNow, recordAdminAction } from "./primitives.js";
+import { databaseNow, isAdminSelfDealingCustomer, recordAdminAction } from "./primitives.js";
 
 export type CrmErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN";
 export type CrmPermission = Extract<
@@ -204,13 +204,115 @@ export async function crmActor(
   ) {
     throw new CrmError("VALIDATION", "Audit hashes must contain exactly 32 bytes.");
   }
-  const actor = await tx.adminUser.findFirst({
-    where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-  });
+  const actors = await tx.$queryRaw<AdminUser[]>`
+    SELECT * FROM "AdminUser"
+    WHERE "id" = ${audit.actorAdminUserId}::uuid
+      AND "status" = 'ACTIVE'
+      AND "deletedAt" IS NULL
+    FOR SHARE
+  `;
+  const actor = actors[0];
   if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
     throw new CrmError("FORBIDDEN", "The administrator is not authorized for this CRM operation.");
   }
   return actor;
+}
+
+type CrmAuditContact = Pick<Contact, "id" | "customerId" | "email">;
+
+async function crmAuditContacts(
+  tx: Prisma.TransactionClient,
+  targetType: string,
+  targetId: string,
+): Promise<CrmAuditContact[]> {
+  const selection = { id: true, customerId: true, email: true } as const;
+  if (targetType === "Contact") {
+    const contact = await tx.contact.findUnique({ where: { id: targetId }, select: selection });
+    return contact ? [contact] : [];
+  }
+  if (targetType === "ContactActivity") {
+    const activity = await tx.contactActivity.findUnique({
+      where: { id: targetId },
+      select: { contact: { select: selection } },
+    });
+    return activity ? [activity.contact] : [];
+  }
+  if (targetType === "Task") {
+    const task = await tx.task.findUnique({
+      where: { id: targetId },
+      select: { contact: { select: selection } },
+    });
+    return task ? [task.contact] : [];
+  }
+  if (targetType === "IdentityMergeCandidate") {
+    const candidate = await tx.identityMergeCandidate.findUnique({
+      where: { id: targetId },
+      select: {
+        sourceContact: { select: selection },
+        targetContact: { select: selection },
+      },
+    });
+    return candidate ? [candidate.sourceContact, candidate.targetContact] : [];
+  }
+  return [];
+}
+
+export async function crmSelfDealingContacts(
+  tx: Prisma.TransactionClient,
+  audit: CrmAudit,
+  contactIds: readonly string[],
+): Promise<boolean> {
+  if (contactIds.length === 0) return false;
+  const actor = await tx.adminUser.findUnique({
+    where: { id: audit.actorAdminUserId },
+    select: { authUserId: true, email: true },
+  });
+  if (!actor) return false;
+  const contacts = await tx.contact.findMany({
+    where: { id: { in: [...contactIds] } },
+    select: { id: true, customerId: true, email: true },
+  });
+  for (const contact of contacts) {
+    if (await isAdminSelfDealingCustomer(tx, actor, contact)) return true;
+  }
+  const previousActorIdentity = await tx.contactIdentity.findFirst({
+    where: {
+      contactId: { in: [...contactIds] },
+      kind: "EMAIL",
+      normalizedValue: normalizeEmail(actor.email),
+    },
+    select: { id: true },
+  });
+  return previousActorIdentity !== null;
+}
+
+export async function crmSelfDealing(
+  tx: Prisma.TransactionClient,
+  audit: CrmAudit,
+  targetType: string,
+  targetId: string,
+): Promise<boolean> {
+  const actor = await tx.adminUser.findUnique({
+    where: { id: audit.actorAdminUserId },
+    select: { authUserId: true, email: true },
+  });
+  if (!actor) return false;
+  const contacts = await crmAuditContacts(tx, targetType, targetId);
+  for (const contact of contacts) {
+    if (await isAdminSelfDealingCustomer(tx, actor, contact)) return true;
+  }
+  if (contacts.length > 0) {
+    const previousActorIdentity = await tx.contactIdentity.findFirst({
+      where: {
+        contactId: { in: contacts.map((contact) => contact.id) },
+        kind: "EMAIL",
+        normalizedValue: normalizeEmail(actor.email),
+      },
+      select: { id: true },
+    });
+    return previousActorIdentity !== null;
+  }
+  return false;
 }
 
 export async function crmLog(
@@ -220,8 +322,13 @@ export async function crmLog(
   targetType: string,
   targetId: string,
   metadata: Prisma.JsonObject = {},
+  selfDealing?: boolean,
 ): Promise<void> {
-  await recordAdminAction(tx, audit, action, targetType, targetId, metadata);
+  const resolvedSelfDealing =
+    selfDealing ?? (await crmSelfDealing(tx, audit, targetType, targetId));
+  await recordAdminAction(tx, audit, action, targetType, targetId, metadata, {
+    selfDealing: resolvedSelfDealing,
+  });
 }
 
 export async function crmNow(tx: Prisma.TransactionClient): Promise<Date> {

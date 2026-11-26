@@ -145,6 +145,34 @@ export class CodReconciliationService {
             compareStrings(left.paymentAttemptId, right.paymentAttemptId)
           );
         });
+        const batchOrderIds = [
+          ...new Set(orderedItems.map((item) => attemptById.get(item.paymentAttemptId)!.orderId)),
+        ].sort(compareStrings);
+        const batchCustomerIdSet = new Set<string>();
+        for (const orderId of batchOrderIds) {
+          const lockedOrder = await lockPaymentOrder(tx, orderId);
+          if (lockedOrder.customerId) batchCustomerIdSet.add(lockedOrder.customerId);
+        }
+        const batchCustomerIds = [...batchCustomerIdSet].sort(compareStrings);
+        const batchReferrals =
+          batchCustomerIds.length > 0
+            ? await tx.referral.findMany({
+                where: { referredCustomerId: { in: batchCustomerIds }, status: "ATTRIBUTED" },
+                select: { referrerCustomerId: true },
+              })
+            : [];
+        const growthLockIds = [
+          ...new Set([
+            ...batchCustomerIds,
+            ...batchReferrals.map((entry) => entry.referrerCustomerId),
+          ]),
+        ].sort(compareStrings);
+        if (growthLockIds.length > 0) {
+          await acquireOperationLocks(
+            tx,
+            growthLockIds.map((id) => `growth-customer:${id}`),
+          );
+        }
         for (const item of orderedItems) {
           const attemptMeta = attemptById.get(item.paymentAttemptId)!;
           const order = await lockPaymentOrder(tx, attemptMeta.orderId);

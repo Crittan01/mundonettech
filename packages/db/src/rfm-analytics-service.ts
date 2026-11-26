@@ -76,8 +76,9 @@ export function customerRfmCte(): Prisma.Sql {
       ) refund ON refund."orderId" = orders."id"
     ),
     customer_totals AS (
-      SELECT orders."customerId", max(orders."recognizedAt") AS "lastCapturedAt",
-        count(*)::bigint AS "frequency",
+      SELECT orders."customerId",
+        max(orders."recognizedAt") FILTER (WHERE orders."grossCapturedCents" > 0) AS "lastCapturedAt",
+        count(*) FILTER (WHERE orders."grossCapturedCents" > 0)::bigint AS "frequency",
         sum(orders."grossCapturedCents" - orders."refundedCents")::bigint AS "ltvCents",
         sum(GREATEST(orders."refundedCents" - orders."grossCapturedCents", 0::bigint))::bigint AS "refundExcessCents"
       FROM order_net orders GROUP BY orders."customerId"

@@ -25,6 +25,9 @@ import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-a
 import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 const snapshotFields = new Set([
+  "name",
+  "description",
+  "segmentId",
   "rfmClass",
   "minFrequency",
   "maxFrequency",
@@ -37,7 +40,7 @@ const snapshotFields = new Set([
 function safeSnapshot(formData: FormData): Record<string, string> {
   return Object.fromEntries(
     Object.entries(formSnapshot(formData)).filter(
-      ([key, value]) => snapshotFields.has(key) && value.length <= 256,
+      ([key, value]) => snapshotFields.has(key) && value.length <= 500,
     ),
   );
 }

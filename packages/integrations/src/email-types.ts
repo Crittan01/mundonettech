@@ -13,6 +13,9 @@ export class EmailConflictError extends Error {
     readonly code:
       | "INVALID_STATE"
       | "SUPPRESSED"
+      | "NO_CONTACT"
+      | "NO_CONSENT"
+      | "STALE"
       | "IDEMPOTENCY_CONFLICT"
       | "PROVIDER_UNCERTAIN" = "INVALID_STATE",
   ) {

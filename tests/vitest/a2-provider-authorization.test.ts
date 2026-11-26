@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { IntegrationEnvironment } from "../../packages/db/dist/index.js";
 import {
+  B2bCopilotService,
   EmailService,
   GuestOrderAccessService,
   InvoiceService,
@@ -113,6 +114,32 @@ describe("A2 — DIAN autoriza antes de bóveda, claims y proveedor", () => {
     });
     expect(vault.list).toHaveBeenCalledOnce();
     expect(adminUser.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("A7 — Copiloto B2B autoriza antes de cualquier acceso a bóveda", () => {
+  it("no consulta credenciales ni permite replay cuando el actor está suspendido", async () => {
+    const vault = vaultHarness();
+    const integrationCredential = { findFirst: vi.fn() };
+    const opportunityCopilotRun = { findUnique: vi.fn() };
+    const db = {
+      adminUser: { findFirst: vi.fn(async () => null) },
+      integrationCredential,
+      opportunityCopilotRun,
+    } as never;
+    const service = new B2bCopilotService(db, { vault });
+    await expect(
+      service.run({
+        opportunityId: randomUUID(),
+        credentialId: randomUUID(),
+        requestId: randomUUID(),
+        audit,
+      }),
+    ).rejects.toMatchObject({ name: "B2bCopilotError", code: "FORBIDDEN" });
+    expect(opportunityCopilotRun.findUnique).not.toHaveBeenCalled();
+    expect(integrationCredential.findFirst).not.toHaveBeenCalled();
+    expect(vault.list).not.toHaveBeenCalled();
+    expect(vault.reveal).not.toHaveBeenCalled();
   });
 });
 

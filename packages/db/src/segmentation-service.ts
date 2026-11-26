@@ -372,7 +372,7 @@ export class SegmentationService {
       lockedCustomerIds.length === 0
         ? []
         : await tx.$queryRaw<
-            Array<{ id: string; entryMembershipId: string; customerId: string }>
+            Array<{ id: string; entryMembershipId: string; customerId: string; reason: string }>
           >(Prisma.sql`
       ${customerRfmCte()}, ${ctes},
       latest AS (
@@ -406,13 +406,13 @@ export class SegmentationService {
             SELECT 1 FROM eligible_members eligible WHERE eligible."customerId" = latest."customerId"
           )
         ORDER BY latest."customerId"
-        RETURNING "id", "customerId", (
+        RETURNING "id", "customerId", "reason", (
           SELECT prior."id" FROM "CustomerSegmentMembership" prior
           WHERE prior."segmentId" = "CustomerSegmentMembership"."segmentId"
             AND prior."customerId" = "CustomerSegmentMembership"."customerId"
             AND prior."sequence" = "CustomerSegmentMembership"."sequence" - 1
         ) AS "entryMembershipId"
-      ) SELECT "id", "entryMembershipId", "customerId" FROM changes
+      ) SELECT "id", "entryMembershipId", "customerId", "reason" FROM changes
     `);
     const now = await databaseNow(tx);
     let cancelled = 0;
@@ -420,13 +420,19 @@ export class SegmentationService {
       if (!change.entryMembershipId) {
         throw new LifecycleError("CONFLICT", "Segment exit does not reference its entry evidence.");
       }
+      const cancelReason =
+        change.reason === "CONSENT_REVOKED"
+          ? "CONSENT_REVOKED"
+          : change.reason === "CUSTOMER_INACTIVE"
+            ? "CUSTOMER_INACTIVE"
+            : "SEGMENT_EXITED";
       const enrollments = await tx.lifecycleEnrollment.findMany({
         where: { entryMembershipId: change.entryMembershipId, status: "ACTIVE" },
         select: { id: true },
         orderBy: { id: "asc" },
       });
       for (const enrollment of enrollments) {
-        if (await cancelLifecycleEnrollment(tx, enrollment.id, now, "SEGMENT_EXITED")) {
+        if (await cancelLifecycleEnrollment(tx, enrollment.id, now, cancelReason)) {
           cancelled += 1;
         }
       }
@@ -488,8 +494,14 @@ export class SegmentationService {
           totals.entered += result.entered;
           totals.exited += result.exited;
           totals.cancelled += result.cancelled;
-        } catch {
-          continue;
+        } catch (error) {
+          if (
+            (error instanceof LifecycleError && error.code === "CONFLICT") ||
+            (error as { code?: unknown } | null)?.code === "40001"
+          ) {
+            continue;
+          }
+          throw error;
         }
       }
     }

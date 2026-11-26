@@ -19,6 +19,7 @@ import {
   crmLog,
   crmNow,
   crmRetentionMonths,
+  crmSelfDealingContacts,
   crmVersion,
   redactCrmActivitiesInTransaction,
   redactCrmMergeHistoryInTransaction,
@@ -76,7 +77,11 @@ export class CrmRetentionService {
     if (!suppressionReasons.has(input.reason)) {
       throw new CrmError("VALIDATION", "The suppression reason is invalid.");
     }
-    if (!input.privacyPolicyVersion || input.privacyPolicyVersion.length > 50) {
+    if (
+      !input.privacyPolicyVersion ||
+      input.privacyPolicyVersion.trim() !== input.privacyPolicyVersion ||
+      input.privacyPolicyVersion.length > 50
+    ) {
       throw new CrmError("VALIDATION", "A valid privacy policy version is required.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
@@ -163,6 +168,8 @@ export class CrmRetentionService {
         hasNewIds(peekScope.cartIds, verifiedScope.cartIds) ||
         hasNewIds(peekScope.couponIds, verifiedScope.couponIds) ||
         hasNewIds(peekScope.orderIds, verifiedScope.orderIds) ||
+        hasNewIds(peekScope.segmentIds, verifiedScope.segmentIds) ||
+        hasNewIds(peekScope.referralCounterpartyIds, verifiedScope.referralCounterpartyIds) ||
         hasNewIds(peekScope.ticketIds, verifiedScope.ticketIds) ||
         hasNewIds(peekScope.reviewIds, verifiedScope.reviewIds)
       ) {
@@ -221,6 +228,7 @@ export class CrmRetentionService {
           );
         }
       }
+      const selfDealing = await crmSelfDealingContacts(tx, audit, lineageIds);
       const lockedCustomerMap = new Map(
         locked.customers.map((customer) => [customer.id, customer]),
       );
@@ -246,6 +254,7 @@ export class CrmRetentionService {
           title: "[tarea suprimida por retención]",
           description: null,
           redactedAt: now,
+          version: { increment: 1 },
         },
       });
       const redactedMergeCount = await redactCrmMergeHistoryInTransaction(tx, lineageIds);
@@ -283,12 +292,20 @@ export class CrmRetentionService {
         });
       }
       await tx.contactIdentity.deleteMany({ where: { contactId: { in: lineageIds } } });
-      await crmLog(tx, audit, "CRM_CONTACT_SUPPRESSED", "Contact", requested.id, {
-        reason: input.reason,
-        lineageCount: contacts.length,
-        anonymizedCustomerCount: anonymizedCustomers.length,
-        redactedMergeCount,
-      });
+      await crmLog(
+        tx,
+        audit,
+        "CRM_CONTACT_SUPPRESSED",
+        "Contact",
+        requested.id,
+        {
+          reason: input.reason,
+          lineageCount: contacts.length,
+          anonymizedCustomerCount: anonymizedCustomers.length,
+          redactedMergeCount,
+        },
+        selfDealing,
+      );
       return {
         contactId: requested.id,
         lineage: lineageIds,
@@ -354,13 +371,19 @@ export class CrmRetentionService {
           throw error;
         }
         if (
-          !(error instanceof CrmError && error.code === "CONFLICT") &&
-          !(error instanceof AccountError && error.code === "CONFLICT")
+          (error instanceof CrmError || error instanceof AccountError) &&
+          error.code === "NOT_FOUND"
         ) {
           continue;
         }
+        if (
+          !(error instanceof CrmError && error.code === "CONFLICT") &&
+          !(error instanceof AccountError && error.code === "CONFLICT")
+        ) {
+          throw error;
+        }
         try {
-          await inInventoryTransaction(this.db, async (tx) => {
+          const deferredId = await inInventoryTransaction(this.db, async (tx) => {
             await crmActor(tx, audit, "crm:suppress");
             await acquireOperationLocks(tx, [`crm-contact:${contact.id}`]);
             const rows = await tx.$queryRaw<
@@ -368,7 +391,7 @@ export class CrmRetentionService {
             >`SELECT * FROM "Contact" WHERE "id" = ${contact.id}::uuid FOR UPDATE SKIP LOCKED`;
             const current = rows[0];
             if (!current || current.status !== "ACTIVE" || current.version !== contact.version)
-              return;
+              return null;
             const reviewRows = await tx.$queryRaw<Array<{ retentionReviewAt: Date }>>`
               SELECT CURRENT_TIMESTAMP + INTERVAL '30 days' AS "retentionReviewAt"
             `;
@@ -383,13 +406,20 @@ export class CrmRetentionService {
               reason: "ACTIVE_OBLIGATIONS",
               retentionMonths: this.retentionMonths,
             });
-            deferred.push(current.id);
+            return current.id;
           });
+          if (deferredId) deferred.push(deferredId);
         } catch (deferError) {
           if (deferError instanceof CrmError && deferError.code === "FORBIDDEN") {
             throw deferError;
           }
-          continue;
+          if (
+            (deferError instanceof CrmError || deferError instanceof AccountError) &&
+            deferError.code === "NOT_FOUND"
+          ) {
+            continue;
+          }
+          throw deferError;
         }
       }
     }

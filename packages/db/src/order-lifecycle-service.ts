@@ -233,6 +233,16 @@ export class OrderLifecycleService {
           if (existing?.status === "RECOVERED") {
             return { candidateId: cart.id, detected: 0, expired: 0, outboxEvents: 0 };
           }
+          const reminderCooldownMs = 24 * 3_600_000;
+          if (
+            existing?.status === "DETECTED" &&
+            existing.reminderCount > 0 &&
+            (existing.reminderCount >= 3 ||
+              (existing.lastReminderAt !== null &&
+                now.getTime() - existing.lastReminderAt.getTime() < reminderCooldownMs))
+          ) {
+            return { candidateId: cart.id, detected: 0, expired: 0, outboxEvents: 0 };
+          }
           await tx.abandonedCart.upsert({
             where: { cartId: cart.id },
             create: {

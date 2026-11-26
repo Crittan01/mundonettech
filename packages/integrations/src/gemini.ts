@@ -110,6 +110,7 @@ export function parseGeminiCredentials(plaintext: Uint8Array): GeminiCredentials
     if (
       url.protocol !== "https:" ||
       url.hostname !== "generativelanguage.googleapis.com" ||
+      url.port !== "" ||
       url.pathname !== "/v1beta/models" ||
       url.username ||
       url.password ||
@@ -118,7 +119,7 @@ export function parseGeminiCredentials(plaintext: Uint8Array): GeminiCredentials
     ) {
       throw new Error();
     }
-    return { apiKey, model, apiUrl: configuredUrl };
+    return { apiKey, model, apiUrl: `${url.origin}${url.pathname}` };
   } catch {
     throw new GeminiProviderError(
       "INVALID_CREDENTIALS",
@@ -231,14 +232,16 @@ function outputFromJson(value: unknown): B2bCopilotSuggestion {
     !reasonCodes.every((reason) =>
       copilotReasons.includes(reason as (typeof copilotReasons)[number]),
     ) ||
-    typeof confidenceBps !== "number"
+    typeof confidenceBps !== "number" ||
+    !Number.isSafeInteger(confidenceBps) ||
+    confidenceBps < 0 ||
+    confidenceBps > 10_000
   ) {
     throw new GeminiProviderError(
       "INVALID_RESPONSE",
       "Gemini returned an invalid suggestion contract.",
     );
   }
-  integer(confidenceBps, "confidenceBps", 0, 10_000);
   return {
     priority: priority as B2bCopilotSuggestion["priority"],
     nextAction: nextAction as B2bCopilotSuggestion["nextAction"],
@@ -247,8 +250,21 @@ function outputFromJson(value: unknown): B2bCopilotSuggestion {
   };
 }
 
+const blockedFinishReasons = new Set([
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+]);
+
 function responseText(root: Record<string, unknown>): string {
-  if (root.promptFeedback !== undefined) {
+  if (
+    typeof root.promptFeedback === "object" &&
+    root.promptFeedback !== null &&
+    !Array.isArray(root.promptFeedback) &&
+    Boolean((root.promptFeedback as Record<string, unknown>).blockReason)
+  ) {
     throw new GeminiProviderError("BLOCKED", "Gemini blocked the zero-PII classification request.");
   }
   const candidates = root.candidates;
@@ -259,6 +275,15 @@ function responseText(root: Record<string, unknown>): string {
     );
   }
   const candidate = candidates[0] as Record<string, unknown>;
+  if (
+    typeof candidate?.finishReason === "string" &&
+    blockedFinishReasons.has(candidate.finishReason)
+  ) {
+    throw new GeminiProviderError(
+      "BLOCKED",
+      "Gemini blocked the zero-PII classification response.",
+    );
+  }
   const content = candidate?.content;
   if (typeof content !== "object" || content === null) {
     throw new GeminiProviderError("INVALID_RESPONSE", "Gemini returned no suggestion content.");

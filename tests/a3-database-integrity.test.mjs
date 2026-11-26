@@ -2340,3 +2340,489 @@ describe("A6 — post-sale, serial and financial structural integrity", () => {
     });
   });
 });
+
+describe("A7 — CRM, B2B, loyalty and lifecycle structural integrity", () => {
+  async function createA7Opportunity(client) {
+    const { adminUserId, credentialId } = await createAdminAndCredential(client);
+    const catalog = await createCatalogFixture(client);
+    const organizationId = randomUUID();
+    const contactId = randomUUID();
+    const opportunityId = randomUUID();
+    await client.query(
+      `INSERT INTO "Organization" ("id", "legalName") VALUES ($1, 'A7 Organization')`,
+      [organizationId],
+    );
+    await client.query(
+      `INSERT INTO "Contact" ("id", "organizationId", "source", "retentionReviewAt")
+       VALUES ($1, $2, 'a7-test', CURRENT_TIMESTAMP + INTERVAL '30 days')`,
+      [contactId, organizationId],
+    );
+    await client.query(
+      `INSERT INTO "Opportunity" (
+         "id", "organizationId", "contactId", "source", "requirements", "privacyPolicyVersion", "acceptanceProofHash", "acceptedAt"
+       ) VALUES ($1, $2, $3, 'a7-test', 'Requerimiento estructural A7', '2026-01', $4, CURRENT_TIMESTAMP)`,
+      [opportunityId, organizationId, contactId, randomBytes(32)],
+    );
+    return { adminUserId, credentialId, catalog, organizationId, contactId, opportunityId };
+  }
+
+  async function createA7B2bFixture(client) {
+    const fixture = await createA7Opportunity(client);
+    const priceListId = randomUUID();
+    const priceListCode = `A7PL_${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`;
+    const cartId = randomUUID();
+    const proposalId = randomUUID();
+    await client.query(
+      `INSERT INTO "PriceList" ("id", "code", "name") VALUES ($1, $2, 'A7 Price List')`,
+      [priceListId, priceListCode],
+    );
+    await client.query(
+      `INSERT INTO "PriceListItem" ("priceListId", "variantId", "unitPriceCents") VALUES ($1, $2, 90000)`,
+      [priceListId, fixture.catalog.variantId],
+    );
+    await client.query(`UPDATE "PriceList" SET "status" = 'ACTIVE' WHERE "id" = $1`, [priceListId]);
+    await client.query(
+      `INSERT INTO "Cart" (
+         "id", "accessTokenHash", "kind", "subtotalCents", "totalCents", "itemCount", "expiresAt"
+       ) VALUES ($1, $2, 'B2B', 100000, 100000, 1, CURRENT_TIMESTAMP + INTERVAL '1 day')`,
+      [cartId, randomBytes(32)],
+    );
+    await client.query(
+      `INSERT INTO "CartItem" (
+         "cartId", "variantId", "quantity", "productNameSnapshot", "productSlugSnapshot", "skuSnapshot",
+         "unitPriceCents", "lineTotalCents"
+       ) VALUES ($1, $2, 1, 'A7 Product', 'a7-product', 'A7-SKU', 100000, 100000)`,
+      [cartId, fixture.catalog.variantId],
+    );
+    await client.query(
+      `INSERT INTO "OpportunityProposal" (
+         "id", "opportunityId", "version", "status", "publicTokenHash", "contentHash", "priceListId",
+         "priceListCodeSnapshot", "priceListVersionSnapshot", "subtotalCents", "discountCents",
+         "taxCents", "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear",
+         "deliveryPromiseDays", "reservationMinutes", "expiresAt", "issuedAt", "cartId", "createdByAdminUserId"
+       ) VALUES (
+         $1, $2, 1, 'DRAFT', NULL, $3, $4, $5, $6, 100000, 0, 19000, 0, 119000,
+         'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120, CURRENT_TIMESTAMP + INTERVAL '1 day',
+         NULL, NULL, $7
+       )`,
+      [
+        proposalId,
+        fixture.opportunityId,
+        randomBytes(32),
+        priceListId,
+        priceListCode,
+        0,
+        fixture.adminUserId,
+      ],
+    );
+    await client.query(
+      `INSERT INTO "OpportunityProposalItem" (
+         "proposalId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot",
+         "catalogUnitPriceCents", "unitPriceCents", "discountCents", "lineTotalCents", "taxGroupCode",
+         "taxGroupName", "treatment", "taxRule", "catalogRateBps", "appliedRateBps", "unitValueCents",
+         "taxableBaseCents", "taxCents"
+       ) VALUES (
+         $1, $2, 1, 'A7 Product', 'a7-product', 'A7-SKU', 100000, 100000, 0, 100000,
+         'A7', 'A7 Tax', 'STANDARD', 'STANDARD', 1900, 1900, 100000, 100000, 19000
+       )`,
+      [proposalId, fixture.catalog.variantId],
+    );
+    await client.query(
+      `UPDATE "OpportunityProposal" SET "status" = 'SENT', "publicTokenHash" = $2, "cartId" = $3, "issuedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+      [proposalId, randomBytes(32), cartId],
+    );
+    await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+    return { ...fixture, priceListId, priceListCode, cartId, proposalId };
+  }
+
+  async function createA7Customer(client, prefix = "a7") {
+    const customerId = randomUUID();
+    await client.query(
+      `INSERT INTO "Customer" ("id", "authUserId", "email", "status")
+       VALUES ($1, $2, $3, 'ACTIVE')`,
+      [customerId, randomUUID(), `${prefix}-${randomUUID()}@example.test`],
+    );
+    return customerId;
+  }
+
+  it("accepts only the closed zero-PII Copilot output and failure-code contract", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA7Opportunity(client);
+      const runIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+      for (const runId of runIds) {
+        await client.query(
+          `INSERT INTO "OpportunityCopilotRun" (
+             "id", "opportunityId", "credentialId", "model", "inputHash", "promptHash", "requestedByAdminUserId"
+           ) VALUES ($1, $2, $3, 'gemini-test', $4, $4, $5)`,
+          [
+            runId,
+            fixture.opportunityId,
+            fixture.credentialId,
+            randomBytes(32),
+            fixture.adminUserId,
+          ],
+        );
+      }
+      await client.query(
+        `UPDATE "OpportunityCopilotRun" SET "status" = 'SUCCEEDED',
+         "output" = '{"priority":"HIGH","nextAction":"ESCALATE","reasonCodes":["HIGH_VALUE","STOCK_RISK"],"confidenceBps":9250}'::jsonb,
+         "completedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [runIds[0]],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "OpportunityCopilotRun" SET "status" = 'SUCCEEDED',
+         "output" = '{"priority":"HIGH","nextAction":"ESCALATE","reasonCodes":["HIGH_VALUE"],"confidenceBps":9250,"note":"persona@example.test"}'::jsonb,
+         "completedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [runIds[1]],
+        "23514",
+        "OpportunityCopilotRun_output_zero_pii",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "OpportunityCopilotRun" SET "status" = 'SUCCEEDED',
+         "output" = '{"priority":"HIGH","nextAction":"ESCALATE","reasonCodes":["HIGH_VALUE","HIGH_VALUE"],"confidenceBps":9250}'::jsonb,
+         "completedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [runIds[2]],
+        "23514",
+        "OpportunityCopilotRun_output_zero_pii",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "OpportunityCopilotRun" SET "status" = 'FAILED', "failureCode" = 'raw provider response', "completedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [runIds[3]],
+        "23514",
+        "OpportunityCopilotRun_failure_code_valid",
+      );
+    });
+  });
+
+  it("seals linked B2B carts and rejects proposal items after issue", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA7B2bFixture(client);
+      await expectSqlViolation(
+        client,
+        `UPDATE "CartItem" SET "unitPriceCents" = 1, "lineTotalCents" = 1 WHERE "cartId" = $1`,
+        [fixture.cartId],
+        "55000",
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "Cart" SET "subtotalCents" = 1, "totalCents" = 1 WHERE "id" = $1`,
+        [fixture.cartId],
+        "55000",
+      );
+      const otherVariant = await createCatalogFixture(client);
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "OpportunityProposalItem" (
+           "proposalId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot",
+           "catalogUnitPriceCents", "unitPriceCents", "discountCents", "lineTotalCents", "taxGroupCode",
+           "taxGroupName", "treatment", "taxRule", "catalogRateBps", "appliedRateBps", "unitValueCents",
+           "taxableBaseCents", "taxCents"
+         ) VALUES (
+           $1, $2, 1, 'Late item', 'late-item', 'LATE-SKU', 100000, 100000, 0, 100000,
+           'A7', 'A7 Tax', 'STANDARD', 'STANDARD', 1900, 1900, 100000, 100000, 19000
+         )`,
+        [fixture.proposalId, otherVariant.variantId],
+        "55000",
+      );
+    });
+  });
+
+  it("checks exact proposal tax arithmetic and price-list activation invariants", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA7Opportunity(client);
+      const proposalId = randomUUID();
+      await client.query(
+        `INSERT INTO "OpportunityProposal" (
+           "id", "opportunityId", "version", "contentHash", "subtotalCents", "discountCents", "taxCents",
+           "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
+           "reservationMinutes", "expiresAt", "createdByAdminUserId"
+         ) VALUES ($1, $2, 1, $3, 100000, 0, 19000, 0, 119000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
+           CURRENT_TIMESTAMP + INTERVAL '1 day', $4)`,
+        [proposalId, fixture.opportunityId, randomBytes(32), fixture.adminUserId],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "OpportunityProposalItem" (
+           "proposalId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot",
+           "catalogUnitPriceCents", "unitPriceCents", "discountCents", "lineTotalCents", "taxGroupCode",
+           "taxGroupName", "treatment", "taxRule", "catalogRateBps", "appliedRateBps", "unitValueCents",
+           "taxableBaseCents", "taxCents"
+         ) VALUES (
+           $1, $2, 1, 'A7 Product', 'a7-product', 'A7-SKU', 100000, 100000, 0, 100000,
+           'A7', 'A7 Tax', 'STANDARD', 'STANDARD', 1900, 1900, 100000, 100000, 1
+         )`,
+        [proposalId, fixture.catalog.variantId],
+        "23514",
+        "OpportunityProposalItem_tax_balanced",
+      );
+      await client.query(
+        `INSERT INTO "OpportunityProposalItem" (
+           "proposalId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot",
+           "catalogUnitPriceCents", "unitPriceCents", "discountCents", "lineTotalCents", "taxGroupCode",
+           "taxGroupName", "treatment", "taxRule", "catalogRateBps", "appliedRateBps", "unitValueCents",
+           "taxableBaseCents", "taxCents"
+         ) VALUES (
+           $1, $2, 1, 'A7 Product', 'a7-product', 'A7-SKU', 100000, 100000, 0, 100000,
+           'A7', 'A7 Tax', 'STANDARD', 'STANDARD', 1900, 1900, 100000, 100000, 19000
+         )`,
+        [proposalId, fixture.catalog.variantId],
+      );
+      await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+
+      const emptyListId = randomUUID();
+      await client.query(
+        `INSERT INTO "PriceList" ("id", "code", "name") VALUES ($1, $2, 'Empty A7 list')`,
+        [emptyListId, `A7EMPTY_${randomUUID().replaceAll("-", "").slice(0, 10).toUpperCase()}`],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "PriceList" SET "status" = 'ACTIVE' WHERE "id" = $1`,
+        [emptyListId],
+        "23514",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "PriceListItem" ("priceListId", "variantId", "unitPriceCents") VALUES ($1, $2, 100001)`,
+        [emptyListId, fixture.catalog.variantId],
+        "23514",
+      );
+    });
+  });
+
+  it("blocks CRM references to archived organizations", async () => {
+    await withRollback(async (client) => {
+      const organizationId = randomUUID();
+      await client.query(
+        `INSERT INTO "Organization" ("id", "legalName") VALUES ($1, 'Archived A7 org')`,
+        [organizationId],
+      );
+      await client.query(
+        `UPDATE "Organization" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [organizationId],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "Contact" ("organizationId", "source", "retentionReviewAt")
+         VALUES ($1, 'a7-test', CURRENT_TIMESTAMP + INTERVAL '30 days')`,
+        [organizationId],
+        "23514",
+      );
+    });
+  });
+
+  async function createA7PaidOrder(client, customerId, cartId = null) {
+    const id = randomUUID();
+    await client.query(
+      `INSERT INTO "DaneDepartment" ("code", "name") VALUES ('11', 'Bogotá') ON CONFLICT ("code") DO NOTHING`,
+    );
+    await client.query(
+      `INSERT INTO "DaneMunicipality" ("code", "departmentCode", "name", "locationType")
+       VALUES ('11001', '11', 'Bogotá, D.C.', 'Municipio') ON CONFLICT ("code") DO NOTHING`,
+    );
+    await client.query(
+      `INSERT INTO "Order" (
+         "id", "orderNumber", "customerId", "cartId", "orderStatus", "paymentStatus", "fulfillmentStatus",
+         "fulfillmentMethod", "taxRegime", "uvtValueCents", "uvtYear", "emailSnapshot", "recipientNameSnapshot",
+         "phoneE164Snapshot", "departmentCode", "departmentNameSnapshot", "municipalityCode", "municipalityNameSnapshot",
+         "addressLine1Snapshot", "deliveryPromiseAt", "reservationKey",
+         "reservationExpiresAt", "termsVersion", "privacyPolicyVersion", "acceptanceProofHash", "acceptedAt",
+         "confirmedAt", "buyerDocumentTypeSnapshot", "buyerDocumentNumberSnapshot", "subtotalCents",
+         "discountCents", "taxCents", "shippingCents", "totalCents"
+       ) VALUES (
+         $1, $2, $3, $4, 'CONFIRMED', 'PAID', 'FULFILLED', 'HOME_DELIVERY', 'NO_RESPONSABLE_IVA', 5237400, 2026,
+         $5, 'A7 Buyer', '+573001234567', '11', 'Bogotá', '11001', 'Bogotá, D.C.', 'A7 address', CURRENT_TIMESTAMP + INTERVAL '1 day', $6,
+         CURRENT_TIMESTAMP + INTERVAL '2 hours', '2026-01', '2026-01', $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+         '13', '1020304050', 100000, 0, 0, 0, 100000
+       )`,
+      [
+        id,
+        `A7-${randomUUID().replaceAll("-", "").slice(0, 26).toUpperCase()}`,
+        customerId,
+        cartId,
+        `a7-${id}@example.test`,
+        `a7-reservation-${id}`,
+        randomBytes(32),
+      ],
+    );
+    return { id };
+  }
+
+  it("requires first paid eligible non-B2B orders for referrals and available customers for consent", async () => {
+    await withRollback(async (client) => {
+      const referrerId = await createA7Customer(client, "a7-referrer");
+      const codeId = randomUUID();
+      await client.query(
+        `INSERT INTO "ReferralCode" ("id", "customerId", "code") VALUES ($1, $2, 'A7REFERRAL99')`,
+        [codeId, referrerId],
+      );
+      const secondReferredId = await createA7Customer(client, "a7-second");
+      const referralId = randomUUID();
+      await client.query(
+        `INSERT INTO "Referral" ("id", "codeId", "referrerCustomerId", "referredCustomerId") VALUES ($1, $2, $3, $4)`,
+        [referralId, codeId, referrerId, secondReferredId],
+      );
+      const cartId = randomUUID();
+      await client.query(
+        `INSERT INTO "Cart" ("id", "accessTokenHash", "kind", "expiresAt") VALUES ($1, $2, 'B2B', CURRENT_TIMESTAMP + INTERVAL '1 day')`,
+        [cartId, randomBytes(32)],
+      );
+      const b2bOrder = await createA7PaidOrder(client, secondReferredId, cartId);
+      await expectSqlViolation(
+        client,
+        `UPDATE "Referral" SET "status" = 'QUALIFIED', "orderId" = $2, "qualifiedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [referralId, b2bOrder.id],
+        "23514",
+      );
+
+      const anonymizedId = await createA7Customer(client, "a7-anonymized");
+      await client.query(
+        `UPDATE "Customer" SET "status" = 'ANONYMIZED', "deletedAt" = CURRENT_TIMESTAMP,
+         "authUserId" = NULL, "email" = 'anon-' || replace("id"::text, '-', '') || '@anonymized.invalid',
+         "givenName" = NULL, "familyName" = NULL, "phoneE164" = NULL, "loyaltyPoints" = 0
+         WHERE "id" = $1`,
+        [anonymizedId],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "Consent" ("customerId", "purpose", "status", "source", "policyVersion", "proofHash")
+         VALUES ($1, 'MARKETING_EMAIL', 'GRANTED', 'a7-test', '2026-01', $2)`,
+        [anonymizedId, randomBytes(32)],
+        "23514",
+      );
+    });
+  });
+
+  it("enforces hardened A7 proposal, contact org reactivation, segment archive and lifecycle HTML triggers", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createA7Opportunity(client);
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "OpportunityProposal" (
+           "id", "opportunityId", "version", "status", "contentHash", "subtotalCents", "discountCents", "taxCents",
+           "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
+           "reservationMinutes", "expiresAt", "createdByAdminUserId", "publicTokenHash", "issuedAt"
+         ) VALUES ($1, $2, 1, 'SENT', $3, 100000, 0, 0, 0, 100000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
+           CURRENT_TIMESTAMP + INTERVAL '1 day', $4, $5, CURRENT_TIMESTAMP)`,
+        [
+          randomUUID(),
+          fixture.opportunityId,
+          randomBytes(32),
+          fixture.adminUserId,
+          randomBytes(32),
+        ],
+        "23514",
+      );
+
+      const zeroItemProposalId = randomUUID();
+      await client.query(
+        `INSERT INTO "OpportunityProposal" (
+           "id", "opportunityId", "version", "contentHash", "subtotalCents", "discountCents", "taxCents",
+           "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
+           "reservationMinutes", "expiresAt", "createdByAdminUserId"
+         ) VALUES ($1, $2, 1, $3, 0, 0, 0, 0, 0, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
+           CURRENT_TIMESTAMP + INTERVAL '1 day', $4)`,
+        [zeroItemProposalId, fixture.opportunityId, randomBytes(32), fixture.adminUserId],
+      );
+      const b2bCartId = randomUUID();
+      await client.query(
+        `INSERT INTO "Cart" ("id", "accessTokenHash", "kind", "expiresAt") VALUES ($1, $2, 'B2B', CURRENT_TIMESTAMP + INTERVAL '1 day')`,
+        [b2bCartId, randomBytes(32)],
+      );
+      const zeroItemSp = `a7_zero_${randomUUID().replaceAll("-", "")}`;
+      await client.query(`SAVEPOINT ${zeroItemSp}`);
+      let zeroItemError;
+      try {
+        await client.query(
+          `UPDATE "OpportunityProposal" SET "status" = 'SENT', "publicTokenHash" = $2, "cartId" = $3, "issuedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+          [zeroItemProposalId, randomBytes(32), b2bCartId],
+        );
+        await client.query("SET CONSTRAINTS ALL IMMEDIATE");
+      } catch (caught) {
+        zeroItemError = caught;
+      } finally {
+        await client.query(`ROLLBACK TO SAVEPOINT ${zeroItemSp}`);
+        await client.query(`RELEASE SAVEPOINT ${zeroItemSp}`);
+      }
+      assert.ok(zeroItemError, "Expected 0-item SENT proposal to fail balance check");
+      assert.equal(zeroItemError.code, "23514", zeroItemError.message);
+
+      const archivedOrgId = randomUUID();
+      const targetOrgId = randomUUID();
+      await client.query(
+        `INSERT INTO "Organization" ("id", "legalName") VALUES ($1, 'Archived Reactivate Org'), ($2, 'Target Active Org')`,
+        [archivedOrgId, targetOrgId],
+      );
+      const mergedContactId = randomUUID();
+      const targetContactId = randomUUID();
+      await client.query(
+        `INSERT INTO "Contact" ("id", "organizationId", "source", "retentionReviewAt")
+         VALUES ($1, $2, 'a7-test', CURRENT_TIMESTAMP + INTERVAL '30 days'),
+                ($3, $4, 'a7-test', CURRENT_TIMESTAMP + INTERVAL '30 days')`,
+        [mergedContactId, archivedOrgId, targetContactId, targetOrgId],
+      );
+      await client.query(
+        `UPDATE "Contact" SET "status" = 'MERGED', "mergedIntoContactId" = $2, "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [mergedContactId, targetContactId],
+      );
+      await client.query(
+        `UPDATE "Organization" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [archivedOrgId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "Contact" SET "status" = 'ACTIVE', "mergedIntoContactId" = NULL, "deletedAt" = NULL WHERE "id" = $1`,
+        [mergedContactId],
+        "23514",
+      );
+
+      const segmentId = randomUUID();
+      await client.query(
+        `INSERT INTO "CustomerSegment" ("id", "name", "definition", "definitionHash", "status", "createdByAdminUserId", "updatedByAdminUserId")
+         VALUES ($1, 'Seg A7 Guard', '{"rfmClass":"PROSPECT"}'::jsonb, $2, 'DRAFT', $3, $3)`,
+        [segmentId, randomBytes(32), fixture.adminUserId],
+      );
+      await client.query(
+        `UPDATE "CustomerSegment" SET "status" = 'ACTIVE', "activatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [segmentId],
+      );
+      const journeyId = randomUUID();
+      await client.query(
+        `INSERT INTO "LifecycleJourney" ("id", "name", "segmentId", "status", "createdByAdminUserId", "updatedByAdminUserId")
+         VALUES ($1, 'Journey A7 Guard', $2, 'DRAFT', $3, $3)`,
+        [journeyId, segmentId, fixture.adminUserId],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "LifecycleStep" ("journeyId", "position", "offsetMinutes", "subject", "htmlBody", "textBody", "variables")
+         VALUES ($1, 0, 0, 'Test', '<a href="&#106;avascript:alert(1)">x</a>{{unsubscribeUrl}}', '{{unsubscribeUrl}}', '["unsubscribeUrl"]'::jsonb)`,
+        [journeyId],
+        "23514",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "LifecycleStep" ("journeyId", "position", "offsetMinutes", "subject", "htmlBody", "textBody", "variables")
+         VALUES ($1, 0, 0, 'Test', '<a href="data:image/svg+xml;base64,PHN2Zz4=">x</a>{{unsubscribeUrl}}', '{{unsubscribeUrl}}', '["unsubscribeUrl"]'::jsonb)`,
+        [journeyId],
+        "23514",
+      );
+      await client.query(
+        `INSERT INTO "LifecycleStep" ("journeyId", "position", "offsetMinutes", "subject", "htmlBody", "textBody", "variables")
+         VALUES ($1, 0, 0, 'Test', '<p>Ok {{unsubscribeUrl}}</p>', '{{unsubscribeUrl}}', '["unsubscribeUrl"]'::jsonb)`,
+        [journeyId],
+      );
+      await client.query(
+        `UPDATE "LifecycleJourney" SET "status" = 'ACTIVE', "segmentVersion" = 0, "activatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [journeyId],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "CustomerSegment" SET "status" = 'ARCHIVED', "archivedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [segmentId],
+        "55000",
+      );
+    });
+  });
+});

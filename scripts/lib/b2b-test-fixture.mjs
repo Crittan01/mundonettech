@@ -12,18 +12,32 @@ export const b2bTables = [
 export async function seedB2bFixture(client, { adminId, catalog, crm }) {
   const priceListId = randomUUID();
   const priceListItemId = randomUUID();
+  const draftPriceListId = randomUUID();
+  const draftPriceListItemId = randomUUID();
   const opportunityId = randomUUID();
   const proposalId = randomUUID();
   const proposalItemId = randomUUID();
   const copilotRunId = randomUUID();
   const credentialId = randomUUID();
+  const priceListCode = `B2B-${randomUUID().slice(0, 8).toUpperCase()}`;
   await client.query(
     `INSERT INTO "PriceList" ("id", "code", "name", "description") VALUES ($1, $2, 'Lista B2B para matriz RLS', 'Fixture persistente sin exposición pública.')`,
-    [priceListId, `B2B-${randomUUID().slice(0, 8).toUpperCase()}`],
+    [priceListId, priceListCode],
   );
   await client.query(
     `INSERT INTO "PriceListItem" ("id", "priceListId", "variantId", "unitPriceCents") VALUES ($1, $2, $3, 90000)`,
     [priceListItemId, priceListId, catalog.variantId],
+  );
+  await client.query(`UPDATE "PriceList" SET "status" = 'ACTIVE', "version" = 1 WHERE "id" = $1`, [
+    priceListId,
+  ]);
+  await client.query(
+    `INSERT INTO "PriceList" ("id", "code", "name", "description") VALUES ($1, $2, 'Lista B2B borrador RLS', 'Fixture borrador para validar RLS en altas y ediciones.')`,
+    [draftPriceListId, `B2BD-${randomUUID().slice(0, 8).toUpperCase()}`],
+  );
+  await client.query(
+    `INSERT INTO "PriceListItem" ("id", "priceListId", "variantId", "unitPriceCents") VALUES ($1, $2, $3, 90000)`,
+    [draftPriceListItemId, draftPriceListId, catalog.variantId],
   );
   await client.query(
     `INSERT INTO "Opportunity" (
@@ -36,8 +50,8 @@ export async function seedB2bFixture(client, { adminId, catalog, crm }) {
        "id", "opportunityId", "version", "contentHash", "priceListId", "priceListCodeSnapshot", "priceListVersionSnapshot",
        "subtotalCents", "discountCents", "taxCents", "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear",
        "deliveryPromiseDays", "reservationMinutes", "expiresAt", "createdByAdminUserId"
-     ) VALUES ($1, $2, 1, $3, $4, 'RLS-B2B', 0, 100000, 10000, 0, 5000, 95000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120, CURRENT_TIMESTAMP + INTERVAL '7 days', $5)`,
-    [proposalId, opportunityId, randomBytes(32), priceListId, adminId],
+     ) VALUES ($1, $2, 1, $3, $4, $5, 1, 100000, 10000, 0, 5000, 95000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120, CURRENT_TIMESTAMP + INTERVAL '7 days', $6)`,
+    [proposalId, opportunityId, randomBytes(32), priceListId, priceListCode, adminId],
   );
   await client.query(
     `INSERT INTO "OpportunityProposalItem" (

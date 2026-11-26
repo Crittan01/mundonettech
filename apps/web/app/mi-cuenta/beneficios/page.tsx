@@ -10,6 +10,7 @@ import { AttributeReferralForm, CreateReferralCodeForm } from "@/components/acco
 import { growthService } from "@/lib/growth";
 import { getPublicSiteUrl } from "@/lib/integrations";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
+import { readReferralCode } from "@/lib/security/referral";
 
 export const metadata = { title: "Puntos y referidos", robots: { index: false, follow: false } };
 
@@ -29,7 +30,8 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
   const raw = await searchParams;
   const parsedCode = codeSchema.safeParse(single(raw.codigo).trim());
   const overview = await growthService().getAccountOverview(profile.id);
-  const initialCode = parsedCode.success ? parsedCode.data.toUpperCase() : "";
+  const cookieCode = parsedCode.success ? null : await readReferralCode();
+  const initialCode = parsedCode.success ? parsedCode.data.toUpperCase() : (cookieCode ?? "");
   const shareUrl = overview.referralCode
     ? `${getPublicSiteUrl()}/referido/${encodeURIComponent(overview.referralCode)}`
     : null;
@@ -39,7 +41,8 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
         <h1 className="text-3xl font-bold">Puntos y referidos</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Consulta movimientos confirmados y comparte tu código. Las recompensas se otorgan solo
-          sobre compras pagadas elegibles y se reversan proporcionalmente con los reembolsos.
+          sobre compras pagadas elegibles y se reversan proporcionalmente con reembolsos y
+          anulaciones.
         </p>
       </div>
       {!parsedCode.success && single(raw.codigo) ? (

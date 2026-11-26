@@ -165,6 +165,31 @@ function sellable(variant: VariantForProposal): boolean {
   return isSellableVariant(variant);
 }
 
+async function lockVariantRows(
+  tx: Prisma.TransactionClient,
+  variantIds: readonly string[],
+): Promise<void> {
+  const ids = [...new Set(variantIds)].sort();
+  if (ids.length === 0) return;
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT v."id"
+    FROM "ProductVariant" v
+    JOIN "Product" p ON p."id" = v."productId"
+    JOIN "Brand" b ON b."id" = p."brandId"
+    JOIN "Category" c ON c."id" = p."categoryId"
+    WHERE v."id" = ANY(${ids}::uuid[])
+      AND v."deletedAt" IS NULL
+      AND p."deletedAt" IS NULL
+      AND b."deletedAt" IS NULL
+      AND c."deletedAt" IS NULL
+    ORDER BY v."id" ASC
+    FOR SHARE OF v, p, b, c
+  `;
+  if (rows.length !== ids.length) {
+    throw retryableLockDivergenceError("A proposal variant changed before it was locked.");
+  }
+}
+
 function publicUnavailableReason(
   proposal: OpportunityProposal,
   currentVersion: number,
@@ -333,6 +358,15 @@ export class B2bService {
       if (!organization) {
         organization = await tx.organization.create({ data: organizationInput });
       }
+      await acquireOperationLocks(tx, [`crm-organization:${organization.id}`]);
+      const lockedOrgs = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT "id" FROM "Organization"
+        WHERE "id" = ${organization.id}::uuid AND "deletedAt" IS NULL
+        FOR SHARE
+      `;
+      if (!lockedOrgs[0]) {
+        throw retryableLockDivergenceError("The organization was archived concurrently.");
+      }
       let contact = await tx.contact.findFirst({
         where: {
           organizationId: organization.id,
@@ -358,14 +392,6 @@ export class B2bService {
         } else {
           contact = null;
         }
-      }
-      const lockedOrgs = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "Organization"
-        WHERE "id" = ${organization.id}::uuid AND "deletedAt" IS NULL
-        FOR SHARE
-      `;
-      if (!lockedOrgs[0]) {
-        throw retryableLockDivergenceError("The organization was archived concurrently.");
       }
       if (!contact) {
         contact = await tx.contact.create({
@@ -406,6 +432,7 @@ export class B2bService {
         data: {
           organizationId: organization.id,
           contactId: contact.id,
+          status: "NEW",
           source: "storefront-b2b",
           requirements,
           privacyPolicyVersion,
@@ -541,7 +568,14 @@ export class B2bService {
 
   async listPriceLists(): Promise<readonly B2bPriceListView[]> {
     const records = await this.db.priceList.findMany({
-      include: { _count: { select: { items: true, organizations: true } } },
+      include: {
+        _count: {
+          select: {
+            items: true,
+            organizations: { where: { deletedAt: null } },
+          },
+        },
+      },
       orderBy: [{ createdAt: "desc" }, { code: "asc" }],
       take: 500,
     });
@@ -668,12 +702,20 @@ export class B2bService {
       if (current.items.length === 0) {
         throw new B2bError("VALIDATION", "Add at least one item before activating the price list.");
       }
+      await lockVariantRows(
+        tx,
+        current.items.map((item) => item.variantId),
+      );
+      const lockedVariants = (await tx.productVariant.findMany({
+        where: { id: { in: current.items.map((item) => item.variantId) } },
+        include: { product: { include: { brand: true, category: true, taxGroup: true } } },
+      })) as VariantForProposal[];
+      const lockedById = new Map(lockedVariants.map((variant) => [variant.id, variant]));
       if (
-        current.items.some(
-          (item) =>
-            !sellable(item.variant as VariantForProposal) ||
-            item.unitPriceCents > item.variant.priceCents,
-        )
+        current.items.some((item) => {
+          const variant = lockedById.get(item.variantId);
+          return !variant || !sellable(variant) || item.unitPriceCents > variant.priceCents;
+        })
       ) {
         throw new B2bError(
           "CONFLICT",
@@ -712,6 +754,12 @@ export class B2bService {
       if (assigned > 0) {
         throw new B2bError("CONFLICT", "Unassign organizations before archiving the price list.");
       }
+      const openProposals = await tx.opportunityProposal.count({
+        where: { priceListId: id, status: { in: ["DRAFT", "SENT"] } },
+      });
+      if (openProposals > 0) {
+        throw new B2bError("CONFLICT", "Close open proposals before archiving the price list.");
+      }
       const now = await b2bNow(tx);
       const record = await tx.priceList.update({
         where: { id },
@@ -745,16 +793,18 @@ export class B2bService {
       if (priceList.version !== version || priceList.status !== "DRAFT") {
         throw new B2bError("CONFLICT", "Price list items are editable only in an unchanged draft.");
       }
-      const variant = (await tx.productVariant.findFirst({
-        where: {
-          sku,
-          status: "ACTIVE",
-          deletedAt: null,
-          product: { status: "ACTIVE", deletedAt: null },
-        },
+      const initialVariant = await tx.productVariant.findFirst({
+        where: { sku, deletedAt: null, product: { deletedAt: null } },
+        select: { id: true },
+      });
+      if (!initialVariant)
+        throw new B2bError("NOT_FOUND", "Active variant not found for this SKU.");
+      await lockVariantRows(tx, [initialVariant.id]);
+      const variant = (await tx.productVariant.findUnique({
+        where: { id: initialVariant.id },
         include: { product: { include: { brand: true, category: true, taxGroup: true } } },
       })) as VariantForProposal | null;
-      if (!variant || !sellable(variant)) {
+      if (!variant || variant.sku !== sku || !sellable(variant)) {
         throw new B2bError("NOT_FOUND", "Active variant not found for this SKU.");
       }
       if (unitPriceCents > variant.priceCents) {
@@ -895,8 +945,16 @@ export class B2bService {
       throw new B2bError("VALIDATION", "Each SKU can appear only once in a proposal.");
     }
     const skuList = normalized.map((input) => input.sku).sort();
+    const initialVariants = await tx.productVariant.findMany({
+      where: { sku: { in: skuList }, deletedAt: null, product: { deletedAt: null } },
+      select: { id: true },
+    });
+    await lockVariantRows(
+      tx,
+      initialVariants.map((variant) => variant.id),
+    );
     const variants = (await tx.productVariant.findMany({
-      where: { sku: { in: skuList } },
+      where: { id: { in: initialVariants.map((variant) => variant.id) } },
       include: { product: { include: { brand: true, category: true, taxGroup: true } } },
     })) as VariantForProposal[];
     const bySku = new Map(variants.filter(sellable).map((variant) => [variant.sku, variant]));
@@ -926,15 +984,19 @@ export class B2bService {
         throw new B2bError("VALIDATION", "Each proposal quantity must be between 1 and 100000.");
       }
       const variant = bySku.get(input.sku)!;
-      const defaultPrice = listPrices.get(variant.id) ?? variant.priceCents;
+      const listPrice = listPrices.get(variant.id);
+      const boundedByList = listPrice !== undefined && listPrice < variant.priceCents;
+      const priceCeiling = boundedByList ? listPrice : variant.priceCents;
       const unitPriceCents =
         input.unitPriceCents === undefined
-          ? defaultPrice
+          ? priceCeiling
           : b2bMoney(input.unitPriceCents, "unitPriceCents");
-      if (unitPriceCents > variant.priceCents) {
+      if (unitPriceCents > priceCeiling) {
         throw new B2bError(
           "VALIDATION",
-          `The negotiated price for ${input.sku} exceeds its catalog price.`,
+          boundedByList
+            ? `The negotiated price for ${input.sku} exceeds its assigned price list ceiling.`
+            : `The negotiated price for ${input.sku} exceeds its catalog price.`,
         );
       }
       const gross = b2bMoney(variant.priceCents * BigInt(input.quantity), "line gross");
@@ -1189,6 +1251,26 @@ export class B2bService {
       const now = await b2bNow(tx);
       if (proposal.expiresAt <= now)
         throw new B2bError("EXPIRED", "Create a new version with a future expiry.");
+      if (proposal.priceListId) {
+        await acquireOperationLocks(tx, [`b2b-price-list:${proposal.priceListId}`]);
+        const list = await tx.priceList.findUnique({ where: { id: proposal.priceListId } });
+        if (
+          !list ||
+          list.deletedAt !== null ||
+          list.status !== "ACTIVE" ||
+          (proposal.priceListCodeSnapshot !== null &&
+            list.code !== proposal.priceListCodeSnapshot) ||
+          (proposal.priceListVersionSnapshot !== null &&
+            list.version !== proposal.priceListVersionSnapshot) ||
+          (list.validFrom !== null && list.validFrom > now) ||
+          (list.validTo !== null && list.validTo <= now)
+        ) {
+          throw new B2bError(
+            "CONFLICT",
+            "The proposal price list is no longer active or valid; create a new version.",
+          );
+        }
+      }
       const previous = await tx.opportunityProposal.findMany({
         where: { opportunityId: proposal.opportunityId, status: { in: ["SENT", "EXPIRED"] } },
         select: { id: true, cartId: true },

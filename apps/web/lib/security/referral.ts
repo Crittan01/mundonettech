@@ -22,6 +22,17 @@ export async function storeReferralCode(value: string): Promise<string> {
   return code;
 }
 
+export async function readReferralCode(): Promise<string | null> {
+  const store = await cookies();
+  const value = store.get(referralCookie)?.value;
+  if (!value) return null;
+  try {
+    return normalizeReferralCode(value);
+  } catch {
+    return null;
+  }
+}
+
 export async function consumeReferralPath(): Promise<string | null> {
   const store = await cookies();
   const value = store.get(referralCookie)?.value;

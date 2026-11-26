@@ -215,6 +215,38 @@ function templateTokens(
   ].sort();
 }
 
+function decodeHtmlEntitiesForSafetyCheck(value: string): string {
+  return value
+    .replaceAll(/&#x([0-9a-f]+);?/gi, (_match, hex: string) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) && code >= 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : "";
+    })
+    .replaceAll(/&#([0-9]+);?/g, (_match, dec: string) => {
+      const code = Number.parseInt(dec, 10);
+      return Number.isFinite(code) && code >= 0 && code <= 0x10ffff
+        ? String.fromCodePoint(code)
+        : "";
+    })
+    .replaceAll(/&colon;?/gi, ":")
+    .replaceAll(/&tab;?/gi, "\t")
+    .replaceAll(/&newline;?/gi, "\n")
+    .replaceAll(/[\u0000-\u0020]+/g, "");
+}
+
+const unsafeLifecycleHtmlPattern =
+  /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|style)\b|[\s/]on[a-z]+\s*=|(?:javascript|vbscript)\s*:|data\s*:\s*(?:text\/html|image\/svg\+xml|application\/xhtml\+xml)|expression\s*\(/i;
+const unsafeLifecycleDecodedUriPattern =
+  /(?:javascript|vbscript):|data:(?:text\/html|image\/svg\+xml|application\/xhtml\+xml)/i;
+
+export function hasUnsafeEmailHtml(htmlBody: string): boolean {
+  return (
+    unsafeLifecycleHtmlPattern.test(htmlBody) ||
+    unsafeLifecycleDecodedUriPattern.test(decodeHtmlEntitiesForSafetyCheck(htmlBody))
+  );
+}
+
 export function normalizeLifecycleSteps(value: unknown): LifecycleStepInput[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > maximumJourneySteps) {
     throw new RangeError(`A journey requires between 1 and ${maximumJourneySteps} steps.`);
@@ -248,11 +280,7 @@ export function normalizeLifecycleSteps(value: unknown): LifecycleStepInput[] {
     const subject = lifecycleSingleLineText(input.subject, `steps[${index}].subject`, 1, 200);
     const htmlBody = lifecycleText(input.htmlBody, `steps[${index}].htmlBody`, 1, 50_000);
     const textBody = lifecycleText(input.textBody, `steps[${index}].textBody`, 1, 20_000);
-    if (
-      /<\/?(?:script|iframe|object|embed|form|meta|link|base|svg|style)\b|[\s/]on[a-z]+\s*=|(?:javascript|vbscript)\s*:|data\s*:\s*text\/html|expression\s*\(/i.test(
-        htmlBody,
-      )
-    ) {
+    if (hasUnsafeEmailHtml(htmlBody)) {
       throw new TypeError("Lifecycle email HTML contains active or unsafe content.");
     }
     if (

@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 
 import { actionError, actionSuccess, closedFormObject, type ActionState } from "@/lib/action-state";
+import { transferGuestCartToCustomer } from "@/lib/cart";
 import { getDatabase } from "@/lib/db";
 import {
   clearActivityCookies,
@@ -211,18 +212,17 @@ export async function verifyCustomerOtpAction(
   }
   await clearCustomerAuthRequest();
   try {
-    await synchronizeCustomerProfile(data.user.id, request.email);
+    const profile = await synchronizeCustomerProfile(data.user.id, request.email);
     await establishCustomerActivity(data.user.id);
+    if (profile?.id) await transferGuestCartToCustomer(profile.id);
   } catch {
     await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
     await clearActivityCookies();
     return actionError("No pudimos activar tu cuenta. Inténtalo de nuevo o contacta soporte.");
   }
-  const referralPath = await consumeReferralPath();
-  const destination =
-    referralPath && (!request.next || request.next === "/mi-cuenta/beneficios")
-      ? referralPath
-      : (request.next ?? "/mi-cuenta");
+  const canUseReferralRedirect = !request.next || request.next === "/mi-cuenta/beneficios";
+  const referralPath = canUseReferralRedirect ? await consumeReferralPath() : null;
+  const destination = referralPath ?? request.next ?? "/mi-cuenta";
   redirect(destination);
 }
 
@@ -277,8 +277,9 @@ export async function resetCustomerPasswordAction(
     );
   }
   try {
-    await synchronizeCustomerProfile(data.user.id, request.email);
+    const profile = await synchronizeCustomerProfile(data.user.id, request.email);
     await establishCustomerActivity(data.user.id);
+    if (profile?.id) await transferGuestCartToCustomer(profile.id);
   } catch {
     await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
     await clearActivityCookies();

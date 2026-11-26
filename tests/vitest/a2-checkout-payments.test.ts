@@ -478,10 +478,20 @@ describe("A5 — normalized B2B phone capture", () => {
       replayed: false,
     }));
     const b2bActions = loadActionModule<Record<string, ServerAction>>("b2b-public", {
-      "@mundonettech/db": { B2bError: class extends Error {} },
+      "@mundonettech/db": {
+        B2bError: class extends Error {},
+        CrmError: class extends Error {},
+        OperationRateLimitError: class extends Error {},
+        consumeOperationRateLimit: vi.fn(async () => ({
+          allowed: true,
+          retryAfterSeconds: 0,
+          remaining: 9,
+        })),
+      },
       "next/cache": { revalidatePath: mocks.revalidatePath, updateTag: mocks.updateTag },
       "next/navigation": { redirect: mocks.redirect },
       "@/lib/action-state": { actionError, actionSuccess, formString },
+      "@/lib/db": { getDatabase: () => ({}) },
       "@/lib/b2b": {
         b2bService: () => ({ captureOpportunity }),
         hashProposalToken: (value: string) => value,

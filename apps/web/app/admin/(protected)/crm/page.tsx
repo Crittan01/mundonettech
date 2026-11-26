@@ -296,32 +296,34 @@ export default async function CrmPage({ searchParams }: PageProps<"/admin/crm">)
               ) : null}
             </article>
           ))}
-          {merged.length > 0 ? (
+          {merged.some((candidate) => candidate.reversible) ? (
             <h3 className="pt-4 text-xl font-semibold">Fusiones reversibles</h3>
           ) : null}
-          {merged.map((candidate) => (
-            <article
-              key={candidate.id}
-              className="space-y-3 rounded-xl border border-border bg-card p-5"
-            >
-              <p className="text-sm">
-                <Link className="underline" href={`/admin/crm/${candidate.targetContact.id}`}>
-                  {candidate.targetContact.givenName} {candidate.targetContact.familyName}
-                </Link>{" "}
-                conserva el linaje de {candidate.sourceContact.givenName}{" "}
-                {candidate.sourceContact.familyName} · {candidate.resolutionNote}
-              </p>
-              {canMerge ? (
-                <CrmMergeForm
-                  candidateId={candidate.id}
-                  version={candidate.version}
-                  sourceVersion={candidate.sourceContact.version}
-                  targetVersion={candidate.targetContact.version}
-                  status="MERGED"
-                />
-              ) : null}
-            </article>
-          ))}
+          {merged
+            .filter((candidate) => candidate.reversible)
+            .map((candidate) => (
+              <article
+                key={candidate.id}
+                className="space-y-3 rounded-xl border border-border bg-card p-5"
+              >
+                <p className="text-sm">
+                  <Link className="underline" href={`/admin/crm/${candidate.targetContact.id}`}>
+                    {candidate.targetContact.givenName} {candidate.targetContact.familyName}
+                  </Link>{" "}
+                  conserva el linaje de {candidate.sourceContact.givenName}{" "}
+                  {candidate.sourceContact.familyName} · {candidate.resolutionNote}
+                </p>
+                {canMerge ? (
+                  <CrmMergeForm
+                    candidateId={candidate.id}
+                    version={candidate.version}
+                    sourceVersion={candidate.sourceContact.version}
+                    targetVersion={candidate.targetContact.version}
+                    status="MERGED"
+                  />
+                ) : null}
+              </article>
+            ))}
         </section>
       ) : null}
     </div>

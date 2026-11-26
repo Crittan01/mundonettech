@@ -806,6 +806,8 @@ export class OrderService {
           ? await carts.getByAccessToken(reference.accessTokenHash)
           : await carts.getById(reference.cartId);
       if (!cart || cart.status !== "ACTIVE") return null;
+      const now = await databaseNow(tx);
+      if (new Date(cart.expiresAt) <= now) return null;
       const settings = await settingsForCart(tx, this.defaults, cart);
       const taxes = await taxesForCart(tx, cart, settings);
       const merchandiseTotalCents = BigInt(cart.totalCents) + totalTax(taxes);
@@ -1369,7 +1371,10 @@ export class OrderService {
 
         let customerId = locked.customerId;
         if (customerId) {
-          await acquireOperationLocks(tx, [`crm-customer:${customerId}`]);
+          await acquireOperationLocks(tx, [
+            `crm-customer:${customerId}`,
+            `growth-customer:${customerId}`,
+          ]);
           const customerRows = await tx.$queryRaw<
             Array<{
               id: string;
@@ -1406,7 +1411,10 @@ export class OrderService {
             select: { id: true },
           });
           if (peekedCustomer) {
-            await acquireOperationLocks(tx, [`crm-customer:${peekedCustomer.id}`]);
+            await acquireOperationLocks(tx, [
+              `crm-customer:${peekedCustomer.id}`,
+              `growth-customer:${peekedCustomer.id}`,
+            ]);
           }
           const existingRows = await tx.$queryRaw<Array<{ id: string; status: string }>>`
             SELECT "id", "status" FROM "Customer"
@@ -1447,7 +1455,10 @@ export class OrderService {
               },
             });
             customerId = customer.id;
-            await acquireOperationLocks(tx, [`crm-customer:${customerId}`]);
+            await acquireOperationLocks(tx, [
+              `crm-customer:${customerId}`,
+              `growth-customer:${customerId}`,
+            ]);
           }
         }
         await new CrmService(this.db).syncCustomerContactInTransaction(tx, customerId, {

@@ -93,6 +93,8 @@ function isPrivateNoStorePath(pathname: string): boolean {
     hasProtectedPathPrefix(pathname, "/recibo") ||
     hasProtectedPathPrefix(pathname, "/pagar") ||
     hasProtectedPathPrefix(pathname, "/propuesta") ||
+    hasProtectedPathPrefix(pathname, "/referido") ||
+    hasProtectedPathPrefix(pathname, "/email/baja") ||
     hasProtectedPathPrefix(pathname, "/carrito") ||
     hasProtectedPathPrefix(pathname, "/checkout") ||
     hasProtectedPathPrefix(pathname, "/ingresar") ||
@@ -109,6 +111,7 @@ function isCapabilityTokenPath(pathname: string): boolean {
     hasProtectedPathPrefix(pathname, "/api/recibos") ||
     hasProtectedPathPrefix(pathname, "/pagar") ||
     hasProtectedPathPrefix(pathname, "/propuesta") ||
+    hasProtectedPathPrefix(pathname, "/referido") ||
     hasProtectedPathPrefix(pathname, "/pedido") ||
     hasProtectedPathPrefix(pathname, "/email/baja")
   );

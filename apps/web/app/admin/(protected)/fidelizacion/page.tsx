@@ -61,7 +61,7 @@ export default async function GrowthAdminPage() {
           Movimientos recientes
         </h2>
         {overview.ledger.length === 0 ? (
-          <EmptyState>No hay puntos otorgados o reversados todavía.</EmptyState>
+          <EmptyState>No hay movimientos de lealtad registrados todavía.</EmptyState>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-border bg-card">
             <table className="w-full min-w-[58rem] text-left text-sm">

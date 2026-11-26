@@ -177,5 +177,84 @@ describe("Gemini zero-PII provider", () => {
       fetchImpl: async () => response({}, 400),
     });
     await expect(rejected.suggest(aggregate)).rejects.toMatchObject({ code: "HTTP_ERROR" });
+
+    expect(() =>
+      parseGeminiCredentials(
+        new TextEncoder().encode(
+          JSON.stringify({
+            ...credentials,
+            apiUrl: "https://generativelanguage.googleapis.com:8443/v1beta/models",
+          }),
+        ),
+      ),
+    ).toThrow(GeminiProviderError);
+
+    const allowedFeedback = new GeminiB2bCopilot(credentials, {
+      fetchImpl: async () =>
+        response({
+          promptFeedback: { safetyRatings: [] },
+          candidates: [
+            {
+              finishReason: "STOP",
+              content: {
+                parts: [
+                  {
+                    text: '{"priority":"NORMAL","nextAction":"SCHEDULE_FOLLOW_UP","reasonCodes":["HIGH_VALUE"],"confidenceBps":8100}',
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+    });
+    await expect(allowedFeedback.suggest(aggregate)).resolves.toMatchObject({
+      priority: "NORMAL",
+      confidenceBps: 8100,
+    });
+
+    const blockedPrompt = new GeminiB2bCopilot(credentials, {
+      fetchImpl: async () => response({ promptFeedback: { blockReason: "SAFETY" } }),
+    });
+    await expect(blockedPrompt.suggest(aggregate)).rejects.toMatchObject({ code: "BLOCKED" });
+
+    const blockedFinish = new GeminiB2bCopilot(credentials, {
+      fetchImpl: async () =>
+        response({
+          candidates: [
+            {
+              finishReason: "SAFETY",
+              content: {
+                parts: [
+                  {
+                    text: '{"priority":"NORMAL","nextAction":"SCHEDULE_FOLLOW_UP","reasonCodes":["HIGH_VALUE"],"confidenceBps":8100}',
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+    });
+    await expect(blockedFinish.suggest(aggregate)).rejects.toMatchObject({ code: "BLOCKED" });
+
+    const badConfidence = new GeminiB2bCopilot(credentials, {
+      fetchImpl: async () =>
+        response({
+          candidates: [
+            {
+              finishReason: "STOP",
+              content: {
+                parts: [
+                  {
+                    text: '{"priority":"NORMAL","nextAction":"REVIEW_PRICING","reasonCodes":["HIGH_VALUE"],"confidenceBps":99999}',
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+    });
+    await expect(badConfidence.suggest(aggregate)).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
   });
 });

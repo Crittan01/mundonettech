@@ -1,9 +1,11 @@
 import { formatCopCents } from "@mundonettech/core";
 import {
+  acquireOperationLocks,
   claimDomainOutboxEvents,
   completeDomainOutbox,
   failDomainOutbox,
   GrowthService,
+  inInventoryTransaction,
   LifecycleService,
   OperationsService,
   retryDomainOutbox,
@@ -30,7 +32,7 @@ import {
   ShippingValidationError,
 } from "./shipping-types.js";
 import { ShippingService } from "./shipping-service.js";
-import { EmailProviderError, EmailValidationError } from "./email-types.js";
+import { EmailConflictError, EmailProviderError, EmailValidationError } from "./email-types.js";
 import type { MetaCapiService } from "./meta-capi-service.js";
 import { MetaCapiServiceError } from "./meta-capi-service.js";
 
@@ -262,21 +264,27 @@ export class DomainEventWorker {
     if (Number.isNaN(activityAt.getTime()) || activityAt.toISOString() !== activityValue) {
       throw new EmailValidationError("Cart abandonment activity timestamp is invalid.");
     }
-    const abandoned = await this.db.abandonedCart.findUnique({
-      where: { cartId },
-      include: {
-        customer: true,
-        cart: {
-          select: {
-            status: true,
-            kind: true,
-            itemCount: true,
-            totalCents: true,
-            order: { select: { id: true } },
+    const [now, abandoned] = await Promise.all([
+      databaseTimestamp(this.db),
+      this.db.abandonedCart.findUnique({
+        where: { cartId },
+        include: {
+          customer: true,
+          cart: {
+            select: {
+              status: true,
+              kind: true,
+              itemCount: true,
+              updatedAt: true,
+              expiresAt: true,
+              totalCents: true,
+              items: { select: { quantity: true } },
+              order: { select: { id: true } },
+            },
           },
         },
-      },
-    });
+      }),
+    ]);
     const growth = new GrowthService(this.db);
     if (!abandoned) return;
     const record = (outcome: "QUEUED" | "NO_CONTACT" | "NO_CONSENT" | "SUPPRESSED" | "STALE") =>
@@ -290,6 +298,9 @@ export class DomainEventWorker {
       abandoned.lastActivityAt.toISOString() !== activityValue ||
       abandoned.cart.status !== "ACTIVE" ||
       abandoned.cart.kind === "B2B" ||
+      abandoned.cart.itemCount <= 0 ||
+      abandoned.cart.expiresAt <= now ||
+      abandoned.cart.updatedAt.getTime() !== abandoned.lastActivityAt.getTime() ||
       abandoned.cart.order !== null
     ) {
       await record("STALE");
@@ -308,31 +319,44 @@ export class DomainEventWorker {
       await record("NO_CONSENT");
       return;
     }
-    const queued = await this.options.email.queue({
-      customerId: abandoned.customer.id,
-      abandonedCartId: abandoned.id,
-      credentialId: await this.emailCredentialId(),
-      templateKey: "cart.recovery",
-      topic: "cart-recovery",
-      recipientEmail: abandoned.customer.email,
-      idempotencyKey: `domain:cart.recovery:${abandoned.id}:${activityValue}`,
-      variables: {
-        storeName: this.options.storeName,
-        itemCount: String(abandoned.cart.itemCount),
-        totalCop: formatCopCents(abandoned.cart.totalCents),
-        cartUrl: `${this.publicSiteUrl}/carrito`,
-      },
-    });
-    await record(queued.status === "SUPPRESSED" ? "SUPPRESSED" : "QUEUED");
+    const totalUnits =
+      abandoned.cart.items.length > 0
+        ? abandoned.cart.items.reduce((sum, item) => sum + item.quantity, 0)
+        : abandoned.cart.itemCount;
+    try {
+      const queued = await this.options.email.queue({
+        customerId: abandoned.customer.id,
+        abandonedCartId: abandoned.id,
+        credentialId: await this.emailCredentialId(),
+        templateKey: "cart.recovery",
+        topic: "cart-recovery",
+        recipientEmail: abandoned.customer.email,
+        idempotencyKey: `domain:cart.recovery:${abandoned.id}:${activityValue}`,
+        variables: {
+          storeName: this.options.storeName,
+          itemCount: String(totalUnits),
+          totalCop: formatCopCents(abandoned.cart.totalCents),
+          cartUrl: `${this.publicSiteUrl}/carrito`,
+        },
+      });
+      await record(queued.status === "SUPPRESSED" ? "SUPPRESSED" : "QUEUED");
+    } catch (error) {
+      if (
+        !(error instanceof EmailConflictError) ||
+        !["NO_CONTACT", "NO_CONSENT", "STALE"].includes(error.code)
+      ) {
+        throw error;
+      }
+      await record(error.code as "NO_CONTACT" | "NO_CONSENT" | "STALE");
+    }
   }
 
   private async queueLifecycleEmail(event: DomainOutbox): Promise<void> {
     const dispatchVersion = this.payload(event).dispatchVersion;
     if (
-      dispatchVersion !== undefined &&
-      (typeof dispatchVersion !== "number" ||
-        !Number.isInteger(dispatchVersion) ||
-        dispatchVersion < 1)
+      typeof dispatchVersion !== "number" ||
+      !Number.isInteger(dispatchVersion) ||
+      dispatchVersion < 1
     ) {
       throw new EmailValidationError("Lifecycle dispatch version is invalid.");
     }
@@ -783,23 +807,35 @@ export class DomainEventWorker {
               const payload = recordValue(event.payload);
               const emailEventId = payload?.emailEventId;
               const messageId = payload?.lifecycleMessageId;
-              if (typeof emailEventId === "string" && typeof messageId === "string") {
+              if (typeof emailEventId === "string" && /^[0-9a-f-]{36}$/i.test(emailEventId)) {
                 const failureCode = this.errorText(error);
-                await this.db.emailEvent.updateMany({
-                  where: { id: emailEventId, status: { in: ["QUEUED", "SENDING"] } },
-                  data: {
-                    status: "FAILED",
-                    statusRank: 70,
-                    finalAt: new Date(),
-                    nextAttemptAt: null,
-                    lastError: failureCode,
-                  },
+                await inInventoryTransaction(this.db, async (tx) => {
+                  const peek = await tx.emailEvent.findUnique({
+                    where: { id: emailEventId },
+                    select: { customerId: true },
+                  });
+                  if (peek?.customerId) {
+                    await acquireOperationLocks(tx, [`growth-customer:${peek.customerId}`]);
+                  }
+                  const now = await databaseTimestamp(tx);
+                  await tx.emailEvent.updateMany({
+                    where: { id: emailEventId, status: { in: ["QUEUED", "SENDING"] } },
+                    data: {
+                      status: "FAILED",
+                      statusRank: 70,
+                      finalAt: now,
+                      nextAttemptAt: null,
+                      lastError: failureCode,
+                    },
+                  });
+                  if (typeof messageId === "string" && /^[0-9a-f-]{36}$/i.test(messageId)) {
+                    await new LifecycleService(tx).markEmailFailed(
+                      messageId,
+                      emailEventId,
+                      failureCode,
+                    );
+                  }
                 });
-                await new LifecycleService(this.db).markEmailFailed(
-                  messageId,
-                  emailEventId,
-                  failureCode,
-                );
               }
             }
             failed += 1;

@@ -2,7 +2,6 @@ import {
   deriveContactVerificationLevel,
   hasAdminPermission,
   isAdminRole,
-  strongestContactVerificationLevel,
 } from "@mundonettech/core";
 
 import type {
@@ -23,6 +22,7 @@ import {
   crmNow,
   crmText,
   crmVersion,
+  retryableLockDivergenceError,
   type CrmAudit,
 } from "./crm-shared.js";
 
@@ -123,6 +123,8 @@ export class CrmMergeService {
         matchReasons: true,
         resolutionNote: true,
         version: true,
+        mergedSourceVersion: true,
+        mergedTargetVersion: true,
         mergedAt: true,
         rejectedAt: true,
         reversedAt: true,
@@ -134,8 +136,14 @@ export class CrmMergeService {
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
       take: 200,
     });
-    return candidates.map((candidate) => ({
+    return candidates.map(({ mergedSourceVersion, mergedTargetVersion, ...candidate }) => ({
       ...candidate,
+      reversible:
+        candidate.status === "MERGED" &&
+        candidate.sourceContact.status === "MERGED" &&
+        candidate.targetContact.status === "ACTIVE" &&
+        candidate.sourceContact.version === mergedSourceVersion &&
+        candidate.targetContact.version === mergedTargetVersion,
       sourceContact: maskCrmContact(candidate.sourceContact),
       targetContact: maskCrmContact(candidate.targetContact),
     }));
@@ -156,19 +164,56 @@ export class CrmMergeService {
   private async lockPair(
     tx: Prisma.TransactionClient,
     candidateId: string,
-  ): Promise<IdentityMergeCandidate> {
+  ): Promise<{ candidate: IdentityMergeCandidate; lockedOrgIds: Set<string> }> {
     const peek = await tx.identityMergeCandidate.findUnique({
       where: { id: candidateId },
-      select: { pairKey: true, sourceContactId: true, targetContactId: true },
+      select: {
+        pairKey: true,
+        status: true,
+        sourceContactId: true,
+        targetContactId: true,
+        sourceSnapshot: true,
+        targetSnapshot: true,
+        sourceContact: { select: { organizationId: true } },
+        targetContact: { select: { organizationId: true } },
+      },
     });
     if (!peek) throw new CrmError("NOT_FOUND", "Identity merge candidate not found.");
+    const peekOpps = await tx.opportunity.findMany({
+      where: { contactId: { in: [peek.sourceContactId, peek.targetContactId] } },
+      select: { organizationId: true },
+    });
+    const orgIdSet = new Set<string>();
+    for (const orgId of [peek.sourceContact.organizationId, peek.targetContact.organizationId]) {
+      if (orgId) orgIdSet.add(orgId);
+    }
+    for (const opp of peekOpps) {
+      if (opp.organizationId) orgIdSet.add(opp.organizationId);
+    }
+    if (peek.status === "MERGED") {
+      for (const snap of [peek.sourceSnapshot, peek.targetSnapshot]) {
+        if (snap && typeof snap === "object" && !Array.isArray(snap)) {
+          const snapOrg = (snap as Record<string, unknown>).organizationId;
+          if (typeof snapOrg === "string" && /^[0-9a-f-]{36}$/i.test(snapOrg)) {
+            orgIdSet.add(snapOrg);
+          }
+        }
+      }
+    }
+    const sortedOrgIds = [...orgIdSet].sort();
+    if (sortedOrgIds.length > 0) {
+      await acquireOperationLocks(
+        tx,
+        sortedOrgIds.map((id) => `crm-organization:${id}`),
+      );
+    }
     await acquireOperationLocks(tx, [
       `crm-contact:${peek.sourceContactId}`,
       `crm-contact:${peek.targetContactId}`,
       `crm-merge:${peek.pairKey}`,
       `crm-merge-candidate:${candidateId}`,
     ]);
-    return this.lockedCandidate(tx, candidateId);
+    return { candidate: await this.lockedCandidate(tx, candidateId), lockedOrgIds: orgIdSet };
   }
 
   async reject(
@@ -184,7 +229,7 @@ export class CrmMergeService {
     const note = crmText(input.note, "note", 10, 500);
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:merge");
-      const candidate = await this.lockPair(tx, input.candidateId);
+      const { candidate } = await this.lockPair(tx, input.candidateId);
       if (candidate.status !== "PENDING") {
         throw new CrmError("CONFLICT", "The candidate is no longer pending.");
       }
@@ -234,7 +279,7 @@ export class CrmMergeService {
     const note = crmText(input.note, "note", 10, 500);
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:merge");
-      const candidate = await this.lockPair(tx, input.candidateId);
+      const { candidate, lockedOrgIds } = await this.lockPair(tx, input.candidateId);
       if (candidate.status !== "PENDING" || candidate.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The candidate is no longer available for merge.");
       }
@@ -265,23 +310,60 @@ export class CrmMergeService {
       const now = await crmNow(tx);
       const [
         sourceIdentities,
-        targetIdentities,
+        allTargetIdentities,
         sourceActivities,
         sourceTasks,
         sourceOpportunities,
       ] = await Promise.all([
         tx.contactIdentity.findMany({ where: { contactId: source.id, retiredAt: null } }),
-        tx.contactIdentity.findMany({ where: { contactId: target.id, retiredAt: null } }),
+        tx.contactIdentity.findMany({ where: { contactId: target.id } }),
         tx.contactActivity.findMany({ where: { contactId: source.id }, select: { id: true } }),
         tx.task.findMany({ where: { contactId: source.id }, select: { id: true } }),
-        tx.opportunity.findMany({ where: { contactId: source.id }, select: { id: true } }),
+        tx.opportunity.findMany({
+          where: { contactId: source.id },
+          select: { id: true, organizationId: true },
+        }),
       ]);
-      const targetIdentityKeys = new Set(
-        targetIdentities.map((item) => `${item.kind}:${item.normalizedValue}`),
+      const mergedOrganizationId = target.organizationId ?? source.organizationId;
+      for (const orgId of [
+        mergedOrganizationId,
+        ...sourceOpportunities.map((opp) => opp.organizationId),
+      ]) {
+        if (orgId && !lockedOrgIds.has(orgId)) {
+          throw retryableLockDivergenceError("Contact organizations changed concurrently.");
+        }
+      }
+      if (
+        sourceOpportunities.some(
+          (opportunity) => opportunity.organizationId !== mergedOrganizationId,
+        )
+      ) {
+        throw new CrmError(
+          "CONFLICT",
+          "Contacts with B2B opportunities in different organizations cannot merge.",
+        );
+      }
+      if (mergedOrganizationId) {
+        const activeOrgs = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "Organization"
+          WHERE "id" = ${mergedOrganizationId}::uuid AND "deletedAt" IS NULL
+          FOR SHARE
+        `;
+        if (!activeOrgs[0]) {
+          throw new CrmError("CONFLICT", "The associated organization is no longer active.");
+        }
+      }
+      const activeTargetIdentityByKey = new Map(
+        allTargetIdentities
+          .filter((item) => item.retiredAt === null)
+          .map((item) => [`${item.kind}:${item.normalizedValue}`, item]),
+      );
+      const anyTargetIdentityByKey = new Map(
+        allTargetIdentities.map((item) => [`${item.kind}:${item.normalizedValue}`, item]),
       );
       if (
         !sourceIdentities.some((identity) =>
-          targetIdentityKeys.has(`${identity.kind}:${identity.normalizedValue}`),
+          activeTargetIdentityByKey.has(`${identity.kind}:${identity.normalizedValue}`),
         )
       ) {
         throw new CrmError("CONFLICT", "The original duplicate evidence no longer exists.");
@@ -289,12 +371,17 @@ export class CrmMergeService {
       const movedIdentityIds: string[] = [];
       const retiredIdentityIds: string[] = [];
       for (const identity of sourceIdentities) {
-        if (targetIdentityKeys.has(`${identity.kind}:${identity.normalizedValue}`)) {
+        const key = `${identity.kind}:${identity.normalizedValue}`;
+        const activeTargetIdentity = activeTargetIdentityByKey.get(key);
+        if (activeTargetIdentity) {
+          if (activeTargetIdentity.verifiedAt === null && identity.verifiedAt !== null) continue;
           await tx.contactIdentity.update({
             where: { id: identity.id },
             data: { retiredAt: now },
           });
           retiredIdentityIds.push(identity.id);
+        } else if (anyTargetIdentityByKey.has(key)) {
+          continue;
         } else {
           await tx.contactIdentity.update({
             where: { id: identity.id },
@@ -317,13 +404,6 @@ export class CrmMergeService {
           data: { contactId: target.id },
         });
       }
-      const movedOpportunityIds = sourceOpportunities.map((item) => item.id);
-      if (movedOpportunityIds.length > 0) {
-        await tx.opportunity.updateMany({
-          where: { id: { in: movedOpportunityIds }, contactId: source.id },
-          data: { contactId: target.id },
-        });
-      }
       const sourceSnapshot = crmContactSnapshot(source);
       const targetSnapshot = crmContactSnapshot(target);
       const mergedSource = await tx.contact.update({
@@ -335,40 +415,51 @@ export class CrmMergeService {
           version: { increment: 1 },
         },
       });
-      const remainingIdentities = await tx.contactIdentity.findMany({
-        where: { contactId: target.id, retiredAt: null },
-        select: { kind: true, verifiedAt: true },
-      });
+      const remainingIdentities = await tx.$queryRaw<
+        Array<{
+          kind: "EMAIL" | "PHONE" | "DOCUMENT";
+          normalizedValue: string;
+          verifiedAt: Date | null;
+        }>
+      >`
+        WITH RECURSIVE lineage AS (
+          SELECT "id" FROM "Contact" WHERE "id" = ${target.id}::uuid
+          UNION
+          SELECT contact."id" FROM "Contact" contact
+          JOIN lineage parent ON contact."mergedIntoContactId" = parent."id"
+        )
+        SELECT identity."kind", identity."normalizedValue", identity."verifiedAt"
+        FROM "ContactIdentity" identity
+        JOIN lineage ON lineage."id" = identity."contactId"
+        WHERE identity."retiredAt" IS NULL
+      `;
       const mergedEmail = target.email ?? source.email;
       const mergedPhone = target.phoneE164 ?? source.phoneE164;
-      const combinedIdentities = [...remainingIdentities, ...sourceIdentities];
-      const combinedDerived = deriveContactVerificationLevel({
-        emailVerified: combinedIdentities.some(
-          (item) => item.kind === "EMAIL" && item.verifiedAt !== null,
-        ),
-        phoneVerified: combinedIdentities.some(
-          (item) => item.kind === "PHONE" && item.verifiedAt !== null,
-        ),
-        identityVerified: combinedIdentities.some(
+      const derivedLevel = deriveContactVerificationLevel({
+        emailVerified:
+          mergedEmail !== null &&
+          remainingIdentities.some(
+            (item) =>
+              item.kind === "EMAIL" &&
+              item.normalizedValue === mergedEmail &&
+              item.verifiedAt !== null,
+          ),
+        phoneVerified:
+          mergedPhone !== null &&
+          remainingIdentities.some(
+            (item) =>
+              item.kind === "PHONE" &&
+              item.normalizedValue === mergedPhone &&
+              item.verifiedAt !== null,
+          ),
+        identityVerified: remainingIdentities.some(
           (item) => item.kind === "DOCUMENT" && item.verifiedAt !== null,
         ),
       });
-      let derivedLevel = strongestContactVerificationLevel(
-        strongestContactVerificationLevel(source.verificationLevel, target.verificationLevel),
-        combinedDerived,
-      );
-      if (!mergedEmail && !mergedPhone) {
-        derivedLevel = "UNVERIFIED";
-      } else if (
-        (!mergedEmail || !mergedPhone) &&
-        (derivedLevel === "DUAL_CHANNEL_VERIFIED" || derivedLevel === "IDENTITY_VERIFIED")
-      ) {
-        derivedLevel = "SINGLE_CHANNEL_VERIFIED";
-      }
       const mergedTarget = await tx.contact.update({
         where: { id: target.id },
         data: {
-          organizationId: target.organizationId ?? source.organizationId,
+          organizationId: mergedOrganizationId,
           customerId: target.customerId ?? source.customerId,
           givenName: target.givenName ?? source.givenName,
           familyName: target.familyName ?? source.familyName,
@@ -385,6 +476,13 @@ export class CrmMergeService {
           version: { increment: 1 },
         },
       });
+      const movedOpportunityIds = sourceOpportunities.map((item) => item.id);
+      if (movedOpportunityIds.length > 0) {
+        await tx.opportunity.updateMany({
+          where: { id: { in: movedOpportunityIds }, contactId: source.id },
+          data: { contactId: target.id },
+        });
+      }
       const updated = await tx.identityMergeCandidate.update({
         where: { id: candidate.id },
         data: {
@@ -429,7 +527,7 @@ export class CrmMergeService {
     const note = crmText(input.note, "note", 10, 500);
     return inInventoryTransaction(this.db, async (tx) => {
       await crmActor(tx, audit, "crm:merge");
-      const candidate = await this.lockPair(tx, input.candidateId);
+      const { candidate, lockedOrgIds } = await this.lockPair(tx, input.candidateId);
       if (candidate.status !== "MERGED" || candidate.version !== expectedVersion) {
         throw new CrmError("CONFLICT", "The merge is no longer reversible from this candidate.");
       }
@@ -464,6 +562,32 @@ export class CrmMergeService {
           "CONFLICT",
           "A later contact mutation or retention redaction makes this merge irreversible.",
         );
+      }
+      const targetFields = restoredContactFields(targetSnapshot);
+      const sourceFields = restoredContactFields(sourceSnapshot);
+      const requiredOrgIds = [
+        ...new Set(
+          [targetFields.organizationId, sourceFields.organizationId].filter(
+            (id): id is string => id !== null,
+          ),
+        ),
+      ].sort();
+      if (requiredOrgIds.some((id) => !lockedOrgIds.has(id))) {
+        throw retryableLockDivergenceError("Merge reversal organizations changed concurrently.");
+      }
+      if (requiredOrgIds.length > 0) {
+        const activeOrgs = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "Organization"
+          WHERE "id" = ANY(${requiredOrgIds}::uuid[]) AND "deletedAt" IS NULL
+          ORDER BY "id"
+          FOR SHARE
+        `;
+        if (activeOrgs.length !== requiredOrgIds.length) {
+          throw new CrmError(
+            "CONFLICT",
+            "Cannot reverse merge because an associated organization was archived.",
+          );
+        }
       }
       if (movedIdentityIds.length > 0) {
         const moved = await tx.contactIdentity.updateMany({
@@ -501,6 +625,17 @@ export class CrmMergeService {
           throw new CrmError("CONFLICT", "A merged task changed before reversal.");
         }
       }
+      const restoredSource = await tx.contact.update({
+        where: { id: source.id },
+        data: {
+          ...sourceFields,
+          customerId: null,
+          status: "ACTIVE",
+          mergedIntoContactId: null,
+          deletedAt: null,
+          version: { increment: 1 },
+        },
+      });
       if (movedOpportunityIds.length > 0) {
         const moved = await tx.opportunity.updateMany({
           where: { id: { in: movedOpportunityIds }, contactId: target.id },
@@ -510,43 +645,16 @@ export class CrmMergeService {
           throw new CrmError("CONFLICT", "A merged opportunity changed before reversal.");
         }
       }
-      const targetFields = restoredContactFields(targetSnapshot);
-      const sourceFields = restoredContactFields(sourceSnapshot);
-      const requiredOrgIds = [
-        ...new Set(
-          [targetFields.organizationId, sourceFields.organizationId].filter(
-            (id): id is string => id !== null,
-          ),
-        ),
-      ].sort();
-      if (requiredOrgIds.length > 0) {
-        const activeOrgs = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "Organization"
-          WHERE "id" = ANY(${requiredOrgIds}::uuid[]) AND "deletedAt" IS NULL
-          ORDER BY "id"
-          FOR SHARE
-        `;
-        if (activeOrgs.length !== requiredOrgIds.length) {
-          throw new CrmError(
-            "CONFLICT",
-            "Cannot reverse merge because an associated organization was archived.",
-          );
-        }
-      }
       const restoredTarget = await tx.contact.update({
         where: { id: target.id },
         data: { ...targetFields, version: { increment: 1 } },
       });
-      const restoredSource = await tx.contact.update({
-        where: { id: source.id },
-        data: {
-          ...sourceFields,
-          status: "ACTIVE",
-          mergedIntoContactId: null,
-          deletedAt: null,
-          version: { increment: 1 },
-        },
-      });
+      if (sourceFields.customerId !== null) {
+        await tx.contact.update({
+          where: { id: source.id },
+          data: { customerId: sourceFields.customerId },
+        });
+      }
       const now = await crmNow(tx);
       const updated = await tx.identityMergeCandidate.update({
         where: { id: candidate.id },

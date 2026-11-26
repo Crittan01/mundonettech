@@ -7,7 +7,7 @@ import {
   purgeExpiredIdempotencyKeys,
   purgeExpiredOperationRateLimits,
 } from "@mundonettech/db";
-import { revalidateTag } from "next/cache";
+import { revalidatePath, revalidateTag } from "next/cache";
 import { z } from "zod";
 
 import { b2bService } from "@/lib/b2b";
@@ -98,6 +98,7 @@ export async function POST(request: Request) {
         revalidateTag("reviews", { expire: 0 });
         for (const slug of crmRetention.affectedReviewProductSlugs ?? []) {
           revalidateTag(`reviews:${slug}`, { expire: 0 });
+          revalidatePath(`/producto/${slug}`);
         }
       }
     } catch (error) {

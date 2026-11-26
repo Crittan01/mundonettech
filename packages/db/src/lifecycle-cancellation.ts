@@ -47,13 +47,27 @@ export async function cancelLifecycleEnrollment(
       where: {
         enrollmentId,
         status: { in: ["DISPATCHING", "QUEUED"] },
-        emailEvent: { isNot: null },
+        emailEvent: {
+          status: { notIn: ["SENT", "DELIVERY_DELAYED", "DELIVERED"] },
+        },
       },
       data: { status: "SUPPRESSED", processedAt: now, lastError: null },
     });
   }
   await tx.lifecycleMessage.updateMany({
-    where: { enrollmentId, status: { in: ["SCHEDULED", "DISPATCHING", "QUEUED"] } },
+    where: {
+      enrollmentId,
+      OR: [
+        { status: { in: ["SCHEDULED", "DISPATCHING"] } },
+        {
+          status: "QUEUED",
+          OR: [
+            { emailEvent: null },
+            { emailEvent: { status: { notIn: ["SENT", "DELIVERY_DELAYED", "DELIVERED"] } } },
+          ],
+        },
+      ],
+    },
     data: { status: "CANCELLED", processedAt: now, lastError: null },
   });
   await tx.emailEvent.updateMany({

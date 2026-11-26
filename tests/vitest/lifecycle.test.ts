@@ -110,6 +110,22 @@ describe("F5.2 segment definitions and lifecycle templates", () => {
       normalizeLifecycleSteps([{ ...step, htmlBody: "<svg/onload=alert(1)>{{unsubscribeUrl}}" }]),
     ).toThrow(TypeError);
     expect(() =>
+      normalizeLifecycleSteps([
+        {
+          ...step,
+          htmlBody: '<a href="&#106;avascript:alert(1)">Click</a>{{unsubscribeUrl}}',
+        },
+      ]),
+    ).toThrow(TypeError);
+    expect(() =>
+      normalizeLifecycleSteps([
+        {
+          ...step,
+          htmlBody: '<a href="data:image/svg+xml;base64,PHN2Zz4=">Click</a>{{unsubscribeUrl}}',
+        },
+      ]),
+    ).toThrow(TypeError);
+    expect(() =>
       normalizeLifecycleSteps([{ ...step, subject: "Hola\n{{customerFirstName}}" }]),
     ).toThrow(TypeError);
     expect(() =>

@@ -101,16 +101,25 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
   );
 }
 
-function revalidate(contactId?: string): void {
+function revalidate(contactId?: string, secondaryContactId?: string, includeHoy = false): void {
   revalidatePath("/admin/crm");
   if (contactId) revalidatePath(`/admin/crm/${contactId}`);
+  if (secondaryContactId && secondaryContactId !== contactId) {
+    revalidatePath(`/admin/crm/${secondaryContactId}`);
+  }
+  if (includeHoy) revalidatePath("/admin/hoy");
 }
 
 async function execute(
   formData: FormData,
   permission: AdminPermission,
   allowedFields: readonly string[],
-  operation: (auditContext: CrmAuditContext) => Promise<{ message: string; contactId?: string }>,
+  operation: (auditContext: CrmAuditContext) => Promise<{
+    message: string;
+    contactId?: string;
+    secondaryContactId?: string;
+    revalidateHoy?: boolean;
+  }>,
   quota?: {
     operation: "crm.duplicates.detect";
     limit: number;
@@ -129,7 +138,7 @@ async function execute(
     }
     assertClosedForm(formData, allowedFields);
     const result = await operation(auditContext);
-    revalidate(result.contactId);
+    revalidate(result.contactId, result.secondaryContactId, result.revalidateHoy);
     return actionSuccess(result.message);
   } catch (error) {
     if (error instanceof AdminOperationRateLimitError) {
@@ -364,6 +373,8 @@ export async function mergeCrmContactsAction(_previous: ActionState, formData: F
     return {
       message: "Contactos fusionados con snapshot reversible.",
       contactId: result.targetContactId,
+      secondaryContactId: result.sourceContactId,
+      revalidateHoy: true,
     };
   });
 }
@@ -395,6 +406,8 @@ export async function reverseCrmMergeAction(_previous: ActionState, formData: Fo
     return {
       message: "Fusión revertida y registros restaurados.",
       contactId: result.targetContactId,
+      secondaryContactId: result.sourceContactId,
+      revalidateHoy: true,
     };
   });
 }

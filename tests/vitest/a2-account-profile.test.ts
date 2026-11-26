@@ -42,6 +42,7 @@ function harness(options: { marketingGranted?: boolean; advertisingGranted?: boo
     $queryRaw: vi.fn(async (strings: TemplateStringsArray) => {
       const sql = strings.join("");
       if (sql.includes('FROM "Customer"')) return [customer];
+      if (sql.includes('FROM "CustomerSegmentMembership"')) return [];
       if (sql.includes('FROM "LifecycleEnrollment"')) return [];
       if (sql.includes('FROM "LifecycleMessage"')) return [];
       if (sql.includes("CURRENT_TIMESTAMP")) return [{ now }];

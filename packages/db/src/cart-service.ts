@@ -177,9 +177,28 @@ async function lockCart(
   tx: Prisma.TransactionClient,
   reference: CartReference,
 ): Promise<{ cart: CartWithItems; now: Date }> {
-  let rows: Cart[];
+  let peekOpportunityId: string | null = null;
   if ("cartId" in reference) {
     assertUuid(reference.cartId, "cartId");
+    const proposal = await tx.opportunityProposal.findUnique({
+      where: { cartId: reference.cartId },
+      select: { opportunityId: true },
+    });
+    peekOpportunityId = proposal?.opportunityId ?? null;
+  } else {
+    const hash = assertTokenHash(reference.accessTokenHash, "accessTokenHash");
+    const peeked = await tx.cart.findUnique({
+      where: { accessTokenHash: hash },
+      select: { kind: true, sourceProposal: { select: { opportunityId: true } } },
+    });
+    peekOpportunityId =
+      peeked?.kind === "B2B" ? (peeked.sourceProposal?.opportunityId ?? null) : null;
+  }
+  if (peekOpportunityId) {
+    await acquireOperationLocks(tx, [`b2b-opportunity:${peekOpportunityId}`]);
+  }
+  let rows: Cart[];
+  if ("cartId" in reference) {
     rows = await tx.$queryRaw<Cart[]>`
       SELECT * FROM "Cart" WHERE "id" = ${reference.cartId}::uuid FOR UPDATE
     `;
@@ -191,6 +210,15 @@ async function lockCart(
   }
   const row = rows[0];
   if (!row) throw new CartNotFoundError();
+  if (row.kind === "B2B") {
+    const actualProposal = await tx.opportunityProposal.findUnique({
+      where: { cartId: row.id },
+      select: { opportunityId: true },
+    });
+    if ((actualProposal?.opportunityId ?? null) !== peekOpportunityId) {
+      retryCouponDivergence();
+    }
+  }
   return { cart: await loadCart(tx, row.id), now: await databaseNow(tx) };
 }
 
@@ -1021,15 +1049,26 @@ export class CartService {
       }
       const customer = await tx.customer.findFirst({
         where: { id: customerId, deletedAt: null, status: { not: "ANONYMIZED" } },
-        select: { id: true },
+        select: { id: true, email: true, status: true },
       });
       if (!customer) throw new CartValidationError("Customer is not available.");
       if (cart.couponId !== (peek?.couponId ?? null)) retryCouponDivergence();
       if (cart.customerId === customerId) return this.revalidateLocked(tx, cart.id, now);
       const transferred = await renewCouponReservation(tx, cart, customerId, cart.expiresAt, now);
-      await tx.cart.update({
+      const updatedCart = await tx.cart.update({
         where: { id: cart.id },
         data: { customerId, couponId: transferred.couponId },
+      });
+      await tx.abandonedCart.updateMany({
+        where: { cartId: cart.id, status: "DETECTED" },
+        data: {
+          customerId,
+          contactEmail: customer.status === "ACTIVE" ? customer.email : null,
+          lastActivityAt: updatedCart.updatedAt,
+          ...(customer.status === "ACTIVE"
+            ? { lastReminderActivityAt: null, lastReminderOutcome: null }
+            : {}),
+        },
       });
       return this.revalidateLocked(
         tx,

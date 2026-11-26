@@ -8,7 +8,7 @@ import {
   normalizeReferralCode,
   referralRejectionReasonLabels,
 } from "../../packages/core/dist/index.js";
-import { GrowthError } from "../../packages/db/dist/index.js";
+import { GrowthError, OperationRateLimitError } from "../../packages/db/dist/index.js";
 import {
   actionError,
   actionSuccess,
@@ -24,12 +24,18 @@ const actionMocks = {
   createReferralCode: vi.fn(),
   attributeReferral: vi.fn(),
   clearReferralCode: vi.fn(),
+  consumeOperationRateLimit: vi.fn(),
 };
 type GrowthAction = (previous: ActionState, formData: FormData) => Promise<ActionState>;
 const growthActions = loadActionModule<Record<string, GrowthAction>>("growth", {
-  "@mundonettech/db": { GrowthError },
+  "@mundonettech/db": {
+    GrowthError,
+    OperationRateLimitError,
+    consumeOperationRateLimit: actionMocks.consumeOperationRateLimit,
+  },
   "next/cache": { revalidatePath: actionMocks.revalidatePath },
   "@/lib/action-state": { actionError, actionSuccess, closedFormObject, formString },
+  "@/lib/db": { getDatabase: () => ({}) },
   "@/lib/growth": {
     growthService: () => ({
       createReferralCode: actionMocks.createReferralCode,
@@ -38,6 +44,12 @@ const growthActions = loadActionModule<Record<string, GrowthAction>>("growth", {
   },
   "@/lib/security/customer-auth": { requireCustomerPage: actionMocks.requireCustomerPage },
   "@/lib/security/referral": { clearReferralCode: actionMocks.clearReferralCode },
+  "@/lib/security/request-context": {
+    getRequestSecurityContext: async () => ({
+      ipHash: new Uint8Array(32).fill(1),
+      userAgentHash: null,
+    }),
+  },
 });
 const idle: ActionState = { status: "idle", message: "" };
 const customerId = "11111111-1111-4111-8111-111111111111";
@@ -47,6 +59,11 @@ beforeEach(() => {
   actionMocks.requireCustomerPage.mockResolvedValue({ profile: { id: customerId } });
   actionMocks.createReferralCode.mockResolvedValue({ code: "23456789ABCD", replayed: false });
   actionMocks.attributeReferral.mockResolvedValue({ replayed: false });
+  actionMocks.consumeOperationRateLimit.mockResolvedValue({
+    allowed: true,
+    retryAfterSeconds: 0,
+    remaining: 19,
+  });
 });
 
 describe("F5.1 loyalty arithmetic and referral identities", () => {
@@ -200,6 +217,21 @@ describe("A6 growth customer actions", () => {
     expect(actionMocks.attributeReferral).toHaveBeenCalledWith(customerId, "23456789abcd");
     expect(actionMocks.clearReferralCode).toHaveBeenCalledOnce();
     expect(actionMocks.revalidatePath).toHaveBeenCalledWith("/mi-cuenta/beneficios");
+  });
+
+  it("reports code-generation conflicts without reusing attribution errors", async () => {
+    actionMocks.createReferralCode.mockRejectedValue(
+      new GrowthError("CONFLICT", "disabled referral identity"),
+    );
+
+    const result = await growthActions.createReferralCodeAction!(idle, new FormData());
+    expect(result.status).toBe("error");
+    expect(result.message).toBe(
+      "Tu código de referidos ya no está disponible. Actualiza la página.",
+    );
+    expect(result.message).not.toContain("atribuir");
+    expect(JSON.stringify(result)).not.toContain("disabled referral identity");
+    expect(actionMocks.revalidatePath).not.toHaveBeenCalled();
   });
 
   it("returns safe domain errors without clearing the referral cookie", async () => {

@@ -37,10 +37,36 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeStyle: "short",
 });
 
+const customerStatusLabels: Record<string, string> = {
+  ACTIVE: "Activa",
+  GUEST: "Invitado",
+  ANONYMIZED: "Anonimizada",
+};
+
+const orderStatusLabels: Record<string, string> = {
+  PENDING: "Pendiente",
+  CONFIRMED: "Confirmado",
+  CANCELLED: "Cancelado",
+};
+
+const paymentStatusLabels: Record<string, string> = {
+  UNPAID: "Sin pago",
+  PARTIALLY_PAID: "Pago parcial",
+  PAID: "Pagado",
+  PARTIALLY_REFUNDED: "Reembolso parcial",
+  REFUNDED: "Reembolsado",
+};
+
+const fulfillmentStatusLabels: Record<string, string> = {
+  UNFULFILLED: "Sin despachar",
+  PARTIALLY_FULFILLED: "Despacho parcial",
+  FULFILLED: "Despachado",
+};
+
 export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[contactId]">) {
+  const session = await requireAdminPage("crm:read");
   const { contactId } = await params;
   if (!z.string().uuid().safeParse(contactId).success) notFound();
-  const session = await requireAdminPage("crm:read");
   const service = crmService(getDatabase());
   const [contact, organizations, assignees] = await Promise.all([
     service.getContact360(contactId).catch((error: unknown) => {
@@ -286,7 +312,8 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
         ) : (
           <div className="space-y-4">
             <p className="text-sm">
-              Comprador {contact.customer.id} · {contact.customer.status} ·{" "}
+              Comprador {contact.customer.id} ·{" "}
+              {customerStatusLabels[contact.customer.status] ?? contact.customer.status} ·{" "}
               {contact.customer.orders.length} pedidos recientes ·{" "}
               {contact.customer.returnRequests.length} devoluciones ·{" "}
               {contact.customer.warrantyClaims.length} garantías ·{" "}
@@ -308,8 +335,10 @@ export default async function CrmContactPage({ params }: PageProps<"/admin/crm/[
                     ) : (
                       <span className="font-medium">{order.orderNumber}</span>
                     )}{" "}
-                    · {formatCopCents(order.totalCents)} · {order.orderStatus} /{" "}
-                    {order.paymentStatus} / {order.fulfillmentStatus} ·{" "}
+                    · {formatCopCents(order.totalCents)} ·{" "}
+                    {orderStatusLabels[order.orderStatus] ?? order.orderStatus} /{" "}
+                    {paymentStatusLabels[order.paymentStatus] ?? order.paymentStatus} /{" "}
+                    {fulfillmentStatusLabels[order.fulfillmentStatus] ?? order.fulfillmentStatus} ·{" "}
                     {dateFormatter.format(order.createdAt)}
                   </li>
                 ))}

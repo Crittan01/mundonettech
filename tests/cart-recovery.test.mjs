@@ -10,6 +10,7 @@ import {
 } from "../packages/db/dist/index.js";
 import {
   DomainEventWorker,
+  EmailConflictError,
   EmailService,
   InvoiceService,
   ShippingService,
@@ -417,5 +418,115 @@ describe("F5.1 — abandoned-cart recovery with privacy enforcement", () => {
     const erasedEvent = await db.emailEvent.findUniqueOrThrow({ where: { id: recoveryEvent.id } });
     assert.ok(erasedEvent.anonymizedAt !== null);
     assert.match(erasedEvent.recipientEmail, /^anon-[0-9a-f]{32}@anonymized\.invalid$/);
+  });
+
+  it("revalidates consent inside the enqueue transaction before creating email or outbox", async () => {
+    const { customer, abandoned } = await makeAbandoned();
+    const consent = await db.consent.findFirstOrThrow({
+      where: { customerId: customer.id, purpose: "MARKETING_EMAIL", status: "GRANTED" },
+    });
+    await db.consent.create({
+      data: {
+        customerId: customer.id,
+        purpose: "MARKETING_EMAIL",
+        status: "REVOKED",
+        source: "recovery-enqueue-race",
+        policyVersion: "2026-01",
+        proofHash: hash(),
+        revokesId: consent.id,
+      },
+    });
+    const outboxBefore = await db.domainOutbox.count({
+      where: { eventType: "email.requested.v1", aggregateType: "EmailEvent" },
+    });
+    await assert.rejects(
+      email.queue({
+        customerId: customer.id,
+        abandonedCartId: abandoned.id,
+        credentialId: resendCredentialId,
+        templateKey: "cart.recovery",
+        topic: "cart-recovery",
+        recipientEmail: customer.email,
+        idempotencyKey: `domain:cart.recovery:${abandoned.id}:${abandoned.lastActivityAt.toISOString()}`,
+        variables: {
+          storeName: "Tienda de pruebas",
+          itemCount: "1",
+          totalCop: "$ 1.000",
+          cartUrl: "https://example.test/carrito",
+        },
+      }),
+      (error) => error instanceof EmailConflictError && error.code === "NO_CONSENT",
+    );
+    assert.equal(await db.emailEvent.count({ where: { abandonedCartId: abandoned.id } }), 0);
+    assert.equal(
+      await db.domainOutbox.count({
+        where: { eventType: "email.requested.v1", aggregateType: "EmailEvent" },
+      }),
+      outboxBefore,
+    );
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: abandoned.id } }))
+        .lastReminderOutcome,
+      "NO_CONSENT",
+    );
+    assert.equal(providerCalls.length, 0);
+  });
+
+  it("marks cleared, modified, and expired carts as STALE without sending and syncs DETECTED abandoned carts on assignCustomer", async () => {
+    const cleared = await makeAbandoned();
+    await db.cartItem.deleteMany({ where: { cartId: cleared.cart.id } });
+    await db.cart.update({
+      where: { id: cleared.cart.id },
+      data: { itemCount: 0, subtotalCents: 0n, couponDiscountCents: 0n, totalCents: 0n },
+    });
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: cleared.abandoned.id } }))
+        .lastReminderOutcome,
+      "STALE",
+    );
+
+    const modified = await makeAbandoned();
+    await worker.runBatch(10);
+    await carts.addVariant({ cartId: modified.cart.id }, catalog.variantId, 1);
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: modified.abandoned.id } }))
+        .lastReminderOutcome,
+      "STALE",
+    );
+
+    const expired = await makeAbandoned();
+    await db.$executeRawUnsafe(`ALTER TABLE "Cart" DISABLE TRIGGER "Cart_set_updated_at"`);
+    try {
+      await db.$executeRaw`UPDATE "Cart" SET "expiresAt" = CURRENT_TIMESTAMP - INTERVAL '5 minutes' WHERE "id" = ${expired.cart.id}::uuid`;
+    } finally {
+      await db.$executeRawUnsafe(`ALTER TABLE "Cart" ENABLE TRIGGER "Cart_set_updated_at"`);
+    }
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: expired.abandoned.id } }))
+        .lastReminderOutcome,
+      "STALE",
+    );
+    assert.equal(providerCalls.length, 0);
+
+    const guest = await makeAbandoned({ guest: true });
+    const assignedCustomer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `assigned-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+        givenName: "Cliente",
+        familyName: "Asignado",
+      },
+    });
+    await carts.assignCustomer({ cartId: guest.cart.id }, assignedCustomer.id);
+    const syncedAbandoned = await db.abandonedCart.findUniqueOrThrow({
+      where: { id: guest.abandoned.id },
+    });
+    assert.equal(syncedAbandoned.customerId, assignedCustomer.id);
+    assert.equal(syncedAbandoned.contactEmail, assignedCustomer.email);
   });
 });

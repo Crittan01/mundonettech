@@ -9,11 +9,13 @@ import {
   loyaltyPointsForMerchandise,
   loyaltyReferralPoints,
   maskEmail,
+  normalizeContactIdentity,
+  normalizeContactPhone,
   normalizeReferralCode,
   type ReferralRejectionReason,
 } from "@mundonettech/core";
 
-import { retryableLockDivergenceError } from "./crm-shared.js";
+import { findCustomerCrmLineageIds, retryableLockDivergenceError } from "./crm-shared.js";
 import type { Customer, LoyaltyTxnType, Prisma, ReferralStatus } from "./generated/client.js";
 import {
   acquireOperationLocks,
@@ -79,7 +81,7 @@ async function lockCustomers(tx: DatabaseExecutor, ids: readonly string[]): Prom
   `;
 }
 
-function activeCustomer(customer: Customer | undefined): boolean {
+function activeCustomer(customer: Customer | undefined): customer is Customer {
   return customer?.status === "ACTIVE" && customer.deletedAt === null;
 }
 
@@ -94,6 +96,97 @@ export async function marketingEmailConsentGranted(
     select: { status: true, revokedBy: { select: { id: true } } },
   });
   return latest?.status === "GRANTED" && latest.revokedBy === null;
+}
+
+function safeNormalizedPhone(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    return normalizeContactPhone(value);
+  } catch {
+    return null;
+  }
+}
+
+function safeNormalizedDocument(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    return normalizeContactIdentity("DOCUMENT", value);
+  } catch {
+    return null;
+  }
+}
+
+async function hasSharedReferralIdentity(
+  tx: Prisma.TransactionClient,
+  referrer: Customer,
+  referred: Customer,
+  order?: {
+    readonly phoneE164Snapshot: string | null;
+    readonly buyerDocumentNumberSnapshot: string | null;
+  },
+): Promise<boolean> {
+  if (referrer.id === referred.id) return true;
+  const referrerPhone = safeNormalizedPhone(referrer.phoneE164);
+  const referredPhones = new Set(
+    [safeNormalizedPhone(referred.phoneE164), safeNormalizedPhone(order?.phoneE164Snapshot)].filter(
+      (value): value is string => value !== null,
+    ),
+  );
+  if (referrerPhone && referredPhones.has(referrerPhone)) return true;
+
+  const [referrerLineage, referredLineage] = await Promise.all([
+    findCustomerCrmLineageIds(tx, [referrer.id]),
+    findCustomerCrmLineageIds(tx, [referred.id]),
+  ]);
+  if (referrerLineage.length > 0 && referredLineage.length > 0) {
+    const referrerLineageSet = new Set(referrerLineage);
+    if (referredLineage.some((id) => referrerLineageSet.has(id))) return true;
+    const [referrerIdentities, referredIdentities] = await Promise.all([
+      tx.contactIdentity.findMany({
+        where: { contactId: { in: referrerLineage }, retiredAt: null },
+        select: { kind: true, normalizedValue: true },
+      }),
+      tx.contactIdentity.findMany({
+        where: { contactId: { in: referredLineage }, retiredAt: null },
+        select: { kind: true, normalizedValue: true },
+      }),
+    ]);
+    const referrerKeys = new Set(
+      referrerIdentities.map((identity) => `${identity.kind}:${identity.normalizedValue}`),
+    );
+    if (
+      referredIdentities.some((identity) =>
+        referrerKeys.has(`${identity.kind}:${identity.normalizedValue}`),
+      )
+    ) {
+      return true;
+    }
+    for (const phone of referredPhones) {
+      if (referrerKeys.has(`PHONE:${phone}`)) return true;
+    }
+    const orderDoc = safeNormalizedDocument(order?.buyerDocumentNumberSnapshot);
+    if (orderDoc && referrerKeys.has(`DOCUMENT:${orderDoc}`)) return true;
+  }
+
+  const orderDoc = safeNormalizedDocument(order?.buyerDocumentNumberSnapshot);
+  if (orderDoc) {
+    const referrerOrders = await tx.order.findMany({
+      where: {
+        customerId: referrer.id,
+        buyerDocumentNumberSnapshot: { not: null },
+      },
+      select: { buyerDocumentNumberSnapshot: true },
+      take: 20,
+    });
+    if (
+      referrerOrders.some(
+        (item) => safeNormalizedDocument(item.buyerDocumentNumberSnapshot) === orderDoc,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export class GrowthService {
@@ -228,6 +321,9 @@ export class GrowthService {
       if (!activeCustomer(referrer)) {
         throw new GrowthError("CONFLICT", "The referring account is not available.");
       }
+      if (await hasSharedReferralIdentity(tx, referrer, referred)) {
+        throw new GrowthError("CONFLICT", "Self-referrals are not allowed.");
+      }
       const existing = await tx.referral.findUnique({ where: { referredCustomerId } });
       if (existing) {
         if (existing.codeId !== referralCode.id) {
@@ -351,6 +447,15 @@ export class GrowthService {
     const referrer = customers.find((customer) => customer.id === referral.referrerCustomerId);
     if (!activeCustomer(referrer) || !referralCode || referralCode.disabledAt !== null) {
       await reject("REFERRER_UNAVAILABLE");
+      return { earnedPoints, referralPoints: 0 };
+    }
+    if (
+      await hasSharedReferralIdentity(tx, referrer, buyer, {
+        phoneE164Snapshot: order.phoneE164Snapshot,
+        buyerDocumentNumberSnapshot: order.buyerDocumentNumberSnapshot,
+      })
+    ) {
+      await reject("SELF_REFERRAL");
       return { earnedPoints, referralPoints: 0 };
     }
     if (netMerchandiseCents < loyaltyEarnUnitCents) {
@@ -686,7 +791,13 @@ export class GrowthService {
       this.db.abandonedCart.findMany({
         include: {
           customer: { select: { email: true, status: true } },
-          cart: { select: { itemCount: true, totalCents: true } },
+          cart: {
+            select: {
+              itemCount: true,
+              totalCents: true,
+              items: { select: { quantity: true } },
+            },
+          },
         },
         orderBy: [{ detectedAt: "desc" }, { id: "desc" }],
         take: 50,
@@ -732,7 +843,10 @@ export class GrowthService {
         id: abandoned.id,
         cartId: abandoned.cartId,
         customerEmail: maskedCustomer(abandoned.customer, abandoned.contactEmail),
-        itemCount: abandoned.cart.itemCount,
+        itemCount:
+          abandoned.cart.items.length > 0
+            ? abandoned.cart.items.reduce((sum, item) => sum + item.quantity, 0)
+            : abandoned.cart.itemCount,
         totalCents: abandoned.cart.totalCents.toString(),
         status: abandoned.status,
         reminderCount: abandoned.reminderCount,
@@ -791,12 +905,6 @@ export class GrowthService {
       where: { referredCustomerId: customerId, status: "ATTRIBUTED" },
       data: { status: "REJECTED", rejectionReason: "REFERRED_UNAVAILABLE" },
     });
-    await tx.$executeRaw`
-      UPDATE "AbandonedCart" SET "contactEmail" = NULL,
-        "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
-        "lastReminderOutcome" = 'SUPPRESSED'
-      WHERE "customerId" = ${customerId}::uuid
-    `;
     await tx.emailEvent.updateMany({
       where: {
         customerId,
@@ -810,6 +918,12 @@ export class GrowthService {
         nextAttemptAt: null,
       },
     });
+    await tx.$executeRaw`
+      UPDATE "AbandonedCart" SET "contactEmail" = NULL,
+        "lastReminderActivityAt" = COALESCE("lastReminderActivityAt", "lastActivityAt"),
+        "lastReminderOutcome" = 'SUPPRESSED'
+      WHERE "customerId" = ${customerId}::uuid
+    `;
     await suppressLifecycleCustomerInTransaction(tx, customerId, now);
   }
 }

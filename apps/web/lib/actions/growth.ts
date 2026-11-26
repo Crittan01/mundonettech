@@ -1,13 +1,15 @@
 "use server";
 
-import { GrowthError } from "@mundonettech/db";
+import { consumeOperationRateLimit, GrowthError, OperationRateLimitError } from "@mundonettech/db";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { actionError, actionSuccess, closedFormObject, type ActionState } from "@/lib/action-state";
+import { getDatabase } from "@/lib/db";
 import { growthService } from "@/lib/growth";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 import { clearReferralCode } from "@/lib/security/referral";
+import { getRequestSecurityContext } from "@/lib/security/request-context";
 
 function isNextRedirect(error: unknown): boolean {
   return (
@@ -19,9 +21,28 @@ function isNextRedirect(error: unknown): boolean {
   );
 }
 
-function failure(error: unknown, values: Record<string, string>): ActionState {
+function failure(
+  error: unknown,
+  values: Record<string, string>,
+  operation: "create" | "attribute" = "attribute",
+): ActionState {
   if (isNextRedirect(error)) throw error;
+  if (error instanceof OperationRateLimitError) {
+    return actionError(
+      `Demasiadas solicitudes. Espera ${error.retryAfterSeconds} segundos e inténtalo de nuevo.`,
+      values,
+    );
+  }
   if (error instanceof GrowthError) {
+    if (operation === "create") {
+      const messages = {
+        VALIDATION: "No pudimos validar la solicitud para generar tu código.",
+        NOT_FOUND: "Tu cuenta no está disponible para generar un código de referidos.",
+        CONFLICT: "Tu código de referidos ya no está disponible. Actualiza la página.",
+        FORBIDDEN: "Tu sesión no está autorizada para esta operación.",
+      } as const;
+      return actionError(messages[error.code], values);
+    }
     const messages = {
       VALIDATION: "El código debe tener 12 caracteres válidos, sin espacios internos.",
       NOT_FOUND: "El código de referido no está disponible. Revisa que esté completo y vigente.",
@@ -46,11 +67,19 @@ export async function createReferralCodeAction(
     if (!closedFormObject(formData, [])) {
       return actionError("Revisa los campos de la solicitud.");
     }
+    const security = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "growth.referral.create",
+      subject: { type: "IP" },
+      ipHash: security.ipHash,
+      limit: 10,
+      windowSeconds: 900,
+    });
     const result = await growthService().createReferralCode(profile.id);
     revalidatePath("/mi-cuenta/beneficios");
     return actionSuccess(`Tu código ${result.code} está listo para compartir.`);
   } catch (error) {
-    return failure(error, {});
+    return failure(error, {}, "create");
   }
 }
 
@@ -65,11 +94,22 @@ export async function attributeReferralAction(
     if (!raw) {
       return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.");
     }
-    const parsed = referralCodeSchema.safeParse((raw.code ?? "").trim());
+    const trimmedCode = (raw.code ?? "").trim().slice(0, 32);
+    const parsed = referralCodeSchema.safeParse(trimmedCode);
     if (!parsed.success) {
-      return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.");
+      return actionError("El código debe tener 12 caracteres válidos, sin espacios internos.", {
+        code: trimmedCode,
+      });
     }
     values = { code: parsed.data };
+    const security = await getRequestSecurityContext();
+    await consumeOperationRateLimit(getDatabase(), {
+      operation: "growth.referral.attribute",
+      subject: { type: "IP" },
+      ipHash: security.ipHash,
+      limit: 20,
+      windowSeconds: 900,
+    });
     const result = await growthService().attributeReferral(profile.id, parsed.data);
     await clearReferralCode();
     revalidatePath("/mi-cuenta/beneficios");
