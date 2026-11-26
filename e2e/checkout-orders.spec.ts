@@ -395,21 +395,27 @@ test("checkout and reservation expiry refresh every inventory-tagged public surf
     return response.text();
   };
   const expectPublicInventory = async (available: 0 | 1) => {
+    const expectedLabel = available > 0 ? "Disponible" : "Sin unidades disponibles";
     for (const path of ["/", `/productos?marca=${product.brand.slug}`, `/pagina/${cmsSlug}`]) {
-      const html = await read(path);
-      const cards = html.match(/<article\b[^>]*>[\s\S]*?<\/article>/g) ?? [];
-      const card = cards.find((entry) => entry.includes(`href="/producto/${product.slug}"`));
-      expect(card, path).toBeDefined();
-      expect(card).toContain(available > 0 ? "Disponible" : "Sin unidades disponibles");
+      const response = await page.goto(path, { waitUntil: "domcontentloaded" });
+      expect(response?.status(), path).toBe(200);
+      const card = page
+        .locator("article", { has: page.locator(`a[href="/producto/${product.slug}"]`) })
+        .first();
+      await expect(card, path).toBeVisible();
+      await expect(card, path).toContainText(expectedLabel);
     }
-    const pdp = await read(`/producto/${product.slug}`);
-    expect(pdp).toContain(
+    const pdpResponse = await page.goto(`/producto/${product.slug}`, {
+      waitUntil: "domcontentloaded",
+    });
+    expect(pdpResponse?.status(), `/producto/${product.slug}`).toBe(200);
+    await expect(page.locator("main")).toContainText(
       available > 0 ? "1 unidad disponible para compra" : "Sin unidades disponibles",
     );
-    const comparison = await read(
-      `/comparar?productos=${encodeURIComponent(`${product.slug},sony-wh-1000xm5`)}`,
-    );
-    expect(comparison).toContain(available > 0 ? "1 unidad" : "Sin unidades");
+    const comparePath = `/comparar?productos=${encodeURIComponent(`${product.slug},sony-wh-1000xm5`)}`;
+    const compareResponse = await page.goto(comparePath, { waitUntil: "domcontentloaded" });
+    expect(compareResponse?.status(), comparePath).toBe(200);
+    await expect(page.locator("main")).toContainText(available > 0 ? "1 unidad" : "Sin unidades");
 
     const merchant = await read("/api/feeds/google-merchant");
     const merchantItem = merchant
