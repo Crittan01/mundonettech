@@ -169,7 +169,7 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
         {q ? (
           <Link
             href="/admin/contenido/medios"
-            className="text-sm font-medium text-primary underline underline-offset-4"
+            className="inline-flex min-h-11 items-center text-sm font-medium text-primary underline underline-offset-4"
           >
             Limpiar
           </Link>
@@ -208,8 +208,7 @@ export default async function CmsMediaPage({ searchParams }: PageProps<"/admin/c
                   </p>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {media.mimeType} · {formatByteSize(media.byteSize)} · {derivativeCount}{" "}
-                    {derivativeCount === 1 ? "derivado" : "derivados"} ·{" "}
-                    {maskEmail(media.createdBy.email)}
+                    {derivativeCount === 1 ? "derivado" : "derivados"} · {media.createdBy.email}
                   </p>
                 </div>
                 {canWrite ? (

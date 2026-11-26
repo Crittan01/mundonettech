@@ -26,7 +26,12 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
 });
 const numberFormatter = new Intl.NumberFormat("es-CO");
 
-const qSchema = z.string().trim().max(64);
+const qSchema = z
+  .string()
+  .trim()
+  .min(3)
+  .max(64)
+  .regex(/^[A-Za-z0-9-]+$/);
 const orderStatusSchema = z.enum(["PENDING", "CONFIRMED", "CANCELLED", "COMPLETED"]);
 const paymentStatusSchema = z.enum([
   "UNPAID",
@@ -45,6 +50,16 @@ const fulfillmentStatusSchema = z.enum([
 const dateParamSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const cursorSchema = z.string().uuid();
 
+function parseBogotaDateParam(value: string): Date | null {
+  if (!dateParamSchema.safeParse(value).success) return null;
+  try {
+    return bogotaDayStart(value);
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) return null;
+    throw error;
+  }
+}
+
 function labelFor<T extends string>(map: Record<T, string>, value: string): string {
   return (map as Record<string, string | undefined>)[value] ?? value;
 }
@@ -56,27 +71,31 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
   const rawOrderStatus = single(raw.orderStatus) || undefined;
   const rawPaymentStatus = single(raw.paymentStatus) || undefined;
   const rawFulfillmentStatus = single(raw.fulfillmentStatus) || undefined;
-  const rawFrom = single(raw.from) || undefined;
-  const rawTo = single(raw.to) || undefined;
-  const rawCursor = single(raw.cursor) || undefined;
+  const rawFrom = single(raw.from)?.trim() || undefined;
+  const rawTo = single(raw.to)?.trim() || undefined;
+  const rawCursor = single(raw.cursor)?.trim() || undefined;
 
-  let filterError: string | null = null;
+  const filterErrors: string[] = [];
+  let hasBlockingFilterError = false;
 
   const parsedQ = rawQ !== undefined ? qSchema.safeParse(rawQ) : null;
   if (parsedQ && !parsedQ.success) {
-    filterError = "Revisa los filtros: el número de pedido supera la longitud máxima permitida.";
+    filterErrors.push("el número de pedido requiere de 3 a 64 letras, dígitos o guiones");
+    hasBlockingFilterError = true;
   }
 
   const parsedOrderStatus =
     rawOrderStatus !== undefined ? orderStatusSchema.safeParse(rawOrderStatus) : null;
   if (parsedOrderStatus && !parsedOrderStatus.success) {
-    filterError = "Revisa los filtros: el estado comercial seleccionado no es válido.";
+    filterErrors.push("el estado comercial seleccionado no es válido");
+    hasBlockingFilterError = true;
   }
 
   const parsedPaymentStatus =
     rawPaymentStatus !== undefined ? paymentStatusSchema.safeParse(rawPaymentStatus) : null;
   if (parsedPaymentStatus && !parsedPaymentStatus.success) {
-    filterError = "Revisa los filtros: el estado de pago seleccionado no es válido.";
+    filterErrors.push("el estado de pago seleccionado no es válido");
+    hasBlockingFilterError = true;
   }
 
   const parsedFulfillmentStatus =
@@ -84,23 +103,30 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
       ? fulfillmentStatusSchema.safeParse(rawFulfillmentStatus)
       : null;
   if (parsedFulfillmentStatus && !parsedFulfillmentStatus.success) {
-    filterError = "Revisa los filtros: el estado logístico seleccionado no es válido.";
+    filterErrors.push("el estado logístico seleccionado no es válido");
+    hasBlockingFilterError = true;
   }
 
-  const parsedFrom = rawFrom !== undefined ? dateParamSchema.safeParse(rawFrom) : null;
-  if (parsedFrom && !parsedFrom.success) {
-    filterError = "Revisa los filtros: la fecha inicial no tiene un formato válido.";
+  const fromDate = rawFrom !== undefined ? parseBogotaDateParam(rawFrom) : undefined;
+  if (rawFrom !== undefined && fromDate === null) {
+    filterErrors.push("la fecha inicial no es una fecha de calendario válida (AAAA-MM-DD)");
+    hasBlockingFilterError = true;
   }
 
-  const parsedTo = rawTo !== undefined ? dateParamSchema.safeParse(rawTo) : null;
-  if (parsedTo && !parsedTo.success) {
-    filterError = "Revisa los filtros: la fecha final no tiene un formato válido.";
+  const toDate = rawTo !== undefined ? parseBogotaDateParam(rawTo) : undefined;
+  if (rawTo !== undefined && toDate === null) {
+    filterErrors.push("la fecha final no es una fecha de calendario válida (AAAA-MM-DD)");
+    hasBlockingFilterError = true;
+  }
+
+  if (fromDate && toDate && fromDate > toDate) {
+    filterErrors.push("la fecha inicial no puede ser posterior a la fecha final");
+    hasBlockingFilterError = true;
   }
 
   const parsedCursor = rawCursor !== undefined ? cursorSchema.safeParse(rawCursor) : null;
   if (parsedCursor && !parsedCursor.success) {
-    filterError =
-      "Revisa los filtros: el cursor de paginación no es válido; te mostramos la primera página.";
+    filterErrors.push("el cursor de paginación no es válido; te mostramos la primera página");
   }
 
   const query = {
@@ -108,48 +134,57 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
     orderStatus: parsedOrderStatus?.success ? parsedOrderStatus.data : undefined,
     paymentStatus: parsedPaymentStatus?.success ? parsedPaymentStatus.data : undefined,
     fulfillmentStatus: parsedFulfillmentStatus?.success ? parsedFulfillmentStatus.data : undefined,
-    from: parsedFrom?.success ? parsedFrom.data : undefined,
-    to: parsedTo?.success ? parsedTo.data : undefined,
+    from: fromDate ? rawFrom : undefined,
+    to: toDate ? rawTo : undefined,
     cursor: parsedCursor?.success ? parsedCursor.data : undefined,
   };
 
-  let activeCursor = query.cursor;
+  let activeCursor = hasBlockingFilterError ? undefined : query.cursor;
   let page: AdminOrderPage = { items: [], nextCursor: null };
   const service = new AdminOrderService(getDatabase(), session.profile.id);
-  const baseFilters = {
-    query: query.q,
-    orderStatus: query.orderStatus,
-    paymentStatus: query.paymentStatus,
-    fulfillmentStatus: query.fulfillmentStatus,
-    from: query.from ? bogotaDayStart(query.from) : undefined,
-    to: query.to ? new Date(bogotaDayStart(query.to).getTime() + 86_400_000) : undefined,
-  };
 
-  try {
-    page = await service.list({ ...baseFilters, cursor: activeCursor });
-  } catch (error) {
-    if (activeCursor && error instanceof RangeError && /cursor/i.test(error.message)) {
-      filterError =
-        "Revisa los filtros: el marcador de paginación ya no está vigente; te mostramos la primera página.";
-      activeCursor = undefined;
-      try {
-        page = await service.list(baseFilters);
-      } catch (innerError) {
-        if (innerError instanceof TypeError || innerError instanceof RangeError) {
-          filterError =
-            "Revisa los filtros: el número requiere de 3 a 64 letras, dígitos o guiones y un rango de fechas válido.";
-        } else {
-          throw innerError;
+  if (!hasBlockingFilterError) {
+    const baseFilters = {
+      query: query.q,
+      orderStatus: query.orderStatus,
+      paymentStatus: query.paymentStatus,
+      fulfillmentStatus: query.fulfillmentStatus,
+      from: fromDate ?? undefined,
+      to: toDate ? new Date(toDate.getTime() + 86_400_000) : undefined,
+    };
+
+    try {
+      page = await service.list({ ...baseFilters, cursor: activeCursor });
+    } catch (error) {
+      if (activeCursor && error instanceof RangeError && /cursor/i.test(error.message)) {
+        filterErrors.push(
+          "el marcador de paginación ya no está vigente; te mostramos la primera página",
+        );
+        activeCursor = undefined;
+        try {
+          page = await service.list(baseFilters);
+        } catch (innerError) {
+          if (innerError instanceof TypeError || innerError instanceof RangeError) {
+            filterErrors.push(
+              "el número requiere de 3 a 64 letras, dígitos o guiones y un rango de fechas válido",
+            );
+          } else {
+            throw innerError;
+          }
         }
+      } else if (error instanceof TypeError || error instanceof RangeError) {
+        filterErrors.push(
+          "el número requiere de 3 a 64 letras, dígitos o guiones y un rango de fechas válido",
+        );
+        activeCursor = undefined;
+      } else {
+        throw error;
       }
-    } else if (error instanceof TypeError || error instanceof RangeError) {
-      filterError =
-        "Revisa los filtros: el número requiere de 3 a 64 letras, dígitos o guiones y un rango de fechas válido.";
-      activeCursor = undefined;
-    } else {
-      throw error;
     }
   }
+
+  const filterError =
+    filterErrors.length > 0 ? `Revisa los filtros: ${filterErrors.join("; ")}.` : null;
 
   const baseParams = new URLSearchParams();
   if (query.q) baseParams.set("q", query.q);
@@ -164,14 +199,24 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
   const nextParams = new URLSearchParams(baseParams);
   if (page.nextCursor) nextParams.set("cursor", page.nextCursor);
   const hasAnyFilter = Boolean(
-    query.q ||
-    query.orderStatus ||
-    query.paymentStatus ||
-    query.fulfillmentStatus ||
-    query.from ||
-    query.to ||
-    activeCursor,
+    rawQ ||
+    rawOrderStatus ||
+    rawPaymentStatus ||
+    rawFulfillmentStatus ||
+    rawFrom ||
+    rawTo ||
+    rawCursor ||
+    activeCursor ||
+    filterError,
   );
+  const formKey = [
+    rawQ ?? "",
+    rawOrderStatus ?? "",
+    rawPaymentStatus ?? "",
+    rawFulfillmentStatus ?? "",
+    rawFrom ?? "",
+    rawTo ?? "",
+  ].join("|");
 
   return (
     <div className="space-y-8">
@@ -183,7 +228,7 @@ export default async function OrdersPage({ searchParams }: PageProps<"/admin/ped
         </p>
       </div>
       <form
-        key={baseParams.toString()}
+        key={formKey}
         action="/admin/pedidos"
         className="grid gap-4 rounded-xl border border-border bg-card p-5 sm:grid-cols-2 lg:grid-cols-3"
       >

@@ -197,7 +197,16 @@ export async function verifyCustomerOtpAction(
   const parsed = z
     .object({ code: otpSchema, turnstileToken: z.string().max(2048) })
     .safeParse(closedFormObject(formData, fields));
-  if (!parsed.success) return actionError("El código no tiene un formato válido.");
+  if (!parsed.success) {
+    const codeFailed = parsed.error.issues.some((issue) => issue.path[0] === "code");
+    return {
+      status: "error",
+      message: "El código no tiene un formato válido.",
+      ...(codeFailed
+        ? { fieldErrors: { code: ["Ingresa el código numérico de 6 dígitos."] } }
+        : {}),
+    };
+  }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_verify");
   if (captchaError) return captchaError;
   const request = await readCustomerAuthRequest(["signup", "login"]);
@@ -244,7 +253,23 @@ export async function resetCustomerPasswordAction(
       turnstileToken: z.string().max(2048),
     })
     .safeParse(closedFormObject(formData, fields));
-  if (!parsed.success) return actionError("Revisa el código y la contraseña.");
+  if (!parsed.success) {
+    const fieldErrors: Record<string, string[]> = {};
+    if (parsed.error.issues.some((issue) => issue.path[0] === "code")) {
+      fieldErrors.code = ["Ingresa el código numérico de 6 dígitos."];
+    }
+    if (parsed.error.issues.some((issue) => issue.path[0] === "password")) {
+      fieldErrors.password = ["Ingresa una contraseña nueva."];
+    }
+    if (parsed.error.issues.some((issue) => issue.path[0] === "confirmation")) {
+      fieldErrors.confirmation = ["Confirma tu contraseña nueva."];
+    }
+    return {
+      status: "error",
+      message: "Revisa el código y la contraseña.",
+      ...(Object.keys(fieldErrors).length > 0 ? { fieldErrors } : {}),
+    };
+  }
   const captchaError = await captcha(parsed.data.turnstileToken, "customer_reset");
   if (captchaError) return captchaError;
   const request = await readCustomerAuthRequest(["recovery"]);

@@ -82,7 +82,7 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
   if (error instanceof AdminAuthorizationError || error instanceof AdminActorAuthorizationError) {
     return actionError("Tu sesión no está autorizada para gestionar ventas asistidas.", values);
   }
-  return actionError(cartMutationMessage(error), values);
+  return actionError(cartMutationMessage(error, "admin"), values);
 }
 
 function expiration(hours: number): Date {

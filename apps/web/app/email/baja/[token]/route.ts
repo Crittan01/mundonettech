@@ -30,7 +30,8 @@ function escapeHtml(value: string): string {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function themeCssBlock(): string {
@@ -41,7 +42,7 @@ function themeCssBlock(): string {
 }
 
 function formatTopicLabel(topic: string): string {
-  return topicLabels[topic] ?? escapeHtml(topic);
+  return Object.hasOwn(topicLabels, topic) ? topicLabels[topic]! : escapeHtml(topic);
 }
 
 function page(token: string, topic: string, completed: boolean): string {

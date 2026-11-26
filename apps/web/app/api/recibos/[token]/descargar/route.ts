@@ -101,13 +101,21 @@ export async function GET(
       { status: 404, headers: privateNoIndexHeaders },
     );
   }
-  const regimeLabel = taxRegimeLabels[receipt.taxRegime] ?? singleLine(receipt.taxRegime);
+  const regimeLabel = Object.hasOwn(taxRegimeLabels, receipt.taxRegime)
+    ? taxRegimeLabels[receipt.taxRegime]!
+    : singleLine(receipt.taxRegime);
+  const orderStatusLabel = Object.hasOwn(orderStatusLabels, receipt.orderStatus)
+    ? orderStatusLabels[receipt.orderStatus]
+    : singleLine(receipt.orderStatus);
+  const paymentStatusLabel = Object.hasOwn(paymentStatusLabels, receipt.paymentStatus)
+    ? paymentStatusLabels[receipt.paymentStatus]
+    : singleLine(receipt.paymentStatus);
   const lines = [
     "COMPROBANTE DE COMPRA NO FISCAL",
     `${singleLine(receipt.receiptNumber)} · Pedido ${singleLine(receipt.orderNumber)}`,
     `Emitido: ${formatBogotaTimestamp(receipt.issuedAt)}`,
-    `Estado del pedido: ${orderStatusLabels[receipt.orderStatus]}`,
-    `Estado del pago: ${paymentStatusLabels[receipt.paymentStatus]}`,
+    `Estado del pedido: ${orderStatusLabel}`,
+    `Estado del pago: ${paymentStatusLabel}`,
     `Régimen tributario: ${regimeLabel}`,
     "",
     `Cliente: ${singleLine(receipt.recipientNameSnapshot)}`,
@@ -122,7 +130,7 @@ export async function GET(
       `${item.quantity} x ${formatCopCents(item.unitPriceCents)} · descuento ${formatCopCents(item.discountCents)} · IVA ${formatCopCents(item.taxCents)} · total ${formatCopCents(item.totalCents)}`,
       ...item.taxLines.map(
         (tax) =>
-          `  ${singleLine(tax.taxGroupName || tax.taxGroupCode)} · regla ${taxRuleLabels[tax.rule] ?? singleLine(tax.rule)} · tarifa ${formatRatePercent(tax.appliedRateBps)} · base ${formatCopCents(tax.taxableBaseCents)} · IVA ${formatCopCents(tax.taxCents)}`,
+          `  ${singleLine(tax.taxGroupName || tax.taxGroupCode)} · regla ${Object.hasOwn(taxRuleLabels, tax.rule) ? taxRuleLabels[tax.rule]! : singleLine(tax.rule)} · tarifa ${formatRatePercent(tax.appliedRateBps)} · base ${formatCopCents(tax.taxableBaseCents)} · IVA ${formatCopCents(tax.taxCents)}`,
       ),
     ]),
     "",

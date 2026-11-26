@@ -43,8 +43,10 @@ function useResetOnSuccess(
 function submitWithTransition(
   event: React.FormEvent<HTMLFormElement>,
   action: (formData: FormData) => void,
+  pending: boolean,
 ) {
   event.preventDefault();
+  if (pending) return;
   const formData = new FormData(event.currentTarget);
   startTransition(() => action(formData));
 }
@@ -106,7 +108,7 @@ export function CrmOrganizationForm({
     <div className="space-y-4">
       <form
         ref={createFormRef}
-        onSubmit={(event) => submitWithTransition(event, createAction)}
+        onSubmit={(event) => submitWithTransition(event, createAction, creating)}
         aria-busy={creating}
         className="grid gap-3 rounded-xl border border-border p-4 sm:grid-cols-3"
       >
@@ -175,7 +177,7 @@ function OrganizationEditor({
       </summary>
       <form
         ref={updateFormRef}
-        onSubmit={(event) => submitWithTransition(event, action)}
+        onSubmit={(event) => submitWithTransition(event, action, pending)}
         aria-busy={pending}
         className="mt-4 grid gap-3 sm:grid-cols-3"
       >
@@ -226,7 +228,7 @@ function OrganizationEditor({
         </div>
       </form>
       <form
-        onSubmit={(event) => submitWithTransition(event, archiveAction)}
+        onSubmit={(event) => submitWithTransition(event, archiveAction, archiving)}
         aria-busy={archiving}
         className="mt-3"
       >
@@ -258,7 +260,7 @@ export function CrmContactForm({
   return (
     <form
       ref={formRef}
-      onSubmit={(event) => submitWithTransition(event, action)}
+      onSubmit={(event) => submitWithTransition(event, action, pending)}
       aria-busy={pending}
       className="grid gap-3 sm:grid-cols-2"
     >
@@ -349,7 +351,7 @@ export function CrmVerificationForm({
   return (
     <form
       ref={formRef}
-      onSubmit={(event) => submitWithTransition(event, action)}
+      onSubmit={(event) => submitWithTransition(event, action, pending)}
       aria-busy={pending}
       className="grid gap-3 sm:grid-cols-2"
     >
@@ -406,7 +408,7 @@ export function CrmDetectDuplicatesForm({ contactId }: { contactId?: string }) {
   const [state, action, pending] = useActionState(detectCrmDuplicatesAction, initialActionState);
   return (
     <form
-      onSubmit={(event) => submitWithTransition(event, action)}
+      onSubmit={(event) => submitWithTransition(event, action, pending)}
       aria-busy={pending}
       className="space-y-2"
     >
@@ -455,6 +457,7 @@ export function CrmMergeForm({
         ref={formRef}
         onSubmit={(event) => {
           event.preventDefault();
+          if (busy) return;
           const submitter = (event.nativeEvent as SubmitEvent).submitter;
           const isReject = submitter?.getAttribute("data-intent") === "reject";
           const formData = new FormData(event.currentTarget);
@@ -517,7 +520,7 @@ export function CrmActivityForm({ contactId }: { contactId: string }) {
   return (
     <form
       ref={formRef}
-      onSubmit={(event) => submitWithTransition(event, action)}
+      onSubmit={(event) => submitWithTransition(event, action, pending)}
       aria-busy={pending}
       className="space-y-3"
     >
@@ -594,7 +597,7 @@ export function CrmTaskForm({
   return (
     <form
       ref={formRef}
-      onSubmit={(event) => submitWithTransition(event, action)}
+      onSubmit={(event) => submitWithTransition(event, action, pending)}
       aria-busy={pending}
       className="grid gap-3 sm:grid-cols-2"
     >
@@ -700,7 +703,7 @@ export function CrmSuppressionForm({ contactId, version }: { contactId: string; 
   return (
     <form
       ref={formRef}
-      onSubmit={(event) => submitWithTransition(event, action)}
+      onSubmit={(event) => submitWithTransition(event, action, pending)}
       aria-busy={pending}
       className="space-y-3 rounded-xl border border-destructive p-4"
     >

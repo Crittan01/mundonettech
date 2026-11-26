@@ -6,9 +6,11 @@ import { Button } from "@/components/ui/button";
 
 export default function StorefrontError({
   reset,
+  retry,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
+  retry?: () => void;
 }) {
   return (
     <section
@@ -20,7 +22,7 @@ export default function StorefrontError({
         La consulta no se completó. Inténtalo de nuevo; no se realizó ninguna modificación.
       </p>
       <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-        <Button type="button" onClick={reset}>
+        <Button type="button" onClick={() => (retry ?? reset)()}>
           Reintentar
         </Button>
         <Button asChild variant="outline">

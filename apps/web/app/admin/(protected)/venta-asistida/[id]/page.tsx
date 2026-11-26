@@ -125,7 +125,7 @@ export default async function AssistedSaleDetailPage({
                 ) : null}
                 <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
                   <div>
-                    {line.bundle ? (
+                    {firstBundle && line.bundle ? (
                       <h4 className="font-medium">{line.productName}</h4>
                     ) : (
                       <h3 className="font-medium">{line.productName}</h3>
@@ -143,7 +143,7 @@ export default async function AssistedSaleDetailPage({
                     ) : null}
                     {BigInt(line.bundleDiscountCents) > 0n ? (
                       <p className="text-sm text-success">
-                        Bundle: −{formatCopCents(line.bundleDiscountCents)}
+                        Paquete: −{formatCopCents(line.bundleDiscountCents)}
                       </p>
                     ) : null}
                     {BigInt(line.couponDiscountCents) > 0n ? (
@@ -176,7 +176,7 @@ export default async function AssistedSaleDetailPage({
           })
         ) : (
           <p className="rounded-xl border border-border bg-card p-6 text-muted-foreground">
-            La venta está vacía. Añade una variante o bundle antes de emitir el enlace.
+            La venta está vacía. Añade una variante o paquete antes de emitir el enlace.
           </p>
         )}
       </section>
@@ -187,7 +187,7 @@ export default async function AssistedSaleDetailPage({
             <AssistedAddVariantForm cartId={id} />
           </section>
           <section className="rounded-xl border border-border bg-card p-5">
-            <h2 className="mb-4 font-semibold">Añadir bundle</h2>
+            <h2 className="mb-4 font-semibold">Añadir paquete</h2>
             <AssistedAddBundleForm cartId={id} />
           </section>
         </div>
@@ -208,7 +208,7 @@ export default async function AssistedSaleDetailPage({
             ) : null}
             {BigInt(cart.bundleDiscountCents) > 0n ? (
               <div className="flex justify-between text-success">
-                <dt>Bundles</dt>
+                <dt>Paquetes</dt>
                 <dd>−{formatCopCents(cart.bundleDiscountCents)}</dd>
               </div>
             ) : null}
@@ -241,8 +241,8 @@ export default async function AssistedSaleDetailPage({
               <AssistedIssueLinkForm cartId={id} hasLink={record.assistedTokenHash !== null} />
               {!cart.canContinue ? (
                 <p role="alert" className="rounded-xl border border-warning bg-card p-4 text-sm">
-                  Resuelve las alertas de stock, productos o bundles antes de emitir. El servicio
-                  volverá a validarlas de forma transaccional.
+                  Resuelve las alertas de inventario, productos o paquetes antes de emitir. El
+                  servicio volverá a validarlas de forma transaccional.
                 </p>
               ) : null}
               <AssistedCancelForm cartId={id} />

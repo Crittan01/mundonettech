@@ -703,29 +703,71 @@ export class GrowthService {
     return { recorded: updated.count === 1 };
   }
 
-  async getAccountOverview(customerId: string) {
+  async getAccountOverview(
+    customerId: string,
+    options: {
+      readonly txnPage?: number;
+      readonly txnPageSize?: number;
+      readonly referralPage?: number;
+      readonly referralPageSize?: number;
+    } = {},
+  ) {
     assertUuid(customerId, "customerId");
-    const customer = await this.db.customer.findFirst({
-      where: { id: customerId, status: "ACTIVE", deletedAt: null },
-      include: {
-        referralCode: true,
-        loyaltyTxns: {
-          include: { order: { select: { orderNumber: true, customerId: true } } },
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: 100,
+    const requestedTxnPage = options.txnPage ?? 1;
+    const txnPageSize = options.txnPageSize ?? 100;
+    const requestedReferralPage = options.referralPage ?? 1;
+    const referralPageSize = options.referralPageSize ?? 50;
+    if (
+      !Number.isInteger(requestedTxnPage) ||
+      requestedTxnPage < 1 ||
+      requestedTxnPage > 10_000 ||
+      !Number.isInteger(txnPageSize) ||
+      txnPageSize < 1 ||
+      txnPageSize > 100 ||
+      !Number.isInteger(requestedReferralPage) ||
+      requestedReferralPage < 1 ||
+      requestedReferralPage > 10_000 ||
+      !Number.isInteger(referralPageSize) ||
+      referralPageSize < 1 ||
+      referralPageSize > 100
+    ) {
+      throw new GrowthError("VALIDATION", "Invalid loyalty or referral pagination options.");
+    }
+    const [customer, txnsTotal, referralsTotal] = await Promise.all([
+      this.db.customer.findFirst({
+        where: { id: customerId, status: "ACTIVE", deletedAt: null },
+        include: {
+          referralCode: true,
+          referralsReceived: {
+            include: { order: { select: { orderNumber: true } } },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            take: 1,
+          },
         },
-        referralsMade: {
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: 50,
-        },
-        referralsReceived: {
-          include: { order: { select: { orderNumber: true } } },
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: 1,
-        },
-      },
-    });
+      }),
+      this.db.loyaltyTxn.count({ where: { customerId } }),
+      this.db.referral.count({ where: { referrerCustomerId: customerId } }),
+    ]);
     if (!customer) throw new GrowthError("NOT_FOUND", "Active customer account not found.");
+    const txnTotalPages = Math.max(1, Math.ceil(txnsTotal / txnPageSize));
+    const txnPage = Math.min(requestedTxnPage, txnTotalPages);
+    const referralTotalPages = Math.max(1, Math.ceil(referralsTotal / referralPageSize));
+    const referralPage = Math.min(requestedReferralPage, referralTotalPages);
+    const [loyaltyTxns, referralsMade] = await Promise.all([
+      this.db.loyaltyTxn.findMany({
+        where: { customerId },
+        include: { order: { select: { orderNumber: true, customerId: true } } },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (txnPage - 1) * txnPageSize,
+        take: txnPageSize,
+      }),
+      this.db.referral.findMany({
+        where: { referrerCustomerId: customerId },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (referralPage - 1) * referralPageSize,
+        take: referralPageSize,
+      }),
+    ]);
     return {
       loyaltyPoints: customer.loyaltyPoints,
       earnUnitCents: loyaltyEarnUnitCents.toString(),
@@ -733,7 +775,7 @@ export class GrowthService {
       referralCode: customer.referralCode?.disabledAt
         ? null
         : (customer.referralCode?.code ?? null),
-      ledger: customer.loyaltyTxns.map((entry) => ({
+      ledger: loyaltyTxns.map((entry) => ({
         id: entry.id,
         type: entry.type,
         points: entry.points,
@@ -741,7 +783,7 @@ export class GrowthService {
         orderNumber: entry.order.customerId === customerId ? entry.order.orderNumber : null,
         createdAt: entry.createdAt,
       })),
-      referralsMade: customer.referralsMade.map((referral) => ({
+      referralsMade: referralsMade.map((referral) => ({
         id: referral.id,
         status: referral.status,
         createdAt: referral.createdAt,
@@ -757,11 +799,48 @@ export class GrowthService {
             createdAt: customer.referralsReceived[0].createdAt,
           }
         : null,
+      pagination: {
+        txns: {
+          page: txnPage,
+          pageSize: txnPageSize,
+          total: txnsTotal,
+          totalPages: txnTotalPages,
+        },
+        referrals: {
+          page: referralPage,
+          pageSize: referralPageSize,
+          total: referralsTotal,
+          totalPages: referralTotalPages,
+        },
+      },
     };
   }
 
-  async getAdminOverview(actorAdminUserId: string) {
+  async getAdminOverview(
+    actorAdminUserId: string,
+    options: {
+      readonly tab?: "ALL" | "LOYALTY" | "REFERRALS" | "CARTS";
+      readonly page?: number;
+      readonly pageSize?: number;
+    } = {},
+  ) {
     assertUuid(actorAdminUserId, "actorAdminUserId");
+    const tab = options.tab ?? "ALL";
+    if (!["ALL", "LOYALTY", "REFERRALS", "CARTS"].includes(tab)) {
+      throw new GrowthError("VALIDATION", "Invalid growth overview tab.");
+    }
+    const requestedPage = options.page ?? 1;
+    const pageSize = options.pageSize ?? 50;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 100
+    ) {
+      throw new GrowthError("VALIDATION", "Invalid growth overview pagination.");
+    }
     const actor = await this.db.adminUser.findFirst({
       where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
       select: { role: true },
@@ -769,44 +848,69 @@ export class GrowthService {
     if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, "crm:read")) {
       throw new GrowthError("FORBIDDEN", "Administrator is not authorized to read growth data.");
     }
-    const [ledger, referrals, abandonedCarts, totals] = await Promise.all([
-      this.db.loyaltyTxn.findMany({
-        include: {
-          customer: { select: { email: true, status: true } },
-          order: { select: { orderNumber: true } },
-        },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: 50,
-      }),
-      this.db.referral.findMany({
-        include: {
-          code: true,
-          referrer: { select: { email: true, status: true } },
-          referred: { select: { email: true, status: true } },
-          order: { select: { orderNumber: true } },
-        },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: 50,
-      }),
-      this.db.abandonedCart.findMany({
-        include: {
-          customer: { select: { email: true, status: true } },
-          cart: {
-            select: {
-              itemCount: true,
-              totalCents: true,
-              items: { select: { quantity: true } },
-            },
-          },
-        },
-        orderBy: [{ detectedAt: "desc" }, { id: "desc" }],
-        take: 50,
-      }),
+    const [totals, loyaltyTxnsTotal, referralsTotal, abandonedCartsTotal] = await Promise.all([
       this.db.$queryRaw<Array<{ customers: number; points: string; referrals: number }>>`
         SELECT (SELECT count(*)::int FROM "Customer" WHERE "loyaltyPoints" > 0) AS customers,
           (SELECT COALESCE(sum("loyaltyPoints"), 0)::text FROM "Customer") AS points,
           (SELECT count(*)::int FROM "Referral" WHERE "status" = 'QUALIFIED') AS referrals
       `,
+      this.db.loyaltyTxn.count(),
+      this.db.referral.count(),
+      this.db.abandonedCart.count(),
+    ]);
+    const activeTabTotal =
+      tab === "LOYALTY"
+        ? loyaltyTxnsTotal
+        : tab === "REFERRALS"
+          ? referralsTotal
+          : tab === "CARTS"
+            ? abandonedCartsTotal
+            : Math.max(loyaltyTxnsTotal, referralsTotal, abandonedCartsTotal);
+    const totalPages = Math.max(1, Math.ceil(activeTabTotal / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const skip = (page - 1) * pageSize;
+    const [ledger, referrals, abandonedCarts] = await Promise.all([
+      tab === "ALL" || tab === "LOYALTY"
+        ? this.db.loyaltyTxn.findMany({
+            include: {
+              customer: { select: { email: true, status: true } },
+              order: { select: { orderNumber: true } },
+            },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            skip,
+            take: pageSize,
+          })
+        : Promise.resolve([]),
+      tab === "ALL" || tab === "REFERRALS"
+        ? this.db.referral.findMany({
+            include: {
+              code: true,
+              referrer: { select: { email: true, status: true } },
+              referred: { select: { email: true, status: true } },
+              order: { select: { orderNumber: true } },
+            },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            skip,
+            take: pageSize,
+          })
+        : Promise.resolve([]),
+      tab === "ALL" || tab === "CARTS"
+        ? this.db.abandonedCart.findMany({
+            include: {
+              customer: { select: { email: true, status: true } },
+              cart: {
+                select: {
+                  itemCount: true,
+                  totalCents: true,
+                  items: { select: { quantity: true } },
+                },
+              },
+            },
+            orderBy: [{ detectedAt: "desc" }, { id: "desc" }],
+            skip,
+            take: pageSize,
+          })
+        : Promise.resolve([]),
     ]);
     const maskedCustomer = (
       party: { email: string; status: string } | null | undefined,
@@ -815,8 +919,26 @@ export class GrowthService {
       party?.status === "ANONYMIZED"
         ? "Cuenta anonimizada"
         : maskEmail(party?.email ?? fallback ?? null);
+    const summaryTotals = totals[0] ?? { customers: 0, points: "0", referrals: 0 };
     return {
-      totals: totals[0] ?? { customers: 0, points: "0", referrals: 0 },
+      totals: {
+        ...summaryTotals,
+        loyaltyTxns: loyaltyTxnsTotal,
+        totalReferrals: referralsTotal,
+        abandonedCarts: abandonedCartsTotal,
+      },
+      pagination: {
+        tab,
+        page,
+        pageSize,
+        total: activeTabTotal,
+        totalPages,
+        counts: {
+          loyaltyTxns: loyaltyTxnsTotal,
+          referrals: referralsTotal,
+          abandonedCarts: abandonedCartsTotal,
+        },
+      },
       ledger: ledger.map((entry) => ({
         id: entry.id,
         customerEmail: maskedCustomer(entry.customer),

@@ -1,11 +1,10 @@
 import { hasAdminPermission, type MetaCatalogIssueCode } from "@mundonettech/core";
+import type { MetaCapiEventStatus } from "@mundonettech/db";
 import { CredentialCursorError } from "@mundonettech/integrations";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
-import { MetaCapiDashboard } from "@/components/admin/meta-capi-dashboard";
-import { MetaCatalogRefreshButton } from "@/components/admin/meta-catalog-refresh-button";
-import { OperationalCredentialForm } from "@/components/admin/operational-credential-form";
 import {
   CredentialRotationForm,
   ReencryptCredentialForm,
@@ -13,7 +12,13 @@ import {
   WompiCredentialWizard,
   type IntegrationCredentialView,
 } from "@/components/admin/integration-credential-forms";
+import { MetaCapiDashboard } from "@/components/admin/meta-capi-dashboard";
+import { MetaCatalogRefreshButton } from "@/components/admin/meta-catalog-refresh-button";
+import { OperationalCredentialForm } from "@/components/admin/operational-credential-form";
+import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import { integrationProviderLabels } from "@/lib/admin-presenters";
+import { single } from "@/lib/admin-search-params";
 import {
   getIntegrationCredentialVault,
   getIntegrationEnvironment,
@@ -33,6 +38,7 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+const numberFormatter = new Intl.NumberFormat("es-CO");
 
 const feedIssueLabels: Record<MetaCatalogIssueCode, string> = {
   INVALID_ID: "Identificador de variante inválido",
@@ -49,13 +55,48 @@ const feedIssueLabels: Record<MetaCatalogIssueCode, string> = {
   INVALID_WEIGHT: "Peso logístico inválido",
 };
 
+const capiStatusOptions: readonly (readonly [MetaCapiEventStatus, string])[] = [
+  ["PENDING", "Estado: Pendiente"],
+  ["DISPATCHING", "Estado: Despachando"],
+  ["SENT", "Estado: Recibido por Meta"],
+  ["SKIPPED", "Estado: Descartado sin envío"],
+  ["FAILED", "Estado: Fallo determinista"],
+  ["UNCERTAIN", "Estado: Resultado incierto"],
+];
+const allowedCapiStatuses = new Set<string>(capiStatusOptions.map(([status]) => status));
+
 const uuidCursorPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function parsePositivePage(value: string | undefined, maxPage = 10_000): number {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed)) return maxPage;
+  return Math.max(1, Math.min(maxPage, parsed));
+}
+
+function integrationsHref(options: {
+  cursor?: string;
+  capiEstado: MetaCapiEventStatus | "ALL";
+  capiPagina: number;
+}): string {
+  const params = new URLSearchParams();
+  if (options.cursor) params.set("cursor", options.cursor);
+  if (options.capiEstado !== "ALL") params.set("capiEstado", options.capiEstado);
+  if (options.capiPagina > 1) params.set("capiPagina", String(options.capiPagina));
+  const qs = params.toString();
+  return qs ? `/admin/integraciones?${qs}` : "/admin/integraciones";
+}
 
 export default async function IntegrationsPage({
   searchParams,
 }: {
-  readonly searchParams?: Promise<{ cursor?: string | string[] }>;
+  readonly searchParams?: Promise<{
+    cursor?: string | string[];
+    capiEstado?: string | string[];
+    capiPagina?: string | string[];
+  }>;
 } = {}) {
   const session = await requireAdminPage("integrations:read");
   let recentSession;
@@ -65,25 +106,35 @@ export default async function IntegrationsPage({
       requireRecentMfa: true,
     });
   } catch (error) {
-    if (error instanceof AdminAuthorizationError && error.code === "MFA_STALE") {
-      return (
-        <div className="space-y-6 rounded-xl border border-border bg-card p-5">
-          <div>
-            <h1 className="text-3xl font-bold">Integraciones y bóveda</h1>
-            <p className="mt-2 text-sm text-muted-foreground" role="alert">
-              Confirma tu autenticador para leer los descriptores y eventos de integraciones.
-            </p>
+    if (error instanceof AdminAuthorizationError) {
+      if (error.code === "MFA_STALE") {
+        return (
+          <div className="space-y-6 rounded-xl border border-border bg-card p-5">
+            <div>
+              <h1 className="text-3xl font-bold">Integraciones y bóveda</h1>
+              <p className="mt-2 text-sm text-muted-foreground" role="alert">
+                Confirma tu autenticador para leer los descriptores y eventos de integraciones.
+              </p>
+            </div>
+            <CmsStepUp session={session} />
           </div>
-          <CmsStepUp session={session} />
-        </div>
-      );
+        );
+      }
+      if (error.code === "AAL1") redirect("/admin/login/mfa");
+      redirect(`/admin/login?reason=${error.code === "TIMEOUT" ? "timeout" : "security"}`);
     }
     throw error;
   }
   const environment = getIntegrationEnvironment();
-  const params = searchParams ? await searchParams : {};
-  const rawCursor = typeof params.cursor === "string" ? params.cursor : undefined;
+  const params = (await searchParams) ?? {};
+  const rawCursor = single(params.cursor);
   const validatedCursor = rawCursor && uuidCursorPattern.test(rawCursor) ? rawCursor : undefined;
+  const rawCapiEstado = single(params.capiEstado)?.trim() ?? "ALL";
+  const capiEstado: MetaCapiEventStatus | "ALL" = allowedCapiStatuses.has(rawCapiEstado)
+    ? (rawCapiEstado as MetaCapiEventStatus)
+    : "ALL";
+  const requestedCapiPage = parsePositivePage(single(params.capiPagina));
+
   const vault = getIntegrationCredentialVault();
   const loadCredentials = async () => {
     try {
@@ -108,10 +159,14 @@ export default async function IntegrationsPage({
       throw error;
     }
   };
-  const [{ credentials, cursor, invalidCursor }, feed, metaEvents] = await Promise.all([
+  const [{ credentials, cursor, invalidCursor }, feed, metaEventsPage] = await Promise.all([
     loadCredentials(),
     getMetaCatalogFeed(),
-    metaCapiService().listEvents(recentSession.profile.id, 50),
+    metaCapiService().listEventsPage(recentSession.profile.id, {
+      ...(capiEstado !== "ALL" ? { status: capiEstado } : {}),
+      page: requestedCapiPage,
+      pageSize: 20,
+    }),
   ]);
   const canWrite = hasAdminPermission(recentSession.profile.role, "integrations:write");
   const items: IntegrationCredentialView[] = credentials.items.map((credential) => ({
@@ -156,10 +211,10 @@ export default async function IntegrationsPage({
       {canWrite ? (
         <>
           <section
-            aria-labelledby="wompi-wizard"
+            aria-labelledby="wompi-setup"
             className="rounded-xl border border-border bg-card p-5"
           >
-            <h2 id="wompi-wizard" className="text-xl font-semibold">
+            <h2 id="wompi-setup" className="text-xl font-semibold">
               Conectar una cuenta Wompi
             </h2>
             <p className="mt-2 mb-5 text-sm text-muted-foreground">
@@ -169,15 +224,15 @@ export default async function IntegrationsPage({
             <WompiCredentialWizard environment={environment} />
           </section>
           <section
-            aria-labelledby="operational-wizard"
+            aria-labelledby="operational-setup"
             className="rounded-xl border border-border bg-card p-5"
           >
-            <h2 id="operational-wizard" className="text-xl font-semibold">
+            <h2 id="operational-setup" className="text-xl font-semibold">
               Conectar logística, correo, facturación, Gemini o Meta
             </h2>
             <p className="mt-2 mb-5 text-sm text-muted-foreground">
               Cada contrato se valida antes de cifrar. El proveedor DIAN debe firmar y transmitir el
-              XML; las credenciales nunca se muestran en descriptores o logs.
+              XML; las credenciales nunca se muestran en descriptores ni registros.
             </p>
             <OperationalCredentialForm environment={environment} />
           </section>
@@ -195,7 +250,7 @@ export default async function IntegrationsPage({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 id="meta-feed" className="text-xl font-semibold">
-              Meta Catalog Feed
+              Catálogo de Meta
             </h2>
             <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
               CSV por variante con precio COP, inventario, enlaces e identificadores reales. Las
@@ -211,6 +266,7 @@ export default async function IntegrationsPage({
               className="text-sm text-primary underline"
             >
               Abrir feed CSV
+              <span className="sr-only"> (se abre en una nueva pestaña)</span>
             </a>
             {canWrite ? <MetaCatalogRefreshButton /> : null}
           </div>
@@ -241,14 +297,90 @@ export default async function IntegrationsPage({
       <section id="meta-capi" aria-labelledby="meta-capi-title" className="space-y-4">
         <div>
           <h2 id="meta-capi-title" className="text-xl font-semibold">
-            Eventos Meta Conversions API
+            Eventos Meta Conversions API ({numberFormatter.format(metaEventsPage.total)})
           </h2>
           <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-            Purchase se deriva del pago real y usa un event_id único por orden. La revocación
-            cancela pendientes; los resultados inciertos solo continúan tras conciliación con MFA.
+            El evento de compra se deriva del pago real y usa un identificador único por orden. La
+            revocación cancela envíos pendientes; los resultados inciertos solo continúan tras
+            conciliación con MFA.
           </p>
         </div>
-        <MetaCapiDashboard events={metaEvents} canWrite={canWrite} />
+        <form
+          key={`${capiEstado}|${cursor ?? ""}`}
+          action="/admin/integraciones"
+          className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
+        >
+          {cursor ? <input type="hidden" name="cursor" value={cursor} /> : null}
+          <Select
+            name="capiEstado"
+            defaultValue={capiEstado}
+            aria-label="Filtrar eventos Meta CAPI por estado"
+            fullWidth={false}
+          >
+            <option value="ALL">Todos los estados</option>
+            {capiStatusOptions.map(([status, label]) => (
+              <option key={status} value={status}>
+                {label}
+              </option>
+            ))}
+          </Select>
+          <Button type="submit" variant="outline">
+            Filtrar
+          </Button>
+          {capiEstado !== "ALL" ? (
+            <Link
+              href={integrationsHref({
+                ...(cursor ? { cursor } : {}),
+                capiEstado: "ALL",
+                capiPagina: 1,
+              })}
+              className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+            >
+              Limpiar
+            </Link>
+          ) : null}
+        </form>
+        <MetaCapiDashboard events={metaEventsPage.items} canWrite={canWrite} />
+        {metaEventsPage.total > 0 ? (
+          <nav
+            aria-label="Paginación de eventos Meta CAPI"
+            className="flex flex-wrap items-center justify-between gap-3"
+          >
+            <span className="text-sm text-muted-foreground">
+              Página {metaEventsPage.page} de {metaEventsPage.totalPages} ·{" "}
+              {numberFormatter.format(metaEventsPage.total)}{" "}
+              {metaEventsPage.total === 1 ? "evento" : "eventos"}
+            </span>
+            <div className="flex gap-2">
+              {metaEventsPage.page > 1 ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    href={integrationsHref({
+                      ...(cursor ? { cursor } : {}),
+                      capiEstado,
+                      capiPagina: metaEventsPage.page - 1,
+                    })}
+                  >
+                    Anterior
+                  </Link>
+                </Button>
+              ) : null}
+              {metaEventsPage.page < metaEventsPage.totalPages ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    href={integrationsHref({
+                      ...(cursor ? { cursor } : {}),
+                      capiEstado,
+                      capiPagina: metaEventsPage.page + 1,
+                    })}
+                  >
+                    Siguiente
+                  </Link>
+                </Button>
+              ) : null}
+            </div>
+          </nav>
+        ) : null}
       </section>
       <section aria-labelledby="credential-list" className="space-y-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
@@ -257,7 +389,8 @@ export default async function IntegrationsPage({
               Credenciales registradas
             </h2>
             <p role="status" className="mt-1 text-sm text-muted-foreground">
-              {items.length} registros en este ambiente
+              Mostrando {numberFormatter.format(items.length)}{" "}
+              {items.length === 1 ? "registro" : "registros"} en esta página
             </p>
           </div>
         </div>
@@ -274,7 +407,7 @@ export default async function IntegrationsPage({
             <h3 className="text-lg font-semibold">No hay credenciales en {environment}</h3>
             <p className="mt-2 text-sm text-muted-foreground">
               Wompi no estará disponible en checkout hasta que un administrador autorizado complete
-              el wizard.
+              el asistente de configuración.
             </p>
           </div>
         ) : (
@@ -372,14 +505,24 @@ export default async function IntegrationsPage({
         {cursor || credentials.nextCursor ? (
           <nav aria-label="Paginación de credenciales" className="flex flex-wrap gap-3">
             {cursor ? (
-              <Link className="text-sm text-primary underline" href="/admin/integraciones">
+              <Link
+                className="text-sm text-primary underline"
+                href={integrationsHref({
+                  capiEstado,
+                  capiPagina: metaEventsPage.page,
+                })}
+              >
                 Primera página
               </Link>
             ) : null}
             {credentials.nextCursor ? (
               <Link
                 className="text-sm text-primary underline"
-                href={`/admin/integraciones?cursor=${encodeURIComponent(credentials.nextCursor)}`}
+                href={integrationsHref({
+                  cursor: credentials.nextCursor,
+                  capiEstado,
+                  capiPagina: metaEventsPage.page,
+                })}
               >
                 Siguiente página
               </Link>

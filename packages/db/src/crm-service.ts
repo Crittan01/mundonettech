@@ -1152,6 +1152,88 @@ export class CrmService {
     }));
   }
 
+  async listTasksPage(
+    options: {
+      readonly assignedToAdminUserId?: string;
+      readonly status?: "OPEN" | "PENDING" | "IN_PROGRESS" | "COMPLETED" | "CANCELLED";
+      readonly page?: number;
+      readonly pageSize?: number;
+    } = {},
+  ) {
+    if (options.assignedToAdminUserId) {
+      assertUuid(options.assignedToAdminUserId, "assignedToAdminUserId");
+    }
+    if (
+      options.status !== undefined &&
+      !["OPEN", "PENDING", "IN_PROGRESS", "COMPLETED", "CANCELLED"].includes(options.status)
+    ) {
+      throw new CrmError("VALIDATION", "Task status filter is invalid.");
+    }
+    const requestedPage = options.page ?? 1;
+    const pageSize = options.pageSize ?? 25;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 100
+    ) {
+      throw new CrmError("VALIDATION", "Invalid CRM task pagination.");
+    }
+    const statusFilter: Prisma.TaskWhereInput =
+      !options.status || options.status === "OPEN"
+        ? { status: { in: ["PENDING", "IN_PROGRESS"] } }
+        : { status: options.status };
+    const where: Prisma.TaskWhereInput = {
+      ...statusFilter,
+      contact: { status: "ACTIVE", deletedAt: null },
+      ...(options.assignedToAdminUserId
+        ? { assignedToAdminUserId: options.assignedToAdminUserId }
+        : {}),
+    };
+    const [currentTime, total] = await Promise.all([
+      databaseNow(this.db),
+      this.db.task.count({ where }),
+    ]);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const tasks = await this.db.task.findMany({
+      where,
+      include: {
+        contact: { include: { organization: true } },
+        assignedTo: { select: { id: true, displayName: true } },
+        createdBy: { select: { id: true, displayName: true } },
+      },
+      orderBy: [{ dueAt: "asc" }, { id: "asc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    });
+    const now = currentTime.getTime();
+    return {
+      items: tasks.map((task) => ({
+        id: task.id,
+        contactId: task.contactId,
+        title: task.title,
+        status: task.status,
+        priority: task.priority,
+        dueAt: task.dueAt,
+        completedAt: task.completedAt,
+        version: task.version,
+        isOverdue:
+          (task.status === "PENDING" || task.status === "IN_PROGRESS") &&
+          task.dueAt.getTime() < now,
+        assignedTo: task.assignedTo,
+        createdBy: task.createdBy,
+        contact: maskCrmContact(task.contact),
+      })),
+      total,
+      page,
+      pageSize,
+      totalPages,
+    };
+  }
+
   async detectDuplicates(
     options: { readonly contactId?: string; readonly limit?: number },
     audit: CrmAudit,

@@ -11,7 +11,7 @@ import {
 } from "@mundonettech/core";
 import { B2bError } from "@mundonettech/db";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { z } from "zod";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -115,7 +115,17 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
       await getAdminSession({ permission: "b2b:write", requireRecentMfa: true });
       copilotAuthorized = true;
     } catch (error) {
-      if (!(error instanceof AdminAuthorizationError && error.code === "MFA_STALE")) throw error;
+      if (error instanceof AdminAuthorizationError) {
+        if (error.code === "MFA_STALE") {
+          copilotAuthorized = false;
+        } else if (error.code === "AAL1") {
+          redirect("/admin/login/mfa");
+        } else {
+          redirect(`/admin/login?reason=${error.code === "TIMEOUT" ? "timeout" : "security"}`);
+        }
+      } else {
+        throw error;
+      }
     }
   }
   const credentials = copilotAuthorized
@@ -218,7 +228,7 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
                 </p>
                 {proposal.priceListCodeSnapshot ? (
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Lista {proposal.priceListCodeSnapshot} · snapshot v
+                    Lista {proposal.priceListCodeSnapshot} · instantánea v
                     {proposal.priceListVersionSnapshot}
                   </p>
                 ) : null}

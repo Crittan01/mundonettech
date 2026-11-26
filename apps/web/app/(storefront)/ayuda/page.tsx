@@ -61,7 +61,12 @@ async function HelpExplorer({
         <h2 id="help-search-title" className="text-2xl font-semibold">
           Buscar en las guías
         </h2>
-        <form method="get" role="search" className="mt-5 grid gap-4 lg:grid-cols-[1fr_16rem_auto]">
+        <form
+          key={`${query}|${category ?? ""}`}
+          method="get"
+          role="search"
+          className="mt-5 grid gap-4 lg:grid-cols-[1fr_16rem_auto]"
+        >
           <div>
             <label htmlFor="help-query" className="text-sm font-medium">
               Palabras clave
@@ -74,7 +79,7 @@ async function HelpExplorer({
               maxLength={120}
               aria-describedby="help-query-hint"
               placeholder="Ejemplo: devolución, serial o pago"
-              className="mt-2 min-h-11 w-full rounded-md border border-input bg-background px-3 py-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-2 min-h-11 w-full rounded-md border border-input bg-background px-3 py-2 outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             />
             <p id="help-query-hint" className="mt-2 text-xs text-muted-foreground">
               Puedes escribir con o sin tildes. Máximo 120 caracteres.
@@ -88,7 +93,7 @@ async function HelpExplorer({
               id="help-category"
               name="categoria"
               defaultValue={category ?? ""}
-              className="mt-2 min-h-11 w-full rounded-md border border-input bg-background px-3 py-2 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="mt-2 min-h-11 w-full rounded-md border border-input bg-background px-3 py-2 outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             >
               <option value="">Todos los temas</option>
               {helpCategories.map((item) => (
@@ -101,7 +106,7 @@ async function HelpExplorer({
           <div className="flex items-end gap-3">
             <button
               type="submit"
-              className="min-h-11 rounded-md bg-primary px-5 py-2 font-semibold text-primary-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="min-h-11 rounded-md bg-primary px-5 py-2 font-semibold text-primary-foreground outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
             >
               Buscar
             </button>
@@ -138,7 +143,7 @@ async function HelpExplorer({
             key={item.id}
             href={`/ayuda?categoria=${item.id}#resultados`}
             aria-current={category === item.id ? "page" : undefined}
-            className="rounded-xl border border-border bg-card p-4 outline-none hover:border-primary focus-visible:ring-2 focus-visible:ring-ring aria-current:bg-secondary"
+            className="rounded-xl border border-border bg-card p-4 outline-hidden hover:border-primary focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:bg-secondary"
           >
             <span className="font-semibold">{item.label}</span>
             <span className="mt-2 block text-sm text-muted-foreground">{item.description}</span>
@@ -181,7 +186,7 @@ async function HelpExplorer({
                 <h3 className="mt-2 text-xl font-semibold">
                   <Link
                     href={`/ayuda/${article.slug}`}
-                    className="outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+                    className="outline-hidden hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     {article.title}
                   </Link>
@@ -239,7 +244,7 @@ export default function HelpCenterPage({ searchParams }: PageProps<"/ayuda">) {
         <div className="space-y-3">
           {helpFaqs.map((faq) => (
             <details key={faq.question} className="rounded-xl border border-border bg-card p-5">
-              <summary className="cursor-pointer font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              <summary className="cursor-pointer font-semibold outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
                 {faq.question}
               </summary>
               <p className="mt-3 text-sm leading-6 text-muted-foreground">{faq.answer}</p>

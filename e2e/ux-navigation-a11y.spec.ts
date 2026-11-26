@@ -54,8 +54,11 @@ let fixtureIds: {
   cmsMediaId: string;
   productId: string;
   productSlug: string;
+  secondProductSlug: string;
+  createdSecondProductId: string | null;
   variantId: string;
   variantSku: string;
+  savedAddressId: string;
   couponId: string;
   assistedCartId: string;
   assistedToken: string;
@@ -64,6 +67,7 @@ let fixtureIds: {
   contactId: string;
   opportunityId: string;
   proposalToken: string;
+  paginationAuditAction: string;
 };
 
 async function authenticateAdmin(
@@ -178,12 +182,12 @@ async function expectWcagAndNoOverflow(page: Page, label: string) {
 
   const overflow = await page.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
-    innerWidth: window.innerWidth,
+    clientWidth: document.documentElement.clientWidth,
   }));
   expect(
     overflow.scrollWidth,
-    `${label} horizontal overflow (${overflow.scrollWidth} > ${overflow.innerWidth})`,
-  ).toBeLessThanOrEqual(overflow.innerWidth + 1);
+    `${label} horizontal overflow (${overflow.scrollWidth} > ${overflow.clientWidth})`,
+  ).toBeLessThanOrEqual(overflow.clientWidth);
 }
 
 test.beforeAll(async () => {
@@ -259,8 +263,26 @@ test.beforeAll(async () => {
     },
   });
 
+  const paginationAuditAction = `A9_PAGINATION_${runSuffix.toUpperCase()}`;
+  await db.adminActionLog.createMany({
+    data: Array.from({ length: 31 }, (_, index) => ({
+      actorAdminUserId: superAdmin.id,
+      action: paginationAuditAction,
+      targetType: "a9_audit_probe",
+      targetId: `a9-probe-${runSuffix}-${index + 1}`,
+      requestId: randomUUID(),
+      metadata: {
+        probe: "a9-e2e-pagination",
+        index: index + 1,
+        summary:
+          "Registro estructurado de auditoría para verificar región desplazable accesible por teclado.",
+      },
+      selfDealing: false,
+    })),
+  });
+
   const accountService = new AccountService(db, { privacyPolicyVersion: "2026.1" });
-  await accountService.createAddress(customer.id, {
+  const createdAddress = await accountService.createAddress(customer.id, {
     label: "Oficina Bogotá",
     recipientName: "Camila A9",
     phoneE164: "+573001112233",
@@ -294,6 +316,52 @@ test.beforeAll(async () => {
     },
     include: { product: true },
   });
+
+  const existingSecondProduct = await db.product.findFirst({
+    where: {
+      id: { not: variant.product.id },
+      status: "ACTIVE",
+      deletedAt: null,
+      variants: { some: { status: "ACTIVE", deletedAt: null } },
+    },
+    select: { id: true, slug: true },
+  });
+
+  let secondProductSlug: string;
+  let createdSecondProductId: string | null = null;
+  if (existingSecondProduct) {
+    secondProductSlug = existingSecondProduct.slug;
+  } else {
+    const createdSecond = await db.product.create({
+      data: {
+        slug: `a9-comparador-${runSuffix}`,
+        name: `Equipo Comparador A9 ${runSuffix}`,
+        brandId: variant.product.brandId,
+        categoryId: variant.product.categoryId,
+        taxGroupId: variant.product.taxGroupId,
+        status: "ACTIVE",
+        authenticity: "ORIGINAL",
+        warrantyMonths: 12,
+        trackSerial: false,
+        variants: {
+          create: {
+            sku: `A9-CMP-${runSuffix.toUpperCase()}`,
+            isDefault: true,
+            status: "ACTIVE",
+            priceCents: 39_000_000n,
+            costCents: 26_000_000n,
+            weightGrams: 250,
+            lengthMillimeters: 120,
+            widthMillimeters: 90,
+            heightMillimeters: 45,
+          },
+        },
+      },
+      select: { id: true, slug: true },
+    });
+    secondProductSlug = createdSecond.slug;
+    createdSecondProductId = createdSecond.id;
+  }
 
   const cmsService = new CmsService(db, {
     "store.name": "MundoNetTech",
@@ -525,8 +593,11 @@ test.beforeAll(async () => {
     cmsMediaId: cmsMedia.id,
     productId: variant.product.id,
     productSlug: variant.product.slug,
+    secondProductSlug,
+    createdSecondProductId,
     variantId: variant.id,
     variantSku: variant.sku,
+    savedAddressId: createdAddress.id,
     couponId: coupon.id,
     assistedCartId: assistedCart.id,
     assistedToken,
@@ -535,11 +606,51 @@ test.beforeAll(async () => {
     contactId: crmContact.id,
     opportunityId: captured.opportunityId,
     proposalToken: issuedProposal.token,
+    paginationAuditAction,
   };
 });
 
 test.afterAll(async () => {
-  if (db) {
+  if (!db) return;
+  try {
+    if (fixtureIds) {
+      await db.cmsPage.updateMany({
+        where: { id: fixtureIds.cmsPageId },
+        data: { status: "ARCHIVED", deletedAt: new Date() },
+      });
+      await db.coupon.deleteMany({
+        where: { id: fixtureIds.couponId },
+      });
+      await db.cartItem.deleteMany({
+        where: { cartId: fixtureIds.assistedCartId },
+      });
+      await db.cart.deleteMany({
+        where: { id: fixtureIds.assistedCartId },
+      });
+      if (customer) {
+        const activeCustomerCarts = await db.cart.findMany({
+          where: { customerId: customer.id, status: "ACTIVE" },
+          select: { id: true },
+        });
+        if (activeCustomerCarts.length > 0) {
+          const cartIds = activeCustomerCarts.map((entry) => entry.id);
+          await db.cartItem.deleteMany({ where: { cartId: { in: cartIds } } });
+          await db.cart.deleteMany({ where: { id: { in: cartIds } } });
+        }
+        await db.address.deleteMany({
+          where: { customerId: customer.id },
+        });
+      }
+      if (fixtureIds.createdSecondProductId) {
+        await db.productVariant.deleteMany({
+          where: { productId: fixtureIds.createdSecondProductId },
+        });
+        await db.product.deleteMany({
+          where: { id: fixtureIds.createdSecondProductId },
+        });
+      }
+    }
+  } finally {
     await db.$disconnect();
   }
 });
@@ -562,6 +673,9 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
   ).toBeVisible();
   await adminContext.close();
 
+  const compareTwoRoute = `/comparar?productos=${encodeURIComponent(
+    `${fixtureIds.productSlug},${fixtureIds.secondProductSlug}`,
+  )}`;
   const publicCustomerRoutes = [
     "/",
     "/productos",
@@ -569,7 +683,7 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
     "/marca/sony",
     `/producto/${fixtureIds.productSlug}`,
     "/comparar",
-    `/comparar?productos=${encodeURIComponent(fixtureIds.productSlug)}`,
+    compareTwoRoute,
     `/pagina/${fixtureIds.cmsPageSlug}`,
     "/ayuda",
     "/ayuda/retracto-cambios-y-devoluciones",
@@ -589,10 +703,20 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
     "/verificar-correo",
   ] as const;
 
+  const nonCheckoutGeolocationRoutes = new Set(["/", "/productos", "/carrito"]);
+
   await page.setViewportSize(desktopViewport);
   for (const route of publicCustomerRoutes) {
     const response = await page.goto(route, { waitUntil: "domcontentloaded" });
     expect(response?.status(), `Desktop status for ${route}`).toBe(200);
+
+    if (nonCheckoutGeolocationRoutes.has(route)) {
+      const permissionsPolicy = response?.headers()["permissions-policy"] ?? "";
+      expect(permissionsPolicy, `Permissions-Policy on ${route}`).toContain("geolocation=()");
+      expect(permissionsPolicy, `Permissions-Policy on ${route}`).not.toContain(
+        "geolocation=(self)",
+      );
+    }
 
     if (route === "/") {
       await expect(
@@ -608,6 +732,16 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
       await expect(
         page.locator(`a[href="/pagina/${fixtureIds.cmsPageSlug}"]`).first(),
       ).toBeVisible();
+
+      await page.keyboard.press("Tab");
+      const skipLink = page.getByRole("link", { name: "Saltar al contenido principal" });
+      await expect(skipLink).toBeFocused();
+      await expect(skipLink).toBeVisible();
+    }
+    if (route === compareTwoRoute) {
+      const comparisonTable = page.locator('section[tabindex="0"] table');
+      await expect(comparisonTable).toBeVisible();
+      await expect(comparisonTable.locator("caption")).toHaveText("Comparación de 2 productos");
     }
     if (route === "/marca/sony") {
       await expect(page.getByRole("navigation", { name: "Migas de pan" })).toBeVisible();
@@ -624,22 +758,49 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
     await expectWcagAndNoOverflow(page, `Desktop customer ${route}`);
   }
 
-  for (const invalidCapabilityRoute of [
+  const notFoundRoutes = [
     "/email/baja/enlace-invalido",
     "/referido/INVALID00000",
     "/ruta-cliente-inexistente-a9",
-  ]) {
-    const response = await page.goto(invalidCapabilityRoute, { waitUntil: "domcontentloaded" });
-    expect(response?.status()).toBe(404);
-    await expectWcagAndNoOverflow(page, `Desktop 404 capability ${invalidCapabilityRoute}`);
+    "/ayuda/no-existe-a9",
+    "/checkout/inexistente",
+  ] as const;
+
+  for (const invalidRoute of notFoundRoutes) {
+    const response = await page.goto(invalidRoute, { waitUntil: "domcontentloaded" });
+    expect(response?.status(), `Desktop 404 status for ${invalidRoute}`).toBe(404);
+    if (invalidRoute === "/checkout/inexistente") {
+      expect(response?.headers()["permissions-policy"]).toContain("geolocation=()");
+    }
+    await expectWcagAndNoOverflow(page, `Desktop 404 ${invalidRoute}`);
   }
+
+  await page.goto("/pagina/no-existe-a9", { waitUntil: "domcontentloaded" });
+  await expect(
+    page.getByRole("heading", { name: "No encontramos esta página", level: 1 }),
+  ).toBeVisible();
+  await expectWcagAndNoOverflow(page, "Desktop streamed 404 /pagina/no-existe-a9");
 
   await page.setViewportSize(mobileViewport);
   for (const route of publicCustomerRoutes) {
     const response = await page.goto(route, { waitUntil: "domcontentloaded" });
     expect(response?.status(), `Mobile status for ${route}`).toBe(200);
+    if (route === compareTwoRoute) {
+      await expect(page.locator('section[tabindex="0"] table')).toBeVisible();
+    }
     await expectWcagAndNoOverflow(page, `Mobile customer ${route}`);
   }
+
+  for (const mobileNotFoundRoute of ["/ayuda/no-existe-a9", "/checkout/inexistente"] as const) {
+    const response = await page.goto(mobileNotFoundRoute, { waitUntil: "domcontentloaded" });
+    expect(response?.status(), `Mobile 404 status for ${mobileNotFoundRoute}`).toBe(404);
+    await expectWcagAndNoOverflow(page, `Mobile 404 ${mobileNotFoundRoute}`);
+  }
+  await page.goto("/pagina/no-existe-a9", { waitUntil: "domcontentloaded" });
+  await expect(
+    page.getByRole("heading", { name: "No encontramos esta página", level: 1 }),
+  ).toBeVisible();
+  await expectWcagAndNoOverflow(page, "Mobile streamed 404 /pagina/no-existe-a9");
 
   await authenticateCustomer(page, customer);
   const accountRoutes = [
@@ -675,12 +836,32 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
   await page.getByRole("button", { name: "Añadir al carrito" }).click();
   await expect(page.getByRole("link", { name: "Ver carrito" })).toBeVisible();
 
-  await page.goto("/carrito");
+  const cartResponse = await page.goto("/carrito", { waitUntil: "domcontentloaded" });
+  expect(cartResponse?.headers()["permissions-policy"]).toContain("geolocation=()");
   await expectWcagAndNoOverflow(page, "Desktop populated /carrito");
 
-  const checkoutResponse = await page.goto("/checkout");
-  expect(checkoutResponse?.headers()["permissions-policy"]).toContain("geolocation=(self)");
-  await expect(page.locator("#saved-address-selector")).toBeVisible();
+  const [checkoutDocumentResponse] = await Promise.all([
+    page.waitForResponse(
+      (res) =>
+        new URL(res.url()).pathname === "/checkout" && res.request().resourceType() === "document",
+    ),
+    page.getByRole("link", { name: "Finalizar compra" }).click(),
+  ]);
+  expect(checkoutDocumentResponse.status()).toBe(200);
+  expect(checkoutDocumentResponse.headers()["permissions-policy"]).toContain("geolocation=(self)");
+
+  const savedAddressSelector = page.locator("#saved-address-selector");
+  await expect(savedAddressSelector).toBeVisible();
+  await savedAddressSelector.selectOption("");
+  await expect(page.locator("#checkout-address")).toHaveValue("");
+  await expect(page.locator("#checkout-neighborhood")).toHaveValue("");
+
+  await savedAddressSelector.selectOption(fixtureIds.savedAddressId);
+  await expect(page.locator("#checkout-recipient")).toHaveValue("Camila A9");
+  await expect(page.locator("#checkout-department")).toHaveValue("11");
+  await expect(page.locator("#checkout-municipality")).toHaveValue("11001");
+  await expect(page.locator("#checkout-address")).toHaveValue("Carrera 11 # 82-01");
+  await expect(page.locator("#checkout-neighborhood")).toHaveValue("Chicó");
   await expectWcagAndNoOverflow(page, "Desktop /checkout Step 1");
 
   await page.locator("#checkout-document-number").fill("1032456789");
@@ -725,6 +906,10 @@ test("all 43 admin routes pass WCAG 2.1 AA axe, RBAC/PII/filter contracts and ze
   await page.goto("/admin/login/mfa", { waitUntil: "domcontentloaded" });
   await expectWcagAndNoOverflow(page, "Desktop /admin/login/mfa challenge");
 
+  await page.setViewportSize(mobileViewport);
+  await expectWcagAndNoOverflow(page, "Mobile /admin/login/mfa challenge");
+
+  await page.setViewportSize(desktopViewport);
   await authenticateAdmin(page, storeManager);
   await page.goto(`/admin/b2b/${fixtureIds.opportunityId}`, { waitUntil: "domcontentloaded" });
   await expect(page.locator('a[href="/admin/integraciones"]')).toHaveCount(0);
@@ -798,13 +983,42 @@ test("all 43 admin routes pass WCAG 2.1 AA axe, RBAC/PII/filter contracts and ze
     await expectWcagAndNoOverflow(page, `Desktop admin ${route}`);
   }
 
+  await page.goto(
+    `/admin/auditoria?action=${encodeURIComponent(fixtureIds.paginationAuditAction)}`,
+    { waitUntil: "domcontentloaded" },
+  );
+  await expect(page.getByText("Página 1 de 2 · 31 registros")).toBeVisible();
+  await page.locator("details summary").first().click();
+  await expect(page.locator('details[open] pre[tabindex="0"]').first()).toBeVisible();
+  await expectWcagAndNoOverflow(page, "Desktop /admin/auditoria expanded details");
+
+  await page
+    .getByRole("navigation", { name: "Paginación de auditoría" })
+    .getByRole("link", { name: "Siguiente" })
+    .click();
+  await expect(page).toHaveURL(
+    new RegExp(`/admin/auditoria\\?.*action=${fixtureIds.paginationAuditAction}.*page=2`),
+  );
+  await expect(page.getByText("Página 2 de 2 · 31 registros")).toBeVisible();
+  await expectWcagAndNoOverflow(page, "Desktop /admin/auditoria page 2");
+
+  await page
+    .getByRole("navigation", { name: "Paginación de auditoría" })
+    .getByRole("link", { name: "Anterior" })
+    .click();
+  await expect(page).toHaveURL(
+    new RegExp(`/admin/auditoria\\?.*action=${fixtureIds.paginationAuditAction}.*page=1`),
+  );
+  await expect(page.getByText("Página 1 de 2 · 31 registros")).toBeVisible();
+
   await page.goto("/admin/auditoria?from=2026-02-31&action=cms_page_published", {
     waitUntil: "domcontentloaded",
   });
   await expect(page.getByRole("alert").first()).toBeVisible();
   await expectWcagAndNoOverflow(page, "Desktop /admin/auditoria invalid calendar alert");
 
-  await page.goto(`/admin/crm/${randomUUID()}`, {
+  const missingCrmRoute = `/admin/crm/${randomUUID()}`;
+  await page.goto(missingCrmRoute, {
     waitUntil: "domcontentloaded",
   });
   await expect(page.locator("main")).toHaveCount(1);
@@ -813,6 +1027,9 @@ test("all 43 admin routes pass WCAG 2.1 AA axe, RBAC/PII/filter contracts and ze
   await expectWcagAndNoOverflow(page, "Desktop /admin/(protected) 404");
 
   await page.setViewportSize(mobileViewport);
+  await page.goto(missingCrmRoute, { waitUntil: "domcontentloaded" });
+  await expectWcagAndNoOverflow(page, "Mobile /admin/(protected) 404");
+
   for (const route of protectedAdminRoutes) {
     const response = await page.goto(route, { waitUntil: "domcontentloaded" });
     expect(response?.status(), `Mobile status for ${route}`).toBe(200);
@@ -820,11 +1037,22 @@ test("all 43 admin routes pass WCAG 2.1 AA axe, RBAC/PII/filter contracts and ze
       const menuButton = page.getByRole("button", { name: "Menú de secciones" });
       await expect(menuButton).toHaveAttribute("aria-expanded", "false");
       await menuButton.click();
-      await expect(page.getByRole("button", { name: "Cerrar menú" })).toHaveAttribute(
-        "aria-expanded",
-        "true",
-      );
+      const closeMenuButton = page.getByRole("button", { name: "Cerrar menú" });
+      await expect(closeMenuButton).toHaveAttribute("aria-expanded", "true");
       await expectWcagAndNoOverflow(page, "Mobile /admin expanded menu");
+
+      await page.keyboard.press("Escape");
+      await expect(menuButton).toHaveAttribute("aria-expanded", "false");
+      await expect(menuButton).toBeFocused();
+
+      await menuButton.click();
+      await expect(closeMenuButton).toHaveAttribute("aria-expanded", "true");
+      await page.locator("#admin-mobile-menu").getByRole("link", { name: "Hoy" }).click();
+      await expect(page).toHaveURL(/\/admin\/hoy$/);
+      await expect(page.getByRole("button", { name: "Menú de secciones" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
     } else {
       await expectWcagAndNoOverflow(page, `Mobile admin ${route}`);
     }

@@ -5,6 +5,13 @@ type RawParams = Record<string, string | string[] | undefined>;
 
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const attributeKeyPattern = /^[a-z][a-z0-9_]{0,79}$/;
+const forbiddenAttributeKeys = new Set([
+  "constructor",
+  "prototype",
+  "__proto__",
+  "toString",
+  "valueOf",
+]);
 const controlCharPattern = /[\u0000-\u001f\u007f]/;
 
 const scalarKeys = [
@@ -104,7 +111,12 @@ export function parseCatalogParams(
       ?.map((entry) => entry.trim())
       .filter(Boolean);
     if (!rawEntries || rawEntries.length === 0) continue;
-    if (!attributeKeyPattern.test(attrKey) || attributeKeysCount >= 20) {
+    if (
+      !attributeKeyPattern.test(attrKey) ||
+      forbiddenAttributeKeys.has(attrKey) ||
+      attrKey in Object.prototype ||
+      attributeKeysCount >= 20
+    ) {
       error = "Alguno de los filtros técnicos no es válido.";
       continue;
     }

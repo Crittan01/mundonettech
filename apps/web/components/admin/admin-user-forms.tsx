@@ -33,6 +33,7 @@ export function InviteAdministratorForm({
       ref={formRef}
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}
@@ -105,6 +106,7 @@ export function AdministratorEditor({
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}

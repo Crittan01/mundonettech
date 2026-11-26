@@ -242,7 +242,6 @@ export const emailTopicLabels: Record<string, string> = {
   fulfillment: "Logística",
   fiscal: "Facturación DIAN",
   postsale: "Posventa y RMA",
-  carts: "Recuperación de carrito",
   "cart-recovery": "Recuperación de carrito",
   lifecycle: "Ciclo de vida",
   support: "Soporte y PQR",
@@ -251,15 +250,15 @@ export const emailTopicLabels: Record<string, string> = {
 export const emailTemplateLabels: Record<string, string> = {
   "order.confirmed": "Confirmación de pedido",
   "order.paid": "Pago confirmado",
-  "order.cancelled": "Pedido cancelado",
   "shipment.shipped": "Pedido despachado",
   "shipment.delivered": "Pedido entregado",
   "invoice.accepted": "Factura electrónica disponible",
-  "credit_note.accepted": "Nota crédito disponible",
-  "guest_order.otp": "Código de acceso invitado",
+  "credit-note.accepted": "Nota crédito disponible",
+  "refund.completed": "Reembolso confirmado",
   "postsale.updated": "Actualización de posventa",
-  "support.replied": "Respuesta a PQR",
   "cart.recovery": "Recordatorio de carrito",
+  "lifecycle.campaign": "Campaña de ciclo de vida",
+  "support.ticket": "Actualización de PQR",
 };
 
 export const securityEventLabels: Record<string, string> = {
@@ -295,7 +294,7 @@ export const integrationProviderLabels: Record<string, string> = {
 };
 
 const orderEventReasonLabels: Record<string, string> = {
-  CHECKOUT_CONFIRMED: "Pedido confirmado en checkout",
+  CHECKOUT_CONFIRMED: "Pedido confirmado en compra",
   B2B_PROPOSAL_ACCEPTED: "Propuesta B2B aceptada y convertida",
   PAYMENT_LEDGER_UPDATED: "Actualización del libro de pagos",
   RESERVATION_EXPIRED: "Reserva vencida sin pago",

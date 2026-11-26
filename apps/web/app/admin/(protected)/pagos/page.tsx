@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import { formatCopCents, hasAdminPermission, maskEmail } from "@mundonettech/core";
-import { assertAdminActorInTransaction, inInventoryTransaction } from "@mundonettech/db";
+import { formatCopCents, hasAdminPermission, maskEmail, maskIdentifier } from "@mundonettech/core";
+import {
+  assertAdminActorInTransaction,
+  inInventoryTransaction,
+  type Prisma,
+} from "@mundonettech/db";
 import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -50,6 +54,7 @@ const bogotaDateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "medium",
 });
+const numberFormatter = new Intl.NumberFormat("es-CO");
 
 const allowedSectionFilters = [
   "ALL",
@@ -61,6 +66,17 @@ const allowedSectionFilters = [
 ] as const;
 type SectionFilter = (typeof allowedSectionFilters)[number];
 
+const allowedBlockedFilters = ["ALL", "ACTIVE"] as const;
+type BlockedFilter = (typeof allowedBlockedFilters)[number];
+
+function parsePositivePage(value: string | undefined, maxPage = 10_000): number {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed)) return maxPage;
+  return Math.max(1, Math.min(maxPage, parsed));
+}
+
 function labelFor<T extends string>(map: Record<T, string>, value: string): string {
   return (
     (map as Record<string, string | undefined>)[value] ??
@@ -68,11 +84,19 @@ function labelFor<T extends string>(map: Record<T, string>, value: string): stri
   );
 }
 
-function paymentsHref(q: string, estado: SectionFilter, page: number): string {
+function paymentsHref(options: {
+  q: string;
+  estado: SectionFilter;
+  page: number;
+  bloqueosEstado: BlockedFilter;
+  bloqueosPagina: number;
+}): string {
   const params = new URLSearchParams();
-  if (q) params.set("q", q);
-  if (estado !== "ALL") params.set("estado", estado);
-  if (page > 1) params.set("page", String(page));
+  if (options.q) params.set("q", options.q);
+  if (options.estado !== "ALL") params.set("estado", options.estado);
+  if (options.page > 1) params.set("page", String(options.page));
+  if (options.bloqueosEstado !== "ALL") params.set("bloqueosEstado", options.bloqueosEstado);
+  if (options.bloqueosPagina > 1) params.set("bloqueosPagina", String(options.bloqueosPagina));
   const qs = params.toString();
   return qs ? `/admin/pagos?${qs}` : "/admin/pagos";
 }
@@ -113,11 +137,15 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
   const estado: SectionFilter = allowedSectionFilters.includes(rawEstado as SectionFilter)
     ? (rawEstado as SectionFilter)
     : "ALL";
-  const requestedPage = Number.parseInt(single(raw.page) ?? "1", 10) || 1;
-  const page = Math.max(1, Math.min(10_000, requestedPage));
+  const requestedPage = parsePositivePage(single(raw.page));
+  const rawBlockedFilter = single(raw.bloqueosEstado) ?? "ALL";
+  const bloqueosEstado: BlockedFilter = allowedBlockedFilters.includes(
+    rawBlockedFilter as BlockedFilter,
+  )
+    ? (rawBlockedFilter as BlockedFilter)
+    : "ALL";
+  const requestedBlockedPage = parsePositivePage(single(raw.bloqueosPagina));
   const pageSize = 20;
-  const skip = (page - 1) * pageSize;
-  const take = pageSize + 1;
 
   const showBank = estado === "ALL" || estado === "BANK_TRANSFER";
   const showCod = estado === "ALL" || estado === "COD";
@@ -125,172 +153,220 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
   const showCompensations = estado === "ALL" || estado === "COMPENSATIONS";
   const showVoids = estado === "ALL" || estado === "VOIDS";
 
+  const bankWhere: Prisma.PaymentAttemptWhereInput = {
+    provider: "BANK_TRANSFER",
+    status: { in: ["PENDING", "PROCESSING", "REQUIRES_ACTION"] },
+    ...(q
+      ? {
+          OR: [
+            { order: { orderNumber: { contains: q, mode: "insensitive" } } },
+            { reference: { contains: q, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+  const codWhere: Prisma.PaymentAttemptWhereInput = {
+    provider: "COD",
+    status: { in: ["PENDING", "PROCESSING", "REQUIRES_ACTION"] },
+    ...(q
+      ? {
+          OR: [
+            { order: { orderNumber: { contains: q, mode: "insensitive" } } },
+            { reference: { contains: q, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+  const refundsWhere: Prisma.OrderRefundWhereInput = {
+    status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
+    ...(q ? { order: { orderNumber: { contains: q, mode: "insensitive" } } } : {}),
+  };
+  const compensationsWhere: Prisma.PaymentTransactionWhereInput = {
+    kind: { in: ["REFUND", "VOID"] },
+    status: { in: ["PENDING", "PROCESSING"] },
+    provider: { not: "STORE_CREDIT" },
+    ...(q
+      ? {
+          attempt: {
+            order: { orderNumber: { contains: q, mode: "insensitive" } },
+          },
+        }
+      : {}),
+  };
+  const voidsWhere: Prisma.PaymentAttemptWhereInput = {
+    status: "SUCCEEDED",
+    provider: { not: "STORE_CREDIT" },
+    ...(q
+      ? {
+          OR: [
+            { order: { orderNumber: { contains: q, mode: "insensitive" } } },
+            { reference: { contains: q, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+    AND: [
+      {
+        transactions: {
+          none: {
+            kind: "REFUND",
+            status: { not: "CANCELLED" },
+          },
+        },
+      },
+      {
+        transactions: {
+          none: {
+            kind: "VOID",
+            status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
+          },
+        },
+      },
+    ],
+  };
+
   const db = getDatabase();
-  const [rawBank, rawCod, rawRefunds, rawCompensations, rawVoids] = await inInventoryTransaction(
-    db,
-    async (tx) => {
+  const [queueData, blockedPage] = await Promise.all([
+    inInventoryTransaction(db, async (tx) => {
       await assertAdminActorInTransaction(tx, session.profile.id, "payments:read");
-      return Promise.all([
-        showBank
-          ? tx.paymentAttempt.findMany({
-              where: {
-                provider: "BANK_TRANSFER",
-                status: { in: ["PENDING", "PROCESSING", "REQUIRES_ACTION"] },
-                ...(q
-                  ? {
-                      OR: [
-                        { order: { orderNumber: { contains: q, mode: "insensitive" } } },
-                        { reference: { contains: q, mode: "insensitive" } },
-                      ],
-                    }
-                  : {}),
-              },
-              select: {
-                id: true,
-                amountCents: true,
-                reference: true,
-                order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
-              },
-              orderBy: { createdAt: "asc" },
-              skip,
-              take,
-            })
-          : [],
-        showCod
-          ? tx.paymentAttempt.findMany({
-              where: {
-                provider: "COD",
-                status: { in: ["PENDING", "PROCESSING", "REQUIRES_ACTION"] },
-                ...(q
-                  ? {
-                      OR: [
-                        { order: { orderNumber: { contains: q, mode: "insensitive" } } },
-                        { reference: { contains: q, mode: "insensitive" } },
-                      ],
-                    }
-                  : {}),
-              },
-              select: {
-                id: true,
-                amountCents: true,
-                order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
-                codReconciliation: { select: { status: true } },
-              },
-              orderBy: { createdAt: "asc" },
-              skip,
-              take,
-            })
-          : [],
-        showRefunds
-          ? tx.orderRefund.findMany({
-              where: {
-                status: { in: ["REQUESTED", "APPROVED", "PROCESSING", "FAILED"] },
-                ...(q ? { order: { orderNumber: { contains: q, mode: "insensitive" } } } : {}),
-              },
-              select: {
-                id: true,
-                reason: true,
-                status: true,
-                totalCents: true,
-                order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
-              },
-              orderBy: { createdAt: "asc" },
-              skip,
-              take,
-            })
-          : [],
-        showCompensations
-          ? tx.paymentTransaction.findMany({
-              where: {
-                kind: { in: ["REFUND", "VOID"] },
-                status: { in: ["PENDING", "PROCESSING"] },
-                provider: { not: "STORE_CREDIT" },
-                ...(q
-                  ? {
-                      attempt: {
-                        order: { orderNumber: { contains: q, mode: "insensitive" } },
-                      },
-                    }
-                  : {}),
-              },
-              select: {
-                id: true,
-                kind: true,
-                provider: true,
-                amountCents: true,
-                status: true,
-                attempt: { select: { order: { select: { id: true, orderNumber: true } } } },
-              },
-              orderBy: { createdAt: "asc" },
-              skip,
-              take,
-            })
-          : [],
-        showVoids
-          ? tx.paymentAttempt.findMany({
-              where: {
-                status: "SUCCEEDED",
-                provider: { not: "STORE_CREDIT" },
-                ...(q
-                  ? {
-                      OR: [
-                        { order: { orderNumber: { contains: q, mode: "insensitive" } } },
-                        { reference: { contains: q, mode: "insensitive" } },
-                      ],
-                    }
-                  : {}),
-                AND: [
-                  {
-                    transactions: {
-                      none: {
-                        kind: "REFUND",
-                        status: { not: "CANCELLED" },
-                      },
-                    },
-                  },
-                  {
-                    transactions: {
-                      none: {
-                        kind: "VOID",
-                        status: { in: ["PENDING", "PROCESSING", "SUCCEEDED"] },
-                      },
-                    },
-                  },
-                ],
-              },
-              select: {
-                id: true,
-                provider: true,
-                reference: true,
-                amountCents: true,
-                order: { select: { id: true, orderNumber: true } },
-              },
-              orderBy: { createdAt: "desc" },
-              skip,
-              take,
-            })
-          : [],
-      ]);
-    },
-  );
+      const [bankTotal, codTotal, refundsTotal, compensationsTotal, voidsTotal] = await Promise.all(
+        [
+          showBank ? tx.paymentAttempt.count({ where: bankWhere }) : Promise.resolve(0),
+          showCod ? tx.paymentAttempt.count({ where: codWhere }) : Promise.resolve(0),
+          showRefunds ? tx.orderRefund.count({ where: refundsWhere }) : Promise.resolve(0),
+          showCompensations
+            ? tx.paymentTransaction.count({ where: compensationsWhere })
+            : Promise.resolve(0),
+          showVoids ? tx.paymentAttempt.count({ where: voidsWhere }) : Promise.resolve(0),
+        ],
+      );
+      const maxQueueTotal = Math.max(
+        bankTotal,
+        codTotal,
+        refundsTotal,
+        compensationsTotal,
+        voidsTotal,
+      );
+      const totalPages = Math.max(1, Math.ceil(maxQueueTotal / pageSize));
+      const page = Math.min(requestedPage, totalPages);
+      const skip = (page - 1) * pageSize;
+      const [bankAttempts, codAttempts, refunds, compensations, successfulAttempts] =
+        await Promise.all([
+          showBank && bankTotal > 0
+            ? tx.paymentAttempt.findMany({
+                where: bankWhere,
+                select: {
+                  id: true,
+                  amountCents: true,
+                  reference: true,
+                  order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+                },
+                orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+                skip,
+                take: pageSize,
+              })
+            : Promise.resolve([]),
+          showCod && codTotal > 0
+            ? tx.paymentAttempt.findMany({
+                where: codWhere,
+                select: {
+                  id: true,
+                  amountCents: true,
+                  order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+                  codReconciliation: { select: { status: true } },
+                },
+                orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+                skip,
+                take: pageSize,
+              })
+            : Promise.resolve([]),
+          showRefunds && refundsTotal > 0
+            ? tx.orderRefund.findMany({
+                where: refundsWhere,
+                select: {
+                  id: true,
+                  reason: true,
+                  status: true,
+                  totalCents: true,
+                  order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+                },
+                orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+                skip,
+                take: pageSize,
+              })
+            : Promise.resolve([]),
+          showCompensations && compensationsTotal > 0
+            ? tx.paymentTransaction.findMany({
+                where: compensationsWhere,
+                select: {
+                  id: true,
+                  kind: true,
+                  provider: true,
+                  amountCents: true,
+                  status: true,
+                  attempt: { select: { order: { select: { id: true, orderNumber: true } } } },
+                },
+                orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+                skip,
+                take: pageSize,
+              })
+            : Promise.resolve([]),
+          showVoids && voidsTotal > 0
+            ? tx.paymentAttempt.findMany({
+                where: voidsWhere,
+                select: {
+                  id: true,
+                  provider: true,
+                  reference: true,
+                  amountCents: true,
+                  order: { select: { id: true, orderNumber: true } },
+                },
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                skip,
+                take: pageSize,
+              })
+            : Promise.resolve([]),
+        ]);
+      return {
+        bankAttempts,
+        codAttempts,
+        refunds,
+        compensations,
+        successfulAttempts,
+        totals: {
+          bank: bankTotal,
+          cod: codTotal,
+          refunds: refundsTotal,
+          compensations: compensationsTotal,
+          voids: voidsTotal,
+        },
+        maxQueueTotal,
+        page,
+        totalPages,
+      };
+    }),
+    blockedIdentityService().listPage(session.profile.id, {
+      activeOnly: bloqueosEstado === "ACTIVE",
+      page: requestedBlockedPage,
+      pageSize: 20,
+    }),
+  ]);
 
-  const hasMore =
-    rawBank.length > pageSize ||
-    rawCod.length > pageSize ||
-    rawRefunds.length > pageSize ||
-    rawCompensations.length > pageSize ||
-    rawVoids.length > pageSize;
-  const bankAttempts = rawBank.slice(0, pageSize);
-  const codAttempts = rawCod.slice(0, pageSize);
-  const refunds = rawRefunds.slice(0, pageSize);
-  const compensations = rawCompensations.slice(0, pageSize);
-  const successfulAttempts = rawVoids.slice(0, pageSize);
-
-  const blocked = await blockedIdentityService().list(100, session.profile.id);
+  const {
+    bankAttempts,
+    codAttempts,
+    refunds,
+    compensations,
+    successfulAttempts,
+    totals,
+    maxQueueTotal,
+    page,
+    totalPages,
+  } = queueData;
   const canWrite = hasAdminPermission(session.profile.role, "payments:write");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
   const creditOperationKey = `admin-credit:${randomUUID()}`;
   const hasFilters = Boolean(q || estado !== "ALL");
+  const hasBlockedFilters = bloqueosEstado !== "ALL";
 
   return (
     <div className="space-y-10">
@@ -304,10 +380,16 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
       </div>
       {canWrite ? <CmsStepUp session={session} /> : null}
       <form
-        key={`${q}|${estado}`}
+        key={`${q}|${estado}|${bloqueosEstado}|${blockedPage.page}`}
         action="/admin/pagos"
         className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
       >
+        {bloqueosEstado !== "ALL" ? (
+          <input type="hidden" name="bloqueosEstado" value={bloqueosEstado} />
+        ) : null}
+        {blockedPage.page > 1 ? (
+          <input type="hidden" name="bloqueosPagina" value={String(blockedPage.page)} />
+        ) : null}
         <label htmlFor="payments-q" className="sr-only">
           Buscar pagos por pedido o referencia
         </label>
@@ -337,7 +419,13 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
         </Button>
         {hasFilters ? (
           <Link
-            href="/admin/pagos"
+            href={paymentsHref({
+              q: "",
+              estado: "ALL",
+              page: 1,
+              bloqueosEstado,
+              bloqueosPagina: blockedPage.page,
+            })}
             className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
           >
             Limpiar
@@ -346,11 +434,23 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
       </form>
       {showBank ? (
         <section aria-labelledby="bank-transfers" className="space-y-4">
-          <h2 id="bank-transfers" className="text-xl font-semibold">
-            Transferencias por confirmar
-          </h2>
+          <div>
+            <h2 id="bank-transfers" className="text-xl font-semibold">
+              Transferencias por confirmar ({numberFormatter.format(totals.bank)})
+            </h2>
+            {totals.bank > 0 && bankAttempts.length < totals.bank ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Mostrando {numberFormatter.format(bankAttempts.length)} de{" "}
+                {numberFormatter.format(totals.bank)}
+              </p>
+            ) : null}
+          </div>
           {bankAttempts.length === 0 ? (
-            <Empty>No hay transferencias pendientes.</Empty>
+            <Empty>
+              {totals.bank > 0
+                ? `No hay más transferencias en la página ${page} (${numberFormatter.format(totals.bank)} en total).`
+                : "No hay transferencias pendientes."}
+            </Empty>
           ) : (
             <ul className="space-y-3">
               {bankAttempts.map((attempt) => (
@@ -371,7 +471,7 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
                     <p className="font-semibold">{formatCopCents(attempt.amountCents)}</p>
                   </div>
                   <p className="mt-2 font-mono text-xs break-all text-muted-foreground">
-                    {attempt.reference}
+                    {maskIdentifier(attempt.reference)}
                   </p>
                   {canWrite ? <BankTransferConfirmationForm paymentAttemptId={attempt.id} /> : null}
                 </li>
@@ -382,11 +482,23 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
       ) : null}
       {showCod ? (
         <section aria-labelledby="cod-remittances" className="space-y-4">
-          <h2 id="cod-remittances" className="text-xl font-semibold">
-            Recaudo y remesas COD
-          </h2>
+          <div>
+            <h2 id="cod-remittances" className="text-xl font-semibold">
+              Recaudo y remesas COD ({numberFormatter.format(totals.cod)})
+            </h2>
+            {totals.cod > 0 && codAttempts.length < totals.cod ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Mostrando {numberFormatter.format(codAttempts.length)} de{" "}
+                {numberFormatter.format(totals.cod)}
+              </p>
+            ) : null}
+          </div>
           {codAttempts.length === 0 ? (
-            <Empty>No hay pagos contraentrega pendientes de conciliación.</Empty>
+            <Empty>
+              {totals.cod > 0
+                ? `No hay más remesas COD en la página ${page} (${numberFormatter.format(totals.cod)} en total).`
+                : "No hay pagos contraentrega pendientes de conciliación."}
+            </Empty>
           ) : (
             <ul className="space-y-3">
               {codAttempts.map((attempt) => (
@@ -426,11 +538,23 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
       ) : null}
       {showRefunds ? (
         <section id="refunds" aria-labelledby="refunds-title" className="space-y-4">
-          <h2 id="refunds-title" className="text-xl font-semibold">
-            Reembolsos
-          </h2>
+          <div>
+            <h2 id="refunds-title" className="text-xl font-semibold">
+              Reembolsos ({numberFormatter.format(totals.refunds)})
+            </h2>
+            {totals.refunds > 0 && refunds.length < totals.refunds ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Mostrando {numberFormatter.format(refunds.length)} de{" "}
+                {numberFormatter.format(totals.refunds)}
+              </p>
+            ) : null}
+          </div>
           {refunds.length === 0 ? (
-            <Empty>No hay reembolsos por ejecutar o conciliar.</Empty>
+            <Empty>
+              {totals.refunds > 0
+                ? `No hay más reembolsos en la página ${page} (${numberFormatter.format(totals.refunds)} en total).`
+                : "No hay reembolsos por ejecutar o conciliar."}
+            </Empty>
           ) : (
             <ul className="space-y-3">
               {refunds.map((refund) => (
@@ -466,11 +590,23 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
       ) : null}
       {showCompensations ? (
         <section aria-labelledby="compensations" className="space-y-4">
-          <h2 id="compensations" className="text-xl font-semibold">
-            Compensaciones por conciliar
-          </h2>
+          <div>
+            <h2 id="compensations" className="text-xl font-semibold">
+              Compensaciones por conciliar ({numberFormatter.format(totals.compensations)})
+            </h2>
+            {totals.compensations > 0 && compensations.length < totals.compensations ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Mostrando {numberFormatter.format(compensations.length)} de{" "}
+                {numberFormatter.format(totals.compensations)}
+              </p>
+            ) : null}
+          </div>
           {compensations.length === 0 ? (
-            <Empty>No hay reembolsos o anulaciones con resultado pendiente.</Empty>
+            <Empty>
+              {totals.compensations > 0
+                ? `No hay más compensaciones en la página ${page} (${numberFormatter.format(totals.compensations)} en total).`
+                : "No hay reembolsos o anulaciones con resultado pendiente."}
+            </Empty>
           ) : (
             <ul className="space-y-3">
               {compensations.map((transaction) => (
@@ -495,11 +631,23 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
       ) : null}
       {showVoids ? (
         <section aria-labelledby="voids" className="space-y-4">
-          <h2 id="voids" className="text-xl font-semibold">
-            Anulaciones de pagos
-          </h2>
+          <div>
+            <h2 id="voids" className="text-xl font-semibold">
+              Anulaciones de pagos ({numberFormatter.format(totals.voids)})
+            </h2>
+            {totals.voids > 0 && successfulAttempts.length < totals.voids ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Mostrando {numberFormatter.format(successfulAttempts.length)} de{" "}
+                {numberFormatter.format(totals.voids)}
+              </p>
+            ) : null}
+          </div>
           {successfulAttempts.length === 0 ? (
-            <Empty>No hay capturas disponibles para anular.</Empty>
+            <Empty>
+              {totals.voids > 0
+                ? `No hay más capturas anulables en la página ${page} (${numberFormatter.format(totals.voids)} en total).`
+                : "No hay capturas disponibles para anular."}
+            </Empty>
           ) : (
             <ul className="grid gap-3 md:grid-cols-2">
               {successfulAttempts.map((attempt) => (
@@ -511,7 +659,7 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
                     suffix={labelFor(paymentProviderLabels, attempt.provider)}
                   />
                   <p className="mt-1 text-sm break-all text-muted-foreground">
-                    {formatCopCents(attempt.amountCents)} · {attempt.reference}
+                    {formatCopCents(attempt.amountCents)} · {maskIdentifier(attempt.reference)}
                   </p>
                   {canWrite ? <VoidPaymentForm paymentAttemptId={attempt.id} /> : null}
                 </li>
@@ -520,18 +668,43 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
           )}
         </section>
       ) : null}
-      {page > 1 || hasMore ? (
-        <nav aria-label="Paginación de pagos" className="flex items-center justify-between">
-          <span className="text-sm text-muted-foreground">Página {page}</span>
+      {maxQueueTotal > 0 ? (
+        <nav
+          aria-label="Paginación de pagos"
+          className="flex flex-wrap items-center justify-between gap-3"
+        >
+          <span className="text-sm text-muted-foreground">
+            Página {page} de {totalPages}
+          </span>
           <div className="flex gap-2">
             {page > 1 ? (
               <Button asChild variant="outline" size="sm">
-                <Link href={paymentsHref(q, estado, page - 1)}>Anterior</Link>
+                <Link
+                  href={paymentsHref({
+                    q,
+                    estado,
+                    page: page - 1,
+                    bloqueosEstado,
+                    bloqueosPagina: blockedPage.page,
+                  })}
+                >
+                  Anterior
+                </Link>
               </Button>
             ) : null}
-            {hasMore ? (
+            {page < totalPages ? (
               <Button asChild variant="outline" size="sm">
-                <Link href={paymentsHref(q, estado, page + 1)}>Siguiente</Link>
+                <Link
+                  href={paymentsHref({
+                    q,
+                    estado,
+                    page: page + 1,
+                    bloqueosEstado,
+                    bloqueosPagina: blockedPage.page,
+                  })}
+                >
+                  Siguiente
+                </Link>
               </Button>
             ) : null}
           </div>
@@ -547,26 +720,68 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
               Ajuste de crédito de tienda
             </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Abonos y retiros con libro consecutivo, locks por cliente e idempotencia persistente.
+              Abonos y retiros con libro consecutivo, bloqueos por cliente e idempotencia
+              persistente.
             </p>
           </div>
           <StoreCreditAdjustmentForm operationKey={creditOperationKey} />
         </section>
       ) : null}
       <section aria-labelledby="blocked-identities" className="space-y-4">
-        <h2 id="blocked-identities" className="text-xl font-semibold">
-          Identidades bloqueadas para COD
-        </h2>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <h2 id="blocked-identities" className="text-xl font-semibold">
+            Identidades bloqueadas para COD ({numberFormatter.format(blockedPage.total)})
+          </h2>
+        </div>
         {canWrite ? (
           <div className="rounded-xl border border-border bg-card p-5">
             <BlockIdentityForm />
           </div>
         ) : null}
-        {blocked.length === 0 ? (
-          <Empty>No hay identidades bloqueadas.</Empty>
+        <form
+          key={`blocked|${q}|${estado}|${page}|${bloqueosEstado}`}
+          action="/admin/pagos"
+          className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4"
+        >
+          {q ? <input type="hidden" name="q" value={q} /> : null}
+          {estado !== "ALL" ? <input type="hidden" name="estado" value={estado} /> : null}
+          {page > 1 ? <input type="hidden" name="page" value={String(page)} /> : null}
+          <Select
+            name="bloqueosEstado"
+            defaultValue={bloqueosEstado}
+            aria-label="Filtrar identidades bloqueadas"
+            fullWidth={false}
+          >
+            <option value="ALL">Todos los bloqueos</option>
+            <option value="ACTIVE">Solo bloqueos activos</option>
+          </Select>
+          <Button type="submit" variant="outline">
+            Filtrar
+          </Button>
+          {hasBlockedFilters ? (
+            <Link
+              href={paymentsHref({
+                q,
+                estado,
+                page,
+                bloqueosEstado: "ALL",
+                bloqueosPagina: 1,
+              })}
+              className="inline-flex min-h-11 items-center px-2 text-sm font-medium text-primary underline underline-offset-4"
+            >
+              Limpiar
+            </Link>
+          ) : null}
+        </form>
+        {blockedPage.items.length === 0 ? (
+          <Empty>
+            {hasBlockedFilters
+              ? "No hay identidades con bloqueos activos."
+              : "No hay identidades bloqueadas."}
+          </Empty>
         ) : (
           <ul className="space-y-3">
-            {blocked.map((identity) => (
+            {blockedPage.items.map((identity) => (
               <li key={identity.id} className="rounded-xl border border-border bg-card p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
@@ -590,6 +805,50 @@ export default async function PaymentsPage({ searchParams }: PageProps<"/admin/p
             ))}
           </ul>
         )}
+        {blockedPage.total > 0 ? (
+          <nav
+            aria-label="Paginación de identidades bloqueadas"
+            className="flex flex-wrap items-center justify-between gap-3"
+          >
+            <span className="text-sm text-muted-foreground">
+              Página {blockedPage.page} de {blockedPage.totalPages} ·{" "}
+              {numberFormatter.format(blockedPage.total)}{" "}
+              {blockedPage.total === 1 ? "identidad bloqueada" : "identidades bloqueadas"}
+            </span>
+            <div className="flex gap-2">
+              {blockedPage.page > 1 ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    href={paymentsHref({
+                      q,
+                      estado,
+                      page,
+                      bloqueosEstado,
+                      bloqueosPagina: blockedPage.page - 1,
+                    })}
+                  >
+                    Anterior
+                  </Link>
+                </Button>
+              ) : null}
+              {blockedPage.page < blockedPage.totalPages ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    href={paymentsHref({
+                      q,
+                      estado,
+                      page,
+                      bloqueosEstado,
+                      bloqueosPagina: blockedPage.page + 1,
+                    })}
+                  >
+                    Siguiente
+                  </Link>
+                </Button>
+              ) : null}
+            </div>
+          </nav>
+        ) : null}
       </section>
     </div>
   );

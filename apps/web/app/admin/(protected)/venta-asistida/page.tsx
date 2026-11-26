@@ -6,7 +6,7 @@ import { AssistedSaleCreateForm } from "@/components/admin/assisted-sale-forms";
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { getDatabaseClock } from "@/lib/database-clock";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
@@ -29,19 +29,23 @@ export default async function AssistedSalesPage({
 }: PageProps<"/admin/venta-asistida">) {
   const session = await requireAdminPage("sales:read");
   const query = await searchParams;
-  const status = statuses.includes(query.estado as (typeof statuses)[number])
-    ? (query.estado as (typeof statuses)[number])
+  const rawEstado = single(query.estado) ?? "";
+  const status = (statuses as readonly string[]).includes(rawEstado)
+    ? (rawEstado as (typeof statuses)[number])
     : undefined;
-  const requestedPage = Number.parseInt(String(query.pagina ?? "1"), 10) || 1;
+  const rawPagina = single(query.pagina)?.trim() ?? "";
+  const parsedPage = /^[1-9]\d*$/.test(rawPagina) ? Number.parseInt(rawPagina, 10) : 1;
+  const requestedPage = Math.max(
+    1,
+    Math.min(10_000, Number.isSafeInteger(parsedPage) ? parsedPage : 1),
+  );
   const db = getDatabase();
-  const [now, result] = await Promise.all([
-    getDatabaseClock(db),
-    new CartService(db).listAssisted({
-      page: Math.max(1, Math.min(10_000, requestedPage)),
-      pageSize: 20,
-      ...(status ? { status } : {}),
-    }),
-  ]);
+  const result = await new CartService(db).listAssisted({
+    page: requestedPage,
+    pageSize: 20,
+    ...(status ? { status } : {}),
+  });
+  const now = result.evaluatedAt;
   const canWrite = hasAdminPermission(session.profile.role, "sales:write");
   const href = (page: number) => {
     const params = new URLSearchParams();
@@ -107,7 +111,11 @@ export default async function AssistedSalesPage({
       {result.items.length ? (
         <section aria-label="Ventas asistidas" className="space-y-3">
           {result.items.map((cart) => {
-            const effectiveExpiresAt = cart.assistedExpiresAt ?? cart.expiresAt;
+            const effectiveExpiresAt = cart.assistedClaimedAt
+              ? cart.expiresAt
+              : cart.assistedExpiresAt && cart.assistedExpiresAt < cart.expiresAt
+                ? cart.assistedExpiresAt
+                : cart.expiresAt;
             const expired =
               cart.status === "EXPIRED" || (cart.status === "ACTIVE" && effectiveExpiresAt <= now);
             return (
@@ -150,7 +158,7 @@ export default async function AssistedSalesPage({
           <p className="mt-2 text-muted-foreground">Crea una venta o cambia el filtro de estado.</p>
         </section>
       )}
-      {result.total > 0 ? (
+      {result.totalPages > 1 ? (
         <nav aria-label="Paginación de ventas" className="flex items-center justify-between">
           <span className="text-sm text-muted-foreground">
             Página {result.page} de {result.totalPages}

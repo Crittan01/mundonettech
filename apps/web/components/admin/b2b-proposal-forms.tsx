@@ -48,6 +48,7 @@ export function B2bProposalBuilder({
       ref={formRef}
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}
@@ -112,6 +113,7 @@ export function B2bProposalBuilder({
               type="button"
               variant="outline"
               size="sm"
+              aria-label={`Eliminar fila ${index + 1}`}
               onClick={() =>
                 setRows((current) => current.filter((candidate) => candidate.id !== row.id))
               }
@@ -196,7 +198,15 @@ export function B2bProposalLifecycleForms({
     <div className="space-y-3">
       <div className="flex flex-wrap gap-3">
         {status === "DRAFT" ? (
-          <form action={issueAction}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (issuing) return;
+              const formData = new FormData(event.currentTarget);
+              startTransition(() => issueAction(formData));
+            }}
+            aria-busy={issuing}
+          >
             <input type="hidden" name="opportunityId" value={opportunityId} />
             <input type="hidden" name="proposalId" value={proposalId} />
             <input
@@ -210,7 +220,15 @@ export function B2bProposalLifecycleForms({
           </form>
         ) : null}
         {["DRAFT", "SENT", "EXPIRED"].includes(status) ? (
-          <form action={cancelAction}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (cancelling) return;
+              const formData = new FormData(event.currentTarget);
+              startTransition(() => cancelAction(formData));
+            }}
+            aria-busy={cancelling}
+          >
             <input type="hidden" name="opportunityId" value={opportunityId} />
             <input type="hidden" name="proposalId" value={proposalId} />
             <input
@@ -238,10 +256,11 @@ export function B2bProposalLifecycleForms({
           <a
             href={issueState.proposalUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="inline-flex text-sm font-medium text-primary underline"
           >
             Abrir propuesta
+            <span className="sr-only"> (se abre en una nueva pestaña)</span>
           </a>
           <p className="text-xs text-muted-foreground">
             Por seguridad no podrás recuperar el token después de recargar; solo su hash queda
@@ -265,6 +284,7 @@ export function B2bCloseOpportunityForm({
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}
@@ -308,6 +328,7 @@ export function B2bCopilotForm({
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}

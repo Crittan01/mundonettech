@@ -33,11 +33,11 @@ const failureLabels: Record<string, string> = {
   CREDENTIAL_REJECTED: "Meta rechazó la credencial",
   CREDENTIAL_REVOKED: "Credencial revocada",
   CREDENTIAL_IDENTITY_CHANGED: "La identidad de la credencial cambió",
-  PAYLOAD_REJECTED: "Meta rechazó el request",
-  REQUEST_HASH_MISMATCH: "El request sellado no coincide",
-  REQUEST_INVALID: "El request persistido no es válido",
+  PAYLOAD_REJECTED: "Meta rechazó la solicitud",
+  REQUEST_HASH_MISMATCH: "La solicitud sellada no coincide",
+  REQUEST_INVALID: "La solicitud persistida no es válida",
   CLAIM_EXPIRED: "El reclamo expiró sin confirmación",
-  OUTBOX_RETRY_EXHAUSTED: "El worker agotó los reintentos de despacho",
+  OUTBOX_RETRY_EXHAUSTED: "El proceso agotó los reintentos de despacho",
 };
 
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
@@ -70,6 +70,7 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
       ref={formRef}
       onSubmit={(submitEvent) => {
         submitEvent.preventDefault();
+        if (pending) return;
         const formData = new FormData(submitEvent.currentTarget);
         startTransition(() => action(formData));
       }}
@@ -109,7 +110,8 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
             aria-describedby={`reference-help-${event.id}`}
           />
           <p id={`reference-help-${event.id}`} className="text-xs text-muted-foreground">
-            ID de evidencia de Events Manager o del ticket operativo, sin datos personales.
+            ID de evidencia del administrador de eventos de Meta o del caso operativo, sin datos
+            personales.
           </p>
         </div>
         <Button type="submit" variant="outline" disabled={pending}>
@@ -133,7 +135,7 @@ export function MetaCapiDashboard({
       <div className="rounded-xl border border-border bg-card p-8 text-center">
         <h3 className="text-lg font-semibold">Todavía no hay eventos Meta CAPI</h3>
         <p className="mt-2 text-sm text-muted-foreground">
-          Los eventos Purchase aparecerán después de un pago confirmado con consentimiento
+          Los eventos de compra aparecerán después de un pago confirmado con consentimiento
           publicitario vigente y una credencial Meta activa.
         </p>
       </div>
@@ -145,8 +147,12 @@ export function MetaCapiDashboard({
         <li key={event.id} className="rounded-xl border border-border bg-card p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h3 className="font-semibold">Purchase · {event.orderNumber}</h3>
-              <p className="mt-1 text-xs break-all text-muted-foreground">{event.eventId}</p>
+              <h3 className="font-semibold">
+                {event.eventName} · {event.orderNumber}
+              </h3>
+              <p className="mt-1 text-xs break-all text-muted-foreground">
+                ID de evento: {event.eventId}
+              </p>
             </div>
             <span className="rounded-md border border-border px-2 py-1 text-xs font-medium">
               {statusLabels[event.status]}

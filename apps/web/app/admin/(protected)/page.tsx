@@ -37,7 +37,7 @@ export default async function AdminDashboardPage() {
     ...(globalEvents === null ? [] : [{ label: "Eventos globales (24 h)", value: globalEvents }]),
     ...(pendingOutbox === null
       ? []
-      : [{ label: "Eventos pendientes en outbox", value: pendingOutbox }]),
+      : [{ label: "Eventos pendientes en la cola de salida", value: pendingOutbox }]),
   ];
   return (
     <div className="space-y-8">

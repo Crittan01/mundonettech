@@ -277,6 +277,7 @@ export default async function ProductPage({ params, searchParams }: PageProps<"/
                       className="text-primary underline underline-offset-4"
                     >
                       {attribute.value}
+                      <span className="sr-only"> (se abre en una nueva pestaña)</span>
                     </a>
                   ) : (
                     attribute.value

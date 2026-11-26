@@ -120,7 +120,7 @@ export default async function RfmAnalyticsPage({
                 Administrar segmentos
               </Link>
               <Link className="text-primary underline" href="/admin/lifecycle">
-                Administrar journeys
+                Administrar recorridos de ciclo de vida
               </Link>
             </>
           ) : null}
@@ -149,7 +149,11 @@ export default async function RfmAnalyticsPage({
         <h2 id="rfm-customers" className="text-2xl font-semibold">
           Clientes por LTV
         </h2>
-        <form className="flex flex-wrap items-end gap-3" action="/admin/analitica-rfm">
+        <form
+          key={`${validRfmClass ?? ""}|${validMinLtvCop ?? ""}`}
+          className="flex flex-wrap items-end gap-3"
+          action="/admin/analitica-rfm"
+        >
           <div className="space-y-2">
             <Label htmlFor="rfm-class-filter">Clase RFM</Label>
             <Select
@@ -194,8 +198,7 @@ export default async function RfmAnalyticsPage({
           <p role="alert" className="text-sm text-destructive">
             Los filtros o el cursor no son válidos.
           </p>
-        ) : null}
-        {report.items.length === 0 ? (
+        ) : report.items.length === 0 ? (
           <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
             No hay clientes que coincidan con estos filtros.
           </p>

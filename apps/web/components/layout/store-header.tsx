@@ -15,7 +15,7 @@ export async function StoreHeader() {
       <div className="mx-auto flex min-h-18 w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-6 py-3 sm:px-8">
         <Link
           href="/"
-          className="rounded-sm text-lg font-bold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="rounded-sm text-lg font-bold tracking-tight outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           aria-label={`${storeConfig.name}, inicio`}
         >
           {storeConfig.name}
@@ -25,7 +25,9 @@ export async function StoreHeader() {
             aria-label="Navegación principal"
             className="flex flex-wrap items-center gap-1 text-sm font-medium"
           >
-            <StoreNavLink href="/productos">Catálogo</StoreNavLink>
+            <StoreNavLink href="/productos" matchPrefixes={["/categoria", "/marca", "/producto"]}>
+              Catálogo
+            </StoreNavLink>
             <StoreNavLink href="/comparar" prefetch={false}>
               Comparar
             </StoreNavLink>
@@ -40,7 +42,7 @@ export async function StoreHeader() {
             <StoreNavLink href="/mi-cuenta" prefetch={false}>
               Mi cuenta
             </StoreNavLink>
-            <StoreNavLink href="/carrito" prefetch={false}>
+            <StoreNavLink href="/carrito" prefetch={false} matchPrefixes={["/checkout"]}>
               Carrito
             </StoreNavLink>
           </nav>

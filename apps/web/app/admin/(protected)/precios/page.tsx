@@ -201,7 +201,7 @@ export default async function AdminPricingPage({ searchParams }: PageProps<"/adm
             key={item}
             href={viewHref(item, 1)}
             aria-current={view === item ? "page" : undefined}
-            className={`rounded-md px-3 py-2 text-sm font-medium ${view === item ? "bg-primary text-primary-foreground" : "bg-secondary hover:bg-accent"}`}
+            className={`inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden ${view === item ? "bg-primary text-primary-foreground" : "bg-secondary hover:bg-accent"}`}
           >
             {viewLabels[item]}
           </Link>
@@ -308,7 +308,7 @@ export default async function AdminPricingPage({ searchParams }: PageProps<"/adm
                     href={`/admin/precios/mayoristas/${tier.id}`}
                     className="text-sm text-primary hover:underline"
                   >
-                    Ver y editar
+                    Ver y editar <span className="sr-only">escala mayorista {target}</span>
                   </Link>
                 </div>
               </article>
@@ -340,7 +340,7 @@ export default async function AdminPricingPage({ searchParams }: PageProps<"/adm
                     href={`/admin/precios/cupones/${coupon.id}`}
                     className="text-sm text-primary hover:underline"
                   >
-                    Ver y editar
+                    Ver y editar <span className="sr-only">cupón {coupon.code}</span>
                   </Link>
                 </div>
               </div>
@@ -406,7 +406,7 @@ export default async function AdminPricingPage({ searchParams }: PageProps<"/adm
                       href={`/admin/precios/bundles/${bundle.id}`}
                       className="text-sm text-primary hover:underline"
                     >
-                      Ver y editar
+                      Ver y editar <span className="sr-only">paquete {bundle.name}</span>
                     </Link>
                   </div>
                 </div>

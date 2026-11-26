@@ -19,15 +19,27 @@ const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   dateStyle: "medium",
   timeStyle: "short",
 });
+const numberFormatter = new Intl.NumberFormat("es-CO");
 
 const allowedStates = ["ALL", "PENDING", "PUBLISHED", "REJECTED"] as const;
 type ReviewFilterState = (typeof allowedStates)[number];
 
-function reviewsHref(q: string, estado: ReviewFilterState, page: number): string {
+const pageSize = 20;
+const maxPage = Math.floor(100_000 / pageSize) + 1;
+
+function parsePositivePage(value: string | undefined): number {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed)) return maxPage;
+  return Math.max(1, Math.min(maxPage, parsed));
+}
+
+function reviewsHref(q: string, estado: ReviewFilterState, pagina: number): string {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (estado !== "ALL") params.set("estado", estado);
-  if (page > 1) params.set("page", String(page));
+  if (pagina > 1) params.set("pagina", String(pagina));
   const qs = params.toString();
   return qs ? `/admin/resenas?${qs}` : "/admin/resenas";
 }
@@ -43,22 +55,31 @@ export default async function ReviewAdminPage({ searchParams }: PageProps<"/admi
   const estado: ReviewFilterState = allowedStates.includes(rawEstado as ReviewFilterState)
     ? (rawEstado as ReviewFilterState)
     : "ALL";
-  const requestedPage = Number.parseInt(single(raw.page) ?? "1", 10) || 1;
-  const page = Math.max(1, Math.min(10_000, requestedPage));
-  const pageSize = 20;
+  const requestedPage = parsePositivePage(single(raw.pagina) ?? single(raw.page));
 
   const canWrite = hasAdminPermission(session.profile.role, "reviews:write");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
   const canReadCatalog = hasAdminPermission(session.profile.role, "catalog:read");
 
-  const rawReviews = await new PostSaleAdminService(getDatabase()).reviewQueue(session.profile.id, {
+  const service = new PostSaleAdminService(getDatabase());
+  const firstResult = await service.reviewQueuePage(session.profile.id, {
     ...(q ? { q } : {}),
     status: estado,
-    skip: (page - 1) * pageSize,
-    take: pageSize + 1,
+    skip: (requestedPage - 1) * pageSize,
+    take: pageSize,
   });
-  const hasMore = rawReviews.length > pageSize;
-  const reviews = rawReviews.slice(0, pageSize);
+  const totalPages = Math.max(1, Math.min(maxPage, Math.ceil(firstResult.total / pageSize)));
+  const page = Math.min(requestedPage, totalPages);
+  const result =
+    page !== requestedPage
+      ? await service.reviewQueuePage(session.profile.id, {
+          ...(q ? { q } : {}),
+          status: estado,
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+        })
+      : firstResult;
+  const reviews = result.items;
   const hasFilters = Boolean(q || estado !== "ALL");
 
   return (
@@ -181,16 +202,22 @@ export default async function ReviewAdminPage({ searchParams }: PageProps<"/admi
           ))}
         </section>
       )}
-      {page > 1 || hasMore ? (
-        <nav aria-label="Paginación de reseñas" className="flex items-center justify-between">
-          <span className="text-sm text-muted-foreground">Página {page}</span>
+      {result.total > 0 ? (
+        <nav
+          aria-label="Paginación de reseñas"
+          className="flex flex-wrap items-center justify-between gap-3"
+        >
+          <span className="text-sm text-muted-foreground">
+            Página {page} de {totalPages} · {numberFormatter.format(result.total)}{" "}
+            {result.total === 1 ? "reseña" : "reseñas"}
+          </span>
           <div className="flex gap-2">
             {page > 1 ? (
               <Button asChild variant="outline" size="sm">
                 <Link href={reviewsHref(q, estado, page - 1)}>Anterior</Link>
               </Button>
             ) : null}
-            {hasMore ? (
+            {page < totalPages ? (
               <Button asChild variant="outline" size="sm">
                 <Link href={reviewsHref(q, estado, page + 1)}>Siguiente</Link>
               </Button>

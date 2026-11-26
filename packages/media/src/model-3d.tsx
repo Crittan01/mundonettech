@@ -5,6 +5,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ComponentType,
   type DetailedHTMLProps,
   type HTMLAttributes,
@@ -28,12 +29,31 @@ type ModelViewerProps = DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLEleme
   "ar-modes"?: string;
   "camera-controls"?: boolean;
   "interaction-prompt"?: "auto" | "none";
+  "interpolation-decay"?: string;
   "shadow-intensity"?: string;
   loading?: "eager" | "lazy";
 };
 const ModelViewer = "model-viewer" as unknown as ComponentType<ModelViewerProps>;
 
 const loadTimeoutMs = 20_000;
+
+function subscribeReducedMotion(onStoreChange: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => {};
+  }
+  const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+  mediaQuery.addEventListener("change", onStoreChange);
+  return () => mediaQuery.removeEventListener("change", onStoreChange);
+}
+
+function getReducedMotionSnapshot(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function getReducedMotionServerSnapshot(): boolean {
+  return false;
+}
 
 export function Model3d({
   glbSrc,
@@ -58,6 +78,11 @@ export function Model3d({
   const [elementReady, setElementReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [failedAttempts, setFailedAttempts] = useState(0);
+  const prefersReducedMotion = useSyncExternalStore(
+    subscribeReducedMotion,
+    getReducedMotionSnapshot,
+    getReducedMotionServerSnapshot,
+  );
   const viewer = useRef<HTMLElement>(null);
   const startButtonRef = useRef<HTMLButtonElement>(null);
   const backButtonRef = useRef<HTMLButtonElement>(null);
@@ -187,14 +212,17 @@ export function Model3d({
             ref={startButtonRef}
             type="button"
             onClick={start}
-            className="min-h-11 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+            className="min-h-11 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
           >
             Explorar en 3D{usdzSrc ? " / AR" : ""}
           </button>
         </div>
       ) : null}
       {status === "loading" || status === "ready" ? (
-        <div className="min-h-80 overflow-hidden rounded-xl border border-border bg-secondary">
+        <div
+          onKeyDown={handleViewerKeyDown}
+          className="min-h-80 overflow-hidden rounded-xl border border-border bg-secondary focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background"
+        >
           {elementReady ? (
             <ModelViewer
               key={attempt}
@@ -206,12 +234,12 @@ export function Model3d({
               ar-modes={usdzSrc ? "webxr scene-viewer quick-look" : "webxr scene-viewer"}
               camera-controls
               interaction-prompt="none"
+              {...(prefersReducedMotion ? { "interpolation-decay": "0" } : {})}
               shadow-intensity="1"
               loading="eager"
               tabIndex={0}
               aria-label={alt}
-              onKeyDown={handleViewerKeyDown}
-              className="block min-h-80 w-full focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              className="block min-h-80 w-full focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden focus-visible:ring-inset"
             />
           ) : posterSrc ? (
             <div className="flex min-h-80 items-center justify-center p-6">
@@ -243,7 +271,7 @@ export function Model3d({
               ref={backButtonRef}
               type="button"
               onClick={resetToPoster}
-              className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+              className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
             >
               Volver a vista fija
             </button>
@@ -261,14 +289,14 @@ export function Model3d({
               ref={retryButtonRef}
               type="button"
               onClick={start}
-              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
             >
               Reintentar
             </button>
             <button
               type="button"
               onClick={resetToPoster}
-              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
             >
               Volver a vista fija
             </button>

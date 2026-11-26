@@ -65,41 +65,31 @@ export default async function CommunicationsPage({
     : "";
   const rawTema = single(raw.tema) ?? "";
   const tema = allowedTopics.includes(rawTema) ? rawTema : "";
-  const requestedPage = Number.parseInt(single(raw.page) ?? "1", 10) || 1;
-  const page = Math.max(1, Math.min(10_000, requestedPage));
+  const rawPage = single(raw.page)?.trim() ?? "";
+  const parsedPage = /^[1-9]\d*$/.test(rawPage) ? Number.parseInt(rawPage, 10) : 1;
+  const requestedPage = Math.max(
+    1,
+    Math.min(10_000, Number.isSafeInteger(parsedPage) ? parsedPage : 1),
+  );
   const pageSize = 25;
 
+  const eventWhere = {
+    ...(estado ? { status: estado } : {}),
+    ...(tema ? { topic: tema } : {}),
+    ...(q
+      ? {
+          OR: [
+            { order: { orderNumber: { contains: q, mode: "insensitive" as const } } },
+            { templateKey: { contains: q, mode: "insensitive" as const } },
+            { topic: { contains: q, mode: "insensitive" as const } },
+          ],
+        }
+      : {}),
+  };
+
   const db = getDatabase();
-  const [rawEvents, templates] = await Promise.all([
-    db.emailEvent.findMany({
-      where: {
-        ...(estado ? { status: estado } : {}),
-        ...(tema ? { topic: tema } : {}),
-        ...(q
-          ? {
-              OR: [
-                { order: { orderNumber: { contains: q, mode: "insensitive" } } },
-                { templateKey: { contains: q, mode: "insensitive" } },
-                { topic: { contains: q, mode: "insensitive" } },
-              ],
-            }
-          : {}),
-      },
-      select: {
-        id: true,
-        templateKey: true,
-        topic: true,
-        status: true,
-        attemptCount: true,
-        recipientEmail: true,
-        anonymizedAt: true,
-        lastError: true,
-        order: { select: { id: true, orderNumber: true } },
-      },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      skip: (page - 1) * pageSize,
-      take: pageSize + 1,
-    }),
+  const [total, templates] = await Promise.all([
+    db.emailEvent.count({ where: eventWhere }),
     db.emailTemplateOverride.findMany({
       select: {
         id: true,
@@ -113,8 +103,28 @@ export default async function CommunicationsPage({
     }),
   ]);
 
-  const hasMore = rawEvents.length > pageSize;
-  const events = rawEvents.slice(0, pageSize);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const events =
+    total > 0
+      ? await db.emailEvent.findMany({
+          where: eventWhere,
+          select: {
+            id: true,
+            templateKey: true,
+            topic: true,
+            status: true,
+            attemptCount: true,
+            recipientEmail: true,
+            anonymizedAt: true,
+            lastError: true,
+            order: { select: { id: true, orderNumber: true } },
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+        })
+      : [];
 
   const defaults = Object.fromEntries(
     emailTemplateKeys
@@ -196,7 +206,7 @@ export default async function CommunicationsPage({
             name="q"
             defaultValue={q}
             maxLength={100}
-            placeholder="Número de pedido, plantilla o asunto"
+            placeholder="Número de pedido, clave de plantilla o tema"
             className="min-w-56 flex-1"
           />
           <Select
@@ -279,19 +289,21 @@ export default async function CommunicationsPage({
             ))}
           </ul>
         )}
-        {page > 1 || hasMore ? (
+        {total > 0 ? (
           <nav
             aria-label="Paginación de eventos de correo"
             className="flex items-center justify-between"
           >
-            <span className="text-sm text-muted-foreground">Página {page}</span>
+            <span className="text-sm text-muted-foreground">
+              Página {page} de {totalPages} · {total} {total === 1 ? "correo" : "correos"}
+            </span>
             <div className="flex gap-2">
               {page > 1 ? (
                 <Button asChild variant="outline" size="sm">
                   <Link href={communicationsHref(q, estado, tema, page - 1)}>Anterior</Link>
                 </Button>
               ) : null}
-              {hasMore ? (
+              {page < totalPages ? (
                 <Button asChild variant="outline" size="sm">
                   <Link href={communicationsHref(q, estado, tema, page + 1)}>Siguiente</Link>
                 </Button>

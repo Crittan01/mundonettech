@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 
 interface AdminNavItem {
   readonly href: string;
@@ -29,6 +29,28 @@ function AdminNavContent({
   pathname: string | null;
 }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [lastPathname, setLastPathname] = useState(pathname);
+  const toggleButtonRef = useRef<HTMLButtonElement>(null);
+
+  if (lastPathname !== pathname) {
+    setLastPathname(pathname);
+    if (mobileOpen) {
+      setMobileOpen(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMobileOpen(false);
+        toggleButtonRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [mobileOpen]);
+
   const allHrefs = items.map((item) => item.href);
   const activeItem = pathname
     ? items.find((item) => isNavItemActive(pathname, item.href, allHrefs))
@@ -41,11 +63,12 @@ function AdminNavContent({
           Sección: <strong className="text-foreground">{activeItem?.label ?? "Panel"}</strong>
         </span>
         <button
+          ref={toggleButtonRef}
           type="button"
           aria-expanded={mobileOpen}
           aria-controls="admin-mobile-menu"
           onClick={() => setMobileOpen((open) => !open)}
-          className="inline-flex min-h-11 items-center justify-center rounded-md border border-input bg-background px-3 py-2 text-sm font-medium text-foreground outline-none hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="inline-flex min-h-11 items-center justify-center rounded-md border border-input bg-background px-3 py-2 text-sm font-medium text-foreground outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           {mobileOpen ? "Cerrar menú" : "Menú de secciones"}
         </button>
@@ -63,7 +86,7 @@ function AdminNavContent({
               prefetch={false}
               aria-current={active ? "page" : undefined}
               onClick={() => setMobileOpen(false)}
-              className={`inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background md:min-h-9 ${
+              className={`inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background md:min-h-9 ${
                 active
                   ? "bg-primary text-primary-foreground"
                   : "text-foreground hover:bg-accent hover:text-accent-foreground"

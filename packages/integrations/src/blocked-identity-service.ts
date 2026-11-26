@@ -233,4 +233,73 @@ export class BlockedIdentityService {
     });
     return records.map(descriptor);
   }
+
+  async listPage(
+    actorAdminUserId: string,
+    options: {
+      readonly activeOnly?: boolean;
+      readonly page?: number;
+      readonly pageSize?: number;
+    } = {},
+  ): Promise<{
+    items: BlockedIdentityDescriptor[];
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  }> {
+    assertPaymentUuid(actorAdminUserId, "actorAdminUserId");
+    const requestedPage = options.page ?? 1;
+    const pageSize = options.pageSize ?? 20;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 100
+    ) {
+      throw new PaymentConflictError("Invalid blocked identity pagination.");
+    }
+    if (options.activeOnly !== undefined && typeof options.activeOnly !== "boolean") {
+      throw new PaymentConflictError("activeOnly must be boolean.");
+    }
+    return inInventoryTransaction(this.db, async (tx) => {
+      try {
+        await assertAdminActorInTransaction(tx, actorAdminUserId, "payments:read");
+      } catch (error) {
+        if (error instanceof AdminActorAuthorizationError) throw new PaymentAuthorizationError();
+        throw error;
+      }
+      const now = await databaseNow(tx);
+      const where = options.activeOnly
+        ? { active: true, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }
+        : {};
+      const total = await tx.blockedIdentity.count({ where });
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(requestedPage, totalPages);
+      const records = await tx.blockedIdentity.findMany({
+        where,
+        orderBy: [{ blockedAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          kind: true,
+          reason: true,
+          active: true,
+          expiresAt: true,
+          blockedAt: true,
+          unblockedAt: true,
+        },
+      });
+      return {
+        items: records.map(descriptor),
+        total,
+        page,
+        pageSize,
+        totalPages,
+      };
+    });
+  }
 }

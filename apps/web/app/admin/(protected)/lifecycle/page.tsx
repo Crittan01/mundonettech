@@ -17,7 +17,7 @@ import { single } from "@/lib/admin-search-params";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 import { lifecycleService, segmentationService } from "@/lib/lifecycle";
 
-export const metadata = { title: "Journeys lifecycle" };
+export const metadata = { title: "Recorridos de ciclo de vida" };
 
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
@@ -107,9 +107,9 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
   return (
     <div className="space-y-10">
       <div>
-        <h1 className="text-3xl font-bold">Journeys lifecycle</h1>
+        <h1 className="text-3xl font-bold">Recorridos de ciclo de vida</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
-          Secuencias persistentes e idempotentes. Cada despacho vuelve a validar journey,
+          Secuencias persistentes e idempotentes. Cada despacho vuelve a validar recorrido,
           inscripción, membresía, consentimiento y supresión antes de crear o enviar el correo.
         </p>
         <div className="mt-4 flex flex-wrap gap-4 text-sm">
@@ -139,7 +139,7 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
       {canWrite ? (
         <section aria-labelledby="journey-create" className="space-y-4">
           <h2 id="journey-create" className="text-2xl font-semibold">
-            Nuevo journey
+            Nuevo recorrido
           </h2>
           <div className="rounded-xl border border-border bg-card p-5">
             <JourneyEditorForm
@@ -151,17 +151,20 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
       <section aria-labelledby="journey-list" className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 id="journey-list" className="text-2xl font-semibold">
-            Journeys persistidos
+            Recorridos persistidos
           </h2>
           {showClearFilters ? (
-            <Link href="/admin/lifecycle" className="text-sm text-primary underline">
+            <Link
+              href="/admin/lifecycle"
+              className="inline-flex min-h-11 items-center text-sm text-primary underline"
+            >
               Limpiar filtros
             </Link>
           ) : null}
         </div>
         {queryInvalid ? (
           <p role="alert" className="text-sm text-destructive">
-            El journey o cursor no es válido.
+            El recorrido o cursor no es válido.
           </p>
         ) : detailNotFound ? (
           <p role="alert" className="text-sm text-destructive">
@@ -170,7 +173,7 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
         ) : null}
         {journeys.items.length === 0 ? (
           <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-            No hay journeys en esta página. Crea un segmento y una secuencia para comenzar.
+            No hay recorridos en esta página. Crea un segmento y una secuencia para comenzar.
           </p>
         ) : (
           <div className="grid gap-4 lg:grid-cols-2">
@@ -185,7 +188,9 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
                     </p>
                   </div>
                   <Button asChild variant="outline" size="sm">
-                    <Link href={openJourneyHref(journey.id)}>Abrir</Link>
+                    <Link href={openJourneyHref(journey.id)}>
+                      Abrir<span className="sr-only"> {journey.name}</span>
+                    </Link>
                   </Button>
                 </div>
                 <p className="mt-3 text-sm">{journey.description ?? "Sin descripción."}</p>
@@ -198,7 +203,7 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
           </div>
         )}
         {rawCursor || journeys.nextCursor ? (
-          <nav aria-label="Paginación de journeys" className="flex flex-wrap items-center gap-4">
+          <nav aria-label="Paginación de recorridos" className="flex flex-wrap items-center gap-4">
             {rawCursor ? (
               <Link className="text-sm text-primary underline" href={firstPageHref}>
                 Primera página
@@ -264,8 +269,8 @@ export default async function LifecyclePage({ searchParams }: PageProps<"/admin/
             <h3 className="text-xl font-semibold">Inscripciones y mensajes</h3>
             {detail.enrollments.length === 0 ? (
               <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
-                No hay inscripciones. El scheduler inscribirá miembros elegibles una sola vez por
-                journey.
+                No hay inscripciones. El programador inscribirá miembros elegibles una sola vez por
+                recorrido.
               </p>
             ) : (
               <div className="space-y-3">

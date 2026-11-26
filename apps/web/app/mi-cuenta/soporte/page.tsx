@@ -2,20 +2,20 @@ import { randomUUID } from "node:crypto";
 
 import type { SupportTicketStatus } from "@mundonettech/db";
 import Link from "next/link";
-import { z } from "zod";
 
 import { SupportReplyForm, SupportTicketForm } from "@/components/orders/postsale-forms";
 import { postSaleService } from "@/lib/account";
 import { requireCustomerPage } from "@/lib/security/customer-auth";
 
 export const metadata = { title: "Mis PQR", robots: { index: false, follow: false } };
+
 const pageSize = 10;
-const pageSchema = z.coerce.number().int().min(1).max(1000).catch(1);
 const dateFormatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "medium",
   timeStyle: "short",
 });
+const numberFormatter = new Intl.NumberFormat("es-CO");
 
 const ticketStatusLabels: Record<SupportTicketStatus, string> = {
   OPEN: "Abierta",
@@ -25,16 +25,27 @@ const ticketStatusLabels: Record<SupportTicketStatus, string> = {
   CLOSED: "Cerrada",
 };
 
+function parsePositivePage(value: string | undefined, maxPage = 10_000): number {
+  const trimmed = value?.trim() ?? "";
+  if (!/^[1-9]\d*$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed)) return maxPage;
+  return Math.max(1, Math.min(maxPage, parsed));
+}
+
+function supportHref(pagina: number): string {
+  return pagina > 1 ? `/mi-cuenta/soporte?pagina=${pagina}` : "/mi-cuenta/soporte";
+}
+
 export default async function SupportPage({ searchParams }: PageProps<"/mi-cuenta/soporte">) {
   const [{ profile }, raw] = await Promise.all([requireCustomerPage(), searchParams]);
-  const tickets = await postSaleService().listSupportTickets({
-    kind: "CUSTOMER",
-    customerId: profile.id,
-  });
-  const rawPage = Array.isArray(raw.page) ? raw.page[0] : raw.page;
-  const totalPages = Math.max(1, Math.ceil(tickets.length / pageSize));
-  const currentPage = Math.min(pageSchema.parse(rawPage || "1"), totalPages);
-  const pagedTickets = tickets.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const rawPagina = Array.isArray(raw.pagina) ? raw.pagina[0] : raw.pagina;
+  const rawLegacyPage = Array.isArray(raw.page) ? raw.page[0] : raw.page;
+  const requestedPage = parsePositivePage(rawPagina ?? rawLegacyPage);
+  const result = await postSaleService().listSupportTicketsPage(
+    { kind: "CUSTOMER", customerId: profile.id },
+    { page: requestedPage, pageSize },
+  );
 
   return (
     <div className="space-y-8">
@@ -57,7 +68,6 @@ export default async function SupportPage({ searchParams }: PageProps<"/mi-cuent
           Nueva PQR
         </h2>
         <SupportTicketForm
-          key={tickets.length}
           channel={{ channel: "account", orderId: "" }}
           idempotencyKey={randomUUID()}
         />
@@ -66,13 +76,13 @@ export default async function SupportPage({ searchParams }: PageProps<"/mi-cuent
         <h2 id="ticket-history" className="text-2xl font-semibold">
           Historial y respuestas
         </h2>
-        {tickets.length === 0 ? (
+        {result.total === 0 ? (
           <p className="rounded-xl border border-border bg-card p-5 text-muted-foreground">
             No has radicado PQR desde esta cuenta.
           </p>
         ) : (
           <>
-            {pagedTickets.map((ticket) => (
+            {result.items.map((ticket) => (
               <article
                 key={ticket.id}
                 className="space-y-4 rounded-xl border border-border bg-card p-5"
@@ -108,38 +118,33 @@ export default async function SupportPage({ searchParams }: PageProps<"/mi-cuent
                 ) : null}
               </article>
             ))}
-            {totalPages > 1 ? (
-              <nav
-                aria-label="Paginación de PQR"
-                className="flex flex-wrap items-center justify-between gap-3 text-sm"
-              >
-                <span className="text-muted-foreground">
-                  Página {currentPage} de {totalPages}
-                </span>
-                <div className="flex flex-wrap gap-3">
-                  {currentPage > 1 ? (
-                    <Link
-                      href={
-                        currentPage - 1 === 1
-                          ? "/mi-cuenta/soporte"
-                          : `/mi-cuenta/soporte?page=${currentPage - 1}`
-                      }
-                      className="rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
-                    >
-                      Página anterior
-                    </Link>
-                  ) : null}
-                  {currentPage < totalPages ? (
-                    <Link
-                      href={`/mi-cuenta/soporte?page=${currentPage + 1}`}
-                      className="rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
-                    >
-                      Siguiente página
-                    </Link>
-                  ) : null}
-                </div>
-              </nav>
-            ) : null}
+            <nav
+              aria-label="Paginación de PQR"
+              className="flex flex-wrap items-center justify-between gap-3 text-sm"
+            >
+              <span className="text-muted-foreground">
+                Página {result.page} de {result.totalPages} · {numberFormatter.format(result.total)}{" "}
+                {result.total === 1 ? "solicitud" : "solicitudes"}
+              </span>
+              <div className="flex flex-wrap gap-3">
+                {result.page > 1 ? (
+                  <Link
+                    href={supportHref(result.page - 1)}
+                    className="inline-flex min-h-11 items-center rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
+                  >
+                    Página anterior
+                  </Link>
+                ) : null}
+                {result.page < result.totalPages ? (
+                  <Link
+                    href={supportHref(result.page + 1)}
+                    className="inline-flex min-h-11 items-center rounded-md border border-input px-3 py-1.5 font-medium hover:bg-accent hover:text-accent-foreground"
+                  >
+                    Siguiente página
+                  </Link>
+                ) : null}
+              </div>
+            </nav>
           </>
         )}
       </section>

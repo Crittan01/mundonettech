@@ -1,13 +1,13 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 import {
   archivePricingAction,
   saveBundleAction,
@@ -54,7 +54,7 @@ interface BundleDefaults {
 }
 
 const textareaClass =
-  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50";
 
 function Field({
   id,
@@ -83,7 +83,7 @@ function Field({
     <div className="space-y-2">
       <Label htmlFor={id}>{label}</Label>
       <Input
-        key={`${id}-${value}-${disabled}`}
+        key={`${id}-${value}`}
         id={id}
         name={name}
         type={type}
@@ -99,18 +99,27 @@ function Field({
 }
 
 export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults }) {
-  const [state, action, pending] = useActionState(saveWholesaleTierAction, initialActionState);
-  const values = state.status === "error" ? state.values : undefined;
   const [scopeOverride, setScopeOverride] = useState<string | null>(null);
+  const [state, action, pending] = useActionState(async (prev: ActionState, formData: FormData) => {
+    const result = await saveWholesaleTierAction(prev, formData);
+    if (result.status === "success") {
+      setScopeOverride(null);
+    }
+    return result;
+  }, initialActionState);
+  const values = state.status === "error" ? state.values : undefined;
   const scope = scopeOverride ?? values?.scope ?? defaults.scope;
   const active = values ? ["on", "true"].includes(values.active ?? "") : defaults.active;
   const isGlobal = scope === "GLOBAL";
   return (
     <form
-      action={(formData) => {
-        setScopeOverride(null);
-        action(formData);
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
       }}
+      aria-busy={pending}
       className="space-y-5 rounded-xl border border-border bg-card p-5"
     >
       {defaults.id ? <input type="hidden" name="id" value={defaults.id} /> : null}
@@ -122,6 +131,7 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
             name="scope"
             value={scope}
             onChange={(event) => setScopeOverride(event.target.value)}
+            disabled={pending}
           >
             <option value="VARIANT">Variante (SKU)</option>
             <option value="PRODUCT">Producto (slug)</option>
@@ -135,7 +145,7 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
           label="SKU o slug; vacío para global"
           value={isGlobal ? "" : (values?.target ?? defaults.target)}
           required={!isGlobal}
-          disabled={isGlobal}
+          disabled={pending || isGlobal}
           maxLength={160}
         />
         <Field
@@ -144,6 +154,7 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
           label="Cantidad mínima por producto"
           value={values?.minimumQuantity ?? defaults.minimumQuantity}
           required
+          disabled={pending}
           type="number"
           min="1"
         />
@@ -153,6 +164,7 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
           label="Precio unitario (centavos COP)"
           value={values?.unitPriceCents ?? defaults.unitPriceCents}
           required
+          disabled={pending}
           maxLength={19}
           inputMode="numeric"
         />
@@ -163,6 +175,7 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
           type="checkbox"
           name="active"
           defaultChecked={active}
+          disabled={pending}
           className="size-4 accent-primary"
         />
         Escala activa
@@ -180,19 +193,28 @@ export function WholesaleTierForm({ defaults }: { defaults: WholesaleDefaults })
 }
 
 export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
-  const [state, action, pending] = useActionState(saveCouponAction, initialActionState);
+  const [discountTypeOverride, setDiscountTypeOverride] = useState<string | null>(null);
+  const [state, action, pending] = useActionState(async (prev: ActionState, formData: FormData) => {
+    const result = await saveCouponAction(prev, formData);
+    if (result.status === "success") {
+      setDiscountTypeOverride(null);
+    }
+    return result;
+  }, initialActionState);
   const values = state.status === "error" ? state.values : undefined;
   const get = (key: Exclude<keyof CouponDefaults, "id">): string => values?.[key] ?? defaults[key];
-  const [discountTypeOverride, setDiscountTypeOverride] = useState<string | null>(null);
   const discountType = discountTypeOverride ?? get("discountType");
   const status = get("status");
   const isPercentage = discountType === "PERCENTAGE";
   return (
     <form
-      action={(formData) => {
-        setDiscountTypeOverride(null);
-        action(formData);
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
       }}
+      aria-busy={pending}
       className="space-y-6 rounded-xl border border-border bg-card p-5"
     >
       {defaults.id ? <input type="hidden" name="id" value={defaults.id} /> : null}
@@ -204,6 +226,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           label="Código"
           value={get("code")}
           required
+          disabled={pending}
           maxLength={64}
         />
         <Field
@@ -212,6 +235,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           label="Nombre interno"
           value={get("name")}
           required
+          disabled={pending}
           maxLength={160}
         />
         <div className="space-y-2">
@@ -221,6 +245,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
             name="discountType"
             value={discountType}
             onChange={(event) => setDiscountTypeOverride(event.target.value)}
+            disabled={pending}
           >
             <option value="PERCENTAGE">Porcentaje</option>
             <option value="FIXED_AMOUNT">Monto fijo</option>
@@ -228,7 +253,13 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
         </div>
         <div className="space-y-2">
           <Label htmlFor="coupon-status">Estado</Label>
-          <Select key={status} id="coupon-status" name="status" defaultValue={status}>
+          <Select
+            key={status}
+            id="coupon-status"
+            name="status"
+            defaultValue={status}
+            disabled={pending}
+          >
             <option value="DRAFT">Borrador</option>
             <option value="ACTIVE">Activo</option>
           </Select>
@@ -238,6 +269,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           name="startsAt"
           label="Inicio (hora de Colombia)"
           value={get("startsAt")}
+          disabled={pending}
           type="datetime-local"
         />
         <Field
@@ -245,6 +277,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           name="endsAt"
           label="Fin (hora de Colombia)"
           value={get("endsAt")}
+          disabled={pending}
           type="datetime-local"
         />
       </fieldset>
@@ -256,7 +289,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           label="Porcentaje en puntos básicos (1000 = 10 %)"
           value={isPercentage ? get("percentageBps") : ""}
           required={isPercentage}
-          disabled={!isPercentage}
+          disabled={pending || !isPercentage}
           maxLength={5}
           inputMode="numeric"
         />
@@ -266,7 +299,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           label="Monto fijo (centavos COP)"
           value={isPercentage ? "" : get("amountCents")}
           required={!isPercentage}
-          disabled={isPercentage}
+          disabled={pending || isPercentage}
           maxLength={19}
           inputMode="numeric"
         />
@@ -275,6 +308,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           name="maximumDiscountCents"
           label="Tope de descuento (centavos COP)"
           value={get("maximumDiscountCents")}
+          disabled={pending}
           maxLength={19}
           inputMode="numeric"
         />
@@ -283,6 +317,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           name="minimumSubtotalCents"
           label="Subtotal mínimo (centavos COP)"
           value={get("minimumSubtotalCents")}
+          disabled={pending}
           maxLength={19}
           inputMode="numeric"
         />
@@ -291,6 +326,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           name="maximumUsages"
           label="Límite total de usos"
           value={get("maximumUsages")}
+          disabled={pending}
           type="number"
           min="1"
         />
@@ -299,6 +335,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
           name="perCustomerUsages"
           label="Límite por cliente"
           value={get("perCustomerUsages")}
+          disabled={pending}
           type="number"
           min="1"
         />
@@ -312,6 +349,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
             name="productSlugs"
             defaultValue={get("productSlugs")}
             rows={4}
+            disabled={pending}
             className={textareaClass}
             placeholder="uno-por-linea"
           />
@@ -324,6 +362,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
             name="categorySlugs"
             defaultValue={get("categorySlugs")}
             rows={4}
+            disabled={pending}
             className={textareaClass}
             placeholder="opcional"
           />
@@ -332,7 +371,7 @@ export function CouponForm({ defaults }: { defaults: CouponDefaults }) {
       <p className="text-sm text-muted-foreground">
         Si no hay restricciones, el cupón aplica a todo el carrito. Si las hay, productos y
         categorías forman una unión. El porcentaje se calcula después de descuentos mayoristas y de
-        bundles.
+        paquetes.
       </p>
       <Button type="submit" disabled={pending}>
         {pending ? "Guardando…" : defaults.id ? "Guardar cupón" : "Crear cupón"}
@@ -348,7 +387,16 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
   const get = (key: Exclude<keyof BundleDefaults, "id">): string => values?.[key] ?? defaults[key];
   const status = get("status");
   return (
-    <form action={action} className="space-y-5 rounded-xl border border-border bg-card p-5">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-5 rounded-xl border border-border bg-card p-5"
+    >
       {defaults.id ? <input type="hidden" name="id" value={defaults.id} /> : null}
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
@@ -357,6 +405,7 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           label="Slug"
           value={get("slug")}
           required
+          disabled={pending}
           maxLength={160}
         />
         <Field
@@ -365,11 +414,18 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           label="Nombre"
           value={get("name")}
           required
+          disabled={pending}
           maxLength={200}
         />
         <div className="space-y-2">
           <Label htmlFor="bundle-status">Estado</Label>
-          <Select key={status} id="bundle-status" name="status" defaultValue={status}>
+          <Select
+            key={status}
+            id="bundle-status"
+            name="status"
+            defaultValue={status}
+            disabled={pending}
+          >
             <option value="DRAFT">Borrador</option>
             <option value="ACTIVE">Activo</option>
           </Select>
@@ -379,6 +435,7 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           name="priceCents"
           label="Precio base (centavos COP; vacío usa suma de componentes y descuento 0)"
           value={get("priceCents")}
+          disabled={pending}
           maxLength={19}
           inputMode="numeric"
         />
@@ -387,6 +444,7 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           name="discountCents"
           label="Descuento sobre el precio base (requiere definir precio base)"
           value={get("discountCents")}
+          disabled={pending}
           maxLength={19}
           inputMode="numeric"
         />
@@ -400,6 +458,7 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           defaultValue={get("description")}
           maxLength={1000}
           rows={3}
+          disabled={pending}
           className={textareaClass}
         />
       </div>
@@ -412,13 +471,14 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
           defaultValue={get("items")}
           rows={7}
           required
+          disabled={pending}
           className={textareaClass}
           placeholder={"SKU-001 | 1\nSKU-002 | 2"}
         />
       </div>
       <p className="text-sm text-muted-foreground">
         La composición queda bloqueada frente a cambios cuando hay carritos activos. Para sustituir
-        componentes, archiva este bundle y crea uno nuevo.
+        componentes, archiva este paquete y crea uno nuevo.
       </p>
       <Button type="submit" disabled={pending}>
         {pending ? "Guardando…" : defaults.id ? "Guardar bundle" : "Crear bundle"}
@@ -431,7 +491,16 @@ export function BundleForm({ defaults }: { defaults: BundleDefaults }) {
 export function ArchivePricingForm({ id, kind }: { id: string; kind: string }) {
   const [state, action, pending] = useActionState(archivePricingAction, initialActionState);
   return (
-    <form action={action} className="space-y-2 rounded-xl border border-border bg-card p-5">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-2 rounded-xl border border-border bg-card p-5"
+    >
       <input type="hidden" name="id" value={id} />
       <input type="hidden" name="kind" value={kind} />
       <h2 className="font-semibold">Archivar registro</h2>

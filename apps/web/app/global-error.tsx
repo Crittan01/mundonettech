@@ -1,17 +1,25 @@
 "use client";
 
+import "./globals.css";
+
 import type { CSSProperties } from "react";
 
+import { storeConfig } from "@mundonettech/config/store";
 import { themeConfig } from "@mundonettech/config/theme";
 
 export default function GlobalError({
   reset,
+  retry,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
+  retry?: () => void;
 }) {
   return (
-    <html lang="es-CO" style={themeConfig.cssVariables as CSSProperties}>
+    <html lang={storeConfig.locale} style={themeConfig.cssVariables as CSSProperties}>
+      <head>
+        <title>{`Error inesperado | ${storeConfig.name}`}</title>
+      </head>
       <body className="bg-background font-sans text-foreground antialiased">
         <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col items-center justify-center px-6 py-12">
           <section
@@ -26,14 +34,14 @@ export default function GlobalError({
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
               <button
                 type="button"
-                onClick={reset}
-                className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-5 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+                onClick={() => (retry ?? reset)()}
+                className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-5 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
               >
                 Reintentar
               </button>
               <a
                 href="/"
-                className="inline-flex h-11 items-center justify-center rounded-md border border-input bg-background px-5 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+                className="inline-flex h-11 items-center justify-center rounded-md border border-input bg-background px-5 text-sm font-medium text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
               >
                 Ir al inicio
               </a>

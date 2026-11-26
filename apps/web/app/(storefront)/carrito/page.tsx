@@ -222,12 +222,12 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                   Seguir comprando
                 </Link>
                 {cart.canContinue ? (
-                  <Link
+                  <a
                     href="/checkout"
-                    className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-6 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                    className="inline-flex h-11 items-center justify-center rounded-md bg-primary px-6 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
                   >
-                    Continuar al checkout
-                  </Link>
+                    Finalizar compra
+                  </a>
                 ) : null}
               </div>
             </aside>

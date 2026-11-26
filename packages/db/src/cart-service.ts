@@ -1522,17 +1522,15 @@ export class CartService {
       ...(options.status === "ACTIVE"
         ? {
             status: "ACTIVE",
-            OR: [
-              { assistedExpiresAt: { gt: now } },
-              { assistedExpiresAt: null, expiresAt: { gt: now } },
-            ],
+            expiresAt: { gt: now },
+            OR: [{ assistedClaimedAt: { not: null } }, { assistedExpiresAt: { gt: now } }],
           }
         : options.status === "EXPIRED"
           ? {
               OR: [
                 { status: "EXPIRED" },
-                { status: "ACTIVE", assistedExpiresAt: { lte: now } },
-                { status: "ACTIVE", assistedExpiresAt: null, expiresAt: { lte: now } },
+                { status: "ACTIVE", expiresAt: { lte: now } },
+                { status: "ACTIVE", assistedClaimedAt: null, assistedExpiresAt: { lte: now } },
               ],
             }
           : options.status
@@ -1559,7 +1557,14 @@ export class CartService {
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
-    return { items, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+    return {
+      items,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      evaluatedAt: now,
+    };
   }
 
   async issueAssistedToken(input: {

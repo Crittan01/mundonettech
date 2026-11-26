@@ -137,7 +137,7 @@ export function ReceiptPaymentPanel({
           <input type="hidden" name="token" value={token} />
           <input type="hidden" name="paymentAttemptId" value={resumableWompiAttemptId} />
           <p className="text-sm text-muted-foreground">
-            Tienes un intento Wompi vigente pendiente de completar en el checkout seguro.
+            Tienes un intento Wompi vigente pendiente de completar en el pago seguro.
           </p>
           <Button type="submit" disabled={resuming} aria-busy={resuming}>
             {resuming ? "Abriendo Wompi…" : "Continuar pago en Wompi"}
@@ -156,7 +156,7 @@ export function ReceiptPaymentPanel({
                 : `Inicia un intento de pago (${formatCopCents(uncommittedCents)})`}
             </legend>
             {wompiAccounts.length ? (
-              <label className="flex items-center gap-3 text-sm">
+              <label className="flex min-h-11 items-center gap-3 text-sm">
                 <input
                   type="radio"
                   name="paymentMethod"
@@ -166,10 +166,10 @@ export function ReceiptPaymentPanel({
                   className="size-4 shrink-0 accent-primary"
                   required
                 />
-                Wompi · Web Checkout seguro
+                Wompi · Pago seguro en línea
               </label>
             ) : null}
-            <label className="flex items-center gap-3 text-sm">
+            <label className="flex min-h-11 items-center gap-3 text-sm">
               <input
                 type="radio"
                 name="paymentMethod"
@@ -182,7 +182,7 @@ export function ReceiptPaymentPanel({
               Pago contraentrega · pendiente de recaudo y remesa
             </label>
             {bankTransferInstructions ? (
-              <label className="flex items-center gap-3 text-sm">
+              <label className="flex min-h-11 items-center gap-3 text-sm">
                 <input
                   type="radio"
                   name="paymentMethod"
@@ -196,7 +196,7 @@ export function ReceiptPaymentPanel({
               </label>
             ) : null}
             {storeCreditAvailableCents ? (
-              <label className="flex items-center gap-3 text-sm">
+              <label className="flex min-h-11 items-center gap-3 text-sm">
                 <input
                   type="radio"
                   name="paymentMethod"
@@ -218,7 +218,6 @@ export function ReceiptPaymentPanel({
                 name="wompiCredentialId"
                 value={credentialId}
                 onChange={(event) => setCredentialId(event.target.value)}
-                className="flex py-2"
                 disabled={pending}
                 required
               >
@@ -267,8 +266,9 @@ export function ReceiptPaymentPanel({
               maxLength={128}
               disabled={verifying}
               required
+              aria-describedby="wompi-transaction-id-help"
             />
-            <p className="text-xs text-muted-foreground">
+            <p id="wompi-transaction-id-help" className="text-xs text-muted-foreground">
               Si regresaste de Wompi, el ID suele venir en la URL. La consulta se realiza con la
               llave privada únicamente desde el servidor.
             </p>

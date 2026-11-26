@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { parseCoordinateE6 as coordinateE6 } from "@mundonettech/core";
+import { canManageDeliveryZones, parseCoordinateE6 as coordinateE6 } from "@mundonettech/core";
 import {
   LocalDeliveryConflictError,
   LocalDeliveryService,
@@ -69,10 +69,7 @@ async function authorize(
     permission: "fulfillment:write",
     requireRecentMfa: true,
   });
-  if (
-    requireDeliveryZoneManager &&
-    !["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(session.profile.role)
-  ) {
+  if (requireDeliveryZoneManager && !canManageDeliveryZones(session.profile.role)) {
     throw new AdminAuthorizationError("FORBIDDEN");
   }
   assertClosedForm(formData, allowedFields);
@@ -204,21 +201,29 @@ interface OptionalLogisticsLookupDb {
 }
 
 async function resolveShipmentOrderId(shipmentId: string): Promise<string | null> {
-  const db = getDatabase() as unknown as OptionalLogisticsLookupDb;
-  const shipment = await db.shipment?.findUnique?.({
-    where: { id: shipmentId },
-    select: { orderId: true },
-  });
-  return shipment?.orderId ?? null;
+  try {
+    const db = getDatabase() as unknown as OptionalLogisticsLookupDb;
+    const shipment = await db.shipment?.findUnique?.({
+      where: { id: shipmentId },
+      select: { orderId: true },
+    });
+    return shipment?.orderId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function resolvePackageOrderId(packageId: string): Promise<string | null> {
-  const db = getDatabase() as unknown as OptionalLogisticsLookupDb;
-  const pkg = await db.shipmentPackage?.findUnique?.({
-    where: { id: packageId },
-    select: { shipment: { select: { orderId: true } } },
-  });
-  return pkg?.shipment.orderId ?? null;
+  try {
+    const db = getDatabase() as unknown as OptionalLogisticsLookupDb;
+    const pkg = await db.shipmentPackage?.findUnique?.({
+      where: { id: packageId },
+      select: { shipment: { select: { orderId: true } } },
+    });
+    return pkg?.shipment.orderId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export async function startPickingAction(

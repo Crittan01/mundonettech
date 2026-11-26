@@ -25,6 +25,7 @@ export interface PostSaleAdminAudit extends RefundAudit {
 interface PostSaleQueueOptions {
   readonly q?: string;
   readonly status?: "ALL" | "OPEN" | "CLOSED";
+  readonly kind?: "ALL" | "RETURNS" | "WARRANTIES" | "TICKETS";
   readonly skip?: number;
   readonly take?: number;
 }
@@ -34,6 +35,32 @@ interface ReviewQueueOptions {
   readonly status?: "ALL" | "PENDING" | "PUBLISHED" | "REJECTED";
   readonly skip?: number;
   readonly take?: number;
+}
+
+function validateQueuePagination(options?: { readonly skip?: number; readonly take?: number }): {
+  skip: number;
+  take: number;
+} {
+  const skip = options?.skip ?? 0;
+  const take = options?.take ?? 50;
+  if (!Number.isInteger(skip) || skip < 0 || skip > 100_000) {
+    throw new PostSaleError("VALIDATION", "skip must be an integer between 0 and 100000.");
+  }
+  if (!Number.isInteger(take) || take < 1 || take > 200) {
+    throw new PostSaleError("VALIDATION", "take must be an integer between 1 and 200.");
+  }
+  return { skip, take };
+}
+
+function normalizeQueueSearch(q: unknown): string {
+  if (q === undefined) return "";
+  if (typeof q !== "string") {
+    throw new PostSaleError("VALIDATION", "Search query must be a string.");
+  }
+  return q
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 120);
 }
 
 function note(value: unknown, required = false): string | null {
@@ -103,25 +130,19 @@ export class PostSaleAdminService {
     await recordAdminAction(tx, audit, action, targetType, targetId, metadata, { selfDealing });
   }
 
-  async reviewQueue(actorAdminUserId: string, options?: ReviewQueueOptions) {
-    assertUuid(actorAdminUserId, "actorAdminUserId");
-    const q =
-      options?.q
-        ?.replace(/[\u0000-\u001f\u007f]/g, "")
-        .trim()
-        .slice(0, 120) ?? "";
+  private parseReviewQueueOptions(options?: ReviewQueueOptions) {
+    const q = normalizeQueueSearch(options?.q);
+    if (
+      options?.status !== undefined &&
+      !["ALL", "PENDING", "PUBLISHED", "REJECTED"].includes(options.status)
+    ) {
+      throw new PostSaleError("VALIDATION", "Review status filter is invalid.");
+    }
     const status =
-      options?.status && ["PENDING", "PUBLISHED", "REJECTED"].includes(options.status)
+      options?.status && options.status !== "ALL"
         ? (options.status as "PENDING" | "PUBLISHED" | "REJECTED")
         : undefined;
-    const take =
-      options?.take !== undefined && Number.isInteger(options.take)
-        ? Math.max(1, Math.min(200, options.take))
-        : 200;
-    const skip =
-      options?.skip !== undefined && Number.isInteger(options.skip) && options.skip > 0
-        ? Math.min(100_000, options.skip)
-        : undefined;
+    const { skip, take } = validateQueuePagination(options);
     const where: Prisma.ReviewWhereInput | undefined =
       q || status
         ? {
@@ -139,52 +160,66 @@ export class PostSaleAdminService {
               : {}),
           }
         : undefined;
+    return { where, skip, take };
+  }
+
+  async reviewQueuePage(actorAdminUserId: string, options?: ReviewQueueOptions) {
+    assertUuid(actorAdminUserId, "actorAdminUserId");
+    const { where, skip, take } = this.parseReviewQueueOptions(options);
     return inInventoryTransaction(this.db, async (tx) => {
       await this.actor(tx, actorAdminUserId, "reviews:read");
-      return tx.review.findMany({
-        ...(where ? { where } : {}),
-        select: {
-          id: true,
-          rating: true,
-          title: true,
-          body: true,
-          authorDisplayName: true,
-          status: true,
-          moderationNote: true,
-          createdAt: true,
-          updatedAt: true,
-          product: { select: { id: true, name: true, slug: true, status: true } },
-          orderItem: {
-            select: {
-              titleSnapshot: true,
-              order: { select: { id: true, orderNumber: true } },
+      const [items, total] = await Promise.all([
+        tx.review.findMany({
+          ...(where ? { where } : {}),
+          select: {
+            id: true,
+            rating: true,
+            title: true,
+            body: true,
+            authorDisplayName: true,
+            status: true,
+            moderationNote: true,
+            createdAt: true,
+            updatedAt: true,
+            product: { select: { id: true, name: true, slug: true, status: true } },
+            orderItem: {
+              select: {
+                titleSnapshot: true,
+                order: { select: { id: true, orderNumber: true } },
+              },
             },
           },
-        },
-        orderBy: [{ status: "asc" }, { createdAt: "desc" }, { id: "desc" }],
-        ...(skip !== undefined ? { skip } : {}),
-        take,
-      });
+          orderBy: [{ status: "asc" }, { createdAt: "desc" }, { id: "desc" }],
+          ...(skip > 0 ? { skip } : {}),
+          take,
+        }),
+        tx.review.count(where ? { where } : undefined),
+      ]);
+      return { items, total };
     });
+  }
+
+  async reviewQueue(actorAdminUserId: string, options?: ReviewQueueOptions) {
+    const { items } = await this.reviewQueuePage(actorAdminUserId, options);
+    return items;
   }
 
   async queue(actorAdminUserId: string, options?: PostSaleQueueOptions) {
     assertUuid(actorAdminUserId, "actorAdminUserId");
-    const q =
-      options?.q
-        ?.replace(/[\u0000-\u001f\u007f]/g, "")
-        .trim()
-        .slice(0, 120) ?? "";
+    const q = normalizeQueueSearch(options?.q);
+    if (options?.status !== undefined && !["ALL", "OPEN", "CLOSED"].includes(options.status)) {
+      throw new PostSaleError("VALIDATION", "Post-sale queue status filter is invalid.");
+    }
     const statusFilter =
       options?.status === "OPEN" || options?.status === "CLOSED" ? options.status : undefined;
-    const take =
-      options?.take !== undefined && Number.isInteger(options.take)
-        ? Math.max(1, Math.min(200, options.take))
-        : 200;
-    const skip =
-      options?.skip !== undefined && Number.isInteger(options.skip) && options.skip > 0
-        ? Math.min(100_000, options.skip)
-        : undefined;
+    if (
+      options?.kind !== undefined &&
+      !["ALL", "RETURNS", "WARRANTIES", "TICKETS"].includes(options.kind)
+    ) {
+      throw new PostSaleError("VALIDATION", "Post-sale queue kind filter is invalid.");
+    }
+    const kind = options?.kind ?? "ALL";
+    const { skip, take } = validateQueuePagination(options);
 
     const returnWhere: Prisma.ReturnRequestWhereInput | undefined =
       q || statusFilter
@@ -217,6 +252,17 @@ export class PostSaleAdminService {
                         },
                       },
                     },
+                    {
+                      items: {
+                        some: {
+                          units: {
+                            some: {
+                              serializedUnit: { imei: { contains: q, mode: "insensitive" } },
+                            },
+                          },
+                        },
+                      },
+                    },
                   ],
                 }
               : {}),
@@ -237,6 +283,7 @@ export class PostSaleAdminService {
                     { order: { orderNumber: { contains: q, mode: "insensitive" } } },
                     { issueDescription: { contains: q, mode: "insensitive" } },
                     { serializedUnit: { serial: { contains: q, mode: "insensitive" } } },
+                    { serializedUnit: { imei: { contains: q, mode: "insensitive" } } },
                     { orderItem: { titleSnapshot: { contains: q, mode: "insensitive" } } },
                   ],
                 }
@@ -266,85 +313,95 @@ export class PostSaleAdminService {
 
     return inInventoryTransaction(this.db, async (tx) => {
       await this.actor(tx, actorAdminUserId, "postsale:read");
-      const [returns, warranties, tickets] = await Promise.all([
-        tx.returnRequest.findMany({
-          ...(returnWhere ? { where: returnWhere } : {}),
-          select: {
-            id: true,
-            kind: true,
-            status: true,
-            reason: true,
-            retractRefundDueAt: true,
-            version: true,
-            createdAt: true,
-            order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
-            items: {
-              select: {
-                id: true,
-                quantity: true,
-                deliveredAt: true,
-                orderItem: {
-                  select: {
-                    titleSnapshot: true,
-                    skuSnapshot: true,
-                    variant: { select: { product: { select: { retractPolicy: true } } } },
+      const [returns, warranties, tickets, returnsTotal, warrantiesTotal, ticketsTotal] =
+        await Promise.all([
+          kind === "ALL" || kind === "RETURNS"
+            ? tx.returnRequest.findMany({
+                ...(returnWhere ? { where: returnWhere } : {}),
+                select: {
+                  id: true,
+                  kind: true,
+                  status: true,
+                  reason: true,
+                  retractRefundDueAt: true,
+                  version: true,
+                  createdAt: true,
+                  order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+                  items: {
+                    select: {
+                      id: true,
+                      quantity: true,
+                      deliveredAt: true,
+                      orderItem: {
+                        select: {
+                          titleSnapshot: true,
+                          skuSnapshot: true,
+                          variant: { select: { product: { select: { retractPolicy: true } } } },
+                        },
+                      },
+                      replacementVariant: { select: { sku: true } },
+                      units: {
+                        select: {
+                          serializedUnit: { select: { id: true, serial: true, imei: true } },
+                        },
+                      },
+                    },
                   },
+                  refund: { select: { id: true, status: true, totalCents: true } },
                 },
-                replacementVariant: { select: { sku: true } },
-                units: {
-                  select: {
-                    serializedUnit: { select: { id: true, serial: true, imei: true } },
+                orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+                ...(skip > 0 ? { skip } : {}),
+                take,
+              })
+            : Promise.resolve([]),
+          kind === "ALL" || kind === "WARRANTIES"
+            ? tx.warrantyClaim.findMany({
+                ...(warrantyWhere ? { where: warrantyWhere } : {}),
+                select: {
+                  id: true,
+                  remedy: true,
+                  status: true,
+                  issueDescription: true,
+                  warrantyDueAt: true,
+                  version: true,
+                  createdAt: true,
+                  order: { select: { id: true, orderNumber: true } },
+                  orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
+                  serializedUnit: { select: { serial: true, imei: true } },
+                  refund: { select: { id: true, status: true, totalCents: true } },
+                },
+                orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+                ...(skip > 0 ? { skip } : {}),
+                take,
+              })
+            : Promise.resolve([]),
+          kind === "ALL" || kind === "TICKETS"
+            ? tx.supportTicket.findMany({
+                ...(ticketWhere ? { where: ticketWhere } : {}),
+                select: {
+                  id: true,
+                  ticketNumber: true,
+                  status: true,
+                  subject: true,
+                  contactEmailSnapshot: true,
+                  slaDueAt: true,
+                  version: true,
+                  order: { select: { id: true, orderNumber: true } },
+                  messages: {
+                    select: { id: true, authorType: true, body: true, createdAt: true },
+                    orderBy: { createdAt: "asc" },
                   },
+                  assignedTo: { select: { displayName: true } },
                 },
-              },
-            },
-            refund: { select: { id: true, status: true, totalCents: true } },
-          },
-          orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-          ...(skip !== undefined ? { skip } : {}),
-          take,
-        }),
-        tx.warrantyClaim.findMany({
-          ...(warrantyWhere ? { where: warrantyWhere } : {}),
-          select: {
-            id: true,
-            remedy: true,
-            status: true,
-            issueDescription: true,
-            warrantyDueAt: true,
-            version: true,
-            createdAt: true,
-            order: { select: { id: true, orderNumber: true } },
-            orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
-            serializedUnit: { select: { serial: true, imei: true } },
-            refund: { select: { id: true, status: true, totalCents: true } },
-          },
-          orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-          ...(skip !== undefined ? { skip } : {}),
-          take,
-        }),
-        tx.supportTicket.findMany({
-          ...(ticketWhere ? { where: ticketWhere } : {}),
-          select: {
-            id: true,
-            ticketNumber: true,
-            status: true,
-            subject: true,
-            contactEmailSnapshot: true,
-            slaDueAt: true,
-            version: true,
-            order: { select: { id: true, orderNumber: true } },
-            messages: {
-              select: { id: true, authorType: true, body: true, createdAt: true },
-              orderBy: { createdAt: "asc" },
-            },
-            assignedTo: { select: { displayName: true } },
-          },
-          orderBy: [{ status: "asc" }, { slaDueAt: "asc" }, { id: "asc" }],
-          ...(skip !== undefined ? { skip } : {}),
-          take,
-        }),
-      ]);
+                orderBy: [{ status: "asc" }, { slaDueAt: "asc" }, { id: "asc" }],
+                ...(skip > 0 ? { skip } : {}),
+                take,
+              })
+            : Promise.resolve([]),
+          tx.returnRequest.count(returnWhere ? { where: returnWhere } : undefined),
+          tx.warrantyClaim.count(warrantyWhere ? { where: warrantyWhere } : undefined),
+          tx.supportTicket.count(ticketWhere ? { where: ticketWhere } : undefined),
+        ]);
       return {
         returns: returns.map((item) => ({
           ...item,
@@ -358,6 +415,11 @@ export class PostSaleAdminService {
             ? { displayName: maskName(item.assignedTo.displayName) }
             : null,
         })),
+        totals: {
+          returns: returnsTotal,
+          warranties: warrantiesTotal,
+          tickets: ticketsTotal,
+        },
       };
     });
   }

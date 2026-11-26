@@ -896,7 +896,7 @@ export class PostSaleService {
           messages: { orderBy: { createdAt: "asc" } },
           order: { select: { orderNumber: true } },
         },
-        orderBy: { createdAt: "desc" },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       });
     }
     if (actor.kind !== "CUSTOMER")
@@ -913,9 +913,56 @@ export class PostSaleService {
         messages: { orderBy: { createdAt: "asc" } },
         order: { select: { orderNumber: true } },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: 100,
     });
+  }
+
+  async listSupportTicketsPage(
+    actor: PostSaleActor,
+    options: { readonly orderId?: string; readonly page?: number; readonly pageSize?: number } = {},
+  ) {
+    const requestedPage = options.page ?? 1;
+    const pageSize = options.pageSize ?? 20;
+    if (
+      !Number.isInteger(requestedPage) ||
+      requestedPage < 1 ||
+      requestedPage > 10_000 ||
+      !Number.isInteger(pageSize) ||
+      pageSize < 1 ||
+      pageSize > 100
+    ) {
+      throw new PostSaleError("VALIDATION", "Invalid support ticket pagination.");
+    }
+    let where: Prisma.SupportTicketWhereInput;
+    if (options.orderId) {
+      await this.assertOrderActor(options.orderId, actor);
+      where = { orderId: options.orderId };
+    } else {
+      if (actor.kind !== "CUSTOMER")
+        throw new PostSaleError("VALIDATION", "Guest tickets require an order.");
+      assertUuid(actor.customerId, "customerId");
+      const customer = await this.db.customer.findFirst({
+        where: { id: actor.customerId, status: "ACTIVE", deletedAt: null },
+        select: { id: true },
+      });
+      if (!customer) throw new PostSaleError("FORBIDDEN", "The customer account is not active.");
+      where = { requesterCustomerId: actor.customerId };
+    }
+    const total = await this.db.supportTicket.count({ where });
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(requestedPage, totalPages);
+    const items = await this.db.supportTicket.findMany({
+      where,
+      include: {
+        messages: { orderBy: { createdAt: "asc" } },
+        order: { select: { orderNumber: true } },
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    });
+    return { items, total, page, pageSize, totalPages };
   }
 
   async createReview(actor: PostSaleActor, input: ReviewInput) {

@@ -76,6 +76,8 @@ export function CatalogBrowser({
       <form
         key={new URLSearchParams(params).toString()}
         action={basePath}
+        role="search"
+        aria-label="Filtros del catálogo"
         className="grid gap-4 rounded-2xl border border-border bg-card p-5"
       >
         {compareSlugs.length > 0 ? (
@@ -216,7 +218,7 @@ export function CatalogBrowser({
                       ? `/categoria/${category.slug}?comparar=${encodeURIComponent(compareSlugs.join(","))}`
                       : `/categoria/${category.slug}`
                   }
-                  className="inline-flex min-h-11 items-center rounded-full border border-input bg-card px-3.5 py-1.5 font-medium text-foreground transition outline-none hover:border-primary hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                  className="inline-flex min-h-11 items-center rounded-full border border-input bg-card px-3.5 py-1.5 font-medium text-foreground outline-hidden transition hover:border-primary hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {category.name} ({category.count})
                 </Link>
@@ -234,7 +236,7 @@ export function CatalogBrowser({
                       ? `/marca/${brand.slug}?comparar=${encodeURIComponent(compareSlugs.join(","))}`
                       : `/marca/${brand.slug}`
                   }
-                  className="inline-flex min-h-11 items-center rounded-full border border-input bg-card px-3.5 py-1.5 font-medium text-foreground transition outline-none hover:border-primary hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                  className="inline-flex min-h-11 items-center rounded-full border border-input bg-card px-3.5 py-1.5 font-medium text-foreground outline-hidden transition hover:border-primary hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {brand.name} ({brand.count})
                 </Link>

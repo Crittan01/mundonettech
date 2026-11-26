@@ -5,7 +5,7 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "relative inline-flex max-w-full shrink items-center justify-center gap-2 rounded-md text-center text-sm font-medium whitespace-normal transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 sm:shrink-0 sm:whitespace-nowrap [&_svg]:pointer-events-none [&_svg]:shrink-0",
+  "relative inline-flex max-w-full shrink items-center justify-center gap-2 rounded-md text-center text-sm font-medium whitespace-normal transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 sm:shrink-0 sm:whitespace-nowrap [&_svg]:pointer-events-none [&_svg]:shrink-0",
   {
     variants: {
       variant: {

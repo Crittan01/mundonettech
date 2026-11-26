@@ -18,7 +18,7 @@ const orderStatusLabels = {
 } as const;
 const stockStatusLabels = {
   NOT_REQUIRED: "Sin reserva",
-  REVIEW_REQUIRED: "Requiere revisión de stock",
+  REVIEW_REQUIRED: "Requiere revisión de inventario",
   RESERVED: "Reservado",
   FULFILLED: "Descontado por despacho",
   RELEASED: "Reserva liberada",
@@ -61,11 +61,12 @@ const ledgerTypeLabels = {
   MANUAL_ADJUSTMENT: "Ajuste manual",
 } as const;
 const stockErrorLabels: Record<string, string> = {
-  LISTING_NOT_MAPPED: "El ítem vendido aún no está vinculado a una publicación administrada.",
-  USER_PRODUCT_DIVERGENCE: "El User Product de la orden no coincide con la publicación local.",
-  SKU_DIVERGENCE: "El SKU remoto no coincide con la variante local.",
+  LISTING_NOT_MAPPED: "El artículo vendido aún no está vinculado a una publicación administrada.",
+  USER_PRODUCT_DIVERGENCE:
+    "El producto de usuario de la orden no coincide con la publicación local.",
+  SKU_DIVERGENCE: "El SKU del canal no coincide con la variante local.",
   STOCK_ORIGIN_DIVERGENCE: "Mercado Libre indicó un origen distinto al configurado.",
-  STOCK_ORIGIN_NOT_FOUND: "No existe un nivel de stock compatible para esta variante.",
+  STOCK_ORIGIN_NOT_FOUND: "No existe un nivel de inventario compatible para esta variante.",
   STOCK_ORIGIN_AMBIGUOUS: "Hay varias bodegas posibles; un operador debe elegir el origen real.",
   STOCK_MAPPING_REQUIRED: "La asignación de variante y bodega está incompleta.",
   STOCK_ORIGIN_INVALID: "La bodega asignada ya no es válida para la logística de la orden.",
@@ -74,11 +75,11 @@ const stockErrorLabels: Record<string, string> = {
     "No hay disponibilidad suficiente; no se descontó inventario y la orden quedó en revisión.",
 };
 const reconciliationReasonLabels: Record<string, string> = {
-  PACK_ORDER_STATE_DIVERGENCE: "El pack cancelado contiene una orden con otro estado",
+  PACK_ORDER_STATE_DIVERGENCE: "El paquete cancelado contiene una orden con otro estado",
   PAID_TOTAL_DIVERGENCE: "El importe pagado no coincide con el bruto de la orden",
   PAYMENT_CHARGEBACK_REVIEW: "Existe un contracargo sin reembolso completo registrado",
   PAYMENT_MEDIATION_REVIEW: "Existe un pago en mediación pendiente de resolución",
-  INSUFFICIENT_STOCK: "No fue posible completar el descuento de inventario por falta de stock",
+  INSUFFICIENT_STOCK: "No fue posible completar el descuento de inventario por falta de unidades",
   PAYMENT_TOTAL_DIVERGENCE: "Diferencia entre importe pagado y capturas aprobadas",
   FEE_TOTAL_DIVERGENCE: "Diferencia entre comisión esperada y comisión aplicada",
   PAYMENT_STATE_DIVERGENCE: "Pedido pagado sin saldo neto capturado",
@@ -116,10 +117,10 @@ export function ChannelOrderDashboardView({
     <section aria-labelledby="channel-orders" className="space-y-5">
       <div>
         <h2 id="channel-orders" className="text-xl font-semibold">
-          Packs, pedidos, envíos y conciliación
+          Paquetes, pedidos, envíos y conciliación
         </h2>
         <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-          Las notificaciones se procesan desde el outbox. Solo se conservan identificadores
+          Las notificaciones se procesan desde la cola de salida. Solo se conservan identificadores
           operativos, cantidades e importes: nunca comprador, correo, teléfono ni dirección.
         </p>
       </div>
@@ -127,16 +128,16 @@ export function ChannelOrderDashboardView({
         <div className="rounded-xl border border-border bg-card p-8 text-center">
           <h3 className="text-lg font-semibold">No hay pedidos de canal sincronizados</h3>
           <p className="mt-2 text-sm text-muted-foreground">
-            Cuando llegue una notificación firmada, el scheduler consultará el recurso oficial y
-            persistirá aquí su pack, pagos, envío y stock.
+            Cuando llegue una notificación firmada, el programador consultará el recurso oficial y
+            registrará aquí su paquete, pagos, envío e inventario.
           </p>
         </div>
       ) : (
         <>
           <p role="status" className="text-sm text-muted-foreground">
-            {dashboard.orders.length} pedidos · {dashboard.packs.length} packs ·{" "}
-            {dashboard.shipments.length} envíos · {dashboard.ledgerEntries.length} movimientos
-            recientes
+            Mostrando los registros recientes: {dashboard.orders.length} pedidos ·{" "}
+            {dashboard.packs.length} paquetes · {dashboard.shipments.length} envíos ·{" "}
+            {dashboard.ledgerEntries.length} movimientos contables
           </p>
           <ul className="space-y-5">
             {dashboard.orders.map((order) => (
@@ -147,7 +148,7 @@ export function ChannelOrderDashboardView({
                       Pedido <span className="font-mono">{order.externalOrderId}</span>
                     </h3>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      {order.externalPackId ? `Pack ${order.externalPackId} · ` : ""}
+                      {order.externalPackId ? `Paquete ${order.externalPackId} · ` : ""}
                       {order.externalItemId} ·{" "}
                       {order.sellerSku ?? order.localSku ?? "SKU sin mapear"}
                     </p>
@@ -178,7 +179,7 @@ export function ChannelOrderDashboardView({
                     </dd>
                   </div>
                   <div>
-                    <dt>Neto del ledger de la orden</dt>
+                    <dt>Neto contable de la orden</dt>
                     <dd className="mt-1">{formatSignedCopCents(order.netProceedsCents)}</dd>
                   </div>
                   <div>
@@ -241,7 +242,7 @@ export function ChannelOrderDashboardView({
       )}
       {dashboard.packs.length > 0 ? (
         <details className="rounded-xl border border-border bg-card p-5">
-          <summary className="cursor-pointer font-semibold">Packs sincronizados</summary>
+          <summary className="cursor-pointer font-semibold">Paquetes sincronizados</summary>
           <ul className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {dashboard.packs.map((pack) => (
               <li key={pack.id} className="rounded-lg border border-border p-3 text-xs">
@@ -274,7 +275,7 @@ export function ChannelOrderDashboardView({
                   <span className="mt-1 block text-muted-foreground">
                     {entry.orderId
                       ? `Pedido ${orderReferences.get(entry.orderId) ?? entry.orderId}`
-                      : `Pack ${packReferences.get(entry.packId ?? "") ?? entry.packId}`}
+                      : `Paquete ${packReferences.get(entry.packId ?? "") ?? entry.packId}`}
                     {entry.externalPaymentId ? ` · Pago ${entry.externalPaymentId}` : ""} ·{" "}
                     {dateFormatter.format(entry.occurredAt)}
                   </span>

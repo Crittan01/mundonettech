@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useState } from "react";
 
 import type { LifecycleStepInput } from "@mundonettech/core";
 
@@ -73,7 +73,16 @@ export function JourneyEditorForm({
     );
   };
   return (
-    <form action={action} className="space-y-5">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-5"
+    >
       {journey ? (
         <>
           <input type="hidden" name="journeyId" value={journey.id} />
@@ -91,6 +100,7 @@ export function JourneyEditorForm({
             minLength={2}
             maxLength={120}
             defaultValue={state.values?.name ?? journey?.name ?? ""}
+            disabled={pending}
           />
         </div>
         <div className="space-y-2">
@@ -100,6 +110,7 @@ export function JourneyEditorForm({
             name="segmentId"
             required
             defaultValue={state.values?.segmentId ?? journey?.segmentId ?? ""}
+            disabled={pending}
           >
             <option value="" disabled>
               Selecciona un segmento
@@ -110,7 +121,7 @@ export function JourneyEditorForm({
                 {segment.status === "ACTIVE"
                   ? ""
                   : segment.status === "DRAFT"
-                    ? " (borrador; actívalo antes del journey)"
+                    ? " (borrador; actívalo antes del recorrido)"
                     : " (archivado; selecciona un segmento activo)"}
               </option>
             ))}
@@ -124,6 +135,7 @@ export function JourneyEditorForm({
           name="description"
           maxLength={500}
           defaultValue={state.values?.description ?? journey?.description ?? ""}
+          disabled={pending}
         />
       </div>
       <div className="space-y-4">
@@ -150,6 +162,7 @@ export function JourneyEditorForm({
                     max={525600}
                     step={1}
                     required
+                    disabled={pending}
                     value={step.offsetMinutes}
                     onChange={(event) => {
                       const raw = event.currentTarget.value;
@@ -165,6 +178,7 @@ export function JourneyEditorForm({
                     <Button
                       type="button"
                       variant="outline"
+                      disabled={pending}
                       onClick={() =>
                         setSteps((current) =>
                           current.filter((_step, candidate) => candidate !== index),
@@ -182,6 +196,7 @@ export function JourneyEditorForm({
                   id={`${id}-subject`}
                   required
                   maxLength={200}
+                  disabled={pending}
                   value={step.subject}
                   onChange={(event) => update(index, { subject: event.currentTarget.value })}
                 />
@@ -193,6 +208,7 @@ export function JourneyEditorForm({
                   required
                   rows={7}
                   maxLength={50000}
+                  disabled={pending}
                   value={step.htmlBody}
                   onChange={(event) => update(index, { htmlBody: event.currentTarget.value })}
                 />
@@ -204,6 +220,7 @@ export function JourneyEditorForm({
                   required
                   rows={5}
                   maxLength={20000}
+                  disabled={pending}
                   value={step.textBody}
                   onChange={(event) => update(index, { textBody: event.currentTarget.value })}
                 />
@@ -214,7 +231,9 @@ export function JourneyEditorForm({
         <Button
           type="button"
           variant="outline"
-          disabled={steps.length >= 20 || steps[steps.length - 1]!.offsetMinutes >= 525600}
+          disabled={
+            pending || steps.length >= 20 || steps[steps.length - 1]!.offsetMinutes >= 525600
+          }
           onClick={() =>
             setSteps((current) => [
               ...current,
@@ -263,7 +282,23 @@ export function JourneyStateButtons({
   return (
     <div className="space-y-3">
       {journey.status !== "ARCHIVED" ? (
-        <form action={action} className="flex flex-wrap gap-2">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (pending) return;
+            const submitter = (event.nativeEvent as SubmitEvent).submitter;
+            const formData = new FormData(event.currentTarget);
+            if (
+              (submitter instanceof HTMLButtonElement || submitter instanceof HTMLInputElement) &&
+              submitter.name
+            ) {
+              formData.append(submitter.name, submitter.value);
+            }
+            startTransition(() => action(formData));
+          }}
+          aria-busy={pending}
+          className="flex flex-wrap gap-2"
+        >
           <input type="hidden" name="journeyId" value={journey.id} />
           <input type="hidden" name="expectedVersion" value={journey.version} />
           {actions.map((item) => (
@@ -278,7 +313,7 @@ export function JourneyStateButtons({
             </Button>
           ))}
           <Button type="submit" name="action" value="ARCHIVE" variant="outline" disabled={pending}>
-            Archivar journey
+            Archivar recorrido
           </Button>
         </form>
       ) : null}

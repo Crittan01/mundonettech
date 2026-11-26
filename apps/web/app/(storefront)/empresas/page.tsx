@@ -1,5 +1,6 @@
 import { storeConfig } from "@mundonettech/config/store";
 import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 
 import { B2bLeadForm } from "@/components/b2b/lead-form";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
@@ -25,6 +26,7 @@ export const metadata: Metadata = {
 };
 
 export default async function BusinessPage() {
+  if (!storeConfig.modules.wholesale) notFound();
   const security = await getAuthPageSecurity();
   return (
     <div className="mx-auto max-w-4xl space-y-8">

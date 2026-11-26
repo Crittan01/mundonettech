@@ -43,6 +43,7 @@ export function Spin360({
   const [syncedFramesKey, setSyncedFramesKey] = useState(framesKey);
   const [current, setCurrent] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  const [showLoadingStatus, setShowLoadingStatus] = useState(false);
   const [error, setError] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const startX = useRef<number | null>(null);
@@ -54,6 +55,7 @@ export function Spin360({
     setSyncedFramesKey(framesKey);
     setCurrent(0);
     setLoaded(false);
+    setShowLoadingStatus(false);
     setError(false);
     setRetryCount(0);
   }
@@ -76,13 +78,25 @@ export function Spin360({
     if (img.complete) {
       if (img.naturalWidth > 0) {
         setLoaded(true);
+        setShowLoadingStatus(false);
         setError(false);
       } else {
         setError(true);
         setLoaded(false);
+        setShowLoadingStatus(false);
       }
     }
   }, [frame, safeIndex, retryCount]);
+
+  useEffect(() => {
+    if (loaded || error || !frame) return;
+    const timer = window.setTimeout(() => {
+      setShowLoadingStatus(true);
+    }, 180);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [loaded, error, frame, safeIndex, retryCount]);
 
   if (!validFrames || !frame) {
     return (
@@ -100,6 +114,7 @@ export function Spin360({
     if (normalized === safeIndex) return;
     setCurrent(normalized);
     setLoaded(false);
+    setShowLoadingStatus(false);
     setError(false);
   }
 
@@ -110,6 +125,7 @@ export function Spin360({
   function retryFrame(): void {
     setError(false);
     setLoaded(false);
+    setShowLoadingStatus(false);
     setRetryCount((value) => value + 1);
   }
 
@@ -150,9 +166,8 @@ export function Spin360({
     const step = Math.trunc((event.clientX - startX.current) / 24);
     const difference = step - lastStep.current;
     if (difference !== 0) {
-      const direction = -Math.sign(difference);
-      move(direction);
-      prefetchNeighbor(direction);
+      move(-difference);
+      prefetchNeighbor(-Math.sign(difference));
       lastStep.current = step;
     }
   }
@@ -163,7 +178,7 @@ export function Spin360({
 
   return (
     <figure className={className}>
-      <div className="relative overflow-hidden rounded-xl border border-border bg-secondary">
+      <div className="relative overflow-hidden rounded-xl border border-border bg-secondary focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background">
         <div
           role="slider"
           tabIndex={0}
@@ -172,7 +187,7 @@ export function Spin360({
           aria-valuemax={frames.length}
           aria-valuenow={safeIndex + 1}
           aria-valuetext={`Vista ${safeIndex + 1} de ${frames.length}`}
-          className="cursor-grab touch-pan-y focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none active:cursor-grabbing"
+          className="cursor-grab touch-pan-y focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden focus-visible:ring-inset active:cursor-grabbing"
           onPointerDown={pointerDown}
           onPointerMove={pointerMove}
           onPointerUp={() => {
@@ -234,24 +249,29 @@ export function Spin360({
               draggable={false}
               onLoad={() => {
                 setLoaded(true);
+                setShowLoadingStatus(false);
                 setError(false);
               }}
               onError={() => {
                 setError(true);
                 setLoaded(false);
+                setShowLoadingStatus(false);
               }}
               className="h-auto w-full select-none"
             />
           </picture>
         </div>
-        {!loaded && !error ? (
-          <p
-            className="pointer-events-none absolute inset-x-0 bottom-0 bg-background/85 p-2 text-center text-sm text-foreground"
-            role="status"
-          >
-            Cargando vista…
-          </p>
-        ) : null}
+        <p
+          role="status"
+          aria-live="polite"
+          className={
+            !loaded && !error && showLoadingStatus
+              ? "pointer-events-none absolute inset-x-0 bottom-0 bg-background/85 p-2 text-center text-sm text-foreground"
+              : "sr-only"
+          }
+        >
+          {!loaded && !error && showLoadingStatus ? "Cargando vista…" : ""}
+        </p>
         {error ? (
           <div
             className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background p-4 text-center text-foreground"
@@ -261,7 +281,7 @@ export function Spin360({
             <button
               type="button"
               onClick={retryFrame}
-              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+              className="min-h-11 rounded-md border border-input bg-background px-4 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
             >
               Reintentar
             </button>
@@ -275,7 +295,7 @@ export function Spin360({
             move(-1);
             prefetchAdjacent(-1);
           }}
-          className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+          className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
           aria-label="Vista anterior"
         >
           Anterior
@@ -289,7 +309,7 @@ export function Spin360({
             move(1);
             prefetchAdjacent(1);
           }}
-          className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-none"
+          className="min-h-11 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background focus-visible:outline-hidden"
           aria-label="Vista siguiente"
         >
           Siguiente

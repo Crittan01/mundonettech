@@ -4,18 +4,30 @@ import { notFound } from "next/navigation";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
 import { BundleForm, CouponForm, WholesaleTierForm } from "@/components/admin/pricing-forms";
+import { single } from "@/lib/admin-search-params";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Crear registro comercial" };
 const types = ["mayoristas", "cupones", "bundles"] as const;
+type PricingCreateType = (typeof types)[number];
+const typeLabels: Record<PricingCreateType, string> = {
+  mayoristas: "Escala mayorista",
+  cupones: "Cupón",
+  bundles: "Paquete",
+};
 
 export default async function NewPricingPage({ searchParams }: PageProps<"/admin/precios/nuevo">) {
   const session = await requireAdminPage("pricing:write");
+  if (!hasAdminPermission(session.profile.role, "pricing:write")) notFound();
   const query = await searchParams;
-  const type = types.includes(query.tipo as (typeof types)[number])
-    ? (query.tipo as (typeof types)[number])
-    : null;
-  if (!type || !hasAdminPermission(session.profile.role, "pricing:write")) notFound();
+  const rawType = single(query.tipo)?.trim();
+  const type: PricingCreateType = !rawType
+    ? "mayoristas"
+    : (types as readonly string[]).includes(rawType)
+      ? (rawType as PricingCreateType)
+      : rawType === "paquetes"
+        ? "bundles"
+        : "mayoristas";
   return (
     <div className="mx-auto max-w-4xl space-y-6">
       <div>
@@ -25,14 +37,23 @@ export default async function NewPricingPage({ searchParams }: PageProps<"/admin
         >
           Volver a precios
         </Link>
-        <h1 className="mt-3 text-3xl font-bold">
-          Crear{" "}
-          {type === "mayoristas" ? "escala mayorista" : type === "cupones" ? "cupón" : "bundle"}
-        </h1>
+        <h1 className="mt-3 text-3xl font-bold">Crear {typeLabels[type].toLowerCase()}</h1>
         <p className="mt-2 text-muted-foreground">
           La operación exige MFA reciente y registra el actor, antes/después y contexto de
           solicitud.
         </p>
+        <nav aria-label="Tipo de registro comercial" className="mt-4 flex flex-wrap gap-2">
+          {types.map((item) => (
+            <Link
+              key={item}
+              href={`/admin/precios/nuevo?tipo=${item}`}
+              aria-current={type === item ? "page" : undefined}
+              className={`inline-flex min-h-11 items-center rounded-md px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden ${type === item ? "bg-primary text-primary-foreground" : "bg-secondary hover:bg-accent"}`}
+            >
+              {typeLabels[item]}
+            </Link>
+          ))}
+        </nav>
       </div>
       <CmsStepUp session={session} />
       {type === "mayoristas" ? (

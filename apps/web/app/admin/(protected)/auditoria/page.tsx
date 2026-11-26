@@ -154,6 +154,7 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
         </div>
       </div>
       <form
+        key={`${actor}|${rawAction}|${parsedFrom.raw}|${parsedTo.raw}|${selfDealing === undefined ? "" : String(selfDealing)}`}
         action="/admin/auditoria"
         className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-5"
       >
@@ -199,7 +200,10 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
         <div className="flex flex-wrap items-center gap-3 sm:col-span-2 lg:col-span-5">
           <Button type="submit">Aplicar filtros</Button>
           {hasFilters ? (
-            <Link href="/admin/auditoria" className="text-sm text-primary underline">
+            <Link
+              href="/admin/auditoria"
+              className="inline-flex min-h-11 items-center text-sm text-primary underline"
+            >
               Limpiar filtros
             </Link>
           ) : null}
@@ -271,7 +275,12 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
                 <summary className="cursor-pointer text-sm font-medium">
                   Metadatos redactados
                 </summary>
-                <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-secondary p-3 text-xs whitespace-pre-wrap">
+                <pre
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Detalle del registro de auditoría"
+                  className="mt-2 max-h-72 overflow-auto rounded-md bg-secondary p-3 text-xs whitespace-pre-wrap outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                >
                   {JSON.stringify(sanitizeAuditValue(log.metadata), null, 2)}
                 </pre>
               </details>
@@ -285,32 +294,34 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
           <p className="mt-2 text-muted-foreground">Prueba un rango de fechas o actor diferente.</p>
         </section>
       ) : null}
-      <nav
-        className="flex flex-wrap items-center justify-between gap-3"
-        aria-label="Paginación de auditoría"
-      >
-        <span className="text-sm text-muted-foreground">
-          Página {page} de {totalPages} · {total} registros
-        </span>
-        <div className="flex gap-2">
-          {page > 1 ? (
-            <Link
-              className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
-              href={href(filters, page - 1)}
-            >
-              Anterior
-            </Link>
-          ) : null}
-          {page < totalPages ? (
-            <Link
-              className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
-              href={href(filters, page + 1)}
-            >
-              Siguiente
-            </Link>
-          ) : null}
-        </div>
-      </nav>
+      {!invalidQuery ? (
+        <nav
+          className="flex flex-wrap items-center justify-between gap-3"
+          aria-label="Paginación de auditoría"
+        >
+          <span className="text-sm text-muted-foreground">
+            Página {page} de {totalPages} · {total} registros
+          </span>
+          <div className="flex gap-2">
+            {page > 1 ? (
+              <Link
+                className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
+                href={href(filters, page - 1)}
+              >
+                Anterior
+              </Link>
+            ) : null}
+            {page < totalPages ? (
+              <Link
+                className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
+                href={href(filters, page + 1)}
+              >
+                Siguiente
+              </Link>
+            ) : null}
+          </div>
+        </nav>
+      ) : null}
     </div>
   );
 }

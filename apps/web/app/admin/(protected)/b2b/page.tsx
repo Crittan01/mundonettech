@@ -165,7 +165,11 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
               Página {opportunities.page} de {totalPages}.
             </p>
           </div>
-          <form className="flex flex-wrap items-end gap-2" action="/admin/b2b">
+          <form
+            key={`${validStatus ?? ""}|${validLista ?? ""}`}
+            className="flex flex-wrap items-end gap-2"
+            action="/admin/b2b"
+          >
             {validLista ? <input type="hidden" name="lista" value={validLista} /> : null}
             <div className="space-y-2">
               <Label htmlFor="b2b-status">Estado</Label>
@@ -200,8 +204,7 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
           <p role="alert" className="text-sm text-destructive">
             Los filtros o la página no son válidos.
           </p>
-        ) : null}
-        {opportunities.items.length === 0 ? (
+        ) : opportunities.items.length === 0 ? (
           <p className="rounded-xl border border-border bg-card p-6 text-muted-foreground">
             No hay oportunidades para estos filtros. La captura pública está disponible en{" "}
             <Link href="/empresas" className="text-primary underline">
@@ -241,7 +244,7 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
             ))}
           </div>
         )}
-        {opportunities.page > 1 || opportunities.page < totalPages ? (
+        {paramsValid && (opportunities.page > 1 || opportunities.page < totalPages) ? (
           <nav
             aria-label="Paginación de oportunidades B2B"
             className="flex flex-wrap items-center gap-4"
@@ -285,7 +288,7 @@ export default async function B2bPage({ searchParams }: PageProps<"/admin/b2b">)
               <Link
                 key={list.id}
                 href={listHref(list.id)}
-                className="rounded-xl border border-border bg-card p-4 hover:border-primary"
+                className="rounded-xl border border-border bg-card p-4 hover:border-primary focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
               >
                 <div className="flex items-center justify-between gap-2">
                   <h3 className="font-semibold">{list.code}</h3>

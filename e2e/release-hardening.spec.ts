@@ -9,7 +9,10 @@ import {
   encodeSupabaseFixtureCookie,
 } from "../scripts/lib/supabase-auth-fixture.mjs";
 
-function expectProductionHeaders(response: APIResponse): void {
+function expectProductionHeaders(
+  response: APIResponse,
+  options: { expectedGeolocation?: "()" | "(self)" } = {},
+): void {
   const headers = response.headers();
   const csp = headers["content-security-policy"] ?? "";
   expect(csp).toContain("default-src 'self'");
@@ -21,6 +24,10 @@ function expectProductionHeaders(response: APIResponse): void {
   expect(headers["x-content-type-options"]).toBe("nosniff");
   expect(headers["x-frame-options"]).toBe("DENY");
   expect(headers["referrer-policy"]).toBe("strict-origin-when-cross-origin");
+  const expectedGeolocation = options.expectedGeolocation ?? "()";
+  const permissionsPolicy = headers["permissions-policy"] ?? "";
+  expect(permissionsPolicy).toContain("camera=()");
+  expect(permissionsPolicy).toContain(`geolocation=${expectedGeolocation}`);
   expect(headers["cross-origin-opener-policy"]).toBe("same-origin");
   expect(headers["cross-origin-resource-policy"]).toBe("same-origin");
   expect(headers["origin-agent-cluster"]).toBe("?1");
@@ -158,7 +165,12 @@ test("schedulers, webhooks and public metrics reject unauthenticated or cross-si
     "/api/jobs/cms-publish",
     "/api/jobs/domain-events",
     "/api/jobs/health",
+    "/api/jobs/channels",
   ]) {
+    const getMethod = await request.get(path);
+    expectProductionHeaders(getMethod);
+    expect(getMethod.status()).toBe(405);
+    expect(getMethod.headers().allow).toBe("POST");
     const anonymous = await request.post(path);
     expectProductionHeaders(anonymous);
     expect(anonymous.status()).toBe(401);
@@ -166,14 +178,48 @@ test("schedulers, webhooks and public metrics reject unauthenticated or cross-si
     const forged = await request.post(path, {
       headers: { Authorization: "Bearer invalid-release-secret" },
     });
+    expectProductionHeaders(forged);
     expect(forged.status()).toBe(401);
   }
-  for (const path of ["/api/webhooks/wompi", "/api/webhooks/resend"]) {
+  for (const path of [
+    "/api/webhooks/wompi",
+    "/api/webhooks/resend",
+    "/api/webhooks/mercado-libre",
+  ]) {
+    const getMethod = await request.get(path);
+    expectProductionHeaders(getMethod);
+    expect(getMethod.status()).toBe(405);
+    expect(getMethod.headers().allow).toBe("POST");
     const response = await request.post(path, { data: {} });
     expectProductionHeaders(response);
     expect(response.status()).toBeGreaterThanOrEqual(400);
     expect(response.status()).toBeLessThan(500);
   }
+  const mlWrongType = await request.post("/api/webhooks/mercado-libre", {
+    headers: { "Content-Type": "text/plain" },
+    data: "{}",
+  });
+  expectProductionHeaders(mlWrongType);
+  expect(mlWrongType.status()).toBe(415);
+  expect(mlWrongType.headers()["cache-control"]).toContain("no-store");
+  expect(mlWrongType.headers()["x-robots-tag"]).toContain("noindex");
+  const mlOversized = await request.post("/api/webhooks/mercado-libre", {
+    headers: { "Content-Type": "application/json" },
+    data: `{"topic":"orders_v2","padding":"${"x".repeat(16_384)}"}`,
+  });
+  expectProductionHeaders(mlOversized);
+  expect(mlOversized.status()).toBe(413);
+  expect(mlOversized.headers()["cache-control"]).toContain("no-store");
+  const mlDuplicateDataId = await request.post(
+    "/api/webhooks/mercado-libre?data.id=first&data.id=second",
+    {
+      headers: { "Content-Type": "application/json" },
+      data: "{}",
+    },
+  );
+  expectProductionHeaders(mlDuplicateDataId);
+  expect(mlDuplicateDataId.status()).toBe(400);
+  expect(mlDuplicateDataId.headers()["cache-control"]).toContain("no-store");
 
   const missingOrigin = await request.post("/api/metrics/funnel", { data: { pageViews: 1 } });
   expect(missingOrigin.status()).toBe(403);

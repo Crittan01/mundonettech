@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useState } from "react";
+import { startTransition, useActionState, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -51,7 +51,12 @@ export function RequestRefundForm({
     .map((item) => ({ orderItemId: item.id, quantity: quantities[item.id]! }));
   return (
     <form
-      action={action}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending || selected.length === 0) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
       aria-busy={pending}
       className="space-y-4 rounded-xl border border-border bg-card p-5"
     >
@@ -113,7 +118,6 @@ export function RequestRefundForm({
             name="note"
             value={note}
             onChange={(event) => setNote(event.target.value)}
-            minLength={noteMinimum}
             maxLength={500}
             disabled={pending}
           />
@@ -138,8 +142,6 @@ export function RequestRefundForm({
   );
 }
 
-const noteMinimum = 0;
-
 export function RefundTransitionForm({
   orderId,
   refundId,
@@ -156,7 +158,16 @@ export function RefundTransitionForm({
     return result;
   }, initialActionState);
   return (
-    <form action={action} aria-busy={pending} className="space-y-2">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-2"
+    >
       <input type="hidden" name="orderId" value={orderId} />
       <input type="hidden" name="refundId" value={refundId} />
       <input type="hidden" name="transition" value={transition} />

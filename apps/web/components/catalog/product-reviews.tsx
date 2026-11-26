@@ -60,7 +60,7 @@ export function ProductReviews({
           {hasActiveCursor ? (
             <Link
               href={firstPageHref}
-              className="inline-flex min-h-11 items-center rounded-md border border-input px-4 py-2 text-sm font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex min-h-11 items-center rounded-md border border-input px-4 py-2 text-sm font-medium outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               Volver a las primeras reseñas
             </Link>
@@ -68,7 +68,7 @@ export function ProductReviews({
           {reviews.nextCursor ? (
             <Link
               href={`/producto/${slug}?${nextQuery.toString()}#resenas`}
-              className="inline-flex min-h-11 items-center rounded-md border border-input px-4 py-2 text-sm font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex min-h-11 items-center rounded-md border border-input px-4 py-2 text-sm font-medium outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
             >
               Ver siguiente página de reseñas
             </Link>

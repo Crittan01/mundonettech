@@ -80,7 +80,7 @@ export function ProductCard({
       <Link
         href={`/producto/${product.slug}`}
         prefetch={false}
-        className="relative block aspect-[4/3] bg-secondary outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+        className="relative block aspect-[4/3] bg-secondary outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
         aria-label={`${image ? "" : "Imagen no disponible. "}Ver ${product.name}`}
       >
         {image ? (
@@ -103,14 +103,14 @@ export function ProductCard({
           <Link
             href={`/marca/${product.brand.slug}`}
             prefetch={false}
-            className="rounded-sm text-xs font-semibold tracking-wide text-muted-foreground uppercase outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            className="inline-flex min-h-7 items-center rounded-sm py-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           >
             {product.brand.name}
           </Link>
           <Heading className="mt-1 text-lg leading-snug font-semibold">
             <Link
               href={`/producto/${product.slug}`}
-              className="rounded-sm outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+              className="rounded-sm outline-hidden hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
             >
               {product.name}
             </Link>
@@ -146,7 +146,7 @@ export function ProductCard({
             <Link
               href={compareHref}
               prefetch={false}
-              className="inline-flex min-h-11 items-center rounded-sm text-sm font-medium text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex min-h-11 items-center rounded-sm text-sm font-medium text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
               {compared ? "Quitar del comparador" : "Añadir al comparador"}
               <span className="sr-only">: {product.name}</span>

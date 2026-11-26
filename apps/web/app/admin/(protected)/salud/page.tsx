@@ -48,7 +48,7 @@ const failureLabels: Record<string, string> = {
   DR_TARGET_NOT_ISOLATED: "El destino de DR no está aislado de la base de datos de origen.",
   GPG_DECRYPTION_FAILED: "GPG no pudo descifrar con la credencial configurada.",
   GPG_ENCRYPTION_FAILED: "GPG no completó el cifrado del flujo.",
-  GPG_PASSPHRASE_CONFIGURATION_INVALID: "La configuración de la passphrase GPG es inválida.",
+  GPG_PASSPHRASE_CONFIGURATION_INVALID: "La configuración de la frase secreta GPG es inválida.",
   PG_DUMP_FAILED: "PostgreSQL no completó el volcado.",
   PG_RESTORE_FAILED: "PostgreSQL no completó la restauración transaccional.",
   POSTGRES_RUNNER_INVALID: "El ejecutor de herramientas PostgreSQL configurado no es válido.",
@@ -59,7 +59,7 @@ const failureLabels: Record<string, string> = {
   R2_BUCKET_PAGINATION_INVALID: "R2 devolvió un cursor de paginación inválido.",
   R2_BUCKET_READ_FAILED: "No fue posible verificar la lectura de objetos en R2.",
   R2_CONFIGURATION_INVALID: "La configuración o separación de credenciales R2 es inválida.",
-  R2_MULTIPART_UPLOAD_FAILED: "La carga multipart cifrada hacia R2 falló y fue abortada.",
+  R2_MULTIPART_UPLOAD_FAILED: "La carga en múltiples partes cifrada hacia R2 falló y fue abortada.",
   RECOVERY_ENVIRONMENT_INVALID: "Los parámetros de entorno de recuperación son inválidos.",
   RECOVERY_STREAM_FAILED: "Un flujo de respaldo o restauración se cerró de forma inesperada.",
   RECOVERY_UNEXPECTED_FAILURE: "Se produjo un fallo inesperado durante el procedimiento.",
@@ -89,7 +89,9 @@ export default async function HealthPage() {
   return (
     <div className="space-y-10">
       <div>
-        <p className="text-sm font-semibold text-primary">Observabilidad sin RUM crudo</p>
+        <p className="text-sm font-semibold text-primary">
+          Observabilidad sin telemetría por visita cruda
+        </p>
         <h1 className="mt-2 text-3xl font-bold">Salud operativa y recuperación</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Sondas, contadores agregados y evidencia inmutable de respaldos cifrados y restauraciones.
@@ -167,9 +169,10 @@ export default async function HealthPage() {
             Respaldos recientes
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Último éxito: {date(snapshot.latestSuccessfulBackupAt)}
+            Últimos {dashboard.backups.length} respaldos (ventana de los 5 más recientes) · Último
+            éxito: {date(snapshot.latestSuccessfulBackupAt)}
             {latestBackup?.failureCode
-              ? ` · Último fallo: ${failureLabels[latestBackup.failureCode] ?? "Consulta el código de corrida en el runbook."}`
+              ? ` · Último fallo: ${failureLabels[latestBackup.failureCode] ?? "Consulta el código de corrida en el procedimiento operativo."}`
               : ""}
           </p>
         </div>
@@ -235,7 +238,8 @@ export default async function HealthPage() {
             Simulacros de recuperación
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Último éxito: {date(snapshot.latestSuccessfulDrillAt)} · próximo vencimiento:{" "}
+            Últimos {dashboard.drills.length} simulacros (ventana de los 5 más recientes) · Último
+            éxito: {date(snapshot.latestSuccessfulDrillAt)} · próximo vencimiento:{" "}
             {date(
               dashboard.drills.find((drill) => drill.status === "SUCCEEDED")?.nextDueAt ?? null,
             )}
@@ -245,7 +249,7 @@ export default async function HealthPage() {
           <Empty>No existe evidencia de restauración. Programa el primer simulacro mensual.</Empty>
         ) : (
           <div className="space-y-4">
-            {dashboard.drills.map((drill) => (
+            {dashboard.drills.map((drill, index) => (
               <article key={drill.id} className="rounded-xl border border-border bg-card p-5">
                 <div className="flex flex-wrap justify-between gap-3">
                   <h3 className="font-semibold">{statusLabels[drill.status]}</h3>
@@ -264,7 +268,7 @@ export default async function HealthPage() {
                 {drill.buckets.length > 0 ? (
                   <div
                     role="region"
-                    aria-label="Tabla de verificación de buckets"
+                    aria-label={`Verificación de buckets del simulacro ${index + 1}`}
                     tabIndex={0}
                     className="mt-4 overflow-x-auto rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                   >
@@ -321,9 +325,15 @@ export default async function HealthPage() {
         )}
       </section>
       <section aria-labelledby="health-history" className="space-y-4">
-        <h2 id="health-history" className="text-xl font-semibold">
-          Capturas agregadas recientes
-        </h2>
+        <div>
+          <h2 id="health-history" className="text-xl font-semibold">
+            Capturas agregadas recientes
+          </h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Últimas {dashboard.recentSnapshots.length} capturas agregadas (ventana de las 12 más
+            recientes).
+          </p>
+        </div>
         {dashboard.recentSnapshots.length === 0 ? (
           <Empty>Todavía no hay capturas agregadas de salud registradas.</Empty>
         ) : (

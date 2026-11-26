@@ -220,7 +220,12 @@ export default async function CmsPageDetail({
                       ? ` · vigencia ${bogotaFormatter.format(latest.effectiveAt)}`
                       : ""}
                   </p>
-                  <pre className="max-h-80 overflow-auto rounded-lg bg-secondary p-4 text-xs whitespace-pre-wrap">
+                  <pre
+                    tabIndex={0}
+                    role="region"
+                    aria-label="Contenido del bloque en formato JSON"
+                    className="max-h-80 overflow-auto rounded-lg bg-secondary p-4 text-xs whitespace-pre-wrap outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  >
                     {JSON.stringify(latest.content, null, 2)}
                   </pre>
                   {canWrite ? (

@@ -232,8 +232,12 @@ export default async function OrderDetailPage({ params }: PageProps<"/admin/pedi
                   <td className="p-3">{formatCopCents(item.unitPriceCents)}</td>
                   <td className="p-3">{formatCopCents(item.discountCents)}</td>
                   <td className="p-3">{formatCopCents(item.taxCents)}</td>
-                  {canReadFinance && item.unitCostWacCents !== undefined ? (
-                    <td className="p-3">{formatCopCents(item.unitCostWacCents)}</td>
+                  {canReadFinance ? (
+                    <td className="p-3">
+                      {canReadFinance && item.unitCostWacCents !== undefined
+                        ? formatCopCents(item.unitCostWacCents)
+                        : "—"}
+                    </td>
                   ) : null}
                   <td className="p-3 font-semibold">{formatCopCents(item.lineTotalCents)}</td>
                 </tr>

@@ -43,6 +43,7 @@ function SubmitForm({
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => submit(formData));
       }}
@@ -132,6 +133,7 @@ function LedgerAdjustmentForm({
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => submit(formData));
       }}
@@ -237,7 +239,7 @@ export function ChannelOrderActions({
             action={retryChannelOrderStockAction}
             orderId={order.id}
             label="Reevaluar stock"
-            pendingLabel="Evaluando stock…"
+            pendingLabel="Evaluando inventario…"
           />
         ) : null}
       </div>
@@ -247,8 +249,8 @@ export function ChannelOrderActions({
           <div className="mt-3">
             {locations.length === 0 ? (
               <p className="text-sm text-muted-foreground" role="status">
-                No hay niveles de stock compatibles y activos para esta variante. Primero registra
-                la bodega y su inventario real.
+                No hay niveles de inventario compatibles y activos para esta variante. Primero
+                registra la bodega y su inventario real.
               </p>
             ) : (
               <SubmitForm

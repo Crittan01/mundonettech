@@ -14,5 +14,11 @@ export async function CmsStepUp({ session }: { session: AdminSession }) {
   const recent = mfaAge !== null && mfaAge >= -30_000 && mfaAge <= 600_000;
   const initialRemainingMs =
     recent && mfaAge !== null ? Math.max(0, 600_000 - Math.max(0, mfaAge)) : 0;
-  return <StepUpPrompt factorId={factor.id} initialRemainingMs={initialRemainingMs} />;
+  return (
+    <StepUpPrompt
+      factorId={factor.id}
+      initialRemainingMs={initialRemainingMs}
+      checkedAtMs={now.getTime()}
+    />
+  );
 }

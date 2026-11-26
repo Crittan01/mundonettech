@@ -82,6 +82,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
   }
 
   function advanceOrEncrypt() {
+    if (pending) return;
     if (step < 3) {
       continueForward();
       return;
@@ -153,6 +154,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
             name="accountName"
             defaultValue={values?.accountName ?? ""}
             maxLength={120}
+            disabled={pending}
             required
           />
           <p className="text-xs text-muted-foreground">
@@ -169,6 +171,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
             spellCheck={false}
             minLength={20}
             maxLength={255}
+            disabled={pending}
             required
           />
         </div>
@@ -185,9 +188,24 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
         className="space-y-4"
       >
         <legend className="mb-3 font-semibold">Material secreto</legend>
-        <SecretField id="wompi-private-key" name="privateKey" label="Llave privada Wompi" />
-        <SecretField id="wompi-integrity" name="integritySecret" label="Secreto de integridad" />
-        <SecretField id="wompi-events" name="eventsSecret" label="Secreto de eventos" />
+        <SecretField
+          id="wompi-private-key"
+          name="privateKey"
+          label="Llave privada Wompi"
+          disabled={pending}
+        />
+        <SecretField
+          id="wompi-integrity"
+          name="integritySecret"
+          label="Secreto de integridad"
+          disabled={pending}
+        />
+        <SecretField
+          id="wompi-events"
+          name="eventsSecret"
+          label="Secreto de eventos"
+          disabled={pending}
+        />
         <p className="text-xs text-muted-foreground">
           Estos tres valores se cifran con AES-256-GCM antes de persistirse. Nunca se muestran de
           nuevo ni se incluyen en descriptores o auditoría.
@@ -220,7 +238,12 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
           </div>
         </dl>
         <label className="flex items-start gap-3 text-sm">
-          <input type="checkbox" required className="mt-1 size-4 accent-primary" />
+          <input
+            type="checkbox"
+            required
+            disabled={pending}
+            className="mt-1 size-4 accent-primary"
+          />
           <span>Confirmo que las llaves pertenecen a la cuenta y al ambiente seleccionados.</span>
         </label>
       </fieldset>
@@ -258,6 +281,7 @@ export function CredentialRotationForm({ credential }: { credential: Integration
       ref={formRef}
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}
@@ -311,6 +335,7 @@ export function ReencryptCredentialForm({ credentialId }: { credentialId: string
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}
@@ -341,6 +366,7 @@ export function RevokeCredentialForm({ credentialId }: { credentialId: string })
       ref={formRef}
       onSubmit={(event) => {
         event.preventDefault();
+        if (pending) return;
         const formData = new FormData(event.currentTarget);
         startTransition(() => action(formData));
       }}

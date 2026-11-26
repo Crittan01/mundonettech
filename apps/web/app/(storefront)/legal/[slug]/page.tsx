@@ -121,6 +121,7 @@ async function CachedLegalArticle({ document }: { document: LegalDocument }) {
                         className="text-primary underline underline-offset-4"
                       >
                         {link.label}
+                        <span className="sr-only"> (se abre en una nueva pestaña)</span>
                       </a>
                     )}
                   </li>

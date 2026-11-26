@@ -193,6 +193,24 @@ export function AddressForm({
   const municipalities = department?.municipalities ?? [];
   const formId = initial?.id ?? "new";
 
+  const [prevUpdatedAt, setPrevUpdatedAt] = useState(initial?.updatedAt);
+  if (prevUpdatedAt !== initial?.updatedAt) {
+    setPrevUpdatedAt(initial?.updatedAt);
+    if (initial?.id) {
+      setLabelText(initial.label ?? "Casa");
+      setRecipientName(initial.recipientName ?? "");
+      setPhoneE164(initial.phoneE164 ?? "");
+      setDepartmentCode(initialDeptCode);
+      setMunicipalityCode(initialMunCode);
+      setPostalCode(initial.postalCode ?? "");
+      setAddressLine1(initial.addressLine1 ?? "");
+      setAddressLine2(initial.addressLine2 ?? "");
+      setNeighborhood(initial.neighborhood ?? "");
+      setDeliveryNotes(initial.deliveryNotes ?? "");
+      setIsDefault(Boolean(initial.isDefault));
+    }
+  }
+
   const [prevState, setPrevState] = useState(state);
   if (prevState !== state) {
     setPrevState(state);

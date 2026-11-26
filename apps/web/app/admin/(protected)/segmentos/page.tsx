@@ -94,7 +94,7 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
         <h1 className="text-3xl font-bold">Segmentos y consentimiento</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Audiencias calculadas sobre capturas y reembolsos reales. Solo ingresan cuentas activas
-          con autorización comercial vigente y sin supresión de lifecycle.
+          con autorización comercial vigente y sin supresión de ciclo de vida.
         </p>
         <div className="mt-4 flex flex-wrap gap-4 text-sm">
           <Link className="text-primary underline" href="/admin/crm">
@@ -104,7 +104,7 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
             Ver fidelización y referidos
           </Link>
           <Link className="text-primary underline" href="/admin/lifecycle">
-            Administrar journeys
+            Administrar recorridos de ciclo de vida
           </Link>
           {canReadFinance ? (
             <Link className="text-primary underline" href="/admin/analitica-rfm">
@@ -136,7 +136,10 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
             Segmentos persistidos
           </h2>
           {showClearFilters ? (
-            <Link href="/admin/segmentos" className="text-sm text-primary underline">
+            <Link
+              href="/admin/segmentos"
+              className="inline-flex min-h-11 items-center text-sm text-primary underline"
+            >
               Limpiar filtros
             </Link>
           ) : null}
@@ -167,7 +170,9 @@ export default async function SegmentsPage({ searchParams }: PageProps<"/admin/s
                     </p>
                   </div>
                   <Button asChild variant="outline" size="sm">
-                    <Link href={openSegmentHref(segment.id)}>Abrir</Link>
+                    <Link href={openSegmentHref(segment.id)}>
+                      Abrir<span className="sr-only"> {segment.name}</span>
+                    </Link>
                   </Button>
                 </div>
                 <p className="mt-3 text-sm">{segment.description ?? "Sin descripción."}</p>

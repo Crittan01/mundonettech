@@ -257,6 +257,16 @@ export function canAssignAdminRole(actorRole: AdminRoleValue, targetRole: AdminR
   return actorRole === "OPERATIONS_MANAGER" && adminRing(targetRole) !== 1;
 }
 
+const deliveryZoneManagers: readonly AdminRoleValue[] = [
+  "SUPERADMIN",
+  "OPERATIONS_MANAGER",
+  "STORE_MANAGER",
+];
+
+export function canManageDeliveryZones(role: AdminRoleValue): boolean {
+  return deliveryZoneManagers.includes(role);
+}
+
 export function adminNavigation(role: AdminRoleValue): readonly {
   href:
     | "/admin"
@@ -352,10 +362,8 @@ export function adminNavigation(role: AdminRoleValue): readonly {
       ? [
           { href: "/admin/contenido" as const, label: "Contenido" },
           { href: "/admin/contenido/medios" as const, label: "Mediateca" },
+          { href: "/admin/contenido/redirecciones" as const, label: "Redirecciones" },
         ]
-      : []),
-    ...(hasAdminPermission(role, "content:write")
-      ? [{ href: "/admin/contenido/redirecciones" as const, label: "Redirecciones" }]
       : []),
     ...(hasAdminPermission(role, "settings:read")
       ? [{ href: "/admin/configuracion" as const, label: "Configuración" }]

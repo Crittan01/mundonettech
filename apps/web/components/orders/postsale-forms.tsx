@@ -165,6 +165,7 @@ export function ReturnRequestForm({
                   <Input
                     id={`quantity-${delivery.shipmentItemId}`}
                     type="number"
+                    inputMode="numeric"
                     min={0}
                     max={delivery.maximum}
                     step={1}
@@ -220,7 +221,7 @@ export function ReturnRequestForm({
                     Selecciona {quantity} serial{quantity === 1 ? "" : "es"}
                   </legend>
                   {delivery.serials.map((unit) => (
-                    <label key={unit.id} className="flex items-center gap-2 text-sm">
+                    <label key={unit.id} className="flex min-h-11 items-center gap-2 py-1 text-sm">
                       <input
                         type="checkbox"
                         checked={selectedSerials.includes(unit.id)}
@@ -265,11 +266,11 @@ export function ReturnRequestForm({
         />
       </div>
       {selected.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
+        <p id={`return-submit-hint-${channel.orderId}`} className="text-xs text-muted-foreground">
           Selecciona una cantidad mayor a cero en al menos una entrega para habilitar el envío.
         </p>
       ) : invalid ? (
-        <p className="text-xs text-muted-foreground">
+        <p id={`return-submit-hint-${channel.orderId}`} className="text-xs text-muted-foreground">
           Selecciona exactamente los seriales correspondientes a las unidades indicadas para
           continuar.
         </p>
@@ -278,6 +279,9 @@ export function ReturnRequestForm({
         type="submit"
         disabled={pending || selected.length === 0 || invalid}
         aria-busy={pending}
+        aria-describedby={
+          selected.length === 0 || invalid ? `return-submit-hint-${channel.orderId}` : undefined
+        }
       >
         {pending ? "Validando…" : "Radicar solicitud de posventa"}
       </Button>
@@ -634,7 +638,15 @@ export function GuestOrderAccessForms({
   );
   const [requestKey, setRequestKey] = useState(idempotencyKey);
   const [code, setCode] = useState("");
-  const challengeId = requestState.values?.challengeId ?? verifyState.values?.challengeId ?? "";
+  const requestedChallengeId = requestState.values?.challengeId ?? "";
+  const [prevRequestedChallengeId, setPrevRequestedChallengeId] = useState(requestedChallengeId);
+  if (prevRequestedChallengeId !== requestedChallengeId) {
+    setPrevRequestedChallengeId(requestedChallengeId);
+    if (requestedChallengeId) {
+      setCode("");
+    }
+  }
+  const challengeId = requestedChallengeId || (verifyState.values?.challengeId ?? "");
   return (
     <div className="mx-auto grid w-full max-w-4xl gap-6 lg:grid-cols-2">
       <form
@@ -677,14 +689,20 @@ export function GuestOrderAccessForms({
             onChange={(event) => setCode(event.target.value)}
             required
             disabled={verifyPending || !challengeId}
+            aria-describedby={!challengeId ? "guest-order-code-hint" : undefined}
           />
           {!challengeId ? (
-            <p className="text-xs text-muted-foreground">
+            <p id="guest-order-code-hint" className="text-xs text-muted-foreground">
               Solicita primero el código en el paso 1 para habilitar este campo.
             </p>
           ) : null}
         </div>
-        <Button type="submit" disabled={verifyPending || !challengeId} aria-busy={verifyPending}>
+        <Button
+          type="submit"
+          disabled={verifyPending || !challengeId}
+          aria-busy={verifyPending}
+          aria-describedby={!challengeId ? "guest-order-code-hint" : undefined}
+        >
           {verifyPending ? "Verificando…" : "Acceder a posventa"}
         </Button>
         <FormMessage state={verifyState} />

@@ -34,7 +34,7 @@ function CartFeedback({ state }: { state: ActionState }) {
         <Link
           href="/carrito"
           prefetch={false}
-          className="inline-flex min-h-11 items-center rounded-sm text-sm font-semibold text-primary underline underline-offset-4 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="inline-flex min-h-11 items-center rounded-sm text-sm font-semibold text-primary underline underline-offset-4 outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         >
           Ver carrito
         </Link>

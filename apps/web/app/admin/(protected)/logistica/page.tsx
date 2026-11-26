@@ -1,4 +1,5 @@
 import {
+  canManageDeliveryZones as canManageDeliveryZonesForRole,
   formatCopCents,
   hasAdminPermission,
   maskEmail,
@@ -100,9 +101,22 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
   )
     ? (rawProveedor as ShippingProviderCode)
     : "";
-  const requestedPage = Number.parseInt(single(raw.page) ?? "1", 10) || 1;
-  const page = Math.max(1, Math.min(10_000, requestedPage));
+  const rawPage = single(raw.page)?.trim() ?? "";
+  const parsedPage = /^[1-9]\d*$/.test(rawPage) ? Number.parseInt(rawPage, 10) : 1;
+  const requestedPage = Math.max(
+    1,
+    Math.min(10_000, Number.isSafeInteger(parsedPage) ? parsedPage : 1),
+  );
   const pageSize = 20;
+
+  const unfulfilledProviderFilter: Prisma.ShipmentWhereInput =
+    proveedor === "PICKUP"
+      ? { fulfillment: null, kind: "CLICK_COLLECT" }
+      : proveedor === "FLEX"
+        ? { fulfillment: null, localDeliveryZoneId: { not: null } }
+        : proveedor === "AVEONLINE"
+          ? { fulfillment: null, kind: "DELIVERY", localDeliveryZoneId: null }
+          : { fulfillment: null };
 
   const shipmentWhere: Prisma.ShipmentWhereInput = {
     ...(estado === "DELIVERED"
@@ -111,7 +125,7 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
     ...(estado === "PENDING"
       ? {
           OR: [
-            { fulfillment: null },
+            unfulfilledProviderFilter,
             {
               fulfillment: {
                 status: "PENDING",
@@ -128,7 +142,9 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
             },
           }
         : proveedor
-          ? { fulfillment: { provider: proveedor } }
+          ? {
+              OR: [unfulfilledProviderFilter, { fulfillment: { provider: proveedor } }],
+            }
           : {}),
     ...(q
       ? {
@@ -158,53 +174,8 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
   };
 
   const db = getDatabase();
-  const [rawShipments, zoneRecords] = await Promise.all([
-    db.shipment.findMany({
-      where: shipmentWhere,
-      select: {
-        id: true,
-        kind: true,
-        status: true,
-        originLocationId: true,
-        shippingCents: true,
-        localDriverName: true,
-        localDriverPhoneE164: true,
-        order: {
-          select: { id: true, orderNumber: true, emailSnapshot: true, paymentStatus: true },
-        },
-        fulfillment: { select: { status: true, provider: true } },
-        items: {
-          select: {
-            id: true,
-            quantity: true,
-            orderItem: {
-              select: {
-                titleSnapshot: true,
-                variantId: true,
-                variant: { select: { product: { select: { trackSerial: true } } } },
-              },
-            },
-          },
-        },
-        packages: {
-          select: {
-            id: true,
-            packageNumber: true,
-            weightGrams: true,
-            declaredValueCents: true,
-            status: true,
-            trackingCode: true,
-            lastError: true,
-            labelUrl: true,
-          },
-          orderBy: { packageNumber: "asc" },
-        },
-        localDeliveryZone: { select: { code: true } },
-      },
-      orderBy: [{ promisedAt: "asc" }, { createdAt: "asc" }],
-      skip: (page - 1) * pageSize,
-      take: pageSize + 1,
-    }),
+  const [total, zoneRecords] = await Promise.all([
+    db.shipment.count({ where: shipmentWhere }),
     db.localDeliveryZone.findMany({
       select: {
         id: true,
@@ -223,8 +194,57 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
       take: 1000,
     }),
   ]);
-  const hasMore = rawShipments.length > pageSize;
-  const shipments = rawShipments.slice(0, pageSize);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(requestedPage, totalPages);
+  const shipments =
+    total > 0
+      ? await db.shipment.findMany({
+          where: shipmentWhere,
+          select: {
+            id: true,
+            kind: true,
+            status: true,
+            originLocationId: true,
+            shippingCents: true,
+            localDriverName: true,
+            localDriverPhoneE164: true,
+            order: {
+              select: { id: true, orderNumber: true, emailSnapshot: true, paymentStatus: true },
+            },
+            fulfillment: { select: { status: true, provider: true } },
+            items: {
+              select: {
+                id: true,
+                quantity: true,
+                orderItem: {
+                  select: {
+                    titleSnapshot: true,
+                    variantId: true,
+                    variant: { select: { product: { select: { trackSerial: true } } } },
+                  },
+                },
+              },
+            },
+            packages: {
+              select: {
+                id: true,
+                packageNumber: true,
+                weightGrams: true,
+                declaredValueCents: true,
+                status: true,
+                trackingCode: true,
+                lastError: true,
+                labelUrl: true,
+              },
+              orderBy: { packageNumber: "asc" },
+            },
+            localDeliveryZone: { select: { code: true } },
+          },
+          orderBy: [{ promisedAt: "asc" }, { createdAt: "asc" }],
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+        })
+      : [];
   const serialUnits = shipments.length
     ? await db.serializedUnit.findMany({
         where: {
@@ -263,16 +283,14 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
   }));
   const canWrite = hasAdminPermission(session.profile.role, "fulfillment:write");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
-  const canManageDeliveryZones = ["SUPERADMIN", "OPERATIONS_MANAGER", "STORE_MANAGER"].includes(
-    session.profile.role,
-  );
+  const canManageDeliveryZones = canManageDeliveryZonesForRole(session.profile.role);
   const hasFilters = Boolean(q || estado || proveedor);
   return (
     <div className="space-y-10">
       <div>
         <h1 className="text-3xl font-bold">Operación logística</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
-          Alistamiento, multi-bulto, guías asíncronas y Flex con claims idempotentes, conciliación
+          Alistamiento, multi-bulto, guías asíncronas y Flex con reclamos idempotentes, conciliación
           ante resultados inciertos y auditoría con MFA reciente.
         </p>
       </div>
@@ -388,9 +406,9 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
                   </p>
                   {shipment.localDriverName ? (
                     <p className="mt-2 text-sm text-muted-foreground">
-                      Conductor: {maskName(shipment.localDriverName)} ·{" "}
+                      Conductor: {maskName(shipment.localDriverName)}
                       {shipment.localDriverPhoneE164
-                        ? maskPhone(shipment.localDriverPhoneE164)
+                        ? ` · ${maskPhone(shipment.localDriverPhoneE164)}`
                         : ""}
                     </p>
                   ) : null}
@@ -463,7 +481,8 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
                       serialUnits={serialUnits.filter(
                         (unit) =>
                           unit.orderId === shipment.order.id &&
-                          unit.locationId === shipment.originLocationId,
+                          unit.locationId === shipment.originLocationId &&
+                          (unit.shipmentId === null || unit.shipmentId === shipment.id),
                       )}
                     />
                   ) : null}
@@ -475,16 +494,18 @@ export default async function LogisticsPage({ searchParams }: PageProps<"/admin/
             })}
           </ul>
         )}
-        {page > 1 || hasMore ? (
+        {total > 0 ? (
           <nav aria-label="Paginación logística" className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">Página {page}</span>
+            <span className="text-sm text-muted-foreground">
+              Página {page} de {totalPages} · {total} {total === 1 ? "envío" : "envíos"}
+            </span>
             <div className="flex gap-2">
               {page > 1 ? (
                 <Button asChild variant="outline" size="sm">
                   <Link href={logisticsHref(q, estado, proveedor, page - 1)}>Anterior</Link>
                 </Button>
               ) : null}
-              {hasMore ? (
+              {page < totalPages ? (
                 <Button asChild variant="outline" size="sm">
                   <Link href={logisticsHref(q, estado, proveedor, page + 1)}>Siguiente</Link>
                 </Button>

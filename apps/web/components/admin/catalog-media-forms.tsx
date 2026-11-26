@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { type FormEvent, useActionState, useRef, useState } from "react";
+import { type FormEvent, startTransition, useActionState, useRef, useState } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -258,14 +258,22 @@ export function CatalogMediaEditForm({
   const currentPosition = values?.position ?? String(position);
   return (
     <div className="space-y-3">
-      <form action={action} aria-busy={pending} className="space-y-3">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (pending) return;
+          const formData = new FormData(event.currentTarget);
+          startTransition(() => action(formData));
+        }}
+        aria-busy={pending}
+        className="space-y-3"
+      >
         <input type="hidden" name="productId" value={productId} />
         <input type="hidden" name="mediaId" value={mediaId} />
         <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8rem]">
           <div className="space-y-2">
             <Label htmlFor={`media-alt-${mediaId}`}>Texto alternativo</Label>
             <Input
-              key={`media-alt-${mediaId}-${currentAlt}`}
               id={`media-alt-${mediaId}`}
               name="altText"
               defaultValue={currentAlt}
@@ -277,7 +285,6 @@ export function CatalogMediaEditForm({
           <div className="space-y-2">
             <Label htmlFor={`media-position-${mediaId}`}>Posición</Label>
             <Input
-              key={`media-position-${mediaId}-${currentPosition}`}
               id={`media-position-${mediaId}`}
               name="position"
               type="number"
@@ -313,7 +320,16 @@ function ArchiveCatalogMediaForm({
 }) {
   const [state, action, pending] = useActionState(archiveCatalogMediaAction, initialActionState);
   return (
-    <form action={action} aria-busy={pending} className="space-y-2">
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => action(formData));
+      }}
+      aria-busy={pending}
+      className="space-y-2"
+    >
       <input type="hidden" name="productId" value={productId} />
       <input type="hidden" name="mediaId" value={mediaId} />
       <Button type="submit" variant="outline" size="sm" disabled={pending}>

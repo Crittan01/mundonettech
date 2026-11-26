@@ -155,10 +155,10 @@ function ProductVariantPanel({
                         type="button"
                         aria-pressed={isSelected}
                         onClick={() => selectOptionValue(axis.key, choice.value)}
-                        className={`inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium transition outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                        className={`inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium outline-hidden transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                           isSelected
                             ? "border-primary bg-primary text-primary-foreground"
-                            : "border-border bg-background text-foreground hover:bg-accent"
+                            : "border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground"
                         }`}
                       >
                         {axis.displayType === "SWATCH" &&
@@ -166,7 +166,7 @@ function ProductVariantPanel({
                         /^#[0-9A-Fa-f]{6}$/.test(choice.hexColor) ? (
                           <span
                             aria-hidden="true"
-                            className="size-3.5 rounded-full border border-border"
+                            className="size-3.5 rounded-full border border-input"
                             style={{ backgroundColor: choice.hexColor }}
                           />
                         ) : null}
@@ -192,10 +192,10 @@ function ProductVariantPanel({
                   type="button"
                   aria-pressed={isSelected}
                   onClick={() => setSelectedId(variant.id)}
-                  className={`inline-flex min-h-11 items-center rounded-md border px-3 py-1.5 font-mono text-xs transition outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  className={`inline-flex min-h-11 items-center rounded-md border px-3 py-1.5 font-mono text-xs outline-hidden transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                     isSelected
                       ? "border-primary bg-primary text-primary-foreground"
-                      : "border-border bg-background text-foreground hover:bg-accent"
+                      : "border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground"
                   }`}
                 >
                   {variant.sku}
@@ -265,7 +265,7 @@ function ProductVariantPanel({
       <Link
         href={`/comparar?productos=${encodeURIComponent(productSlug)}`}
         prefetch={false}
-        className="inline-flex min-h-11 items-center rounded-sm font-medium text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+        className="inline-flex min-h-11 items-center rounded-sm font-medium text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
       >
         Comparar este producto
       </Link>

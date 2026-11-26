@@ -6,9 +6,11 @@ import { Button } from "@/components/ui/button";
 
 export default function AdminError({
   reset,
+  retry,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
+  retry?: () => void;
 }) {
   return (
     <section className="rounded-xl border border-border bg-card p-6 text-center" role="alert">
@@ -17,7 +19,7 @@ export default function AdminError({
         La consulta no se completó. Reintenta; si persiste, contacta al equipo de seguridad.
       </p>
       <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
-        <Button type="button" onClick={reset}>
+        <Button type="button" onClick={() => (retry ?? reset)()}>
           Reintentar
         </Button>
         <Button asChild variant="outline">

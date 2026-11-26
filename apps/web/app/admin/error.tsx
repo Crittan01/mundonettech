@@ -6,9 +6,11 @@ import { Button } from "@/components/ui/button";
 
 export default function AdminRootError({
   reset,
+  retry,
 }: {
   error: Error & { digest?: string };
   reset: () => void;
+  retry?: () => void;
 }) {
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col items-center justify-center px-6 py-12">
@@ -22,7 +24,7 @@ export default function AdminRootError({
           de sesión administrativo.
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-          <Button type="button" onClick={reset}>
+          <Button type="button" onClick={() => (retry ?? reset)()}>
             Reintentar
           </Button>
           <Button asChild variant="outline">

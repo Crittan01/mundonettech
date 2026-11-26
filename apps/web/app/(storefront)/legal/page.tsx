@@ -65,7 +65,7 @@ export default async function LegalIndexPage() {
               <h3 className="text-xl font-semibold">
                 <Link
                   href={`/legal/${document.slug}`}
-                  className="outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
+                  className="outline-hidden hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {document.title}
                 </Link>
@@ -120,6 +120,7 @@ export default async function LegalIndexPage() {
             className="text-primary underline underline-offset-4"
           >
             Superintendencia de Industria y Comercio
+            <span className="sr-only"> (se abre en una nueva pestaña)</span>
           </a>
           .
         </p>

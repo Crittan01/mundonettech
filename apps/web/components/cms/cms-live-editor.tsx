@@ -81,13 +81,13 @@ export async function CmsLiveEditor({
           <nav aria-label="Acciones de edición en vivo" className="flex flex-wrap gap-3 text-sm">
             <Link
               href={`/pagina/${page.slug}`}
-              className="inline-flex min-h-11 items-center rounded-sm py-3 text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex min-h-11 items-center rounded-sm py-3 text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
               Salir de edición en vivo
             </Link>
             <Link
               href={`/admin/contenido/${page.id}`}
-              className="inline-flex min-h-11 items-center rounded-sm py-3 text-primary underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex min-h-11 items-center rounded-sm py-3 text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
               Administración completa
             </Link>
@@ -179,7 +179,7 @@ export async function CmsLiveEditor({
           </p>
         ) : null}
         <details className="rounded-xl border border-border bg-card">
-          <summary className="min-h-11 cursor-pointer p-4 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <summary className="min-h-11 cursor-pointer p-4 font-semibold outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
             Añadir bloque
           </summary>
           <div className="p-4 pt-0">

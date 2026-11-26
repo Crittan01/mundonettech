@@ -1,7 +1,7 @@
 "use client";
 
 import type { UrlRedirect } from "@mundonettech/db";
-import { useActionState } from "react";
+import { startTransition, useActionState, useEffect, useRef } from "react";
 
 import { FormMessage } from "@/components/auth/form-message";
 import { Button } from "@/components/ui/button";
@@ -24,10 +24,12 @@ function Fields({
   values,
   redirect,
   prefix,
+  disabled = false,
 }: {
   values?: Record<string, string> | undefined;
   redirect?: Pick<UrlRedirect, "id" | "fromPath" | "toPath" | "statusCode" | "active">;
   prefix: string;
+  disabled?: boolean;
 }) {
   const fromPath = values?.fromPath ?? redirect?.fromPath ?? "";
   const toPath = values?.toPath ?? redirect?.toPath ?? "";
@@ -38,11 +40,11 @@ function Fields({
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-from`}>Ruta de origen</Label>
         <Input
-          key={`${prefix}-from-${fromPath}`}
           id={`${prefix}-from`}
           name="fromPath"
           defaultValue={fromPath}
           required
+          disabled={disabled}
           maxLength={2048}
           className={inputClass}
           placeholder="/ruta-anterior"
@@ -51,11 +53,11 @@ function Fields({
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-to`}>Ruta de destino</Label>
         <Input
-          key={`${prefix}-to-${toPath}`}
           id={`${prefix}-to`}
           name="toPath"
           defaultValue={toPath}
           required
+          disabled={disabled}
           maxLength={2048}
           className={inputClass}
           placeholder="/ruta-vigente"
@@ -64,10 +66,10 @@ function Fields({
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-status`}>Estado HTTP</Label>
         <Select
-          key={`${prefix}-status-${statusCode}`}
           id={`${prefix}-status`}
           name="statusCode"
           defaultValue={statusCode}
+          disabled={disabled}
         >
           <option value="308">308 · Permanente</option>
           <option value="301">301 · Permanente clásico</option>
@@ -78,10 +80,10 @@ function Fields({
       <div className="space-y-2">
         <Label htmlFor={`${prefix}-active`}>Estado editorial</Label>
         <Select
-          key={`${prefix}-active-${String(active)}`}
           id={`${prefix}-active`}
           name="active"
           defaultValue={String(active)}
+          disabled={disabled}
         >
           <option value="true">Activa</option>
           <option value="false">Inactiva</option>
@@ -95,17 +97,37 @@ function StatefulForm({
   action,
   children,
   submitLabel,
+  resetOnSuccess = false,
   className = "space-y-4",
 }: {
   action: ServerAction;
-  children: (values?: Record<string, string>) => React.ReactNode;
+  children: (values: Record<string, string> | undefined, pending: boolean) => React.ReactNode;
   submitLabel: string;
+  resetOnSuccess?: boolean;
   className?: string;
 }) {
   const [state, run, pending] = useActionState(action, initialActionState);
+  const formRef = useRef<HTMLFormElement>(null);
+  const handledSuccess = useRef<ActionState | null>(null);
+  useEffect(() => {
+    if (resetOnSuccess && state.status === "success" && handledSuccess.current !== state) {
+      handledSuccess.current = state;
+      formRef.current?.reset();
+    }
+  }, [resetOnSuccess, state]);
   return (
-    <form action={run} className={className}>
-      {children(state.values)}
+    <form
+      ref={formRef}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        const formData = new FormData(event.currentTarget);
+        startTransition(() => run(formData));
+      }}
+      aria-busy={pending}
+      className={className}
+    >
+      {children(state.values, pending)}
       <Button type="submit" size="sm" variant="outline" disabled={pending}>
         {pending ? "Procesando…" : submitLabel}
       </Button>
@@ -116,8 +138,8 @@ function StatefulForm({
 
 export function CreateRedirectForm() {
   return (
-    <StatefulForm action={createUrlRedirectAction} submitLabel="Crear redirección">
-      {(values) => <Fields values={values} prefix="redirect-new" />}
+    <StatefulForm action={createUrlRedirectAction} submitLabel="Crear redirección" resetOnSuccess>
+      {(values, pending) => <Fields values={values} prefix="redirect-new" disabled={pending} />}
     </StatefulForm>
   );
 }
@@ -130,10 +152,15 @@ export function EditRedirectForm({
   return (
     <div className="space-y-3">
       <StatefulForm action={updateUrlRedirectAction} submitLabel="Guardar cambios">
-        {(values) => (
+        {(values, pending) => (
           <>
             <input type="hidden" name="redirectId" value={redirect.id} />
-            <Fields values={values} redirect={redirect} prefix={`redirect-${redirect.id}`} />
+            <Fields
+              values={values}
+              redirect={redirect}
+              prefix={`redirect-${redirect.id}`}
+              disabled={pending}
+            />
           </>
         )}
       </StatefulForm>

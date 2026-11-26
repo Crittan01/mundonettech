@@ -232,6 +232,7 @@ export function RecoveryRequestForm({ siteKey, nonce }: SecurityProps) {
 export function OtpVerificationForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(verifyCustomerOtpAction, initialActionState);
   const [code, setCode] = useState("");
+  const codeErrors = state.fieldErrors?.code;
   return (
     <div className="space-y-3">
       <form action={action} className="space-y-5" aria-busy={pending}>
@@ -252,8 +253,11 @@ export function OtpVerificationForm({ siteKey, nonce }: SecurityProps) {
             disabled={pending}
             value={code}
             onChange={(event) => setCode(event.target.value)}
+            aria-invalid={codeErrors?.length ? true : undefined}
+            aria-describedby={codeErrors?.length ? "otp-code-error" : undefined}
             className="text-center text-2xl tracking-[0.4em]"
           />
+          <FieldErrors id="otp-code-error" messages={codeErrors} />
         </div>
         <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_verify" state={state} />
         <FormMessage state={state} />
@@ -269,6 +273,7 @@ export function OtpVerificationForm({ siteKey, nonce }: SecurityProps) {
 export function PasswordResetForm({ siteKey, nonce }: SecurityProps) {
   const [state, action, pending] = useActionState(resetCustomerPasswordAction, initialActionState);
   const [code, setCode] = useState("");
+  const codeErrors = state.fieldErrors?.code;
   return (
     <div className="space-y-3">
       <form action={action} className="space-y-5" aria-busy={pending}>
@@ -289,7 +294,10 @@ export function PasswordResetForm({ siteKey, nonce }: SecurityProps) {
             disabled={pending}
             value={code}
             onChange={(event) => setCode(event.target.value)}
+            aria-invalid={codeErrors?.length ? true : undefined}
+            aria-describedby={codeErrors?.length ? "reset-code-error" : undefined}
           />
+          <FieldErrors id="reset-code-error" messages={codeErrors} />
         </div>
         <PasswordFields state={state} idPrefix="recovery-reset" disabled={pending} />
         <TurnstileField siteKey={siteKey} nonce={nonce} action="customer_reset" state={state} />

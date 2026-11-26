@@ -44,6 +44,7 @@ export function CartQuantityForm({
           id={`quantity-${id}`}
           name="quantity"
           type="number"
+          inputMode="numeric"
           min="0"
           max="1000000"
           step="1"
@@ -125,6 +126,36 @@ export function CouponForm({ appliedCode }: { appliedCode: string | null }) {
     initialActionState,
   );
   const [code, setCode] = useState(applyState.values?.code ?? "");
+  const [lastAction, setLastAction] = useState<"apply" | "remove" | null>(null);
+  const [prevApplyState, setPrevApplyState] = useState(applyState);
+  const [prevRemoveState, setPrevRemoveState] = useState(removeState);
+  const [prevAppliedCode, setPrevAppliedCode] = useState(appliedCode);
+
+  if (prevApplyState !== applyState) {
+    setPrevApplyState(applyState);
+    setLastAction("apply");
+  }
+  if (prevRemoveState !== removeState) {
+    setPrevRemoveState(removeState);
+    setLastAction("remove");
+    if (removeState.status === "success") {
+      setCode("");
+    }
+  }
+  if (prevAppliedCode !== appliedCode) {
+    setPrevAppliedCode(appliedCode);
+    if (appliedCode === null) {
+      setCode("");
+    }
+  }
+
+  const activeMessageState =
+    lastAction === "remove"
+      ? removeState
+      : lastAction === "apply"
+        ? applyState
+        : initialActionState;
+
   return (
     <div className="space-y-3">
       {appliedCode ? (
@@ -141,7 +172,7 @@ export function CouponForm({ appliedCode }: { appliedCode: string | null }) {
           >
             {removing ? "Retirando…" : "Retirar cupón"}
           </Button>
-          <FormMessage state={removeState} />
+          <FormMessage state={activeMessageState} />
         </form>
       ) : (
         <form action={applyAction} className="space-y-2" aria-busy={applying}>
@@ -164,7 +195,7 @@ export function CouponForm({ appliedCode }: { appliedCode: string | null }) {
               {applying ? "Validando…" : "Aplicar"}
             </Button>
           </div>
-          <FormMessage state={applyState} />
+          <FormMessage state={activeMessageState} />
         </form>
       )}
     </div>

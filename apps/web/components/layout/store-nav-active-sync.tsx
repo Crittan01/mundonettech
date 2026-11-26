@@ -11,9 +11,15 @@ export function StoreNavActiveSync() {
     for (const link of links) {
       const href = link.dataset.storeNav ?? "";
       const exact = link.dataset.storeNavExact === "1";
+      const matchPrefixes = (link.dataset.storeNavMatch ?? "")
+        .split(",")
+        .map((prefix) => prefix.trim())
+        .filter(Boolean);
+      const matchesPrefix = (prefix: string) =>
+        pathname === prefix || pathname.startsWith(`${prefix}/`);
       const active = exact
         ? pathname === href
-        : Boolean(href) && (pathname === href || pathname.startsWith(`${href}/`));
+        : (Boolean(href) && matchesPrefix(href)) || matchPrefixes.some(matchesPrefix);
       if (active) {
         link.setAttribute("aria-current", "page");
       } else {

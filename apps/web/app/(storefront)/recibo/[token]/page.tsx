@@ -214,7 +214,9 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
         <div className="flex flex-wrap gap-3 print:hidden">
           <PrintReceiptButton />
           <Button asChild variant="outline">
-            <a href={`/api/recibos/${token}/descargar`}>Descargar comprobante</a>
+            <a href={`/api/recibos/${encodeURIComponent(token)}/descargar`}>
+              Descargar comprobante
+            </a>
           </Button>
         </div>
       </div>
@@ -441,7 +443,15 @@ export default async function ReceiptPage({ params, searchParams }: PageProps<"/
           >
             Ver seguimiento y posventa del pedido
           </Link>
-        ) : null}
+        ) : (
+          <Link
+            href={`/pedido/${encodeURIComponent(token)}`}
+            prefetch={false}
+            className="text-primary hover:underline"
+          >
+            Seguimiento y posventa del pedido
+          </Link>
+        )}
         <Link href="/productos" className="text-primary hover:underline">
           Seguir comprando
         </Link>

@@ -65,7 +65,21 @@ const requiredPhoneSchema = z
     }
   });
 
-const optionalPhoneSchema = z.union([z.literal(""), requiredPhoneSchema]);
+const optionalPhoneSchema = z
+  .string()
+  .trim()
+  .transform((value, ctx) => {
+    if (value === "") return "";
+    const parsed = requiredPhoneSchema.safeParse(value);
+    if (!parsed.success) {
+      ctx.addIssue({
+        code: "custom",
+        message: parsed.error.issues[0]?.message ?? phoneValidationMessage,
+      });
+      return z.NEVER;
+    }
+    return parsed.data;
+  });
 
 const profileSchema = z.object({
   expectedUpdatedAt: z.string().max(64),
@@ -99,10 +113,13 @@ const addressSchema = z.object({
     .max(200, "Máximo 200 caracteres."),
   addressLine2: z.string().trim().max(200, "Máximo 200 caracteres."),
   neighborhood: z.string().trim().max(120, "Máximo 120 caracteres."),
-  postalCode: z.union([
-    z.literal(""),
-    z.string().regex(/^[0-9]{6}$/, "El código postal debe tener exactamente 6 dígitos."),
-  ]),
+  postalCode: z
+    .string()
+    .trim()
+    .refine(
+      (value) => value === "" || /^[0-9]{6}$/.test(value),
+      "El código postal debe tener exactamente 6 dígitos.",
+    ),
   deliveryNotes: z.string().trim().max(500, "Máximo 500 caracteres."),
   isDefault: z.boolean(),
 });
@@ -166,10 +183,10 @@ export async function updateProfileAction(
     const raw = closedFormObject(formData, profileFields);
     if (!raw) throw new z.ZodError([]);
     const input = profileSchema.parse({
-      expectedUpdatedAt: raw.expectedUpdatedAt,
-      givenName: raw.givenName,
-      familyName: raw.familyName,
-      phoneE164: raw.phoneE164,
+      expectedUpdatedAt: raw.expectedUpdatedAt ?? "",
+      givenName: raw.givenName ?? "",
+      familyName: raw.familyName ?? "",
+      phoneE164: raw.phoneE164 ?? "",
       marketingEmail: raw.marketingEmail === "on",
       advertising: raw.advertising === "on",
     });
@@ -213,18 +230,18 @@ export async function saveAddressAction(
     const raw = closedFormObject(formData, addressFields);
     if (!raw) throw new z.ZodError([]);
     const input = addressSchema.parse({
-      addressId: raw.addressId,
-      expectedUpdatedAt: raw.expectedUpdatedAt,
-      label: raw.label,
-      recipientName: raw.recipientName,
-      phoneE164: raw.phoneE164,
-      departmentCode: raw.departmentCode,
-      municipalityCode: raw.municipalityCode,
-      addressLine1: raw.addressLine1,
-      addressLine2: raw.addressLine2,
-      neighborhood: raw.neighborhood,
-      postalCode: raw.postalCode,
-      deliveryNotes: raw.deliveryNotes,
+      addressId: raw.addressId ?? "",
+      expectedUpdatedAt: raw.expectedUpdatedAt ?? "",
+      label: raw.label ?? "",
+      recipientName: raw.recipientName ?? "",
+      phoneE164: raw.phoneE164 ?? "",
+      departmentCode: raw.departmentCode ?? "",
+      municipalityCode: raw.municipalityCode ?? "",
+      addressLine1: raw.addressLine1 ?? "",
+      addressLine2: raw.addressLine2 ?? "",
+      neighborhood: raw.neighborhood ?? "",
+      postalCode: raw.postalCode ?? "",
+      deliveryNotes: raw.deliveryNotes ?? "",
       isDefault: raw.isDefault === "on",
     });
     const address = {
@@ -264,7 +281,10 @@ export async function deleteAddressAction(
   try {
     const { profile } = await requireCustomerPage();
     const raw = closedFormObject(formData, ["addressId"]);
-    const addressId = z.string().uuid().parse(raw?.addressId);
+    const addressId = z
+      .string()
+      .uuid()
+      .parse(raw?.addressId ?? "");
     await accountService().deleteAddress(profile.id, addressId);
     revalidateAccount();
     return actionSuccess("Dirección eliminada de forma permanente.");
@@ -291,7 +311,7 @@ export async function anonymizeAccountAction(
           error: "Escribe exactamente ELIMINAR MI CUENTA en mayúsculas.",
         }),
       })
-      .parse({ confirmation: raw.confirmation }).confirmation;
+      .parse({ confirmation: raw.confirmation ?? "" }).confirmation;
     const context = await getRequestSecurityContext();
     const result = await accountService().anonymize(profile.id, confirmation, context);
     affectedReviewProductSlugs = result.affectedReviewProductSlugs;

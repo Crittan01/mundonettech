@@ -28,14 +28,15 @@ function CmsLink({ href, label, className }: { href: string; label: string; clas
   ) : (
     <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
       {label}
+      <span className="sr-only"> (se abre en una nueva pestaña)</span>
     </a>
   );
 }
 
 const primaryLinkClass =
-  "inline-flex min-h-11 items-center justify-center rounded-md bg-primary px-6 font-medium text-primary-foreground outline-none hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring";
+  "inline-flex min-h-11 items-center justify-center rounded-md bg-primary px-6 font-medium text-primary-foreground outline-hidden hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 const secondaryLinkClass =
-  "inline-flex min-h-11 items-center justify-center rounded-md border border-border px-6 font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring";
+  "inline-flex min-h-11 items-center justify-center rounded-md border border-input px-6 font-medium outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
 function CmsMediaImage({
   media,
@@ -287,11 +288,11 @@ function FaqBlock({
       <div className="mt-5 divide-y divide-border rounded-xl border border-border">
         {block.content.items.map((item, index) => (
           <details key={`${block.id}-question-${index}`} className="group p-5">
-            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-4 py-2 font-semibold outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-4 py-2 font-semibold outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
               <span>{item.question}</span>
               <span
                 aria-hidden="true"
-                className="text-muted-foreground transition-transform group-open:rotate-45"
+                className="text-muted-foreground transition-transform group-open:rotate-45 motion-reduce:transition-none"
               >
                 +
               </span>

@@ -55,7 +55,7 @@ async function CompareResults({
         .filter(Boolean),
     ),
   ];
-  const rawCandidateQuery = typeof params.q === "string" ? params.q : "";
+  const rawCandidateQuery = Array.isArray(params.q) ? (params.q[0] ?? "") : (params.q ?? "");
   const candidateQuery = rawCandidateQuery
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .trim()
@@ -143,7 +143,7 @@ async function CompareResults({
         <section
           aria-labelledby="comparison-table-title"
           tabIndex={0}
-          className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="overflow-x-auto rounded-xl border border-border outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           <h2 id="comparison-table-title" className="sr-only">
             Comparación detallada
@@ -161,7 +161,7 @@ async function CompareResults({
                   <th scope="col" className="p-4" key={product.id}>
                     <Link
                       href={`/producto/${product.slug}`}
-                      className="rounded-sm outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                      className="rounded-sm outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       {product.name}
                     </Link>
@@ -269,7 +269,7 @@ async function CompareResults({
               Busca aquí o{" "}
               <Link
                 href={catalogExploreHref}
-                className="rounded-sm text-primary underline underline-offset-4 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="rounded-sm text-primary underline underline-offset-4 outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               >
                 explora todo el catálogo
               </Link>

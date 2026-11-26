@@ -234,7 +234,10 @@ export function OrderPostSaleView({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           {channel.channel === "account" ? (
-            <Link href="/mi-cuenta/pedidos" className="text-sm font-medium underline">
+            <Link
+              href="/mi-cuenta/pedidos"
+              className="inline-flex min-h-11 items-center rounded-sm text-sm font-medium underline outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            >
               ← Volver a pedidos
             </Link>
           ) : null}
@@ -271,7 +274,7 @@ export function OrderPostSaleView({
           role="region"
           aria-label="Tabla de productos comprados y entregas"
           tabIndex={0}
-          className="overflow-x-auto rounded-xl border border-border outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="overflow-x-auto rounded-xl border border-border outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           <table className="w-full min-w-[700px] text-left text-sm">
             <caption className="sr-only">Productos comprados, cantidades y totales</caption>
@@ -352,7 +355,6 @@ export function OrderPostSaleView({
         )}
         {deliveries.length ? (
           <ReturnRequestForm
-            key={order.returnRequests.length}
             channel={channel}
             deliveries={deliveries}
             idempotencyKey={`${idempotencySeed}:return`}
@@ -396,7 +398,6 @@ export function OrderPostSaleView({
         )}
         {warrantyUnits.length ? (
           <WarrantyClaimForm
-            key={order.warrantyClaims.length}
             channel={channel}
             units={warrantyUnits.map((unit) => ({
               id: unit.id,
@@ -494,11 +495,7 @@ export function OrderPostSaleView({
             ) : null}
           </article>
         ))}
-        <SupportTicketForm
-          key={order.supportTickets.length}
-          channel={channel}
-          idempotencyKey={`${idempotencySeed}:support`}
-        />
+        <SupportTicketForm channel={channel} idempotencyKey={`${idempotencySeed}:support`} />
       </section>
     </div>
   );
