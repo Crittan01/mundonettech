@@ -1361,6 +1361,18 @@ export const securityPostureManifest = {
     },
     {
       table: "ChannelLedgerEntry",
+      name: "ChannelLedgerEntry_payment_id_required",
+      kind: "c",
+      columns: ["entryType", "externalPaymentId"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK (("entryType" = ANY (ARRAY[\'PAYMENT_CAPTURE\'::"ChannelLedgerEntryType", \'CAPTURE_REVERSAL\'::"ChannelLedgerEntryType", \'PAYMENT_REFUND\'::"ChannelLedgerEntryType", \'REFUND_REVERSAL\'::"ChannelLedgerEntryType", \'MARKETPLACE_FEE\'::"ChannelLedgerEntryType", \'FEE_REVERSAL\'::"ChannelLedgerEntryType"])) AND "externalPaymentId" IS NOT NULL OR ("entryType" <> ALL (ARRAY[\'PAYMENT_CAPTURE\'::"ChannelLedgerEntryType", \'CAPTURE_REVERSAL\'::"ChannelLedgerEntryType", \'PAYMENT_REFUND\'::"ChannelLedgerEntryType", \'REFUND_REVERSAL\'::"ChannelLedgerEntryType", \'MARKETPLACE_FEE\'::"ChannelLedgerEntryType", \'FEE_REVERSAL\'::"ChannelLedgerEntryType"])) AND "externalPaymentId" IS NULL)',
+    },
+    {
+      table: "ChannelLedgerEntry",
       name: "ChannelLedgerEntry_payment_id_valid",
       kind: "c",
       columns: ["externalPaymentId"],
@@ -2063,6 +2075,29 @@ export const securityPostureManifest = {
     },
     {
       table: "ChannelOrder",
+      name: "ChannelOrder_timestamps_valid",
+      kind: "c",
+      columns: ["externalUpdatedAt", "externalCreatedAt", "externalClosedAt"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK ("externalUpdatedAt" >= "externalCreatedAt" AND ("externalClosedAt" IS NULL OR "externalClosedAt" >= "externalCreatedAt" AND "externalClosedAt" <= "externalUpdatedAt"))',
+    },
+    {
+      table: "ChannelOrder",
+      name: "ChannelOrder_refund_within_capture",
+      kind: "c",
+      columns: ["refundedAmountCents", "capturedAmountCents"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition: 'CHECK ("refundedAmountCents" <= "capturedAmountCents")',
+    },
+    {
+      table: "ChannelOrder",
       name: "ChannelOrder_variantId_fkey",
       kind: "f",
       columns: ["variantId"],
@@ -2168,6 +2203,18 @@ export const securityPostureManifest = {
     },
     {
       table: "ChannelShipment",
+      name: "ChannelShipment_ownership_valid",
+      kind: "c",
+      columns: ["packId", "externalPackId", "externalOrderId"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK ("packId" IS NOT NULL AND "externalPackId" IS NOT NULL OR "packId" IS NULL AND "externalPackId" IS NULL AND "externalOrderId" IS NOT NULL)',
+    },
+    {
+      table: "ChannelShipment",
       name: "ChannelShipment_packId_fkey",
       kind: "f",
       columns: ["packId"],
@@ -2200,6 +2247,18 @@ export const securityPostureManifest = {
       validated: true,
       definition:
         'CHECK ((status = ANY (ARRAY[\'PENDING\'::"ChannelShipmentStatus", \'READY_TO_SHIP\'::"ChannelShipmentStatus", \'CANCELLED\'::"ChannelShipmentStatus"])) AND "shippedAt" IS NULL AND "deliveredAt" IS NULL OR (status = ANY (ARRAY[\'SHIPPED\'::"ChannelShipmentStatus", \'NOT_DELIVERED\'::"ChannelShipmentStatus"])) AND "shippedAt" IS NOT NULL AND "deliveredAt" IS NULL OR status = \'DELIVERED\'::"ChannelShipmentStatus" AND "shippedAt" IS NOT NULL AND "deliveredAt" IS NOT NULL AND "deliveredAt" >= "shippedAt")',
+    },
+    {
+      table: "ChannelShipment",
+      name: "ChannelShipment_timestamps_valid",
+      kind: "c",
+      columns: ["externalUpdatedAt", "externalCreatedAt", "shippedAt", "deliveredAt"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK ("externalUpdatedAt" >= "externalCreatedAt" AND ("shippedAt" IS NULL OR "shippedAt" >= "externalCreatedAt" AND "shippedAt" <= "externalUpdatedAt") AND ("deliveredAt" IS NULL OR "deliveredAt" >= "shippedAt" AND "deliveredAt" <= "externalUpdatedAt"))',
     },
     {
       table: "ChannelShipment",
@@ -11031,6 +11090,13 @@ export const securityPostureManifest = {
       searchPath: ["search_path=pg_catalog,public"],
     },
     {
+      identity: "prevent_integration_credential_delete()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
       identity: "prevent_url_redirect_cache_state_truncate()",
       kind: "f",
       securityDefiner: false,
@@ -12490,6 +12556,18 @@ export const securityPostureManifest = {
       predicate: null,
       definition:
         'CREATE UNIQUE INDEX "ChannelLedgerEntry_pkey" ON public."ChannelLedgerEntry" USING btree (id)',
+    },
+    {
+      name: "ChannelLedgerEntry_sale_expected_unique",
+      table: "ChannelLedgerEntry",
+      method: "btree",
+      unique: true,
+      valid: true,
+      ready: true,
+      columns: ['"orderId"'],
+      predicate: '"entryType" = \'SALE_EXPECTED\'::"ChannelLedgerEntryType"',
+      definition:
+        'CREATE UNIQUE INDEX "ChannelLedgerEntry_sale_expected_unique" ON public."ChannelLedgerEntry" USING btree ("orderId") WHERE ("entryType" = \'SALE_EXPECTED\'::"ChannelLedgerEntryType")',
     },
     {
       name: "ChannelListing_accountId_variantId_key",
@@ -19327,7 +19405,7 @@ export const securityPostureManifest = {
       deferrable: false,
       initiallyDeferred: false,
       definition:
-        'CREATE TRIGGER "ChannelOAuthAttempt_credential_binding" BEFORE INSERT OR UPDATE OF "credentialId", environment ON "ChannelOAuthAttempt" FOR EACH ROW EXECUTE FUNCTION enforce_channel_credential_binding()',
+        'CREATE TRIGGER "ChannelOAuthAttempt_credential_binding" BEFORE INSERT OR UPDATE OF "credentialId", environment, status ON "ChannelOAuthAttempt" FOR EACH ROW EXECUTE FUNCTION enforce_channel_credential_binding()',
     },
     {
       table: "ChannelOAuthAttempt",
@@ -20134,6 +20212,19 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "IntegrationCredential_immutable_identity" BEFORE UPDATE ON "IntegrationCredential" FOR EACH ROW EXECUTE FUNCTION enforce_integration_credential_immutability()',
+    },
+    {
+      table: "IntegrationCredential",
+      name: "IntegrationCredential_no_delete",
+      function: "prevent_integration_credential_delete()",
+      timing: "BEFORE",
+      level: "ROW",
+      events: ["DELETE"],
+      enabled: "O",
+      deferrable: false,
+      initiallyDeferred: false,
+      definition:
+        'CREATE TRIGGER "IntegrationCredential_no_delete" BEFORE DELETE ON "IntegrationCredential" FOR EACH ROW EXECUTE FUNCTION prevent_integration_credential_delete()',
     },
     {
       table: "IntegrationCredential",
@@ -22410,6 +22501,9 @@ export const securityPostureManifest = {
     "20261125120100_a5_checkout_flex_document_constraints",
     "20261125130000_a6_postsale_financial_integrity",
     "20261125140000_a7_crm_b2b_growth_integrity",
+    "20261125150000_a8_channel_order_integrity",
+    "20261125230000_a8_meta_capi_consent_cancellation",
+    "20261126120000_a8_audit_hardening",
   ],
   signedColumns: [
     {

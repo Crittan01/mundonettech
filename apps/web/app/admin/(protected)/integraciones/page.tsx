@@ -1,4 +1,5 @@
 import { hasAdminPermission, type MetaCatalogIssueCode } from "@mundonettech/core";
+import { CredentialCursorError } from "@mundonettech/integrations";
 import Link from "next/link";
 
 import { CmsStepUp } from "@/components/admin/cms-step-up";
@@ -47,7 +48,14 @@ const feedIssueLabels: Record<MetaCatalogIssueCode, string> = {
   INVALID_WEIGHT: "Peso logístico inválido",
 };
 
-export default async function IntegrationsPage() {
+const uuidCursorPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export default async function IntegrationsPage({
+  searchParams,
+}: {
+  readonly searchParams?: Promise<{ cursor?: string | string[] }>;
+} = {}) {
   const session = await requireAdminPage("integrations:read");
   let recentSession;
   try {
@@ -72,11 +80,35 @@ export default async function IntegrationsPage() {
     throw error;
   }
   const environment = getIntegrationEnvironment();
-  const [credentials, feed, metaEvents] = await Promise.all([
-    getIntegrationCredentialVault().list(recentSession.profile.id, {
-      includeRevoked: true,
-      limit: 100,
-    }),
+  const params = searchParams ? await searchParams : {};
+  const rawCursor = typeof params.cursor === "string" ? params.cursor : undefined;
+  const validatedCursor = rawCursor && uuidCursorPattern.test(rawCursor) ? rawCursor : undefined;
+  const vault = getIntegrationCredentialVault();
+  const loadCredentials = async () => {
+    try {
+      const result = await vault.list(recentSession.profile.id, {
+        includeRevoked: true,
+        limit: 100,
+        ...(validatedCursor ? { cursor: validatedCursor } : {}),
+      });
+      return {
+        credentials: result,
+        cursor: validatedCursor,
+        invalidCursor: rawCursor !== undefined && validatedCursor === undefined,
+      };
+    } catch (error) {
+      if (error instanceof CredentialCursorError) {
+        const fallback = await vault.list(recentSession.profile.id, {
+          includeRevoked: true,
+          limit: 100,
+        });
+        return { credentials: fallback, cursor: undefined, invalidCursor: true };
+      }
+      throw error;
+    }
+  };
+  const [{ credentials, cursor, invalidCursor }, feed, metaEvents] = await Promise.all([
+    loadCredentials(),
     getMetaCatalogFeed(),
     metaCapiService().listEvents(recentSession.profile.id, 50),
   ]);
@@ -164,13 +196,14 @@ export default async function IntegrationsPage() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <Link
+            <a
               href="/api/feeds/meta-catalog"
               target="_blank"
+              rel="noopener noreferrer"
               className="text-sm text-primary underline"
             >
               Abrir feed CSV
-            </Link>
+            </a>
             {canWrite ? <MetaCatalogRefreshButton /> : null}
           </div>
         </div>
@@ -220,6 +253,14 @@ export default async function IntegrationsPage() {
             </p>
           </div>
         </div>
+        {invalidCursor ? (
+          <p
+            role="alert"
+            className="rounded-lg border border-destructive p-3 text-sm text-destructive"
+          >
+            El cursor de paginación ya no es válido; mostramos la primera página.
+          </p>
+        ) : null}
         {items.length === 0 ? (
           <div className="rounded-xl border border-border bg-card p-8 text-center">
             <h3 className="text-lg font-semibold">No hay credenciales en {environment}</h3>
@@ -310,6 +351,23 @@ export default async function IntegrationsPage() {
             ))}
           </ul>
         )}
+        {cursor || credentials.nextCursor ? (
+          <nav aria-label="Paginación de credenciales" className="flex flex-wrap gap-3">
+            {cursor ? (
+              <Link className="text-sm text-primary underline" href="/admin/integraciones">
+                Primera página
+              </Link>
+            ) : null}
+            {credentials.nextCursor ? (
+              <Link
+                className="text-sm text-primary underline"
+                href={`/admin/integraciones?cursor=${encodeURIComponent(credentials.nextCursor)}`}
+              >
+                Siguiente página
+              </Link>
+            ) : null}
+          </nav>
+        ) : null}
       </section>
     </div>
   );

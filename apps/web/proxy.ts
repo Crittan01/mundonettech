@@ -106,7 +106,7 @@ function isPrivateNoStorePath(pathname: string): boolean {
 
 function isCapabilityTokenPath(pathname: string): boolean {
   return (
-    pathname === "/api/channels/mercado-libre/oauth/callback" ||
+    hasProtectedPathPrefix(pathname, "/api/channels/mercado-libre/oauth/callback") ||
     hasProtectedPathPrefix(pathname, "/recibo") ||
     hasProtectedPathPrefix(pathname, "/api/recibos") ||
     hasProtectedPathPrefix(pathname, "/pagar") ||
@@ -357,7 +357,7 @@ export async function proxy(request: NextRequest) {
     (hasProtectedPathPrefix(pathname, "/ingresar") && request.nextUrl.searchParams.has("next"))
   ) {
     response.headers.set("Referrer-Policy", "no-referrer");
-    if (pathname === "/api/channels/mercado-libre/oauth/callback") {
+    if (hasProtectedPathPrefix(pathname, "/api/channels/mercado-libre/oauth/callback")) {
       response.headers.set("Cache-Control", "no-store");
       response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
     }

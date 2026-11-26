@@ -1,4 +1,5 @@
 import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./integration-http.js";
+import { isPrivateOrLocalHostname } from "./integration-utils.js";
 import type { MercadoLibreTokenCredential } from "./mercado-libre.js";
 
 const mercadoLibreApiUrl = "https://api.mercadolibre.com/";
@@ -83,6 +84,7 @@ function apiEndpoint(value: string, allowLoopback: boolean): string {
   const official =
     url.protocol === "https:" &&
     url.hostname === "api.mercadolibre.com" &&
+    url.port === "" &&
     (url.pathname === "/" || url.pathname === "") &&
     !url.username &&
     !url.password &&
@@ -249,7 +251,11 @@ function stringValue(value: unknown, field: string, maximum = 200): string {
   return value;
 }
 
-function parseItem(body: string, expectedSellerId: string): MercadoLibreItemSnapshot {
+function parseItem(
+  body: string,
+  expectedSellerId: string,
+  expected: { readonly itemId?: string; readonly userProductId?: string } = {},
+): MercadoLibreItemSnapshot {
   const root = record(parseHttpJson(body));
   const id = itemId(stringValue(root.id, "id", 64));
   const externalUserProductId = userProductId(
@@ -260,6 +266,21 @@ function parseItem(body: string, expectedSellerId: string): MercadoLibreItemSnap
     throw new MercadoLibreCatalogError(
       "INVALID_RESPONSE",
       "Mercado Libre returned an item for another seller.",
+    );
+  }
+  if (root.currency_id !== "COP") {
+    throw new MercadoLibreCatalogError(
+      "INVALID_RESPONSE",
+      "Mercado Libre returned an item without COP currency.",
+    );
+  }
+  if (
+    (expected.itemId !== undefined && id !== expected.itemId) ||
+    (expected.userProductId !== undefined && externalUserProductId !== expected.userProductId)
+  ) {
+    throw new MercadoLibreCatalogError(
+      "INVALID_RESPONSE",
+      "Mercado Libre returned a different item or User Product.",
     );
   }
   const status = stringValue(root.status, "status", 30);
@@ -317,11 +338,15 @@ function stockSnapshot(
   body: string,
   rawVersion: string | null,
   expectedSellerId: string,
+  expectedUserProductId: string,
 ): MercadoLibreStockSnapshot {
   const root = record(parseHttpJson(body));
   const id = userProductId(stringValue(root.id, "id", 64));
-  if (sellerId(root.user_id) !== expectedSellerId) {
-    throw new MercadoLibreCatalogError("INVALID_RESPONSE", "The stock belongs to another seller.");
+  if (sellerId(root.user_id) !== expectedSellerId || id !== expectedUserProductId) {
+    throw new MercadoLibreCatalogError(
+      "INVALID_RESPONSE",
+      "The stock belongs to another seller or User Product.",
+    );
   }
   if (!Array.isArray(root.locations) || root.locations.length > 100) {
     throw new MercadoLibreCatalogError(
@@ -432,13 +457,13 @@ export class MercadoLibreUserProductsClient {
     if (response.status === 404) {
       throw new MercadoLibreCatalogError("NOT_FOUND", "The Mercado Libre resource was not found.");
     }
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401) {
       throw new MercadoLibreCatalogError(
         "UNAUTHORIZED",
         "Mercado Libre rejected the channel credentials.",
       );
     }
-    if (response.status === 400 || response.status === 422) {
+    if (response.status === 400 || response.status === 403 || response.status === 422) {
       throw new MercadoLibreCatalogError(
         "PROVIDER_REJECTED",
         "Mercado Libre rejected the request.",
@@ -481,9 +506,12 @@ export class MercadoLibreUserProductsClient {
     } catch {
       throw new MercadoLibreCatalogError("INVALID_INPUT", "The picture source is not a URL.");
     }
-    const loopback = this.allowLoopback && loopbackHosts.has(url.hostname.toLowerCase());
+    const host = url.hostname.toLowerCase();
+    const loopback = this.allowLoopback && loopbackHosts.has(host);
+    const hostBlocked = isPrivateOrLocalHostname(host) && !loopback;
     if (
       (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+      hostBlocked ||
       url.username ||
       url.password ||
       url.hash
@@ -539,7 +567,9 @@ export class MercadoLibreUserProductsClient {
         ...(input.fulfillment ? { logistic_type: "fulfillment" } : {}),
       },
     });
-    return parseItem(response.body, credential.externalAccountId);
+    return parseItem(response.body, credential.externalAccountId, {
+      ...(input.userProductId ? { userProductId: input.userProductId } : {}),
+    });
   }
 
   async getItem(
@@ -551,7 +581,7 @@ export class MercadoLibreUserProductsClient {
       "GET",
       `items/${encodeURIComponent(itemId(id))}`,
     );
-    return parseItem(response.body, credential.externalAccountId);
+    return parseItem(response.body, credential.externalAccountId, { itemId: id });
   }
 
   async updateItem(
@@ -600,7 +630,7 @@ export class MercadoLibreUserProductsClient {
           : {}),
       },
     );
-    return parseItem(response.body, credential.externalAccountId);
+    return parseItem(response.body, credential.externalAccountId, { itemId: id });
   }
 
   async getStock(
@@ -617,6 +647,7 @@ export class MercadoLibreUserProductsClient {
         response.body,
         response.headers.get("x-version"),
         credential.externalAccountId,
+        id,
       );
     } catch (error) {
       if (error instanceof MercadoLibreCatalogError && error.code === "NOT_FOUND") return null;

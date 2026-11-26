@@ -91,8 +91,10 @@ describe("F6.4 — Meta Catalog CSV", () => {
       { ...feedItem, id: "variant-9", description: "   " },
       { ...feedItem, id: "variant-10", brand: "" },
       { ...feedItem, id: "variant-11", weightGrams: 0 },
+      { ...feedItem, id: "variant-12", available: true, availableQuantity: 0 },
     ]);
     expect(invalid.accepted).toBe(1);
+    expect(invalid.excluded).toBe(11);
     expect(invalid.issues).toEqual(
       expect.arrayContaining([
         { id: "variant-1", code: "INVALID_GTIN" },
@@ -106,6 +108,7 @@ describe("F6.4 — Meta Catalog CSV", () => {
         { id: "variant-9", code: "INVALID_DESCRIPTION" },
         { id: "variant-10", code: "INVALID_BRAND" },
         { id: "variant-11", code: "INVALID_WEIGHT" },
+        { id: "variant-12", code: "INVALID_INVENTORY" },
       ]),
     );
     expect(invalid.csv).toContain("identifier_exists");
@@ -267,6 +270,19 @@ describe("F6.4 — Meta Conversions API transport", () => {
     const responses = [
       new Response("{}", { status: 429, headers: { "retry-after": "120" } }),
       new Response("{}", { status: 401 }),
+      new Response(JSON.stringify({ error: { type: "OAuthException", code: 190 } }), {
+        status: 400,
+      }),
+      new Response(JSON.stringify({ error: { code: 4 } }), { status: 400 }),
+      new Response(
+        JSON.stringify({
+          events_received: 1,
+          fbtrace_id: "trace-additive",
+          custom_match_keys: ["em"],
+        }),
+        { status: 200 },
+      ),
+      new Response("{}", { status: 408 }),
       new Response("{}", { status: 500 }),
       new Response(JSON.stringify({ events_received: 0, fbtrace_id: "trace" }), { status: 200 }),
     ];
@@ -278,6 +294,22 @@ describe("F6.4 — Meta Conversions API transport", () => {
     expect(await client.send(request(), "secret-token")).toEqual({
       kind: "REJECTED",
       code: "CREDENTIAL_REJECTED",
+    });
+    expect(await client.send(request(), "secret-token")).toEqual({
+      kind: "REJECTED",
+      code: "CREDENTIAL_REJECTED",
+    });
+    expect(await client.send(request(), "secret-token")).toEqual({
+      kind: "RATE_LIMITED",
+      retryAfterSeconds: 60,
+    });
+    expect(await client.send(request(), "secret-token")).toEqual({
+      kind: "SENT",
+      providerTraceId: "trace-additive",
+    });
+    expect(await client.send(request(), "secret-token")).toEqual({
+      kind: "UNCERTAIN",
+      code: "PROVIDER_UNCERTAIN",
     });
     expect(await client.send(request(), "secret-token")).toEqual({
       kind: "UNCERTAIN",

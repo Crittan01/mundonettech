@@ -496,8 +496,8 @@ export class AccountService {
           throw retryableLockDivergenceError("Customer segment membership changed concurrently.");
         }
       }
-      const [latestConsent, latestAdvertisingConsent] = await Promise.all([
-        tx.consent.findFirst({
+      const [activeMarketingConsents, activeAdvertisingConsents] = await Promise.all([
+        tx.consent.findMany({
           where: {
             customerId,
             purpose: "MARKETING_EMAIL",
@@ -507,7 +507,7 @@ export class AccountService {
           select: { id: true },
           orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
         }),
-        tx.consent.findFirst({
+        tx.consent.findMany({
           where: {
             customerId,
             purpose: "ADVERTISING",
@@ -518,8 +518,8 @@ export class AccountService {
           orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
         }),
       ]);
-      const currentlyGranted = latestConsent !== null;
-      const currentlyAdvertisingGranted = latestAdvertisingConsent !== null;
+      const currentlyGranted = activeMarketingConsents.length > 0;
+      const currentlyAdvertisingGranted = activeAdvertisingConsents.length > 0;
       if (
         customer.givenName === values.givenName &&
         customer.familyName === values.familyName &&
@@ -554,34 +554,70 @@ export class AccountService {
         },
       });
       if (currentlyGranted !== values.marketingEmail) {
-        await tx.consent.create({
-          data: {
-            customerId,
-            purpose: "MARKETING_EMAIL",
-            status: values.marketingEmail ? "GRANTED" : "REVOKED",
-            source: "customer-account",
-            policyVersion: this.options.privacyPolicyVersion,
-            proofHash,
-            ipHash: audit.ipHash,
-            userAgentHash: audit.userAgentHash,
-            revokesId: values.marketingEmail ? null : latestConsent!.id,
-          },
-        });
+        if (values.marketingEmail) {
+          await tx.consent.create({
+            data: {
+              customerId,
+              purpose: "MARKETING_EMAIL",
+              status: "GRANTED",
+              source: "customer-account",
+              policyVersion: this.options.privacyPolicyVersion,
+              proofHash,
+              ipHash: audit.ipHash,
+              userAgentHash: audit.userAgentHash,
+              revokesId: null,
+            },
+          });
+        } else {
+          for (const activeConsent of activeMarketingConsents) {
+            await tx.consent.create({
+              data: {
+                customerId,
+                purpose: "MARKETING_EMAIL",
+                status: "REVOKED",
+                source: "customer-account",
+                policyVersion: this.options.privacyPolicyVersion,
+                proofHash,
+                ipHash: audit.ipHash,
+                userAgentHash: audit.userAgentHash,
+                revokesId: activeConsent.id,
+              },
+            });
+          }
+        }
       }
       if (currentlyAdvertisingGranted !== values.advertising) {
-        await tx.consent.create({
-          data: {
-            customerId,
-            purpose: "ADVERTISING",
-            status: values.advertising ? "GRANTED" : "REVOKED",
-            source: "customer-account",
-            policyVersion: this.options.privacyPolicyVersion,
-            proofHash,
-            ipHash: audit.ipHash,
-            userAgentHash: audit.userAgentHash,
-            revokesId: values.advertising ? null : latestAdvertisingConsent!.id,
-          },
-        });
+        if (values.advertising) {
+          await tx.consent.create({
+            data: {
+              customerId,
+              purpose: "ADVERTISING",
+              status: "GRANTED",
+              source: "customer-account",
+              policyVersion: this.options.privacyPolicyVersion,
+              proofHash,
+              ipHash: audit.ipHash,
+              userAgentHash: audit.userAgentHash,
+              revokesId: null,
+            },
+          });
+        } else {
+          for (const activeConsent of activeAdvertisingConsents) {
+            await tx.consent.create({
+              data: {
+                customerId,
+                purpose: "ADVERTISING",
+                status: "REVOKED",
+                source: "customer-account",
+                policyVersion: this.options.privacyPolicyVersion,
+                proofHash,
+                ipHash: audit.ipHash,
+                userAgentHash: audit.userAgentHash,
+                revokesId: activeConsent.id,
+              },
+            });
+          }
+        }
       }
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = nowRows[0]!.now;
@@ -885,7 +921,6 @@ export class AccountService {
       blockingRefund,
       blockingReturn,
       blockingWarranty,
-      blockingMetaCapi,
       blockingPaymentTransaction,
       blockingTaxInvoice,
       blockingCreditNote,
@@ -934,13 +969,6 @@ export class AccountService {
         where: {
           order: { customerId },
           status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
-        },
-        select: { id: true },
-      }),
-      tx.metaCapiEvent.findFirst({
-        where: {
-          customerId,
-          status: "DISPATCHING",
         },
         select: { id: true },
       }),
@@ -993,7 +1021,6 @@ export class AccountService {
       blockingRefund ||
       blockingReturn ||
       blockingWarranty ||
-      blockingMetaCapi ||
       blockingPaymentTransaction ||
       blockingTaxInvoice ||
       blockingCreditNote ||

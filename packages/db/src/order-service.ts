@@ -41,6 +41,7 @@ import {
 } from "./inventory-shared.js";
 import { acquireIdempotencyKey, completeIdempotencyKey, databaseNow } from "./primitives.js";
 import { reserveStock } from "./stock.js";
+import { cancelPendingMetaCapiForCustomerInTransaction } from "./meta-capi.js";
 import { recordDailyFunnelCounters } from "./funnel-service.js";
 import type {
   CheckoutConversionInput,
@@ -1501,6 +1502,41 @@ export class OrderService {
                 occurredAt: now,
               },
             });
+          }
+        } else if (contact.advertisingAccepted === false) {
+          const guestCustomer = await tx.customer.findUnique({
+            where: { id: customerId },
+            select: { status: true },
+          });
+          if (guestCustomer?.status === "GUEST") {
+            const activeGuestConsents = await tx.consent.findMany({
+              where: {
+                customerId,
+                purpose: "ADVERTISING",
+                status: "GRANTED",
+                revokedBy: null,
+              },
+              select: { id: true },
+            });
+            for (const activeConsent of activeGuestConsents) {
+              await tx.consent.create({
+                data: {
+                  customerId,
+                  purpose: "ADVERTISING",
+                  status: "REVOKED",
+                  source: "checkout",
+                  policyVersion: contact.privacyPolicyVersion,
+                  proofHash: contact.acceptanceProofHash,
+                  ipHash: contact.acceptanceIpHash,
+                  userAgentHash: contact.acceptanceUserAgentHash,
+                  occurredAt: now,
+                  revokesId: activeConsent.id,
+                },
+              });
+            }
+            if (activeGuestConsents.length > 0) {
+              await cancelPendingMetaCapiForCustomerInTransaction(tx, customerId, now);
+            }
           }
         }
 

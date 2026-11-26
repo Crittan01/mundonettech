@@ -32,8 +32,14 @@ function optionalElement(
   value: string | null | undefined,
   maxLength: number,
 ): string | null {
-  const trimmed = value?.trim();
-  return trimmed ? element(name, normalizeXmlText(trimmed, maxLength, name)) : null;
+  if (typeof value !== "string") return null;
+  let normalized: string;
+  try {
+    normalized = normalizeXmlText(value, maxLength, name);
+  } catch {
+    return null;
+  }
+  return element(name, normalized);
 }
 
 export function buildGoogleMerchantXml(
@@ -43,29 +49,44 @@ export function buildGoogleMerchantXml(
   const seen = new Set<string>();
   const body = items
     .map((item, index) => {
-      if (!item.id || item.id.length > 100 || seen.has(item.id)) {
+      let normalizedId: string;
+      try {
+        normalizedId =
+          typeof item.id === "string" && item.id.length <= 100
+            ? normalizeXmlText(item.id, 100, "g:id")
+            : "";
+      } catch {
+        normalizedId = "";
+      }
+      if (!normalizedId || seen.has(normalizedId)) {
         throw new Error(`Merchant item id is empty, duplicated, or too long at index ${index}.`);
       }
-      seen.add(item.id);
+      seen.add(normalizedId);
       if (!item.itemGroupId || item.itemGroupId.length > 100) {
         throw new Error(`Merchant item_group_id is invalid at index ${index}.`);
+      }
+      if (typeof item.priceCents !== "string" || !/^[0-9]+$/.test(item.priceCents)) {
+        throw new TypeError(`Invalid price for merchant item ${normalizedId}.`);
+      }
+      if (BigInt(item.priceCents) <= 0n) {
+        throw new RangeError(`Merchant price must be positive for item ${normalizedId}.`);
       }
       let gtin: string | null;
       try {
         gtin = resolveCommercialGtin(item.gtin, item.ean);
       } catch {
-        throw new TypeError(`Invalid GTIN for merchant item ${item.id}.`);
+        throw new TypeError(`Invalid GTIN for merchant item ${normalizedId}.`);
       }
       if (
         item.weightGrams !== undefined &&
         (!Number.isInteger(item.weightGrams) || item.weightGrams < 1)
       ) {
-        throw new TypeError(`Invalid shipping weight for merchant item ${item.id}.`);
+        throw new TypeError(`Invalid shipping weight for merchant item ${normalizedId}.`);
       }
-      const normalizedMpn = item.mpn?.trim() || null;
+      const mpnLine = optionalElement("g:mpn", item.mpn, 70);
       const lines = [
         "    <item>",
-        element("g:id", normalizeXmlText(item.id, 100, "g:id")),
+        element("g:id", normalizedId),
         element("g:item_group_id", normalizeXmlText(item.itemGroupId, 100, "g:item_group_id")),
         element("g:title", normalizeXmlText(item.title, 150, "g:title")),
         element("g:description", normalizeXmlText(item.description, 5000, "g:description")),
@@ -78,8 +99,8 @@ export function buildGoogleMerchantXml(
         element("g:price", `${centsToDecimalString(item.priceCents)} COP`),
         element("g:brand", normalizeXmlText(item.brand, 70, "g:brand")),
         gtin ? element("g:gtin", gtin) : null,
-        optionalElement("g:mpn", normalizedMpn, 70),
-        !gtin && !normalizedMpn ? element("g:identifier_exists", "no") : null,
+        mpnLine,
+        !gtin && !mpnLine ? element("g:identifier_exists", "no") : null,
         item.weightGrams ? element("g:shipping_weight", `${item.weightGrams} g`) : null,
         optionalElement("g:color", item.color, 100),
         optionalElement("g:size", item.size, 100),

@@ -318,6 +318,14 @@ describe("F6.3 — signed ingestion, stock and financial ledger", () => {
     });
     assert.equal(replay.status, "REPLAYED");
     assert.equal(replay.eventId, queued.eventId);
+    await assert.rejects(
+      orderService.enqueueNotification({
+        body: body.replace(`/orders/${remote.orderId}`, `/orders/${Number(remote.orderId) + 1}`),
+        requestId,
+        signature: `ts=${ts},v1=${signature}`,
+      }),
+      (error) => error.code === "CONFLICT",
+    );
     const event = await db.domainOutbox.findUniqueOrThrow({ where: { id: queued.eventId } });
     assert.deepEqual(event.payload, {
       accountId: account.id,
@@ -518,6 +526,7 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
     const second = remoteResources(secondListing, { logisticType: "self_service", quantity: 2 });
     second.order.pack_id = Number(first.packId);
     second.order.shipping.id = Number(first.shipmentId);
+    second.order.date_created = first.order.date_created;
     second.shipment.pack_id = Number(first.packId);
     first.pack.orders.push({ id: Number(second.orderId) });
     fixture.packs.delete(second.packId);
@@ -655,7 +664,11 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
     assert.equal(reconciled.reconciliationReason, "PROVIDER_SETTLEMENT_MATCH");
     const version = reconciled.version;
     const currentTimestamp = remote.order.last_updated;
+    const currentClosed = remote.order.date_closed;
+    const currentPaymentModified = remote.order.payments[0].date_last_modified;
     remote.order.last_updated = remote.order.date_created;
+    remote.order.date_closed = remote.order.date_created;
+    remote.order.payments[0].date_last_modified = remote.order.date_created;
     const stale = await synchronize("orders", remote.orderId);
     assert.equal(stale.stale, true);
     assert.equal(
@@ -663,6 +676,8 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
       version,
     );
     remote.order.last_updated = currentTimestamp;
+    remote.order.date_closed = currentClosed;
+    remote.order.payments[0].date_last_modified = currentPaymentModified;
 
     const manual = await db.channelLedgerEntry.findFirstOrThrow({
       where: { orderId: order.id, entryType: "MANUAL_ADJUSTMENT" },
@@ -793,6 +808,7 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
       user_product_id: lateUserProductId,
       seller_id: Number(account.externalAccountId),
       status: "active",
+      currency_id: "COP",
       price: Number(latePriceCents / 100n),
       available_quantity: 8,
       seller_sku: unmappedCatalog.sku,
@@ -890,6 +906,7 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
     depletedRemote.shipment.status = "delivered";
     depletedRemote.shipment.date_shipped = timestamp();
     depletedRemote.shipment.date_delivered = timestamp();
+    touch(depletedRemote.shipment);
     await synchronize("orders", depletedRemote.orderId);
     await admin.query(
       `UPDATE "StockLocation" SET "deletedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
@@ -959,6 +976,144 @@ describe("F6.3 — packs, reconciliation and failure safety", () => {
     await assert.rejects(
       admin.query(`DELETE FROM "ChannelShipment" WHERE "id" = $1`, [order.shipmentId]),
       (error) => error.code === "55000",
+    );
+  });
+});
+
+describe("A8 — pack membership and shipment logistics safety", () => {
+  it("keeps a Full shipment incompatible with a local offer in review without reserving stock", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const remote = remoteResources(listing);
+    remote.shipment.logistic_type = "fulfillment";
+    await synchronize("orders", remote.orderId);
+    const order = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: remote.orderId },
+    });
+    assert.equal(order.stockStatus, "REVIEW_REQUIRED");
+    assert.equal(order.stockError, "SHIPMENT_LOGISTIC_DIVERGENCE");
+    assert.equal(order.reconciliationStatus, "REVIEW_REQUIRED");
+    assert.equal(order.reconciliationReason, "SHIPMENT_LOGISTIC_DIVERGENCE");
+    const level = await db.stockLevel.findUniqueOrThrow({
+      where: {
+        locationId_variantId: {
+          locationId: catalog.inventory.locationId,
+          variantId: catalog.variantId,
+        },
+      },
+    });
+    assert.equal(level.onHand, 10);
+    assert.equal(level.committed, 0);
+  });
+
+  it("rejects an order excluded from its provider pack instead of binding it", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const remote = remoteResources(listing);
+    remote.pack.orders = [{ id: Number(remote.orderId) + 999 }];
+    await assert.rejects(
+      synchronize("orders", remote.orderId),
+      (error) => error.code === "CONFLICT",
+    );
+    assert.equal(await db.channelOrder.count({ where: { externalOrderId: remote.orderId } }), 0);
+    const level = await db.stockLevel.findUniqueOrThrow({
+      where: {
+        locationId_variantId: {
+          locationId: catalog.inventory.locationId,
+          variantId: catalog.variantId,
+        },
+      },
+    });
+    assert.equal(level.committed, 0);
+  });
+
+  it("enqueues distinct lifecycle notifications for the same order while rejecting mutated x-request-id replays", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const remote = remoteResources(listing);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sign = (dataId, requestId) =>
+      `ts=${ts},v1=${createHmac("sha256", clientSecret)
+        .update(`id:${dataId};request-id:${requestId};ts:${ts};`)
+        .digest("hex")}`;
+    const body = JSON.stringify({
+      topic: "orders_v2",
+      resource: `/orders/${remote.orderId}`,
+      user_id: Number(account.externalAccountId),
+      data: { id: remote.orderId },
+    });
+    const first = await orderService
+      .enqueueNotification({
+        body,
+        requestId: `req-lifecycle-1-${randomUUID()}`,
+        signature: "",
+        queryDataId: remote.orderId,
+      })
+      .catch(() => null);
+    assert.equal(first, null);
+
+    const requestId1 = `req-life-1-${randomUUID()}`;
+    const requestId2 = `req-life-2-${randomUUID()}`;
+    const accepted1 = await orderService.enqueueNotification({
+      body,
+      requestId: requestId1,
+      signature: sign(remote.orderId, requestId1),
+      queryDataId: remote.orderId,
+    });
+    const accepted2 = await orderService.enqueueNotification({
+      body,
+      requestId: requestId2,
+      signature: sign(remote.orderId, requestId2),
+      queryDataId: remote.orderId,
+    });
+    assert.equal(accepted1.status, "ENQUEUED");
+    assert.equal(accepted2.status, "ENQUEUED");
+    assert.notEqual(accepted1.eventId, accepted2.eventId);
+
+    const mutatedBody = JSON.stringify({
+      topic: "orders_v2",
+      resource: `/orders/${Number(remote.orderId) + 1}`,
+      user_id: Number(account.externalAccountId),
+      data: { id: remote.orderId },
+    });
+    await assert.rejects(
+      orderService.enqueueNotification({
+        body: mutatedBody,
+        requestId: requestId1,
+        signature: sign(remote.orderId, requestId1),
+        queryDataId: remote.orderId,
+      }),
+      (error) => error instanceof ChannelOrderError && error.code === "CONFLICT",
+    );
+  });
+
+  it("flags in_mediation payments for financial review and rejects assignStockLocation on SKU divergence", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const remote = remoteResources(listing);
+    remote.order.payments[0].status = "in_mediation";
+    await synchronize("orders", remote.orderId);
+    const mediated = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: remote.orderId },
+    });
+    assert.equal(mediated.reconciliationStatus, "REVIEW_REQUIRED");
+    assert.equal(mediated.reconciliationReason, "PAYMENT_MEDIATION_REVIEW");
+
+    const mismatched = remoteResources(listing);
+    mismatched.order.order_items[0].item.seller_sku = "WRONG-SKU-999";
+    await synchronize("orders", mismatched.orderId);
+    const skuDiverged = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: mismatched.orderId },
+    });
+    assert.equal(skuDiverged.stockStatus, "REVIEW_REQUIRED");
+    assert.equal(skuDiverged.stockError, "SKU_DIVERGENCE");
+    await assert.rejects(
+      orderService.assignStockLocation({
+        orderId: skuDiverged.id,
+        locationId: catalog.inventory.locationId,
+        audit: audit(),
+      }),
+      (error) => error instanceof ChannelOrderError && error.code === "CONFLICT",
     );
   });
 });

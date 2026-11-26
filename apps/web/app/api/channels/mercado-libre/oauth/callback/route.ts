@@ -111,13 +111,22 @@ export async function GET(request: Request) {
   let outcome: Outcome = "uncertain";
   try {
     const security = await getRequestSecurityContext();
-    const providerError = providerErrorValues[0]?.trim() ?? "";
-    const code = codeValues[0];
+    const rawProviderError = providerErrorValues[0];
+    const providerError =
+      rawProviderError !== undefined && /^[a-z][a-z0-9_]{0,99}$/.test(rawProviderError)
+        ? rawProviderError
+        : undefined;
+    const malformedProviderError = rawProviderError !== undefined && providerError === undefined;
+    const code = malformedProviderError ? undefined : codeValues[0];
     await channelAccountService().completeMercadoLibreOAuth({
       attemptId,
       state,
       ...(code ? { code } : {}),
-      ...(providerError && /^[a-z][a-z0-9_]{0,99}$/.test(providerError) ? { providerError } : {}),
+      ...(malformedProviderError
+        ? { providerError: "invalid_request" }
+        : providerError
+          ? { providerError }
+          : {}),
       redirectUri: mercadoLibreOAuthRedirectUri(),
       audit: {
         requestId: randomUUID(),

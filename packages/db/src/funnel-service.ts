@@ -1,8 +1,8 @@
-import { assertMoney, isAdminRole } from "@mundonettech/core";
+import { assertMoney, hasAdminPermission, isAdminRole } from "@mundonettech/core";
 
 import { assertUuid } from "./inventory-shared.js";
 import { notificationWhereForRole } from "./operations-service.js";
-import type { DashboardSnapshot, DailyFunnelPoint } from "./operations-types.js";
+import type { DashboardSnapshot } from "./operations-types.js";
 import type { DatabaseExecutor } from "./primitives.js";
 import type { PrismaClient } from "./generated/client.js";
 
@@ -102,11 +102,21 @@ export class FunnelService {
       where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
       select: { role: true },
     });
-    if (!actor || !isAdminRole(actor.role)) {
+    if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, "dashboard:read")) {
       throw new Error("Active administrator not found.");
     }
     const [days, unreadNotifications] = await Promise.all([
-      this.db.$queryRaw<Array<DailyFunnelPoint & { total: bigint }>>`
+      this.db.$queryRaw<
+        Array<{
+          metricDate: string;
+          pageViews: bigint;
+          productViews: bigint;
+          cartAdditions: bigint;
+          checkoutStarts: bigint;
+          ordersConfirmed: bigint;
+          ordersPaid: bigint;
+        }>
+      >`
         SELECT day."metricDate"::date::text AS "metricDate",
           COALESCE(metric."pageViews", 0) AS "pageViews",
           COALESCE(metric."productViews", 0) AS "productViews",

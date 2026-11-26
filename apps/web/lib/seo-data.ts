@@ -143,11 +143,29 @@ async function readGoogleMerchantFeed(): Promise<string> {
   cacheLife(seoLife);
   cacheTag("seo", "merchant-feed", "catalog", "catalog:inventory");
   const products = await new CatalogService(getDatabase()).getFeedProducts();
-  const items = catalogFeedItems(products, getPublicMediaOrigin());
-  return buildGoogleMerchantXml(
-    { title: storeConfig.name, link: storeConfig.url, description: storeConfig.description },
-    items,
-  );
+  const channel = {
+    title: storeConfig.name,
+    link: storeConfig.url,
+    description: storeConfig.description,
+  };
+  const candidates = catalogFeedItems(products, getPublicMediaOrigin()).filter((item) => {
+    if (!item.imageLink) return false;
+    try {
+      return BigInt(item.priceCents) > 0n;
+    } catch {
+      return false;
+    }
+  });
+  const eligible: MerchantFeedItem[] = [];
+  for (const item of candidates) {
+    try {
+      buildGoogleMerchantXml(channel, [item]);
+      eligible.push(item);
+    } catch {
+      continue;
+    }
+  }
+  return buildGoogleMerchantXml(channel, eligible);
 }
 
 export function getGoogleMerchantFeed(): Promise<string> {

@@ -33,6 +33,10 @@ export async function fetchWithLimit(options: {
     throw new TypeError("timeoutMs must be between 100 and 60000.");
   }
   const controller = new AbortController();
+  const callerSignal = options.init.signal;
+  const abortFromCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
   try {
     const response = await options.fetchImpl(options.url, {
@@ -83,6 +87,7 @@ export async function fetchWithLimit(options: {
     );
   } finally {
     clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }
 

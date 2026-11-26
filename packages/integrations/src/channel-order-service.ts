@@ -315,6 +315,7 @@ export class ChannelOrderService {
     permission: AdminPermission,
   ): Promise<void> {
     assertUuid(actorAdminUserId, "actorAdminUserId");
+    await db.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${actorAdminUserId}::uuid FOR SHARE`;
     const actor = await db.adminUser.findFirst({
       where: { id: actorAdminUserId, status: "ACTIVE", deletedAt: null },
     });
@@ -439,7 +440,7 @@ export class ChannelOrderService {
       signature: options.signature,
       clientSecret: credential.clientSecret,
     });
-    const deduplicationKey = `channel-notification:${account.id}:${notification.notificationId}`;
+    const deduplicationKey = `channel-notification:${account.id}:${options.requestId!}`;
     const payload: Prisma.JsonObject = {
       accountId: account.id,
       kind: notification.kind,
@@ -491,7 +492,7 @@ export class ChannelOrderService {
     accountId: string,
     expected?: AccountSyncFence,
   ): Promise<void> {
-    await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${accountId}::uuid FOR UPDATE`;
+    await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${accountId}::uuid FOR SHARE`;
     const current = await tx.channelAccount.findUnique({ where: { id: accountId } });
     if (current && current.environment !== this.options.ring.environment) {
       throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.");
@@ -591,6 +592,7 @@ export class ChannelOrderService {
     const snapshot = await this.client.getPack(credential, externalPackId);
     const hash = digest(snapshot);
     const stale = await inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await this.assertAccountFence(tx, account.id, account);
       await acquireOperationLocks(tx, [`channel-pack:${account.id}:${externalPackId}`]);
       const existing = await tx.channelPack.findUnique({
@@ -606,6 +608,19 @@ export class ChannelOrderService {
           "CONFLICT",
           "The pack changed without advancing its timestamp.",
         );
+      }
+      if (existing) {
+        const validTransition =
+          existing.externalStatus === snapshot.status ||
+          (existing.externalStatus === "PENDING" && snapshot.status !== "PENDING") ||
+          (existing.externalStatus === "RELEASED" &&
+            ["ERROR", "PENDING_CANCEL", "CANCELLED"].includes(snapshot.status)) ||
+          (existing.externalStatus === "PENDING_CANCEL" &&
+            ["RELEASED", "ERROR", "CANCELLED"].includes(snapshot.status)) ||
+          existing.externalStatus === "ERROR";
+        if (!validTransition) {
+          throw new ChannelOrderError("CONFLICT", "The channel pack status cannot regress.");
+        }
       }
       if (existing && sourceHash(existing) === Buffer.from(hash).toString("hex")) return false;
       const now = await this.now(tx);
@@ -652,6 +667,8 @@ export class ChannelOrderService {
     if (stale) return { orderIds: [], changedOrderIds: new Set(), shipmentId: null, stale: true };
     const orderIds: string[] = [];
     const changedOrderIds = new Set<string>();
+    const childShipmentIds = new Set<string>();
+    const ordersNeedingStock = new Set<string>();
     for (const externalOrderId of snapshot.orderIds) {
       const result = await this.syncOrder(account, credential, externalOrderId, audit, {
         pack: snapshot,
@@ -660,18 +677,34 @@ export class ChannelOrderService {
       if (!result.stale) {
         orderIds.push(result.orderId);
         if (result.changed) changedOrderIds.add(result.orderId);
+        if (result.externalShipmentId) {
+          childShipmentIds.add(result.externalShipmentId);
+          ordersNeedingStock.add(result.orderId);
+        }
       }
     }
     let shipmentId: string | null = null;
-    if (!skipShipment && snapshot.externalShipmentId) {
-      const shipment = await this.syncShipment(
-        account,
-        credential,
-        snapshot.externalShipmentId,
-        audit,
-        { changedOrderIds },
-      );
-      shipmentId = shipment.shipmentId;
+    if (!skipShipment) {
+      const shipmentTargets = snapshot.externalShipmentId
+        ? [snapshot.externalShipmentId]
+        : [...childShipmentIds];
+      const processedOrderIds = new Set<string>();
+      for (const externalShipmentId of shipmentTargets) {
+        const shipment = await this.syncShipment(account, credential, externalShipmentId, audit, {
+          changedOrderIds,
+          packSynced: true,
+        });
+        if (!shipmentId) shipmentId = shipment.shipmentId;
+        for (const id of shipment.orderIds) processedOrderIds.add(id);
+      }
+      for (const orderId of ordersNeedingStock) {
+        if (!processedOrderIds.has(orderId)) {
+          await this.reprocessStock(orderId, audit, {
+            account,
+            remoteChanged: changedOrderIds.has(orderId),
+          });
+        }
+      }
     }
     return { orderIds, changedOrderIds, shipmentId, stale: false };
   }
@@ -682,7 +715,13 @@ export class ChannelOrderService {
     externalOrderId: string,
     audit: ChannelAuditContext,
     context: { pack?: MercadoLibrePackSnapshot; skipShipment?: boolean } = {},
-  ): Promise<{ orderId: string; shipmentId: string | null; stale: boolean; changed: boolean }> {
+  ): Promise<{
+    orderId: string;
+    shipmentId: string | null;
+    externalShipmentId: string | null;
+    stale: boolean;
+    changed: boolean;
+  }> {
     const snapshot = await this.client.getOrder(credential, externalOrderId);
     let pack = context.pack;
     if (snapshot.externalPackId && (!pack || pack.externalId !== snapshot.externalPackId)) {
@@ -690,7 +729,13 @@ export class ChannelOrderService {
     }
     const persisted = await this.persistOrder(account, snapshot, pack ?? null, audit);
     if (persisted.stale) {
-      return { orderId: persisted.orderId, shipmentId: null, stale: true, changed: false };
+      return {
+        orderId: persisted.orderId,
+        shipmentId: null,
+        externalShipmentId: snapshot.externalShipmentId,
+        stale: true,
+        changed: false,
+      };
     }
     let shipmentId: string | null = null;
     if (!context.skipShipment && snapshot.externalShipmentId) {
@@ -702,13 +747,19 @@ export class ChannelOrderService {
         { orderChanged: persisted.changed },
       );
       shipmentId = shipment.shipmentId;
-    } else {
+    } else if (!snapshot.externalShipmentId) {
       await this.reprocessStock(persisted.orderId, audit, {
         account,
         remoteChanged: persisted.changed,
       });
     }
-    return { orderId: persisted.orderId, shipmentId, stale: false, changed: persisted.changed };
+    return {
+      orderId: persisted.orderId,
+      shipmentId,
+      externalShipmentId: snapshot.externalShipmentId,
+      stale: false,
+      changed: persisted.changed,
+    };
   }
 
   private async syncShipment(
@@ -716,7 +767,11 @@ export class ChannelOrderService {
     credential: ReturnType<ChannelOrderService["reveal"]>,
     externalShipmentId: string,
     audit: ChannelAuditContext,
-    context: { orderChanged?: boolean; changedOrderIds?: ReadonlySet<string> } = {},
+    context: {
+      orderChanged?: boolean;
+      changedOrderIds?: ReadonlySet<string>;
+      packSynced?: boolean;
+    } = {},
   ): Promise<{ orderIds: string[]; shipmentId: string | null; stale: boolean }> {
     const snapshot = await this.client.getShipment(credential, externalShipmentId);
     if (!snapshot.externalOrderId && !snapshot.externalPackId) {
@@ -724,14 +779,16 @@ export class ChannelOrderService {
     }
     const syncedOrderChanges = new Set<string>(context.changedOrderIds ?? []);
     if (snapshot.externalPackId) {
-      const packResult = await this.syncPack(
-        account,
-        credential,
-        snapshot.externalPackId,
-        audit,
-        true,
-      );
-      for (const id of packResult.changedOrderIds) syncedOrderChanges.add(id);
+      if (!context.packSynced) {
+        const packResult = await this.syncPack(
+          account,
+          credential,
+          snapshot.externalPackId,
+          audit,
+          true,
+        );
+        for (const id of packResult.changedOrderIds) syncedOrderChanges.add(id);
+      }
     } else if (snapshot.externalOrderId) {
       const existing = await this.db.channelOrder.findUnique({
         where: {
@@ -740,9 +797,13 @@ export class ChannelOrderService {
             externalOrderId: snapshot.externalOrderId,
           },
         },
-        select: { id: true },
+        select: { id: true, status: true },
       });
-      if (!existing) {
+      if (
+        !existing ||
+        existing.status === "PENDING" ||
+        ["SHIPPED", "DELIVERED", "NOT_DELIVERED", "CANCELLED"].includes(snapshot.status)
+      ) {
         const orderResult = await this.syncOrder(
           account,
           credential,
@@ -775,9 +836,13 @@ export class ChannelOrderService {
     if (pack && pack.externalId !== snapshot.externalPackId) {
       throw new ChannelOrderError("CONFLICT", "The order and pack identifiers do not match.");
     }
+    if (pack && !pack.orderIds.includes(snapshot.externalId)) {
+      throw new ChannelOrderError("CONFLICT", "The order is outside its provider pack.");
+    }
     const hash = digest(snapshot);
     const hashHex = Buffer.from(hash).toString("hex");
     return inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await this.assertAccountFence(tx, account.id, account);
       await acquireOperationLocks(tx, [`channel-order:${account.id}:${snapshot.externalId}`]);
       const existingPeek = await tx.channelOrder.findUnique({
@@ -800,7 +865,7 @@ export class ChannelOrderService {
             externalOrderId: snapshot.externalId,
           },
         },
-        include: { ledgerEntries: true, shipment: true },
+        include: { ledgerEntries: true, shipment: true, pack: true },
       });
       if (existing && existing.externalUpdatedAt > snapshot.updatedAt) {
         return { orderId: existing.id, stale: true, changed: false };
@@ -815,6 +880,29 @@ export class ChannelOrderService {
           "The order changed without advancing its timestamp.",
         );
       }
+      if (existing) {
+        if (
+          existing.externalItemId !== snapshot.externalItemId ||
+          existing.externalUserProductId !== snapshot.externalUserProductId ||
+          existing.sellerSku !== snapshot.sellerSku ||
+          existing.quantity !== snapshot.quantity ||
+          existing.unitPriceCents !== snapshot.unitPriceCents ||
+          existing.grossAmountCents !== snapshot.grossAmountCents ||
+          existing.externalCreatedAt.getTime() !== snapshot.createdAt.getTime() ||
+          (existing.pack?.externalPackId ?? null) !== snapshot.externalPackId
+        ) {
+          throw new ChannelOrderError(
+            "CONFLICT",
+            "The provider changed sealed order identity or commercial totals.",
+          );
+        }
+        if (
+          (existing.status === "CANCELLED" && snapshot.status !== "CANCELLED") ||
+          (existing.status === "PAID" && snapshot.status === "PENDING")
+        ) {
+          throw new ChannelOrderError("CONFLICT", "The channel order status cannot regress.");
+        }
+      }
       const now = await this.now(tx);
       const offer = await tx.channelOffer.findUnique({
         where: { externalItemId: snapshot.externalItemId },
@@ -826,20 +914,31 @@ export class ChannelOrderService {
           "The external item belongs to another channel account.",
         );
       }
-      let stockError: string | null = null;
-      if (!offer) {
-        stockError = "LISTING_NOT_MAPPED";
-      } else if (offer.listing.externalUserProductId !== snapshot.externalUserProductId) {
-        stockError = "USER_PRODUCT_DIVERGENCE";
-      } else if (snapshot.sellerSku && offer.listing.variant.sku !== snapshot.sellerSku) {
-        stockError = "SKU_DIVERGENCE";
-      } else if (snapshot.stockReferences.length > 0) {
-        const matches = snapshot.stockReferences.some(
-          (reference) =>
-            reference.storeId === offer.listing.sellerStoreId &&
-            reference.networkNodeId === offer.listing.sellerNetworkNodeId,
-        );
-        if (!matches) stockError = "STOCK_ORIGIN_DIVERGENCE";
+      const stockSettledOrReserved = Boolean(
+        existing && ["RESERVED", "FULFILLED", "RELEASED"].includes(existing.stockStatus),
+      );
+      let stockError: string | null = stockSettledOrReserved
+        ? (existing?.stockError ?? null)
+        : null;
+      if (!stockSettledOrReserved) {
+        if (!offer) {
+          stockError = "LISTING_NOT_MAPPED";
+        } else if (offer.listing.externalUserProductId !== snapshot.externalUserProductId) {
+          stockError = "USER_PRODUCT_DIVERGENCE";
+        } else if (snapshot.sellerSku && offer.listing.variant.sku !== snapshot.sellerSku) {
+          stockError = "SKU_DIVERGENCE";
+        } else if (
+          offer.listing.sellerStoreId !== null ||
+          offer.listing.sellerNetworkNodeId !== null ||
+          snapshot.stockReferences.length > 0
+        ) {
+          const matches = snapshot.stockReferences.some(
+            (reference) =>
+              reference.storeId === offer.listing.sellerStoreId &&
+              reference.networkNodeId === offer.listing.sellerNetworkNodeId,
+          );
+          if (!matches) stockError = "STOCK_ORIGIN_DIVERGENCE";
+        }
       }
       const expectedLocationType =
         offer?.logisticType === "FULFILLMENT" ? "MELI_FULL" : "LOCAL_MAIN";
@@ -875,6 +974,23 @@ export class ChannelOrderService {
       }
       if (!offer && !stockError) stockError = "LISTING_NOT_MAPPED";
       const reconciliationIssues: string[] = [];
+      if (pack?.status === "CANCELLED" && snapshot.status !== "CANCELLED") {
+        reconciliationIssues.push("PACK_ORDER_STATE_DIVERGENCE");
+      }
+      if (snapshot.status === "PAID" && snapshot.paidAmountCents !== snapshot.grossAmountCents) {
+        reconciliationIssues.push("PAID_TOTAL_DIVERGENCE");
+      }
+      if (snapshot.payments.some((payment) => payment.status === "in_mediation")) {
+        reconciliationIssues.push("PAYMENT_MEDIATION_REVIEW");
+      }
+      if (
+        snapshot.payments.some(
+          (payment) =>
+            payment.status === "charged_back" && payment.refundedCents < payment.capturedCents,
+        )
+      ) {
+        reconciliationIssues.push("PAYMENT_CHARGEBACK_REVIEW");
+      }
       if (snapshot.paidAmountCents !== snapshot.capturedAmountCents) {
         reconciliationIssues.push("PAYMENT_TOTAL_DIVERGENCE");
       }
@@ -919,7 +1035,10 @@ export class ChannelOrderService {
       }
       const reviewReason = reconciliationIssues[0] ?? null;
       const changed = !existing || sourceHash(existing) !== hashHex;
-      const preserveExistingReconciliation = Boolean(existing && !changed);
+      const packStateDiverged = Boolean(
+        pack?.status === "CANCELLED" && snapshot.status !== "CANCELLED",
+      );
+      const preserveExistingReconciliation = Boolean(existing && !changed && !packStateDiverged);
       const reconciliationStatus: "PENDING" | "RECONCILED" | "REVIEW_REQUIRED" =
         preserveExistingReconciliation && existing
           ? existing.reconciliationStatus
@@ -1134,6 +1253,7 @@ export class ChannelOrderService {
     const hash = digest(snapshot);
     const hashHex = Buffer.from(hash).toString("hex");
     return inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await this.assertAccountFence(tx, account.id, account);
       await acquireOperationLocks(tx, [`channel-shipment:${account.id}:${snapshot.externalId}`]);
       const existing = await tx.channelShipment.findUnique({
@@ -1156,6 +1276,15 @@ export class ChannelOrderService {
           "CONFLICT",
           "The shipment changed without advancing its timestamp.",
         );
+      }
+      if (
+        existing &&
+        ((["DELIVERED", "CANCELLED"].includes(existing.status) &&
+          existing.status !== snapshot.status) ||
+          (["SHIPPED", "NOT_DELIVERED"].includes(existing.status) &&
+            ["PENDING", "READY_TO_SHIP"].includes(snapshot.status)))
+      ) {
+        throw new ChannelOrderError("CONFLICT", "The channel shipment status cannot regress.");
       }
       const order = snapshot.externalOrderId
         ? await tx.channelOrder.findUnique({
@@ -1218,6 +1347,12 @@ export class ChannelOrderService {
       });
       if (linkedOrders.length !== linkedOrderIds.length) {
         throw new ChannelOrderError("NOT_FOUND", "No persisted orders own this shipment.");
+      }
+      if (linkedOrders.some((candidate) => candidate.externalCreatedAt > snapshot.createdAt)) {
+        throw new ChannelOrderError(
+          "CONFLICT",
+          "The shipment was created before one of its orders.",
+        );
       }
       if (order && !linkedOrders.some((candidate) => candidate.id === order.id)) {
         throw new ChannelOrderError("CONFLICT", "The shipment order is outside its pack.");
@@ -1324,8 +1459,16 @@ export class ChannelOrderService {
           },
         );
       }
+      const orderedOrderIds = [...linkedOrders]
+        .sort(
+          (left, right) =>
+            left.externalCreatedAt.getTime() - right.externalCreatedAt.getTime() ||
+            left.externalOrderId.localeCompare(right.externalOrderId) ||
+            left.id.localeCompare(right.id),
+        )
+        .map((candidate) => candidate.id);
       return {
-        orderIds: linkedOrders.map((candidate) => candidate!.id),
+        orderIds: orderedOrderIds,
         shipmentId: shipment.id,
         stale: false,
         changed,
@@ -1381,6 +1524,7 @@ export class ChannelOrderService {
       throw new ChannelOrderError("CONFLICT", "The order belongs to another channel account.");
     }
     await inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await this.assertAccountFence(tx, target.accountId, options.account);
       await acquireOperationLocks(tx, [`channel-order-id:${orderId}`]);
       await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${orderId}::uuid FOR UPDATE`;
@@ -1518,7 +1662,9 @@ export class ChannelOrderService {
         }
       }
       if (order.stockError && order.stockError !== "INSUFFICIENT_STOCK") {
-        if (order.stockStatus !== "REVIEW_REQUIRED") {
+        if (order.stockStatus === "RESERVED") {
+          await this.reviewOrder(tx, order, order.stockError, now, audit);
+        } else if (order.stockStatus !== "REVIEW_REQUIRED") {
           await tx.channelOrder.update({
             where: { id: order.id },
             data: { stockStatus: "REVIEW_REQUIRED", updatedAt: now },
@@ -1527,24 +1673,53 @@ export class ChannelOrderService {
         return;
       }
       if (!order.variant || order.variant.deletedAt || !order.stockLocation || !order.offer) {
-        await tx.channelOrder.update({
-          where: { id: order.id },
-          data: {
-            stockStatus: "REVIEW_REQUIRED",
-            stockError: order.stockError ?? "STOCK_MAPPING_REQUIRED",
-            updatedAt: now,
-          },
-        });
+        if (order.stockStatus === "RESERVED") {
+          await this.reviewOrder(
+            tx,
+            order,
+            order.stockError ?? "STOCK_MAPPING_REQUIRED",
+            now,
+            audit,
+          );
+        } else {
+          await tx.channelOrder.update({
+            where: { id: order.id },
+            data: {
+              stockStatus: "REVIEW_REQUIRED",
+              stockError: order.stockError ?? "STOCK_MAPPING_REQUIRED",
+              updatedAt: now,
+            },
+          });
+        }
         return;
       }
       const expectedType = order.offer.logisticType === "FULFILLMENT" ? "MELI_FULL" : "LOCAL_MAIN";
       if (order.stockLocation.deletedAt || order.stockLocation.type !== expectedType) {
+        if (order.stockStatus === "RESERVED") {
+          await this.reviewOrder(tx, order, "STOCK_ORIGIN_INVALID", now, audit);
+        } else {
+          await tx.channelOrder.update({
+            where: { id: order.id },
+            data: {
+              stockLocationId: null,
+              stockStatus: "REVIEW_REQUIRED",
+              stockError: "STOCK_ORIGIN_INVALID",
+              updatedAt: now,
+            },
+          });
+        }
+        return;
+      }
+      const shipmentMatchesOffer =
+        !order.shipment ||
+        (order.shipment.logisticType === "FULL") === (expectedType === "MELI_FULL");
+      if (!shipmentMatchesOffer) {
+        await this.reviewOrder(tx, order, "SHIPMENT_LOGISTIC_DIVERGENCE", now, audit);
         await tx.channelOrder.update({
           where: { id: order.id },
           data: {
-            stockLocationId: null,
-            stockStatus: "REVIEW_REQUIRED",
-            stockError: "STOCK_ORIGIN_INVALID",
+            ...(order.stockStatus === "RESERVED" ? {} : { stockStatus: "REVIEW_REQUIRED" }),
+            stockError: "SHIPMENT_LOGISTIC_DIVERGENCE",
             updatedAt: now,
           },
         });
@@ -1621,18 +1796,38 @@ export class ChannelOrderService {
         throw new ChannelOrderError("CONFLICT", "The channel reservation cannot be fulfilled.");
       }
       const operationKey = `channel-order:${order.id}:fulfill:v1`;
-      await fulfillStock(tx, {
-        operationKey,
-        reservationKey: current.reservationKey,
-        channelOrderId: order.id,
-        items: [
-          {
-            variantId: current.variantId,
-            locationId: current.stockLocationId,
-            quantity: current.quantity,
-          },
-        ],
-      });
+      try {
+        await fulfillStock(tx, {
+          operationKey,
+          reservationKey: current.reservationKey,
+          channelOrderId: order.id,
+          items: [
+            {
+              variantId: current.variantId,
+              locationId: current.stockLocationId,
+              quantity: current.quantity,
+            },
+          ],
+        });
+      } catch (error) {
+        if (error instanceof InsufficientStockError) {
+          await this.reviewOrder(tx, current, "INSUFFICIENT_STOCK", now, audit);
+          await tx.channelOrder.update({
+            where: { id: order.id },
+            data: { stockError: "INSUFFICIENT_STOCK", updatedAt: now },
+          });
+          await this.audit(
+            tx,
+            { ...audit, requestId: randomUUID() },
+            "CHANNEL_ORDER_STOCK_REVIEW_REQUIRED",
+            "ChannelOrder",
+            order.id,
+            { stockError: "INSUFFICIENT_STOCK", operationKey },
+          );
+          return;
+        }
+        throw error;
+      }
       await tx.channelOrder.update({
         where: { id: order.id },
         data: { stockStatus: "FULFILLED", fulfilledAt: now, stockError: null, updatedAt: now },
@@ -1669,6 +1864,13 @@ export class ChannelOrderService {
     assertUuid(options.locationId, "locationId");
     await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
     await inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+      const target = await tx.channelOrder.findUnique({
+        where: { id: options.orderId },
+        select: { accountId: true },
+      });
+      if (!target) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
+      await this.assertAccountFence(tx, target.accountId);
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
       await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
@@ -1681,6 +1883,20 @@ export class ChannelOrderService {
       }
       if (!["NOT_REQUIRED", "REVIEW_REQUIRED"].includes(order.stockStatus)) {
         throw new ChannelOrderError("CONFLICT", "Reserved stock origins cannot be reassigned.");
+      }
+      if (
+        order.stockError &&
+        [
+          "SKU_DIVERGENCE",
+          "USER_PRODUCT_DIVERGENCE",
+          "LISTING_NOT_MAPPED",
+          "SHIPMENT_LOGISTIC_DIVERGENCE",
+        ].includes(order.stockError)
+      ) {
+        throw new ChannelOrderError(
+          "CONFLICT",
+          "Resolve listing identity or logistics divergence before assigning a stock origin.",
+        );
       }
       if (!order.variantId || !order.offer) {
         throw new ChannelOrderError(
@@ -1764,14 +1980,24 @@ export class ChannelOrderService {
     readonly audit: ChannelAuditContext;
   }): Promise<void> {
     assertUuid(options.orderId, "orderId");
-    if (!Number.isInteger(options.expectedVersion) || options.expectedVersion < 0) {
+    if (
+      !Number.isInteger(options.expectedVersion) ||
+      options.expectedVersion < 0 ||
+      options.expectedVersion > 2_147_483_647
+    ) {
       throw new ChannelOrderError("INVALID_INPUT", "The order version is invalid.");
     }
     const evidenceReference = evidence(options.evidenceReference, "evidenceReference");
     const reasonCode = reason(options.reasonCode);
-    await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
-    await this.actor(this.db, options.audit.actorAdminUserId, "finance:read");
     await inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
+      await this.actor(tx, options.audit.actorAdminUserId, "finance:read");
+      const target = await tx.channelOrder.findUnique({
+        where: { id: options.orderId },
+        select: { accountId: true },
+      });
+      if (!target) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
+      await this.assertAccountFence(tx, target.accountId);
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
       await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
@@ -1829,7 +2055,11 @@ export class ChannelOrderService {
     ) {
       throw new ChannelOrderError("INVALID_INPUT", "The order version is invalid.");
     }
-    if (typeof options.amountCents !== "bigint" || options.amountCents <= 0n) {
+    if (
+      typeof options.amountCents !== "bigint" ||
+      options.amountCents <= 0n ||
+      options.amountCents > 9_223_372_036_854_775_807n
+    ) {
       throw new ChannelOrderError(
         "INVALID_INPUT",
         "The adjustment must use positive BigInt cents.",
@@ -1844,6 +2074,12 @@ export class ChannelOrderService {
     return inInventoryTransaction(this.db, async (tx) => {
       await this.actor(tx, options.audit.actorAdminUserId, "integrations:write");
       await this.actor(tx, options.audit.actorAdminUserId, "finance:read");
+      const target = await tx.channelOrder.findUnique({
+        where: { id: options.orderId },
+        select: { accountId: true },
+      });
+      if (!target) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
+      await this.assertAccountFence(tx, target.accountId);
       await acquireOperationLocks(tx, [`channel-order-id:${options.orderId}`]);
       await tx.$executeRaw`SELECT "id" FROM "ChannelOrder" WHERE "id" = ${options.orderId}::uuid FOR UPDATE`;
       const order = await tx.channelOrder.findUnique({
@@ -1976,6 +2212,7 @@ export class ChannelOrderService {
     audit: ChannelAuditContext,
   ): Promise<void> {
     await inInventoryTransaction(this.db, async (tx) => {
+      await this.actor(tx, audit.actorAdminUserId, "integrations:write");
       await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${snapshot.id}::uuid FOR UPDATE`;
       const account = await tx.channelAccount.findUnique({ where: { id: snapshot.id } });
       if (
@@ -2030,6 +2267,12 @@ export class ChannelOrderService {
       throw new ChannelOrderError("INVALID_INPUT", "The channel event payload must be an object.");
     }
     const value = payload as Prisma.JsonObject;
+    if (Object.keys(value).sort().join(",") !== "accountId,externalId,kind") {
+      throw new ChannelOrderError(
+        "INVALID_INPUT",
+        "The channel event payload must contain only its canonical resource fields.",
+      );
+    }
     if (
       typeof value.accountId !== "string" ||
       !uuidPattern.test(value.accountId) ||
@@ -2068,7 +2311,15 @@ export class ChannelOrderService {
     let retries = 0;
     let failed = 0;
     const failures: { eventId: string; code: string }[] = [];
+    const claimLeaseSafetyMs = 5_000;
     for (const event of events) {
+      if (event.claimExpiresAt) {
+        const pgNow = await this.now(this.db);
+        if (event.claimExpiresAt.getTime() <= pgNow.getTime() + claimLeaseSafetyMs) {
+          failures.push({ eventId: event.id, code: "CLAIM_EXPIRED" });
+          continue;
+        }
+      }
       try {
         const resource = this.resourcePayload(event.payload);
         await this.synchronizeResource({
@@ -2087,7 +2338,7 @@ export class ChannelOrderService {
           error instanceof MercadoLibreCatalogError || error instanceof ChannelOrderError
             ? error.code
             : "CHANNEL_SYNC_UNCERTAIN";
-        const terminal = event.attempts >= 8 || code === "UNAUTHORIZED" || code === "INVALID_INPUT";
+        const terminal = event.attempts >= 8 || code === "INVALID_INPUT";
         if (terminal) {
           const failedNow = await failDomainOutbox(this.db, {
             id: event.id,
@@ -2097,16 +2348,23 @@ export class ChannelOrderService {
           if (failedNow) {
             failed += 1;
             failures.push({ eventId: event.id, code });
+          } else {
+            failures.push({ eventId: event.id, code: "CLAIM_EXPIRED" });
           }
         } else {
-          await retryDomainOutbox(this.db, {
+          const pgNow = await this.now(this.db);
+          const retried = await retryDomainOutbox(this.db, {
             id: event.id,
             workerId,
-            availableAt: new Date(Date.now() + Math.min(300_000, 5_000 * 2 ** event.attempts)),
+            availableAt: new Date(pgNow.getTime() + Math.min(300_000, 5_000 * 2 ** event.attempts)),
             error: code.slice(0, 100),
           });
-          retries += 1;
-          failures.push({ eventId: event.id, code });
+          if (retried) {
+            retries += 1;
+            failures.push({ eventId: event.id, code });
+          } else {
+            failures.push({ eventId: event.id, code: "CLAIM_EXPIRED" });
+          }
         }
       }
     }

@@ -113,13 +113,23 @@ function grossUp(
     throw new ChannelPricingError("MONEY_OVERFLOW", "Channel pricing exceeds signed INT8.");
   }
   let candidate = wholeCopCeil(estimate);
+  if (candidate > maxSignedBigInt) {
+    throw new ChannelPricingError("MONEY_OVERFLOW", "Channel pricing exceeds signed INT8.");
+  }
   if (aboveThreshold) {
     candidate =
       candidate < mercadoLibreCopFreeShippingThresholdCents
         ? mercadoLibreCopFreeShippingThresholdCents
         : candidate;
   } else if (candidate >= mercadoLibreCopFreeShippingThresholdCents) {
-    return candidate;
+    const maxBelow = wholeCopFloor(mercadoLibreCopFreeShippingThresholdCents - 1n);
+    if (netAt(maxBelow, input) < targetNetCents) {
+      return candidate;
+    }
+    candidate = maxBelow;
+  }
+  if (candidate < copCentStep) {
+    candidate = copCentStep;
   }
   while (netAt(candidate, input) < targetNetCents) {
     candidate = add(candidate, copCentStep);
@@ -138,6 +148,15 @@ function grossUp(
 export function mercadoLibreCopDeadZoneEndCents(
   input: Pick<ChannelPricingInput, "commissionBps" | "fixedFeeCents" | "shippingCostCents">,
 ): bigint {
+  if (
+    !Number.isInteger(input.commissionBps) ||
+    input.commissionBps < 0 ||
+    input.commissionBps > 5_000
+  ) {
+    throw new ChannelPricingError("INVALID_INPUT", "commissionBps must be between 0 and 5000.");
+  }
+  money(input.fixedFeeCents, "fixedFeeCents");
+  money(input.shippingCostCents, "shippingCostCents");
   const lastBelowThreshold = wholeCopFloor(mercadoLibreCopFreeShippingThresholdCents - 1n);
   const referenceNet = netAt(lastBelowThreshold, input);
   const candidate = grossUp(referenceNet, input, true);

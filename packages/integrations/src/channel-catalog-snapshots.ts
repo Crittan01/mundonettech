@@ -5,7 +5,11 @@ import {
 } from "@mundonettech/core";
 import { Prisma } from "@mundonettech/db";
 
-import { canonicalIntegrationJson, integrationDigest } from "./integration-utils.js";
+import {
+  canonicalIntegrationJson,
+  integrationDigest,
+  isPrivateOrLocalHostname,
+} from "./integration-utils.js";
 import type { MercadoLibreAttributeInput } from "./mercado-libre-catalog.js";
 
 export const channelVariantInclude = {
@@ -81,9 +85,12 @@ export function channelStockQuantities(variant: ChannelVariantSnapshot): {
 
 function mediaOrigin(value: string, allowLoopback: boolean): string {
   const url = new URL(value);
-  const loopback = allowLoopback && ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+  const host = url.hostname.toLowerCase();
+  const loopback = allowLoopback && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host);
+  const hostBlocked = isPrivateOrLocalHostname(host) && !loopback;
   if (
     (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    hostBlocked ||
     url.username ||
     url.password ||
     url.search ||
@@ -95,10 +102,18 @@ function mediaOrigin(value: string, allowLoopback: boolean): string {
 }
 
 function publicMediaUrl(origin: string, storageKey: string): string {
-  if (!/^[A-Za-z0-9/._-]{1,500}$/.test(storageKey) || storageKey.split("/").includes("..")) {
+  const segments = storageKey.split("/");
+  if (
+    !/^[A-Za-z0-9/._-]{1,500}$/.test(storageKey) ||
+    segments.some((segment) => segment === "" || segment === "." || segment === "..")
+  ) {
     throw new TypeError("The catalog media key is not safe for channel publication.");
   }
-  return `${origin}/${storageKey.split("/").map(encodeURIComponent).join("/")}`;
+  return `${origin}/${segments.map(encodeURIComponent).join("/")}`;
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function measurement(value: number): string {
@@ -163,7 +178,7 @@ export function buildChannelContentSnapshot(options: {
       return (
         leftVariant - rightVariant ||
         left.position - right.position ||
-        left.id.localeCompare(right.id)
+        compareCodePoints(left.id, right.id)
       );
     });
   const pictureSources = [
@@ -171,6 +186,9 @@ export function buildChannelContentSnapshot(options: {
   ].slice(0, 12);
   if (pictureSources.length === 0) {
     throw new TypeError("The variant needs a ready JPEG, PNG or WebP image before publication.");
+  }
+  if (!Number.isInteger(variant.weightGrams) || variant.weightGrams <= 0) {
+    throw new TypeError("Invalid package weight.");
   }
   const attributes: MercadoLibreAttributeInput[] = [
     { id: "ITEM_CONDITION", valueName: "Nuevo" },
@@ -184,11 +202,19 @@ export function buildChannelContentSnapshot(options: {
   ];
   const gtin = resolveCommercialGtin(variant.gtin, variant.ean);
   if (gtin) attributes.push({ id: "GTIN", valueName: gtin });
+  const seenAttributeKeys = new Set(
+    attributes.map((attribute) => attribute.id ?? attribute.name ?? ""),
+  );
   for (const link of [...variant.optionLinks].sort((left, right) =>
-    left.optionDefinition.key.localeCompare(right.optionDefinition.key),
+    compareCodePoints(left.optionDefinition.key, right.optionDefinition.key),
   )) {
+    const optionName = printable(link.optionDefinition.name, "option name", 120);
+    if (seenAttributeKeys.has(optionName)) {
+      throw new TypeError("Duplicate channel attribute name detected in variant options.");
+    }
+    seenAttributeKeys.add(optionName);
     attributes.push({
-      name: printable(link.optionDefinition.name, "option name", 120),
+      name: optionName,
       valueName: printable(link.optionValue.label, "option value", 120),
     });
   }

@@ -89,6 +89,9 @@ export async function POST(request: Request) {
     > | null = null;
     try {
       refresh = await channelAccountService(db).refreshDueAccounts(audit);
+      if (refresh.failures.length > 0) {
+        errors.push({ stage: "refreshDueAccounts", code: "REFRESH_INCOMPLETE" });
+      }
     } catch (error) {
       errors.push({ stage: "refreshDueAccounts", code: stageErrorCode(error) });
     }
@@ -110,15 +113,30 @@ export async function POST(request: Request) {
     let sync: Awaited<
       ReturnType<ReturnType<typeof channelCatalogService>["processSyncJobs"]>
     > | null = null;
-    if (ingestion !== null) {
+    let pendingIngestion = 0;
+    if (ingestion !== null && ingestion.failures.length === 0) {
       try {
-        sync = await channelCatalogService(db).processSyncJobs(
-          { ...audit, requestId: randomUUID() },
-          { limit: 10 },
-        );
+        pendingIngestion = await db.domainOutbox.count({
+          where: {
+            eventType: "channel.resource.sync.requested.v1",
+            processedAt: null,
+            failedAt: null,
+          },
+        });
+        if (pendingIngestion === 0) {
+          sync = await channelCatalogService(db).processSyncJobs(
+            { ...audit, requestId: randomUUID() },
+            { limit: 10 },
+          );
+          if (sync.failures.length > 0) {
+            errors.push({ stage: "processSyncJobs", code: "SYNC_INCOMPLETE" });
+          }
+        }
       } catch (error) {
         errors.push({ stage: "processSyncJobs", code: stageErrorCode(error) });
       }
+    } else if (ingestion !== null) {
+      errors.push({ stage: "processResourceEvents", code: "INGESTION_INCOMPLETE" });
     }
 
     let notificationsSynchronized = false;
@@ -135,13 +153,22 @@ export async function POST(request: Request) {
           ...(refresh ?? {}),
           ...(ingestion ? { ingestion } : {}),
           ...(sync ? { sync } : {}),
+          ...(pendingIngestion > 0 ? { pendingIngestion } : {}),
           notificationsSynchronized,
           errors,
         },
         { status: 500, headers },
       );
     }
-    return Response.json({ ...refresh!, ingestion: ingestion!, sync: sync! }, { headers });
+    return Response.json(
+      {
+        ...refresh!,
+        ingestion: ingestion!,
+        sync,
+        ...(pendingIngestion > 0 ? { pendingIngestion } : {}),
+      },
+      { headers },
+    );
   } catch {
     return Response.json(
       { error: "Channel scheduler execution failed." },

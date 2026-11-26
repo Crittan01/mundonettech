@@ -2,7 +2,9 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { hasAdminPermission, isAdminRole, normalizeEmail } from "@mundonettech/core";
 import {
+  acquireOperationLocks,
   IntegrationEnvironment,
+  isAdminSelfDealingCustomer,
   Prisma,
   PrismaClient,
   type MetaCapiEvent,
@@ -29,6 +31,7 @@ const retryableFailureCodes = new Set([
   "CREDENTIAL_REJECTED",
   "CREDENTIAL_REVOKED",
   "PROVIDER_RATE_LIMITED",
+  "OUTBOX_RETRY_EXHAUSTED",
 ]);
 const terminalStatuses = new Set<MetaCapiEventStatus>(["SENT", "SKIPPED", "FAILED"]);
 
@@ -105,6 +108,10 @@ function hash(value: string): Uint8Array<ArrayBuffer> {
   return createHash("sha256").update(value, "utf8").digest();
 }
 
+function consentUpperBound(eventTime: Date): Date {
+  return new Date(Math.floor(eventTime.getTime()) + 1);
+}
+
 function contentsOf(event: MetaCapiEvent): MetaCapiContent[] {
   if (!Array.isArray(event.contents)) {
     throw new MetaCapiServiceError("VALIDATION", "Meta CAPI contents are invalid.");
@@ -146,6 +153,17 @@ function matchingHashes(customer: { id: string; email: string; phoneE164: string
     emailHash: hash(normalizeEmail(customer.email)),
     phoneHash: customer.phoneE164 ? hash(customer.phoneE164.replace(/\D/g, "")) : null,
   };
+}
+
+function assertOptionalHash(
+  value: Uint8Array | null | undefined,
+  field: string,
+): Uint8Array<ArrayBuffer> | null {
+  if (value === undefined || value === null) return null;
+  if (!(value instanceof Uint8Array) || value.byteLength !== 32) {
+    throw new MetaCapiServiceError("VALIDATION", `${field} must be 32 bytes.`);
+  }
+  return Uint8Array.from(value);
 }
 
 function sameHash(left: Uint8Array, right: Uint8Array): boolean {
@@ -280,6 +298,11 @@ export class MetaCapiService {
       select: { id: true },
     });
     if (existing) return { status: "ALREADY_ENQUEUED", metaEventId: existing.id };
+    const orderPeek = await this.db.order.findUnique({
+      where: { id: input.orderId },
+      select: { customerId: true },
+    });
+    if (!orderPeek?.customerId) return { status: "NOT_ELIGIBLE" };
     const configured = await this.db.integrationCredential.findFirst({
       where: { provider: "meta", environment: this.options.environment, revokedAt: null },
       select: { id: true },
@@ -289,6 +312,8 @@ export class MetaCapiService {
     const metaEventId = randomUUID();
     try {
       return await this.db.$transaction(async (tx) => {
+        await acquireOperationLocks(tx, [`growth-customer:${orderPeek.customerId}`]);
+        await tx.$executeRaw`SELECT "id" FROM "Customer" WHERE "id" = ${orderPeek.customerId}::uuid FOR SHARE`;
         const now = await databaseTimestamp(tx);
         const order = await tx.order.findUnique({
           where: { id: input.orderId },
@@ -306,8 +331,30 @@ export class MetaCapiService {
         ) {
           return { status: "NOT_ELIGIBLE" } as const;
         }
-        if (now.getTime() - input.paidAt.getTime() > 7 * 24 * 3_600_000) {
+        const capture = await tx.paymentTransaction.findFirst({
+          where: {
+            attempt: { orderId: order.id },
+            kind: "CAPTURE",
+            status: "SUCCEEDED",
+            completedAt: { not: null },
+          },
+          select: { completedAt: true },
+          orderBy: [{ completedAt: "desc" }, { id: "desc" }],
+        });
+        const paidAt = capture?.completedAt;
+        if (
+          !paidAt ||
+          paidAt < order.createdAt ||
+          paidAt.getTime() > input.paidAt.getTime() + 300_000
+        ) {
+          return { status: "NOT_ELIGIBLE" } as const;
+        }
+        if (now.getTime() - paidAt.getTime() > 7 * 24 * 3_600_000) {
           return { status: "STALE" } as const;
+        }
+        const contents = aggregatedContents(order.items);
+        if (contents.length === 0 || contents.length > 100) {
+          return { status: "NOT_ELIGIBLE" } as const;
         }
         const consent = await tx.consent.findFirst({
           where: {
@@ -315,7 +362,7 @@ export class MetaCapiService {
             purpose: "ADVERTISING",
             status: "GRANTED",
             revokedBy: null,
-            occurredAt: { lte: input.paidAt },
+            occurredAt: { lt: consentUpperBound(paidAt) },
           },
           orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
         });
@@ -336,10 +383,10 @@ export class MetaCapiService {
           testEventCode: credential.testEventCode,
           purchase: {
             orderId: order.id,
-            eventTime: input.paidAt,
+            eventTime: paidAt,
             eventSourceUrl: `${this.publicSiteUrl}/checkout`,
             valueCents: order.totalCents,
-            contents: aggregatedContents(order.items),
+            contents,
             externalIdHash: hashes.externalIdHash,
             emailHash: hashes.emailHash,
             phoneHash: hashes.phoneHash,
@@ -359,10 +406,10 @@ export class MetaCapiService {
             pixelId: credential.pixelId,
             requestUrl: request.requestUrl,
             testEventCode: credential.testEventCode,
-            eventTime: input.paidAt,
+            eventTime: paidAt,
             eventSourceUrl: `${this.publicSiteUrl}/checkout`,
             valueCents: order.totalCents,
-            contents: aggregatedContents(order.items) as unknown as Prisma.InputJsonValue,
+            contents: contents as unknown as Prisma.InputJsonValue,
             requestHash: request.requestHash,
             ...hashes,
           },
@@ -444,7 +491,7 @@ export class MetaCapiService {
         purpose: "ADVERTISING",
         status: "GRANTED",
         revokedBy: null,
-        occurredAt: { lte: event.eventTime },
+        occurredAt: { lt: consentUpperBound(event.eventTime) },
         customer: { deletedAt: null, status: { in: ["GUEST", "ACTIVE"] } },
       },
       select: { id: true },
@@ -456,55 +503,69 @@ export class MetaCapiService {
     eventId: string,
     claimId: string | null,
     input: {
-      status: "SENT" | "SKIPPED" | "FAILED" | "UNCERTAIN";
+      status: "PENDING" | "SENT" | "SKIPPED" | "FAILED" | "UNCERTAIN";
       failureCode?: string;
       providerTraceId?: string;
+      availableAt?: Date;
     },
-  ): Promise<void> {
-    await this.db.$transaction(async (tx) => {
+  ): Promise<"PENDING" | "SENT" | "SKIPPED" | "FAILED" | "UNCERTAIN"> {
+    return this.db.$transaction(async (tx) => {
       const now = await databaseTimestamp(tx);
+      const rows = await tx.$queryRaw<
+        MetaCapiEvent[]
+      >`SELECT * FROM "MetaCapiEvent" WHERE "id" = ${eventId}::uuid FOR UPDATE`;
+      const current = rows[0];
+      if (!current) throw new MetaCapiServiceError("NOT_FOUND", "Meta CAPI event not found.");
+      if (claimId && (current.status !== "DISPATCHING" || current.claimId !== claimId)) {
+        if (current.status === "SKIPPED" && current.failureCode === "NO_CONSENT") {
+          return "SKIPPED";
+        }
+        throw new MetaCapiServiceError("CONFLICT", "Meta CAPI claim changed before completion.");
+      }
+      let outcome = input;
+      if (
+        outcome.status !== "SKIPPED" &&
+        claimId &&
+        current.requestStartedAt &&
+        current.claimExpiresAt &&
+        current.claimExpiresAt <= now
+      ) {
+        outcome = { status: "UNCERTAIN", failureCode: "CLAIM_EXPIRED" };
+      }
+      if (outcome.status === "PENDING" || outcome.status === "UNCERTAIN") {
+        if (!(await this.hasActiveConsent(tx, current))) {
+          outcome = { status: "SKIPPED", failureCode: "NO_CONSENT", availableAt: now };
+        }
+      }
       const terminal =
-        input.status === "SENT" || input.status === "SKIPPED" || input.status === "FAILED";
-      const current =
-        input.status === "UNCERTAIN"
-          ? await tx.metaCapiEvent.findUnique({
-              where: { id: eventId },
-              select: { consentId: true, customerId: true, eventTime: true },
-            })
-          : null;
-      const purgeHashes =
-        terminal || (current !== null && !(await this.hasActiveConsent(tx, current)));
-      const updated = await tx.metaCapiEvent.updateMany({
-        where: {
-          id: eventId,
-          ...(claimId ? { claimId, status: "DISPATCHING" } : {}),
-        },
+        outcome.status === "SENT" || outcome.status === "SKIPPED" || outcome.status === "FAILED";
+      await tx.metaCapiEvent.update({
+        where: { id: current.id },
         data: {
-          status: input.status,
+          status: outcome.status,
           claimId: null,
           claimedBy: null,
           claimedAt: null,
           claimExpiresAt: null,
-          sentAt: input.status === "SENT" ? now : null,
+          sentAt: outcome.status === "SENT" ? now : null,
           completedAt: terminal ? now : null,
-          providerTraceId: input.providerTraceId ?? null,
-          failureCode: input.failureCode ?? null,
-          ...(purgeHashes ? { externalIdHash: null, emailHash: null, phoneHash: null } : {}),
+          providerTraceId: outcome.providerTraceId ?? null,
+          failureCode: outcome.failureCode ?? null,
+          ...(outcome.availableAt ? { availableAt: outcome.availableAt } : {}),
+          ...(terminal ? { externalIdHash: null, emailHash: null, phoneHash: null } : {}),
         },
       });
-      if (updated.count !== 1) {
-        throw new MetaCapiServiceError("CONFLICT", "Meta CAPI claim changed before completion.");
-      }
-      if (input.status === "FAILED" || input.status === "UNCERTAIN") {
+      if (outcome.status === "FAILED" || outcome.status === "UNCERTAIN") {
         await this.alert(
           tx,
           eventId,
-          input.failureCode ?? "PROVIDER_UNCERTAIN",
-          input.status === "UNCERTAIN",
+          outcome.failureCode ?? "PROVIDER_UNCERTAIN",
+          outcome.status === "UNCERTAIN",
         );
-      } else {
+      } else if (outcome.status === "SENT" || outcome.status === "SKIPPED") {
         await this.resolveAlert(tx, eventId);
       }
+      return outcome.status;
     });
   }
 
@@ -603,7 +664,7 @@ export class MetaCapiService {
             purpose: "ADVERTISING",
             status: "GRANTED",
             revokedBy: null,
-            occurredAt: { lte: event.eventTime },
+            occurredAt: { lt: consentUpperBound(event.eventTime) },
             customer: { deletedAt: null, status: { in: ["GUEST", "ACTIVE"] } },
           },
           select: { id: true },
@@ -676,88 +737,58 @@ export class MetaCapiService {
     }
     const result = await this.client.send(prepared.request, prepared.accessToken);
     if (result.kind === "SENT") {
-      await this.finish(event.id, claimId, {
+      const status = await this.finish(event.id, claimId, {
         status: "SENT",
         providerTraceId: result.providerTraceId,
       });
-      return { status: "SENT" };
+      return { status };
     }
     if (result.kind === "REJECTED") {
-      await this.finish(event.id, claimId, { status: "FAILED", failureCode: result.code });
-      return { status: "FAILED" };
+      const status = await this.finish(event.id, claimId, {
+        status: "FAILED",
+        failureCode: result.code,
+      });
+      return { status };
     }
     if (result.kind === "UNCERTAIN") {
-      await this.finish(event.id, claimId, { status: "UNCERTAIN", failureCode: result.code });
-      return { status: "UNCERTAIN" };
+      const status = await this.finish(event.id, claimId, {
+        status: "UNCERTAIN",
+        failureCode: result.code,
+      });
+      return { status };
     }
     if (event.attempts >= this.maximumAttempts) {
-      await this.finish(event.id, claimId, {
+      const status = await this.finish(event.id, claimId, {
         status: "FAILED",
         failureCode: "PROVIDER_RATE_LIMITED",
       });
-      return { status: "FAILED" };
+      return { status };
     }
-    const scheduled = await this.db.$transaction(async (tx): Promise<MetaCapiDispatchResult> => {
-      const now = await databaseTimestamp(tx);
-      const activeConsent = await this.hasActiveConsent(tx, event);
-      if (!activeConsent) {
-        const skipped = await tx.metaCapiEvent.updateMany({
-          where: { id: event.id, claimId, status: "DISPATCHING" },
-          data: {
-            status: "SKIPPED",
-            availableAt: now,
-            completedAt: now,
-            claimId: null,
-            claimedBy: null,
-            claimedAt: null,
-            claimExpiresAt: null,
-            failureCode: "NO_CONSENT",
-            externalIdHash: null,
-            emailHash: null,
-            phoneHash: null,
-          },
-        });
-        if (skipped.count !== 1) {
-          throw new MetaCapiServiceError(
-            "CONFLICT",
-            "Meta CAPI claim changed before consent cancellation.",
-          );
-        }
-        await this.resolveAlert(tx, event.id);
-        return { status: "SKIPPED" };
-      }
-      const availableAt = new Date(now.getTime() + result.retryAfterSeconds * 1000);
-      const updated = await tx.metaCapiEvent.updateMany({
-        where: { id: event.id, claimId, status: "DISPATCHING" },
-        data: {
-          status: "PENDING",
-          availableAt,
-          claimId: null,
-          claimedBy: null,
-          claimedAt: null,
-          claimExpiresAt: null,
-          failureCode: "PROVIDER_RATE_LIMITED",
-        },
-      });
-      if (updated.count !== 1) {
-        throw new MetaCapiServiceError(
-          "CONFLICT",
-          "Meta CAPI claim changed before retry scheduling.",
-        );
-      }
-      return { status: "PENDING", nextAttemptAt: availableAt };
+    const now = await databaseTimestamp(this.db);
+    const availableAt = new Date(now.getTime() + result.retryAfterSeconds * 1000);
+    const status = await this.finish(event.id, claimId, {
+      status: "PENDING",
+      availableAt,
+      failureCode: "PROVIDER_RATE_LIMITED",
     });
-    return scheduled;
+    return { status, ...(status === "PENDING" ? { nextAttemptAt: availableAt } : {}) };
   }
 
   async recordFeedRefresh(audit: MetaCapiAudit): Promise<void> {
     assertIntegrationUuid(audit.actorAdminUserId, "actorAdminUserId");
     if (audit.requestId !== undefined) assertIntegrationUuid(audit.requestId, "requestId");
+    const ipHash = assertOptionalHash(audit.ipHash, "ipHash");
+    const userAgentHash = assertOptionalHash(audit.userAgentHash, "userAgentHash");
     await this.db.$transaction(async (tx) => {
-      const actor = await tx.adminUser.findFirst({
-        where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-        select: { id: true, role: true },
-      });
+      const actorRows = await tx.$queryRaw<Array<{ id: string; role: string }>>`
+        SELECT "id", "role"::text AS "role"
+        FROM "AdminUser"
+        WHERE "id" = ${audit.actorAdminUserId}::uuid
+          AND "status" = 'ACTIVE'
+          AND "deletedAt" IS NULL
+        FOR SHARE
+      `;
+      const actor = actorRows[0];
       if (
         !actor ||
         !isAdminRole(actor.role) ||
@@ -775,8 +806,8 @@ export class MetaCapiService {
           targetType: "MetaCatalogFeed",
           targetId: this.options.environment,
           requestId: audit.requestId ?? null,
-          ipHash: audit.ipHash ? Buffer.from(audit.ipHash) : null,
-          userAgentHash: audit.userAgentHash ? Buffer.from(audit.userAgentHash) : null,
+          ipHash,
+          userAgentHash,
           metadata: { environment: this.options.environment },
         },
       });
@@ -840,9 +871,20 @@ export class MetaCapiService {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}$/.test(input.reference)) {
       throw new MetaCapiServiceError("VALIDATION", "Reconciliation reference is invalid.");
     }
+    const ipHash = assertOptionalHash(input.audit.ipHash, "ipHash");
+    const userAgentHash = assertOptionalHash(input.audit.userAgentHash, "userAgentHash");
+    const peekEvent =
+      input.resolution === "RETRY"
+        ? await this.db.metaCapiEvent.findUnique({
+            where: { id: input.metaEventId },
+            select: { customerId: true },
+          })
+        : null;
     return this.db.$transaction(async (tx) => {
-      const actorRows = await tx.$queryRaw<Array<{ id: string; role: string }>>`
-        SELECT "id", "role"::text AS "role"
+      const actorRows = await tx.$queryRaw<
+        Array<{ id: string; role: string; email: string; authUserId: string }>
+      >`
+        SELECT "id", "role"::text AS "role", "email", "authUserId"
         FROM "AdminUser"
         WHERE "id" = ${input.audit.actorAdminUserId}::uuid
           AND "status" = 'ACTIVE'
@@ -859,6 +901,10 @@ export class MetaCapiService {
           "UNAUTHORIZED",
           "Active integrations administrator required.",
         );
+      }
+      if (peekEvent?.customerId) {
+        await acquireOperationLocks(tx, [`growth-customer:${peekEvent.customerId}`]);
+        await tx.$executeRaw`SELECT "id" FROM "Customer" WHERE "id" = ${peekEvent.customerId}::uuid FOR SHARE`;
       }
       const rows = await tx.$queryRaw<Array<MetaCapiEvent & { order: { orderNumber: string } }>>`
         SELECT * FROM "MetaCapiEvent" WHERE "id" = ${input.metaEventId}::uuid FOR UPDATE
@@ -983,7 +1029,7 @@ export class MetaCapiService {
             purpose: "ADVERTISING",
             status: "GRANTED",
             revokedBy: null,
-            occurredAt: { lte: event.eventTime },
+            occurredAt: { lt: consentUpperBound(event.eventTime) },
           },
           select: { id: true },
         });
@@ -1032,6 +1078,7 @@ export class MetaCapiService {
           data: {
             credentialId: activeCredentialRow.id,
             status: "PENDING",
+            attempts: 0,
             availableAt: now,
             completedAt: null,
             failureCode: null,
@@ -1046,6 +1093,7 @@ export class MetaCapiService {
             claimExpiresAt: null,
           },
         });
+        await this.resolveAlert(tx, event.id);
         await tx.domainOutbox.create({
           data: {
             eventType: "meta.capi.dispatch.v1",
@@ -1056,6 +1104,9 @@ export class MetaCapiService {
           },
         });
       }
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: event.customerId,
+      });
       await tx.adminActionLog.create({
         data: {
           actorAdminUserId: actor.id,
@@ -1067,13 +1118,16 @@ export class MetaCapiService {
                 : "META_CAPI_RETRY_RECONCILED",
           targetType: "MetaCapiEvent",
           targetId: event.id,
+          selfDealing,
           requestId: input.audit.requestId ?? null,
-          ipHash: input.audit.ipHash ? Buffer.from(input.audit.ipHash) : null,
-          userAgentHash: input.audit.userAgentHash ? Buffer.from(input.audit.userAgentHash) : null,
+          ipHash,
+          userAgentHash,
           metadata: {
             resolution: input.resolution,
             reference: input.reference,
             eventName: event.eventName,
+            eventId: event.eventId,
+            requestHash: Buffer.from(event.requestHash).toString("hex"),
             previousStatus: event.status,
             version: input.resolution === "RETRY" ? event.version + 1 : event.version,
           },
@@ -1085,73 +1139,5 @@ export class MetaCapiService {
       });
       return view(saved);
     });
-  }
-
-  async cancelPendingForConsentRevocation(tx: Db, customerId: string): Promise<number> {
-    assertIntegrationUuid(customerId, "customerId");
-    const now = await databaseTimestamp(tx);
-    const revocationCondition: Prisma.MetaCapiEventWhereInput = {
-      OR: [
-        { consent: { status: "REVOKED" } },
-        { consent: { revokedBy: { isNot: null } } },
-        { customer: { status: "ANONYMIZED" } },
-        { customer: { deletedAt: { not: null } } },
-      ],
-    };
-    const pendingRows = await tx.metaCapiEvent.findMany({
-      where: {
-        customerId,
-        status: "PENDING",
-        ...revocationCondition,
-      },
-      select: { id: true },
-    });
-    const result = await tx.metaCapiEvent.updateMany({
-      where: {
-        customerId,
-        status: "PENDING",
-        ...revocationCondition,
-      },
-      data: {
-        status: "SKIPPED",
-        completedAt: now,
-        failureCode: "NO_CONSENT",
-        externalIdHash: null,
-        emailHash: null,
-        phoneHash: null,
-        availableAt: now,
-      },
-    });
-    await tx.metaCapiEvent.updateMany({
-      where: {
-        customerId,
-        status: "UNCERTAIN",
-        AND: [
-          revocationCondition,
-          {
-            OR: [
-              { externalIdHash: { not: null } },
-              { emailHash: { not: null } },
-              { phoneHash: { not: null } },
-            ],
-          },
-        ],
-      },
-      data: {
-        externalIdHash: null,
-        emailHash: null,
-        phoneHash: null,
-      },
-    });
-    if (pendingRows.length > 0) {
-      await tx.notification.updateMany({
-        where: {
-          deduplicationKey: { in: pendingRows.map((row) => `meta-capi:${row.id}:review`) },
-          resolvedAt: null,
-        },
-        data: { resolvedAt: now },
-      });
-    }
-    return result.count;
   }
 }

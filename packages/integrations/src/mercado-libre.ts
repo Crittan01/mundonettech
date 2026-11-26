@@ -310,10 +310,20 @@ function tokenSetFromJson(value: Record<string, unknown>): MercadoLibreTokenSet 
 }
 
 function redirectUri(value: string): string {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new MercadoLibreProviderError(
+      "INVALID_INPUT",
+      null,
+      "The OAuth redirect URI must be the fixed callback and use HTTPS outside loopback.",
+    );
+  }
   const loopback = loopbackHosts.has(url.hostname.toLowerCase());
   if (
     (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    url.pathname !== mercadoLibreCallbackPath ||
     url.username ||
     url.password ||
     url.search ||
@@ -322,18 +332,28 @@ function redirectUri(value: string): string {
     throw new MercadoLibreProviderError(
       "INVALID_INPUT",
       null,
-      "The OAuth redirect URI must be fixed and use HTTPS outside loopback.",
+      "The OAuth redirect URI must be the fixed callback and use HTTPS outside loopback.",
     );
   }
   return url.toString();
 }
 
 function tokenEndpoint(value: string, allowLoopback: boolean): string {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new MercadoLibreProviderError(
+      "INVALID_INPUT",
+      null,
+      "The Mercado Libre token endpoint is not allowed.",
+    );
+  }
   const official =
     url.protocol === "https:" &&
     url.hostname === "api.mercadolibre.com" &&
     url.pathname === "/oauth/token" &&
+    !url.port &&
     !url.username &&
     !url.password &&
     !url.search &&
@@ -342,6 +362,7 @@ function tokenEndpoint(value: string, allowLoopback: boolean): string {
     allowLoopback &&
     loopbackHosts.has(url.hostname.toLowerCase()) &&
     ["http:", "https:"].includes(url.protocol) &&
+    url.pathname === "/oauth/token" &&
     !url.username &&
     !url.password &&
     !url.search &&
@@ -531,6 +552,13 @@ export class MercadoLibreOAuthClient {
         "INVALID_RESPONSE",
         null,
         "Mercado Libre returned a token for a different seller.",
+      );
+    }
+    if (token.refreshToken === credential.refreshToken) {
+      throw new MercadoLibreProviderError(
+        "INVALID_RESPONSE",
+        null,
+        "Mercado Libre did not rotate the single-use refresh token.",
       );
     }
     return { ...token, clientId: credential.clientId, clientSecret: credential.clientSecret };

@@ -2,12 +2,18 @@
 
 import { randomUUID } from "node:crypto";
 
-import { ChannelAccountError } from "@mundonettech/integrations";
+import { ChannelAccountError, MercadoLibreProviderError } from "@mundonettech/integrations";
 import { revalidatePath } from "next/cache";
 import { cookies } from "next/headers";
 import { z } from "zod";
 
-import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
+import {
+  actionError,
+  actionSuccess,
+  closedFormObject,
+  formString,
+  type ActionState,
+} from "@/lib/action-state";
 import { channelAccountService, mercadoLibreOAuthRedirectUri } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
@@ -18,6 +24,10 @@ import {
 } from "@/lib/security/session-policy";
 
 export type ChannelActionState = ActionState & { authorizationUrl?: string };
+
+const connectionFields = ["accountId", "label", "clientId", "clientSecret"] as const;
+const accountFields = ["accountId"] as const;
+const disconnectFields = ["accountId", "confirmation"] as const;
 
 const connectionSchema = z.object({
   accountId: z.union([z.literal(""), z.string().uuid()]),
@@ -31,7 +41,7 @@ const connectionSchema = z.object({
     .string()
     .trim()
     .regex(/^[0-9]{5,64}$/),
-  clientSecret: z.string().min(8).max(255),
+  clientSecret: z.string().regex(/^[^\s\u0000-\u001f\u007f]{8,255}$/),
 });
 
 function publicValues(formData: FormData): Record<string, string> {
@@ -43,11 +53,17 @@ function publicValues(formData: FormData): Record<string, string> {
   };
 }
 
-async function authorize() {
+async function authorize(formData: FormData, allowedFields: readonly string[]) {
   const session = await getAdminSession({
     permission: "integrations:write",
     requireRecentMfa: true,
   });
+  if (!closedFormObject(formData, allowedFields)) {
+    throw new ChannelAccountError(
+      "INVALID_INPUT",
+      "Channel form fields must be known, unique strings.",
+    );
+  }
   const context = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
@@ -96,6 +112,18 @@ function failure(error: unknown, values?: Record<string, string>): ActionState {
       return actionError("Revisa los datos de la cuenta y la aplicación de Mercado Libre.", values);
     }
   }
+  if (error instanceof MercadoLibreProviderError) {
+    if (error.code === "INVALID_CREDENTIALS") {
+      return actionError(
+        "Mercado Libre invalidó la autorización. Reconecta la cuenta con el vendedor principal.",
+        values,
+      );
+    }
+    return actionError(
+      "Mercado Libre no confirmó la operación en este momento. Inténtalo de nuevo.",
+      values,
+    );
+  }
   if (error instanceof z.ZodError) {
     return actionError("Revisa el identificador de la cuenta de canal.", values);
   }
@@ -108,7 +136,7 @@ export async function startMercadoLibreConnectionAction(
 ): Promise<ChannelActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, connectionFields);
     const parsed = connectionSchema.safeParse({
       accountId: formString(formData, "accountId"),
       label: formString(formData, "label"),
@@ -151,7 +179,7 @@ export async function refreshChannelAccountAction(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, accountFields);
     const accountId = z.string().uuid().parse(formString(formData, "accountId"));
     const result = await channelAccountService().refreshAccount(accountId, audit, { force: true });
     revalidatePath("/admin/canales");
@@ -170,7 +198,7 @@ export async function disconnectChannelAccountAction(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, disconnectFields);
     const accountId = z.string().uuid().parse(formString(formData, "accountId"));
     if (formString(formData, "confirmation") !== "DESVINCULAR") {
       return actionError("Escribe DESVINCULAR para confirmar la desconexión.");

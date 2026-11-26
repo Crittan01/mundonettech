@@ -110,7 +110,7 @@ describe("A2 public funnel metrics", () => {
     }
   });
 
-  it("enforces the real streamed size even when Content-Length lies", async () => {
+  it("enforces the real streamed size even when Content-Length lies or is omitted", async () => {
     const current = createFunnelRoute();
     const response = await current.route.POST(
       metricRequest("x".repeat(16_385), { "content-length": "2" }),
@@ -118,6 +118,22 @@ describe("A2 public funnel metrics", () => {
     expect(response.status).toBe(413);
     expect(current.getRequestSecurityContext).toHaveBeenCalledOnce();
     expect(current.recordPublicBatch).not.toHaveBeenCalled();
+
+    const chunked = createFunnelRoute();
+    const noLengthRequest = requestWithJson(endpoint, validBody, {
+      origin: "https://shop.example.test",
+      host: "shop.example.test",
+    });
+    expect((await chunked.route.POST(noLengthRequest)).status).toBe(202);
+    expect(chunked.recordPublicBatch).toHaveBeenCalledOnce();
+
+    const oversizedChunked = createFunnelRoute();
+    const oversizedNoLength = requestWithJson(endpoint, "x".repeat(16_385), {
+      origin: "https://shop.example.test",
+      host: "shop.example.test",
+    });
+    expect((await oversizedChunked.route.POST(oversizedNoLength)).status).toBe(413);
+    expect(oversizedChunked.recordPublicBatch).not.toHaveBeenCalled();
   });
 
   it("fails closed when a verified IP hash is unavailable instead of sharing an unverified anonymous bucket", async () => {
@@ -194,7 +210,7 @@ describe("A2 public funnel metrics", () => {
 
   it("returns a generic persistence error without leaking database or counter details", async () => {
     const current = createFunnelRoute();
-    current.recordPublicBatch.mockRejectedValue(new Error("raw SQL customer@example.test"));
+    current.recordPublicBatch.mockRejectedValue(new TypeError("raw SQL customer@example.test"));
     const response = await current.route.POST(metricRequest());
     expect(response.status).toBe(500);
     expect(await responseBody(response)).toEqual({ error: "Metrics could not be recorded." });

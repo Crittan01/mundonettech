@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   MercadoLibreOAuthClient,
@@ -343,5 +343,64 @@ describe("F6.1 — Mercado Libre HTTP OAuth provider", () => {
           allowLoopback: true,
         }),
     ).not.toThrow();
+  });
+});
+
+describe("A8 — fail-closed OAuth callback and refresh rotation", () => {
+  it("accepts only the exact MCO callback path and canonical URL", () => {
+    const pkce = createMercadoLibrePkce();
+    for (const invalid of [
+      "not-a-url",
+      "https://shop.example.test/callback",
+      "https://shop.example.test/api/channels/mercado-libre/oauth/callback/",
+      "https://shop.example.test/api/channels/mercado-libre/oauth/callback?code=injected",
+    ]) {
+      expect(() =>
+        createMercadoLibreAuthorizationUrl({
+          clientId: client.clientId,
+          redirectUri: invalid,
+          state: pkce.state,
+          codeChallenge: pkce.codeChallenge,
+        }),
+      ).toThrow(MercadoLibreProviderError);
+    }
+    expect(() =>
+      createMercadoLibreAuthorizationUrl({
+        clientId: client.clientId,
+        redirectUri,
+        state: pkce.state,
+        codeChallenge: pkce.codeChallenge,
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects a successful refresh response that reuses the single-use refresh token", async () => {
+    const oauth = new MercadoLibreOAuthClient({
+      fetchImpl: async () =>
+        jsonResponse(tokenResponse({ refresh_token: tokenCredential.refreshToken })),
+    });
+    await expect(oauth.refresh(tokenCredential)).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
+  it("rejects non-default ports and non-canonical fixture paths before network access", async () => {
+    const fetchImpl = vi.fn();
+    expect(
+      () =>
+        new MercadoLibreOAuthClient({
+          tokenUrl: "https://api.mercadolibre.com:444/oauth/token",
+          fetchImpl,
+        }),
+    ).toThrow(MercadoLibreProviderError);
+    expect(
+      () =>
+        new MercadoLibreOAuthClient({
+          tokenUrl: "http://127.0.0.1:54420/another-path",
+          allowLoopback: true,
+          fetchImpl,
+        }),
+    ).toThrow(MercadoLibreProviderError);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

@@ -370,6 +370,7 @@ export async function updateCatalogProductAction(
     const context = await getRequestSecurityContext();
     const updated = await new CatalogService(getDatabase()).updateProduct(productId, product, {
       actorAdminUserId: session.profile.id,
+      requestId: randomUUID(),
       ipHash: context.ipHash,
       userAgentHash: context.userAgentHash,
     });
@@ -400,6 +401,7 @@ export async function upsertCatalogVariantAction(
     const context = await getRequestSecurityContext();
     const saved = await new CatalogService(getDatabase()).upsertVariant(productId, variant, {
       actorAdminUserId: session.profile.id,
+      requestId: randomUUID(),
       ipHash: context.ipHash,
       userAgentHash: context.userAgentHash,
     });
@@ -440,6 +442,7 @@ export async function upsertCatalogAttributeAction(
       },
       {
         actorAdminUserId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
       },
@@ -472,6 +475,7 @@ export async function removeCatalogAttributeAction(
       attributeValueId,
       {
         actorAdminUserId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
       },
@@ -517,6 +521,7 @@ export async function upsertCatalogCompatibilityAction(
       },
       {
         actorAdminUserId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
       },
@@ -549,6 +554,7 @@ export async function removeCatalogCompatibilityAction(
       compatibilityId,
       {
         actorAdminUserId: session.profile.id,
+        requestId: randomUUID(),
         ipHash: context.ipHash,
         userAgentHash: context.userAgentHash,
       },
@@ -571,6 +577,7 @@ async function authorizeMediaMutation(): Promise<{
 function mediaAudit(session: AdminSession, request: RequestSecurityContext): ProductMediaAudit {
   return {
     actorAdminUserId: session.profile.id,
+    requestId: randomUUID(),
     ipHash: request.ipHash,
     userAgentHash: request.userAgentHash,
   };

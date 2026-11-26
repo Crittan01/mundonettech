@@ -376,6 +376,24 @@ test("Admin product mutations refresh PLP, PDP, JSON-LD, feeds and sitemap acros
   expect(renamedSitemapXml).toContain(`/producto/${renamedSlug}`);
   expect(renamedSitemapXml).not.toContain(`/producto/${initialSlug}<`);
 
+  const merchantWithoutMedia = await page.request.get("/api/feeds/google-merchant");
+  expect(merchantWithoutMedia.status()).toBe(200);
+  expect(await merchantWithoutMedia.text()).not.toContain(`/producto/${renamedSlug}?variant=`);
+
+  await db.productMedia.create({
+    data: {
+      productId,
+      mediaType: "IMAGE",
+      status: "READY",
+      position: 0,
+      storageKey: `e2e/storefront/${runSuffix}/product.webp`,
+      mimeType: "image/webp",
+      altText: "Imagen principal del espejo E2E",
+      width: 1200,
+      height: 1200,
+    },
+  });
+
   await page.goto(`/admin/catalogo/${productId}`);
   const editVariant = page.locator("form").filter({
     has: page.getByRole("button", { name: "Guardar variante", exact: true }),
@@ -396,6 +414,7 @@ test("Admin product mutations refresh PLP, PDP, JSON-LD, feeds and sitemap acros
   const merchantXml = await merchant.text();
   expect(merchantXml).toContain(`<g:price>${decimalCop(updatedPriceCents)} COP</g:price>`);
   expect(merchantXml).toContain(`/producto/${renamedSlug}?variant=`);
+  expect(merchantXml).toContain("<g:image_link>");
   expect(merchantXml).not.toContain(`<g:price>${decimalCop(initialPriceCents)} COP</g:price>`);
   expect(
     await db.adminActionLog.count({

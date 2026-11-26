@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountError, AccountService } from "../../packages/db/src/account-service";
+import { cancelPendingMetaCapiForCustomerInTransaction } from "../../packages/db/src/meta-capi";
 
 const customerId = randomUUID();
 const initialUpdatedAt = new Date("2026-11-24T11:00:00.000Z");
@@ -45,14 +46,15 @@ function harness(options: { marketingGranted?: boolean; advertisingGranted?: boo
       if (sql.includes('FROM "CustomerSegmentMembership"')) return [];
       if (sql.includes('FROM "LifecycleEnrollment"')) return [];
       if (sql.includes('FROM "LifecycleMessage"')) return [];
+      if (sql.includes('FROM "MetaCapiEvent"')) return [];
       if (sql.includes("CURRENT_TIMESTAMP")) return [{ now }];
       throw new TypeError(`Unexpected query: ${sql}`);
     }),
     customer: { update: customerUpdate },
     consent: {
-      findFirst: vi.fn(async ({ where }: { where: { purpose: string } }) => {
+      findMany: vi.fn(async ({ where }: { where: { purpose: string } }) => {
         const granted = where.purpose === "MARKETING_EMAIL" ? marketingGranted : advertisingGranted;
-        return granted ? { id: randomUUID() } : null;
+        return granted ? [{ id: randomUUID() }] : [];
       }),
       create: consentCreate,
     },
@@ -235,6 +237,63 @@ describe("A6 — cursor de pedidos y obligaciones de anonimización", () => {
     expect(transaction.paymentTransactionFindFirst).toHaveBeenCalledWith({
       where: { attempt: { order: { customerId } }, status: { in: ["PENDING", "PROCESSING"] } },
       select: { id: true },
+    });
+  });
+});
+
+describe("A8 — cancelación Meta por privacidad", () => {
+  it("bloquea con FOR UPDATE y purga PENDING, DISPATCHING, UNCERTAIN y FAILED sin tocar terminales", async () => {
+    const rows = [
+      { id: randomUUID() },
+      { id: randomUUID() },
+      { id: randomUUID() },
+      { id: randomUUID() },
+    ];
+    let lockedSql = "";
+    const queryRaw = vi.fn(async (strings: TemplateStringsArray) => {
+      lockedSql = strings.join("?");
+      return rows;
+    });
+    const updateMany = vi.fn(async () => ({ count: rows.length }));
+    const resolveAlerts = vi.fn(async () => ({ count: rows.length }));
+    const tx = {
+      $queryRaw: queryRaw,
+      metaCapiEvent: { updateMany },
+      notification: { updateMany: resolveAlerts },
+    };
+
+    const count = await cancelPendingMetaCapiForCustomerInTransaction(tx as never, customerId, now);
+
+    expect(count).toBe(4);
+    expect(lockedSql).toContain("FOR UPDATE");
+    expect(lockedSql).toContain("'PENDING', 'DISPATCHING', 'UNCERTAIN', 'FAILED'");
+    expect(lockedSql).not.toContain("'SENT'");
+    expect(lockedSql).not.toContain("'SKIPPED'");
+    expect(updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: rows.map((row) => row.id) },
+      },
+      data: {
+        status: "SKIPPED",
+        completedAt: now,
+        failureCode: "NO_CONSENT",
+        externalIdHash: null,
+        emailHash: null,
+        phoneHash: null,
+        availableAt: now,
+        claimId: null,
+        claimedBy: null,
+        claimedAt: null,
+        claimExpiresAt: null,
+        requestStartedAt: null,
+      },
+    });
+    expect(resolveAlerts).toHaveBeenCalledWith({
+      where: {
+        deduplicationKey: { in: rows.map((row) => `meta-capi:${row.id}:review`) },
+        resolvedAt: null,
+      },
+      data: { resolvedAt: now },
     });
   });
 });

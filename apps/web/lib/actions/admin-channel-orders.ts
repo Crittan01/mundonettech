@@ -2,13 +2,19 @@
 
 import { randomUUID } from "node:crypto";
 
-import { hasAdminPermission, parseWholeCopToCents } from "@mundonettech/core";
+import { hasAdminPermission, parseDecimalCopToCents } from "@mundonettech/core";
 import { ChannelLedgerDirection, OperationsService } from "@mundonettech/db";
-import { ChannelOrderError } from "@mundonettech/integrations";
+import { ChannelOrderError, MercadoLibreCatalogError } from "@mundonettech/integrations";
 import { revalidatePath, updateTag } from "next/cache";
 import { z } from "zod";
 
-import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
+import {
+  actionError,
+  actionSuccess,
+  closedFormObject,
+  formString,
+  type ActionState,
+} from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
 import { channelOrderService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
@@ -21,7 +27,7 @@ const reasonSchema = z.enum([
   "PROVIDER_CORRECTION",
   "FINANCE_MANUAL_REVIEW",
 ]);
-const amountSchema = z.string().regex(/^[0-9]{1,15}$/);
+const amountSchema = z.string().regex(/^[0-9]{1,15}(?:[.,][0-9]{1,2})?$/);
 const versionSchema = z
   .string()
   .regex(/^[0-9]{1,10}$/)
@@ -45,13 +51,23 @@ function publicValues(formData: FormData): Record<string, string> {
   return values;
 }
 
-async function authorize(options: { readonly requireFinanceRead?: boolean } = {}) {
+async function authorize(
+  formData: FormData,
+  allowedFields: readonly string[],
+  options: { readonly requireFinanceRead?: boolean } = {},
+) {
   const session = await getAdminSession({
     permission: "integrations:write",
     requireRecentMfa: true,
   });
   if (options.requireFinanceRead && !hasAdminPermission(session.profile.role, "finance:read")) {
     throw new AdminAuthorizationError("FORBIDDEN");
+  }
+  if (!closedFormObject(formData, allowedFields)) {
+    throw new ChannelOrderError(
+      "INVALID_INPUT",
+      "Channel order form fields must be known, unique strings.",
+    );
   }
   const context = await getRequestSecurityContext();
   return {
@@ -63,7 +79,11 @@ async function authorize(options: { readonly requireFinanceRead?: boolean } = {}
 }
 
 async function refreshChannelSurfaces(): Promise<void> {
-  await new OperationsService(getDatabase()).synchronizeNotifications();
+  try {
+    await new OperationsService(getDatabase()).synchronizeNotifications();
+  } catch {
+    // Notification synchronization runs best-effort after the order mutation has committed.
+  }
   revalidatePath("/admin/canales");
   revalidatePath("/admin/hoy");
 }
@@ -88,6 +108,18 @@ function failure(error: unknown, values?: Record<string, string>): ActionState {
     };
     return actionError(messages[error.code] ?? "No pudimos operar el pedido del canal.", values);
   }
+  if (error instanceof MercadoLibreCatalogError) {
+    const messages: Partial<Record<MercadoLibreCatalogError["code"], string>> = {
+      UNAUTHORIZED: "Mercado Libre rechazó el token. Reconecta la cuenta antes de sincronizar.",
+      NOT_FOUND: "El recurso ya no está disponible en Mercado Libre.",
+      PROVIDER_REJECTED: "Mercado Libre rechazó la consulta en este momento.",
+      PROVIDER_UNCERTAIN: "Mercado Libre no respondió de forma estable. Inténtalo de nuevo.",
+    };
+    return actionError(
+      messages[error.code] ?? "No pudimos consultar el recurso en Mercado Libre.",
+      values,
+    );
+  }
   if (error instanceof z.ZodError || error instanceof TypeError || error instanceof RangeError) {
     return actionError("Revisa los datos ingresados antes de continuar.", values);
   }
@@ -99,7 +131,7 @@ export async function synchronizeChannelOrderAction(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["orderId"]);
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const result = await channelOrderService().synchronizeOrder(orderId, audit);
     updateTag("catalog:inventory");
@@ -119,7 +151,7 @@ export async function retryChannelOrderStockAction(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["orderId"]);
     const orderId = idSchema.parse(formString(formData, "orderId"));
     await channelOrderService().retryStock(orderId, audit);
     updateTag("catalog:inventory");
@@ -136,7 +168,7 @@ export async function assignChannelOrderStockAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, ["orderId", "locationId"]);
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const locationId = idSchema.parse(formString(formData, "locationId"));
     await channelOrderService().assignStockLocation({ orderId, locationId, audit });
@@ -154,7 +186,11 @@ export async function reconcileChannelOrderAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize({ requireFinanceRead: true });
+    const audit = await authorize(
+      formData,
+      ["orderId", "version", "evidenceReference", "reasonCode"],
+      { requireFinanceRead: true },
+    );
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const expectedVersion = versionSchema.parse(formString(formData, "version"));
     const evidenceReference = evidenceSchema.parse(formString(formData, "evidenceReference"));
@@ -179,7 +215,19 @@ export async function adjustChannelOrderLedgerAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize({ requireFinanceRead: true });
+    const audit = await authorize(
+      formData,
+      [
+        "orderId",
+        "version",
+        "idempotencyKey",
+        "amountCop",
+        "direction",
+        "evidenceReference",
+        "reasonCode",
+      ],
+      { requireFinanceRead: true },
+    );
     const orderId = idSchema.parse(formString(formData, "orderId"));
     const expectedVersion = versionSchema.parse(formString(formData, "version"));
     const idempotencyKey = idSchema.parse(formString(formData, "idempotencyKey"));
@@ -191,7 +239,7 @@ export async function adjustChannelOrderLedgerAction(
       orderId,
       expectedVersion,
       idempotencyKey,
-      amountCents: BigInt(parseWholeCopToCents(amountCop)),
+      amountCents: BigInt(parseDecimalCopToCents(amountCop)),
       direction,
       evidenceReference,
       reasonCode,

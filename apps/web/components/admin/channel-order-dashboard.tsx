@@ -43,6 +43,11 @@ const shipmentStatusLabels = {
   NOT_DELIVERED: "No entregado",
   CANCELLED: "Cancelado",
 } as const;
+const shipmentLogisticLabels = {
+  ME2: "Mercado Envíos 2",
+  FLEX: "Mercado Envíos Flex",
+  FULL: "Mercado Envíos Full",
+} as const;
 const ledgerTypeLabels = {
   SALE_EXPECTED: "Venta esperada",
   PAYMENT_CAPTURE: "Captura",
@@ -64,9 +69,16 @@ const stockErrorLabels: Record<string, string> = {
   STOCK_ORIGIN_AMBIGUOUS: "Hay varias bodegas posibles; un operador debe elegir el origen real.",
   STOCK_MAPPING_REQUIRED: "La asignación de variante y bodega está incompleta.",
   STOCK_ORIGIN_INVALID: "La bodega asignada ya no es válida para la logística de la orden.",
-  INSUFFICIENT_STOCK: "No hay disponibilidad suficiente; no se reservó ni descontó inventario.",
+  SHIPMENT_LOGISTIC_DIVERGENCE: "La logística del envío no coincide con la oferta vendida.",
+  INSUFFICIENT_STOCK:
+    "No hay disponibilidad suficiente; no se descontó inventario y la orden quedó en revisión.",
 };
 const reconciliationReasonLabels: Record<string, string> = {
+  PACK_ORDER_STATE_DIVERGENCE: "El pack cancelado contiene una orden con otro estado",
+  PAID_TOTAL_DIVERGENCE: "El importe pagado no coincide con el bruto de la orden",
+  PAYMENT_CHARGEBACK_REVIEW: "Existe un contracargo sin reembolso completo registrado",
+  PAYMENT_MEDIATION_REVIEW: "Existe un pago en mediación pendiente de resolución",
+  INSUFFICIENT_STOCK: "No fue posible completar el descuento de inventario por falta de stock",
   PAYMENT_TOTAL_DIVERGENCE: "Diferencia entre importe pagado y capturas aprobadas",
   FEE_TOTAL_DIVERGENCE: "Diferencia entre comisión esperada y comisión aplicada",
   PAYMENT_STATE_DIVERGENCE: "Pedido pagado sin saldo neto capturado",
@@ -85,11 +97,13 @@ export function ChannelOrderDashboardView({
   dashboard,
   canWrite,
   canReconcile,
+  canReadFinance = canReconcile,
   locations,
 }: {
   readonly dashboard: ChannelOrderDashboard;
   readonly canWrite: boolean;
   readonly canReconcile: boolean;
+  readonly canReadFinance?: boolean;
   readonly locations: Readonly<Record<string, readonly ChannelStockLocationChoice[]>>;
 }) {
   const orderReferences = new Map(
@@ -187,7 +201,7 @@ export function ChannelOrderDashboardView({
                     <dt>Envío</dt>
                     <dd className="mt-1">
                       {order.shipment
-                        ? `${order.shipment.logisticType} · ${shipmentStatusLabels[order.shipment.status]}`
+                        ? `${shipmentLogisticLabels[order.shipment.logisticType]} · ${shipmentStatusLabels[order.shipment.status]}`
                         : "Aún no sincronizado"}
                     </dd>
                   </div>
@@ -240,38 +254,43 @@ export function ChannelOrderDashboardView({
           </ul>
         </details>
       ) : null}
-      <details className="rounded-xl border border-border bg-card p-5">
-        <summary className="cursor-pointer font-semibold">
-          Ledger financiero reciente ({dashboard.ledgerEntries.length})
-        </summary>
-        {dashboard.ledgerEntries.length === 0 ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            No hay movimientos financieros persistidos.
-          </p>
-        ) : (
-          <ul className="mt-4 space-y-2">
-            {dashboard.ledgerEntries.map((entry) => (
-              <li key={entry.id} className="rounded-lg border border-border p-3 text-xs">
-                <span className="font-medium">{ledgerTypeLabels[entry.entryType]}</span> ·{" "}
-                {entry.direction === "CREDIT" ? "Crédito" : "Débito"} ·{" "}
-                {formatCopCents(entry.amountCents)}
-                <span className="mt-1 block text-muted-foreground">
-                  {entry.orderId
-                    ? `Pedido ${orderReferences.get(entry.orderId) ?? entry.orderId}`
-                    : `Pack ${packReferences.get(entry.packId ?? "") ?? entry.packId}`}
-                  {entry.externalPaymentId ? ` · Pago ${entry.externalPaymentId}` : ""} ·{" "}
-                  {dateFormatter.format(entry.occurredAt)}
-                </span>
-                {entry.evidenceReference ? (
+      {canReadFinance ? (
+        <details className="rounded-xl border border-border bg-card p-5">
+          <summary className="cursor-pointer font-semibold">
+            Ledger financiero reciente ({dashboard.ledgerEntries.length})
+          </summary>
+          {dashboard.ledgerEntries.length === 0 ? (
+            <p className="mt-3 text-sm text-muted-foreground">
+              No hay movimientos financieros persistidos.
+            </p>
+          ) : (
+            <ul className="mt-4 space-y-2">
+              {dashboard.ledgerEntries.map((entry) => (
+                <li key={entry.id} className="rounded-lg border border-border p-3 text-xs">
+                  <span className="font-medium">{ledgerTypeLabels[entry.entryType]}</span> ·{" "}
+                  {entry.direction === "CREDIT" ? "Crédito" : "Débito"} ·{" "}
+                  {formatCopCents(entry.amountCents)}
                   <span className="mt-1 block text-muted-foreground">
-                    Evidencia {entry.evidenceReference} · {entry.reasonCode}
+                    {entry.orderId
+                      ? `Pedido ${orderReferences.get(entry.orderId) ?? entry.orderId}`
+                      : `Pack ${packReferences.get(entry.packId ?? "") ?? entry.packId}`}
+                    {entry.externalPaymentId ? ` · Pago ${entry.externalPaymentId}` : ""} ·{" "}
+                    {dateFormatter.format(entry.occurredAt)}
                   </span>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        )}
-      </details>
+                  {entry.evidenceReference ? (
+                    <span className="mt-1 block text-muted-foreground">
+                      Evidencia {entry.evidenceReference}
+                      {entry.reasonCode
+                        ? ` · ${reconciliationReasonLabels[entry.reasonCode] ?? entry.reasonCode}`
+                        : ""}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </details>
+      ) : null}
     </section>
   );
 }

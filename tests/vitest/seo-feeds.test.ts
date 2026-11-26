@@ -213,6 +213,7 @@ describe("F2.3 — Merchant XML and scalable sitemap", () => {
       ]),
     ).toThrow(/HTTPS/);
     expect(normalizeXmlText("a\u0000\n b", 20)).toBe("a b");
+    expect(normalizeXmlText("a\ud800b\udfff\u0085\ufffe\uffffc", 20)).toBe("a b c");
     expect(Array.from(normalizeXmlText("😀".repeat(200), 150))).toHaveLength(150);
   });
 
@@ -337,10 +338,56 @@ describe("A4 — public catalog GET validation", () => {
           mpn: "   ",
           color: "   ",
           size: "  ",
+          googleProductCategory: "\u0000\u0007",
         },
       ],
     );
     expect(xml).toContain("<g:identifier_exists>no</g:identifier_exists>");
     expect(xml).not.toContain("<g:mpn>");
+    expect(xml).not.toContain("<g:google_product_category>");
+    expect(() =>
+      buildGoogleMerchantXml(
+        { title: "Tienda", link: "https://tienda.example.co", description: "Feed" },
+        [
+          {
+            id: "var-zero",
+            itemGroupId: "prod-zero",
+            title: "Producto gratis",
+            description: "Sin precio comercial",
+            link: "https://tienda.example.co/producto/gratis",
+            brand: "Marca",
+            priceCents: "0",
+            available: true,
+          },
+        ],
+      ),
+    ).toThrow(RangeError);
+    expect(() =>
+      buildGoogleMerchantXml(
+        { title: "Tienda", link: "https://tienda.example.co", description: "Feed" },
+        [
+          {
+            id: " variant-dup ",
+            itemGroupId: "prod-dup",
+            title: "A",
+            description: "A",
+            link: "https://tienda.example.co/producto/a",
+            brand: "Marca",
+            priceCents: "10000",
+            available: true,
+          },
+          {
+            id: "variant-dup",
+            itemGroupId: "prod-dup",
+            title: "B",
+            description: "B",
+            link: "https://tienda.example.co/producto/b",
+            brand: "Marca",
+            priceCents: "10000",
+            available: true,
+          },
+        ],
+      ),
+    ).toThrow(/duplicated/);
   });
 });

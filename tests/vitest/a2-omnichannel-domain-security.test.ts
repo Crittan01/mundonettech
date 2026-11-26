@@ -94,6 +94,13 @@ function ledgerHarness() {
     adminUser: {
       findFirst: vi.fn(async () => ({ role: "SUPERADMIN" })),
     },
+    channelAccount: {
+      findUnique: vi.fn(async () => ({
+        id: accountId,
+        status: "ACTIVE",
+        environment: IntegrationEnvironment.LOCAL,
+      })),
+    },
     channelOrder: {
       findUnique: vi.fn(async () => ({
         ...order,
@@ -536,5 +543,130 @@ describe("A2 — Meta CAPI administrative reads", () => {
       code: "UNAUTHORIZED",
     } satisfies Partial<MetaCapiServiceError>);
     expect(harness.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("A8 — channel order transactional authorization and logistics", () => {
+  it("revalidates both reconciliation permissions at the transaction lock before writing", async () => {
+    const actor = { role: "SUPERADMIN", status: "ACTIVE" };
+    const updates: unknown[] = [];
+    const logs: unknown[] = [];
+    const order = {
+      id: orderId,
+      accountId,
+      version: 4,
+      reconciliationStatus: "REVIEW_REQUIRED",
+      reconciliationReason: "FEE_TOTAL_DIVERGENCE",
+      account: { environment: IntegrationEnvironment.LOCAL },
+    };
+    const db = {
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(db)),
+      $executeRaw: vi.fn(async () => {
+        actor.role = "FINANCE_ANALYST";
+        return 1;
+      }),
+      $queryRaw: vi.fn(async () => [{ now: new Date("2026-11-25T12:00:00.000Z") }]),
+      adminUser: {
+        findFirst: vi.fn(async () =>
+          actor.status === "ACTIVE" ? { id: actorAdminUserId, role: actor.role } : null,
+        ),
+      },
+      channelAccount: {
+        findUnique: vi.fn(async () => ({
+          id: accountId,
+          status: "ACTIVE",
+          environment: IntegrationEnvironment.LOCAL,
+        })),
+      },
+      channelOrder: {
+        findUnique: vi.fn(async (options?: { select?: { accountId?: boolean } }) =>
+          options?.select?.accountId ? { accountId } : order,
+        ),
+        update: vi.fn(async ({ data }: { data: unknown }) => {
+          updates.push(data);
+          return order;
+        }),
+      },
+      adminActionLog: {
+        create: vi.fn(async ({ data }: { data: unknown }) => {
+          logs.push(data);
+          return data;
+        }),
+      },
+    };
+    const service = new ChannelOrderService(db as never, { ring: ring(), allowLoopback: true });
+
+    await expect(
+      service.markReconciled({
+        orderId,
+        expectedVersion: 4,
+        evidenceReference: "SETTLEMENT-2026-002",
+        reasonCode: "PROVIDER_SETTLEMENT_MATCH",
+        audit: audit(),
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(updates).toHaveLength(0);
+    expect(logs).toHaveLength(0);
+  });
+
+  it("blocks stock reservation and dispatch when shipment logistics diverge from the offer", async () => {
+    const updates: Record<string, unknown>[] = [];
+    const logs: unknown[] = [];
+    const order = {
+      id: orderId,
+      accountId,
+      status: "PAID",
+      stockStatus: "NOT_REQUIRED",
+      reconciliationStatus: "PENDING",
+      reconciliationReason: null,
+      stockError: null,
+      stockLocationId: randomUUID(),
+      variantId,
+      quantity: 1,
+      reservationKey: null,
+      shipment: { logisticType: "FULL", status: "READY_TO_SHIP" },
+      stockLocation: { id: randomUUID(), code: "MAIN-1", type: "LOCAL_MAIN", deletedAt: null },
+      offer: { logisticType: "CROSS_DOCKING" },
+      variant: { id: variantId, sku: "SKU-A8-1", deletedAt: null },
+    };
+    const db = {
+      $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(db)),
+      $executeRaw: vi.fn(async () => 1),
+      $queryRaw: vi.fn(async () => [{ now: new Date("2026-11-25T12:00:00.000Z") }]),
+      adminUser: { findFirst: vi.fn(async () => ({ role: "SUPERADMIN" })) },
+      channelAccount: {
+        findUnique: vi.fn(async () => ({
+          id: accountId,
+          status: "ACTIVE",
+          environment: IntegrationEnvironment.LOCAL,
+        })),
+      },
+      channelOrder: {
+        findUnique: vi.fn(async (options?: { select?: { accountId?: boolean } }) =>
+          options?.select?.accountId ? { accountId } : order,
+        ),
+        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          updates.push(data);
+          Object.assign(order, data);
+          return order;
+        }),
+      },
+      adminActionLog: {
+        create: vi.fn(async ({ data }: { data: unknown }) => {
+          logs.push(data);
+          return data;
+        }),
+      },
+    };
+    const service = new ChannelOrderService(db as never, { ring: ring(), allowLoopback: true });
+
+    await service.retryStock(orderId, audit());
+    expect(order.stockStatus).toBe("REVIEW_REQUIRED");
+    expect(order.stockError).toBe("SHIPMENT_LOGISTIC_DIVERGENCE");
+    expect(order.reconciliationStatus).toBe("REVIEW_REQUIRED");
+    expect(order.reconciliationReason).toBe("SHIPMENT_LOGISTIC_DIVERGENCE");
+    expect(order.reservationKey).toBeNull();
+    expect(updates.some((data) => data.stockStatus === "FULFILLED")).toBe(false);
+    expect(logs).toHaveLength(1);
   });
 });

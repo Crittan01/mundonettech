@@ -14,11 +14,15 @@ import {
   ChannelAccountError,
   ChannelAccountService,
   CredentialConflictError,
+  CredentialDecryptionError,
   createCredentialKeyRing,
+  createMercadoLibrePkce,
   decryptIntegrationCredential,
+  encryptIntegrationCredential,
   IntegrationCredentialVault,
   parseMercadoLibrePendingCredential,
   parseMercadoLibreTokenCredential,
+  serializeMercadoLibrePendingCredential,
 } from "../packages/integrations/dist/index.js";
 import { startMercadoLibreFixture } from "../scripts/lib/mercado-libre-fixture.mjs";
 import { acquireIsolatedTestDatabase } from "../scripts/lib/postgres-test-harness.mjs";
@@ -97,13 +101,14 @@ async function connect(options = {}) {
   return { account, started, externalAccountId };
 }
 
-async function revealTokens(credentialId) {
+async function revealTokens(credentialId, options = {}) {
   const credential = await db.integrationCredential.findUniqueOrThrow({
     where: { id: credentialId },
   });
   const plaintext = decryptIntegrationCredential(
     { ...credential, credentialId: credential.id },
     ring,
+    { allowRevoked: options.allowRevoked ?? true },
   );
   try {
     return parseMercadoLibreTokenCredential(plaintext);
@@ -761,5 +766,298 @@ describe("F6.1 — disconnection, reconnection and PostgreSQL invariants", () =>
       (error) => error instanceof ChannelAccountError && error.code === "FORBIDDEN",
     );
     assert.deepEqual(await service.listAccounts(readOnly.id), await service.listAccounts(actor.id));
+  });
+});
+
+describe("A8 — OAuth validation and post-HTTP fences", () => {
+  it("rejects a non-canonical redirect before creating an attempt, credential or audit log", async () => {
+    const before = {
+      attempts: await db.channelOAuthAttempt.count(),
+      credentials: await db.integrationCredential.count(),
+      logs: await db.adminActionLog.count(),
+    };
+    await assert.rejects(
+      service.startMercadoLibreOAuth({
+        label: "Redirect no canónico",
+        clientId,
+        clientSecret,
+        redirectUri: "https://shop.example.test/not-the-oauth-callback",
+        audit: audit(),
+      }),
+      (error) => error.code === "INVALID_INPUT",
+    );
+    assert.equal(await db.channelOAuthAttempt.count(), before.attempts);
+    assert.equal(await db.integrationCredential.count(), before.credentials);
+    assert.equal(await db.adminActionLog.count(), before.logs);
+  });
+
+  it("validates callback audit before claiming state or exchanging the code", async () => {
+    const started = await start();
+    const calls = fixture.calls.length;
+    await assert.rejects(
+      service.completeMercadoLibreOAuth({
+        attemptId: started.attemptId,
+        state: started.state,
+        code: `TG-code-${randomUUID()}`,
+        redirectUri,
+        audit: { ...callbackAudit(), requestId: "not-a-uuid" },
+      }),
+      (error) => error instanceof ChannelAccountError && error.code === "INVALID_INPUT",
+    );
+    assert.equal(fixture.calls.length, calls);
+    const pending = await db.channelOAuthAttempt.findUniqueOrThrow({
+      where: { id: started.attemptId },
+      include: { credential: true },
+    });
+    assert.equal(pending.status, "PENDING");
+    assert.equal(pending.claimedAt, null);
+    assert.equal(pending.credential.revokedAt, null);
+  });
+
+  it("does not persist an OAuth grant after the processing lease expires during HTTP", async () => {
+    const attemptId = randomUUID();
+    const credentialId = randomUUID();
+    const pkce = createMercadoLibrePkce();
+    const plaintext = serializeMercadoLibrePendingCredential({
+      clientId,
+      clientSecret,
+      codeVerifier: pkce.codeVerifier,
+    });
+    const sealed = encryptIntegrationCredential({
+      credentialId,
+      environment: ring.environment,
+      provider: "mercado-libre",
+      accountName: attemptId,
+      plaintext,
+      ring,
+    });
+    plaintext.fill(0);
+    await admin.query(
+      `INSERT INTO "IntegrationCredential" (
+        "id", "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+      ) VALUES ($1, 'mercado-libre', 'LOCAL', $2, $3, $4, $5, $6, $7)`,
+      [
+        credentialId,
+        attemptId,
+        sealed.keyVersion,
+        sealed.nonce,
+        sealed.ciphertext,
+        sealed.authTag,
+        actor.id,
+      ],
+    );
+    await admin.query(
+      `INSERT INTO "ChannelOAuthAttempt" (
+        "id", "provider", "siteId", "environment", "credentialId", "label", "stateHash",
+        "expiresAt", "createdByAdminUserId"
+      ) VALUES ($1, 'MERCADO_LIBRE', 'MCO', 'LOCAL', $2, 'Intento vencido en HTTP', $3,
+        CURRENT_TIMESTAMP + INTERVAL '150 milliseconds', $4)`,
+      [attemptId, credentialId, pkce.stateHash, actor.id],
+    );
+    const externalAccountId = String(++externalSequence);
+    tokenBehavior = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return { status: 200, body: grant(externalAccountId) };
+    };
+    await assert.rejects(
+      service.completeMercadoLibreOAuth({
+        attemptId,
+        state: pkce.state,
+        code: `TG-code-${randomUUID()}`,
+        redirectUri,
+        audit: callbackAudit(),
+      }),
+      (error) => error instanceof ChannelAccountError && error.code === "OAUTH_EXPIRED",
+    );
+    const failed = await db.channelOAuthAttempt.findUniqueOrThrow({
+      where: { id: attemptId },
+      include: { credential: true },
+    });
+    assert.equal(failed.status, "FAILED");
+    assert.equal(failed.failureCode, "OAUTH_EXPIRED");
+    assert.ok(failed.credential.revokedAt);
+    assert.equal(await db.channelAccount.count({ where: { externalAccountId } }), 0);
+  });
+
+  it("revokes instead of persisting refreshed tokens after the refresh lease expires during HTTP", async () => {
+    const { account } = await connect();
+    const original = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      include: { credential: true },
+    });
+    const originalTokens = await revealTokens(original.credentialId);
+    tokenBehavior = async (body) => {
+      if (body.get("grant_type") === "refresh_token") {
+        await db.channelAccount.update({
+          where: { id: account.id },
+          data: {
+            refreshClaimedAt: new Date(Date.now() - 60_000),
+            refreshClaimExpiresAt: new Date(Date.now() - 30_000),
+          },
+        });
+      }
+      return { status: 200, body: grant(account.externalAccountId) };
+    };
+    await assert.rejects(
+      service.refreshAccount(account.id, audit(), { force: true }),
+      (error) => error instanceof ChannelAccountError && error.code === "REAUTH_REQUIRED",
+    );
+    const failed = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      include: { credential: true },
+    });
+    assert.equal(failed.status, "REAUTH_REQUIRED");
+    assert.equal(failed.lastRefreshError, "REFRESH_UNCERTAIN");
+    assert.equal(failed.refreshClaimId, null);
+    assert.ok(failed.credential.revokedAt);
+    assert.deepEqual(await revealTokens(failed.credentialId), originalTokens);
+  });
+
+  it("revalidates the initiating actor after refresh HTTP and never persists tokens for a suspended actor", async () => {
+    const temporaryAdmin = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `channels-refresh-suspended-${randomUUID()}@example.test`,
+        displayName: "Operador de renovación suspendido",
+        role: "OPERATIONS_MANAGER",
+        status: "ACTIVE",
+      },
+    });
+    const temporaryAudit = () => ({ ...audit(), actorAdminUserId: temporaryAdmin.id });
+    const externalAccountId = String(++externalSequence);
+    tokenBehavior = async () => ({ status: 200, body: grant(externalAccountId) });
+    const started = await service.startMercadoLibreOAuth({
+      label: "Renovación con actor suspendido",
+      clientId,
+      clientSecret,
+      redirectUri,
+      audit: temporaryAudit(),
+    });
+    const account = await service.completeMercadoLibreOAuth({
+      attemptId: started.attemptId,
+      state: started.state,
+      code: `TG-code-${randomUUID()}`,
+      redirectUri,
+      audit: callbackAudit(),
+    });
+    const original = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      include: { credential: true },
+    });
+    const originalTokens = await revealTokens(original.credentialId);
+    tokenBehavior = async (body) => {
+      if (body.get("grant_type") === "refresh_token") {
+        await db.adminUser.update({
+          where: { id: temporaryAdmin.id },
+          data: { status: "SUSPENDED" },
+        });
+      }
+      return { status: 200, body: grant(externalAccountId) };
+    };
+    await assert.rejects(
+      service.refreshAccount(account.id, temporaryAudit(), { force: true }),
+      (error) => error instanceof ChannelAccountError && error.code === "FORBIDDEN",
+    );
+    const failed = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      include: { credential: true },
+    });
+    assert.equal(failed.status, "REAUTH_REQUIRED");
+    assert.ok(failed.credential.revokedAt);
+    assert.deepEqual(await revealTokens(failed.credentialId), originalTokens);
+  });
+
+  it("holds AdminUser FOR SHARE even when a scheduled refresh is a no-op", async () => {
+    const { account } = await connect();
+    await admin.query("BEGIN");
+    await admin.query('SELECT "id" FROM "AdminUser" WHERE "id" = $1 FOR UPDATE', [actor.id]);
+    let settled = false;
+    const pending = service.refreshAccount(account.id, audit()).finally(() => {
+      settled = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(settled, false);
+    } finally {
+      await admin.query("ROLLBACK");
+    }
+    const result = await pending;
+    assert.equal(result.status, "NOT_DUE");
+  });
+
+  it("still requests remote revocation when local refresh failure already revoked the credential", async () => {
+    const { account } = await connect();
+    tokenBehavior = async (body) => {
+      if (body.get("grant_type") === "refresh_token") {
+        return { status: 400, body: { error: "invalid_grant" } };
+      }
+      return { status: 200, body: grant(account.externalAccountId) };
+    };
+    await assert.rejects(service.refreshAccount(account.id, audit(), { force: true }));
+    const revoked = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      include: { credential: true },
+    });
+    assert.equal(revoked.status, "REAUTH_REQUIRED");
+    assert.ok(revoked.credential.revokedAt);
+    fixture.calls.length = 0;
+    const disconnected = await service.disconnectAccount(account.id, audit());
+    assert.equal(disconnected.remoteRevoked, true);
+    assert.equal(fixture.calls.filter((call) => call.method === "DELETE").length, 1);
+    assert.equal(
+      (await db.channelAccount.findUniqueOrThrow({ where: { id: account.id } })).status,
+      "DISCONNECTED",
+    );
+  });
+
+  it("refuses decrypting revoked credentials by default and commits local disconnect before remote DELETE", async () => {
+    const { account } = await connect();
+    revokeBehavior = () => ({ status: 500, body: { error: "provider_down" } });
+    const uncertainDisconnect = await service.disconnectAccount(account.id, audit());
+    assert.equal(uncertainDisconnect.remoteRevoked, false);
+    const persisted = await db.channelAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      include: { credential: true },
+    });
+    assert.equal(persisted.status, "DISCONNECTED");
+    assert.equal(persisted.lastRefreshError, "REMOTE_REVOCATION_UNCERTAIN");
+    assert.ok(persisted.credential.revokedAt);
+    assert.throws(
+      () =>
+        decryptIntegrationCredential(
+          { ...persisted.credential, credentialId: persisted.credential.id },
+          ring,
+        ),
+      CredentialDecryptionError,
+    );
+  });
+
+  it("expires stale pending OAuth attempts inline instead of blocking with ATTEMPT_LIMIT", async () => {
+    for (let index = 0; index < 3; index += 1) {
+      const attemptId = randomUUID();
+      const credentialId = randomUUID();
+      await admin.query(
+        `INSERT INTO "IntegrationCredential" (
+          "id", "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+        ) VALUES ($1, 'mercado-libre', 'LOCAL', $2, 1, $3, $4, $5, $6)`,
+        [credentialId, attemptId, randomBytes(12), randomBytes(32), randomBytes(16), actor.id],
+      );
+      await admin.query(
+        `INSERT INTO "ChannelOAuthAttempt" (
+          "id", "provider", "siteId", "environment", "credentialId", "label", "stateHash",
+          "expiresAt", "createdByAdminUserId", "createdAt"
+        ) VALUES ($1, 'MERCADO_LIBRE', 'MCO', 'LOCAL', $2, $3, $4,
+          CURRENT_TIMESTAMP - INTERVAL '10 minutes', $5, CURRENT_TIMESTAMP - INTERVAL '20 minutes')`,
+        [attemptId, credentialId, `Stale attempt ${index}`, randomBytes(32), actor.id],
+      );
+    }
+    const fresh = await service.startMercadoLibreOAuth({
+      label: "Fresh attempt after inline expiry",
+      clientId,
+      clientSecret,
+      redirectUri,
+      audit: audit(),
+    });
+    assert.ok(fresh.attemptId);
   });
 });

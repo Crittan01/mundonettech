@@ -174,7 +174,11 @@ function createHealthRoute() {
 
 function createChannelsRoute() {
   const findFirst = vi.fn().mockResolvedValue({ id: actorId, role: "SUPERADMIN" });
-  const db = { adminUser: { findFirst } };
+  const pendingOutboxCount = vi.fn().mockResolvedValue(0);
+  const db = {
+    adminUser: { findFirst },
+    domainOutbox: { count: pendingOutboxCount },
+  };
   const refreshDueAccounts = vi.fn().mockResolvedValue({
     scanned: 1,
     refreshed: 1,
@@ -224,6 +228,7 @@ function createChannelsRoute() {
   return {
     route,
     findFirst,
+    pendingOutboxCount,
     refreshDueAccounts,
     processResourceEvents,
     processSyncJobs,
@@ -488,5 +493,14 @@ describe("A2 channels scheduler", () => {
     expect(current.revalidateTag).toHaveBeenCalledWith("catalog:inventory", { expire: 0 });
     expect(current.processSyncJobs).not.toHaveBeenCalled();
     expect(await response.text()).not.toContain("access-token");
+  });
+
+  it("defers catalog sync when channel resource ingestion outbox still has pending events", async () => {
+    const current = createChannelsRoute();
+    current.pendingOutboxCount.mockResolvedValue(3);
+    const response = await current.route.POST(authorized(secrets.channels));
+    expect(response.status).toBe(200);
+    expect(current.processSyncJobs).not.toHaveBeenCalled();
+    expect(await responseBody(response)).toMatchObject({ sync: null, pendingIngestion: 3 });
   });
 });

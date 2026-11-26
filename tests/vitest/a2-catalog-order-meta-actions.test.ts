@@ -8,6 +8,7 @@ import { MetaCapiServiceError } from "../../packages/integrations/dist/index.js"
 import {
   actionError,
   actionSuccess,
+  closedFormObject,
   formString,
   type ActionState,
 } from "../../apps/web/lib/action-state";
@@ -64,7 +65,7 @@ function baseMocks(role = "SUPERADMIN") {
       ChannelLedgerDirection: { CREDIT: "CREDIT", DEBIT: "DEBIT" },
       OperationsService: OperationsServiceMock,
     },
-    "@/lib/action-state": { actionError, actionSuccess, formString },
+    "@/lib/action-state": { actionError, actionSuccess, closedFormObject, formString },
     "@/lib/db": { getDatabase },
     "@/lib/security/admin-auth": { AdminAuthorizationError, getAdminSession },
     "@/lib/security/request-context": { getRequestSecurityContext },
@@ -206,13 +207,9 @@ describe("A2 — channel catalog action validation and RSC", () => {
       "admin-channel-catalog",
       base.mocks,
     );
-    const created = await actions.createChannelListingAction!(
-      previous,
-      form({ ...listingValues(), accessToken: providerSecret }),
-    );
+    const created = await actions.createChannelListingAction!(previous, form(listingValues()));
     expect(created.status).toBe("success");
     expect(created.message).toContain("SKU-A2");
-    expect(JSON.stringify(created)).not.toContain(providerSecret);
     expect(createListing).toHaveBeenCalledWith(
       expect.objectContaining({
         accountId,
@@ -231,18 +228,24 @@ describe("A2 — channel catalog action validation and RSC", () => {
       }),
     );
 
+    const extraField = await actions.createChannelListingAction!(
+      previous,
+      form({ ...listingValues(), accessToken: providerSecret }),
+    );
+    expect(extraField.status).toBe("error");
+    expect(JSON.stringify(extraField)).not.toContain(providerSecret);
+    expect(createListing).toHaveBeenCalledTimes(1);
+
     expect(
       (await actions.addChannelOfferAction!(previous, form({ listingId, ...offerValues() })))
         .status,
     ).toBe("success");
-    expect(
-      (
-        await actions.updateChannelOfferAction!(
-          previous,
-          form({ offerId, version: "3", ...offerValues() }),
-        )
-      ).status,
-    ).toBe("success");
+    const updated = await actions.updateChannelOfferAction!(
+      previous,
+      form({ offerId, version: "3", ...offerValues() }),
+    );
+    expect(updated.status).toBe("success");
+    expect(updated.values).toEqual({ version: "4" });
     expect(addOffer).toHaveBeenCalledWith(
       expect.objectContaining({
         listingId,
@@ -346,6 +349,40 @@ describe("A2 — channel catalog action validation and RSC", () => {
     const batch = await actions.processChannelSyncJobsAction!(previous, form());
     expect(batch.status).toBe("success");
     expect(batch.message).toContain("No hay trabajos pendientes");
+
+    processSyncJobs.mockResolvedValue({
+      claimed: 1,
+      succeeded: 0,
+      failed: 0,
+      uncertain: 0,
+      retryScheduled: 1,
+      recoveredExpired: 0,
+      failures: [{ jobId: randomUUID(), code: "VERSION_CONFLICT" }],
+    });
+    const retry = await actions.processChannelSyncJobsAction!(previous, form());
+    expect(retry.status).toBe("error");
+    expect(retry.message).toContain("reintento acotado");
+    expect(retry.message).toContain("x-version");
+
+    processSyncJobs.mockResolvedValue({
+      claimed: 0,
+      succeeded: 0,
+      failed: 0,
+      uncertain: 0,
+      retryScheduled: 0,
+      recoveredExpired: 1,
+      failures: [],
+    });
+    const recovered = await actions.processChannelSyncJobsAction!(previous, form());
+    expect(recovered.status).toBe("error");
+    expect(recovered.message).toContain("resultados inciertos");
+
+    const extraBatch = await actions.processChannelSyncJobsAction!(
+      previous,
+      form({ unexpected: "blocked" }),
+    );
+    expect(extraBatch.status).toBe("error");
+    expect(processSyncJobs).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -443,9 +480,20 @@ describe("A2 — channel order financial boundaries", () => {
         audit: expect.objectContaining({ actorAdminUserId, ipHash, userAgentHash }),
       }),
     );
+    expect(
+      (
+        await actions.adjustChannelOrderLedgerAction!(
+          previous,
+          form({ ...adjustmentValues(), amountCop: "1234.50" }),
+        )
+      ).status,
+    ).toBe("success");
+    expect(appendLedgerAdjustment).toHaveBeenCalledWith(
+      expect.objectContaining({ amountCents: 123_450n }),
+    );
     expect(base.updateTag).toHaveBeenCalledTimes(3);
     expect(base.updateTag).toHaveBeenCalledWith("catalog:inventory");
-    expect(base.synchronizeNotifications).toHaveBeenCalledTimes(5);
+    expect(base.synchronizeNotifications).toHaveBeenCalledTimes(6);
     expect(base.revalidatePath).toHaveBeenCalledWith("/admin/canales");
     expect(base.revalidatePath).toHaveBeenCalledWith("/admin/hoy");
   });
@@ -608,5 +656,25 @@ describe("A2 — Meta CAPI reconciliation and feed refresh", () => {
     expect(JSON.stringify(replay)).not.toContain(providerSecret);
     expect(JSON.stringify(replay)).not.toContain("raw response");
     expect(base.revalidatePath).not.toHaveBeenCalled();
+
+    const extraField = await actions.reconcileMetaCapiAction!(
+      previous,
+      form({
+        metaEventId,
+        resolution: "RETRY",
+        reference: "EM-REVIEW-403",
+        unexpected: "blocked",
+      }),
+    );
+    expect(extraField.status).toBe("error");
+    expect(extraField.values).toBeUndefined();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+
+    const extraRefresh = await actions.refreshMetaCatalogFeedAction!(
+      previous,
+      form({ unexpected: "blocked" }),
+    );
+    expect(extraRefresh.status).toBe("error");
+    expect(base.updateTag).not.toHaveBeenCalled();
   });
 });

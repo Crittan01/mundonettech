@@ -10,7 +10,7 @@ import { initialActionState } from "@/lib/action-state";
 export function MetaCatalogRefreshButton() {
   const [state, action, pending] = useActionState(refreshMetaCatalogFeedAction, initialActionState);
   return (
-    <form action={action} className="space-y-2">
+    <form action={action} className="space-y-2" aria-busy={pending}>
       <Button type="submit" variant="outline" size="sm" disabled={pending}>
         {pending ? "Actualizando…" : "Actualizar feed"}
       </Button>
