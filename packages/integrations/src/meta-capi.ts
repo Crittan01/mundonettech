@@ -254,14 +254,35 @@ export class MetaConversionsApiClient {
       }
       if (response.status === 408) return { kind: "UNCERTAIN", code: "PROVIDER_UNCERTAIN" };
       if (response.status >= 400 && response.status < 500) {
+        try {
+          const parsedError = parseHttpJson(response.body);
+          const errorRecord =
+            typeof parsedError.error === "object" &&
+            parsedError.error !== null &&
+            !Array.isArray(parsedError.error)
+              ? (parsedError.error as Record<string, unknown>)
+              : null;
+          const errorCode = typeof errorRecord?.code === "number" ? errorRecord.code : null;
+          const errorType = typeof errorRecord?.type === "string" ? errorRecord.type : null;
+          if (
+            errorType === "OAuthException" ||
+            (errorCode !== null && [10, 190, 200].includes(errorCode))
+          ) {
+            return { kind: "REJECTED", code: "CREDENTIAL_REJECTED" };
+          }
+          if (errorCode !== null && [4, 17, 32, 613, 80004].includes(errorCode)) {
+            const header = response.headers.get("retry-after");
+            const parsed = header && /^[0-9]{1,4}$/.test(header) ? Number(header) : 60;
+            return { kind: "RATE_LIMITED", retryAfterSeconds: Math.min(900, Math.max(1, parsed)) };
+          }
+        } catch {
+          // Non-JSON 4xx body remains PAYLOAD_REJECTED.
+        }
         return { kind: "REJECTED", code: "PAYLOAD_REJECTED" };
       }
       if (response.status !== 200) return { kind: "UNCERTAIN", code: "PROVIDER_UNCERTAIN" };
       const payload = parseHttpJson(response.body);
       if (
-        !Object.keys(payload).every((key) =>
-          ["events_received", "fbtrace_id", "messages"].includes(key),
-        ) ||
         payload.events_received !== 1 ||
         typeof payload.fbtrace_id !== "string" ||
         !tracePattern.test(payload.fbtrace_id)

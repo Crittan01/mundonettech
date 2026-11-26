@@ -10,7 +10,7 @@ import {
   createOperationalCredentialAction,
   rotateOperationalCredentialAction,
 } from "@/lib/actions/admin-operational-credentials";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 type Provider = "aveonline" | "resend" | "dian" | "gemini" | "meta";
 type Field = {
@@ -134,13 +134,17 @@ export function OperationalCredentialForm({
     credential ? rotateOperationalCredentialAction : createOperationalCredentialAction,
     initialActionState,
   );
-  if (state.status === "success") {
+  const [dismissedState, setDismissedState] = useState<ActionState | null>(null);
+  if (!pending && state.status === "success" && dismissedState !== state) {
     return (
-      <div className="rounded-lg border border-success bg-card p-4">
+      <div className="space-y-3 rounded-lg border border-success bg-card p-4">
         <FormMessage state={state} />
-        <p className="mt-2 text-sm text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           Los campos secretos se descartaron de esta vista.
         </p>
+        <Button type="button" variant="outline" onClick={() => setDismissedState(state)}>
+          {credential ? "Rotar nuevamente" : "Conectar otro proveedor"}
+        </Button>
       </div>
     );
   }
@@ -149,7 +153,7 @@ export function OperationalCredentialForm({
   );
   const values = state.values?.provider === provider ? state.values : undefined;
   return (
-    <form action={action} className="space-y-5">
+    <form action={action} className="space-y-5" aria-busy={pending}>
       {credential ? <input type="hidden" name="credentialId" value={credential.id} /> : null}
       <input type="hidden" name="provider" value={provider} />
       <div className="grid gap-4 sm:grid-cols-2">

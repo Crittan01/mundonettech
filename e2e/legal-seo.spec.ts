@@ -1,7 +1,17 @@
 import AxeBuilder from "@axe-core/playwright";
+import { randomUUID } from "node:crypto";
 import { expect, test, type Page } from "@playwright/test";
 
 import { legalConfig } from "../config/dist/legal.config.js";
+import { createTimeoutToken } from "../packages/core/dist/index.js";
+import { createDatabaseClient } from "../packages/db/dist/index.js";
+import {
+  createSupabaseFixtureSession,
+  encodeSupabaseFixtureCookie,
+} from "../scripts/lib/supabase-auth-fixture.mjs";
+
+const databaseUrl =
+  process.env.DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54422/postgres";
 
 declare global {
   interface Window {
@@ -156,54 +166,151 @@ test("robots and sitemap expose only canonical public resources and allow Mercha
 test("Merchant feed and PDP JSON-LD use persisted variants, money, brand and stock", async ({
   page,
 }) => {
-  const feed = await page.request.get("/api/feeds/google-merchant");
-  expect(feed.status()).toBe(200);
-  expect(feed.headers()["content-type"]).toContain("application/xml");
-  expect(feed.headers()["x-robots-tag"]).toContain("noindex, nofollow, noarchive");
-  expect(feed.headers()["cache-control"]).toContain("no-store");
-  const xml = await feed.text();
-  expect(xml).toContain('<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">');
-  expect(xml).toContain("<g:brand>Sony</g:brand>");
-  expect(xml).toContain("<g:mpn>WH1000XM5/B</g:mpn>");
-  expect(xml).toContain("<g:price>1450000.00 COP</g:price>");
-  expect(xml).toContain("<g:availability>in stock</g:availability>");
-  expect(xml).toContain("<g:item_group_id>");
-  expect(xml).toContain("?variant=");
-  expect(xml).not.toContain("<script>");
+  const db = createDatabaseClient({ databaseUrl, maxConnections: 2 });
+  let temporaryMediaId: string | null = null;
+  try {
+    const sony = await db.product.findFirstOrThrow({
+      where: { slug: "sony-wh-1000xm5", deletedAt: null },
+      select: { id: true },
+    });
+    const existingImage = await db.productMedia.findFirst({
+      where: { productId: sony.id, mediaType: "IMAGE", status: "READY", deletedAt: null },
+      select: { id: true },
+    });
+    if (!existingImage) {
+      const secret = process.env.SESSION_TIMEOUT_SECRET;
+      if (!secret) throw new Error("SESSION_TIMEOUT_SECRET is required for authenticated E2E.");
+      const manager = await db.adminUser.create({
+        data: {
+          authUserId: randomUUID(),
+          email: `legal-seo-feed-${randomUUID()}@example.test`,
+          displayName: "Gestor SEO E2E",
+          role: "STORE_MANAGER",
+          status: "ACTIVE",
+        },
+      });
+      const createdMedia = await db.productMedia.create({
+        data: {
+          productId: sony.id,
+          mediaType: "IMAGE",
+          status: "READY",
+          position: 99,
+          storageKey: `e2e/legal-seo/${randomUUID()}/sony-wh-1000xm5.webp`,
+          mimeType: "image/webp",
+          altText: "Audífonos Sony WH-1000XM5",
+          width: 1200,
+          height: 1200,
+        },
+      });
+      temporaryMediaId = createdMedia.id;
+      const session = createSupabaseFixtureSession({
+        subject: manager.authUserId,
+        email: manager.email,
+        factorId: randomUUID(),
+        aal: "aal2",
+        mfaAgeSeconds: 30,
+      });
+      const activity = createTimeoutToken({
+        kind: "admin",
+        subject: manager.authUserId,
+        secret: Buffer.from(secret, "base64"),
+        idleSeconds: 1800,
+        absoluteSeconds: 43_200,
+      });
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Network.setCookie", {
+        name: "__Host-admin_activity",
+        value: activity,
+        domain: "127.0.0.1",
+        path: "/",
+        httpOnly: true,
+        secure: true,
+        sameSite: "Strict",
+        sourceScheme: "Secure",
+      });
+      await cdp.detach();
+      await page.context().addCookies([
+        {
+          name: "sb-127-auth-token",
+          value: encodeSupabaseFixtureCookie(session),
+          url: "http://127.0.0.1:4110/",
+          httpOnly: true,
+          sameSite: "Strict",
+        },
+        {
+          name: "admin_activity",
+          value: activity,
+          url: "http://127.0.0.1:4110/",
+          httpOnly: true,
+          sameSite: "Strict",
+        },
+      ]);
+      await page.goto(`/admin/catalogo/${sony.id}`);
+      const updateForm = page.locator("form").filter({
+        has: page.getByRole("button", { name: "Guardar producto", exact: true }),
+      });
+      await updateForm.getByRole("button", { name: "Guardar producto", exact: true }).click();
+      await expect(
+        page.getByText("Producto actualizado y cambio registrado en auditoría."),
+      ).toBeVisible();
+      await page.context().clearCookies();
+    }
 
-  const pdpResponse = await page.request.get("/producto/sony-wh-1000xm5");
-  const pdpHtml = await pdpResponse.text();
-  const headEnd = pdpHtml.indexOf("</head>");
-  expect(headEnd).toBeGreaterThan(0);
-  expect(pdpHtml.slice(0, headEnd)).toContain(
-    '<meta name="description" content="Sony WH-1000XM5 con cancelación de ruido y Bluetooth multipunto."/>',
-  );
+    const feed = await page.request.get("/api/feeds/google-merchant");
+    expect(feed.status()).toBe(200);
+    expect(feed.headers()["content-type"]).toContain("application/xml");
+    expect(feed.headers()["x-robots-tag"]).toContain("noindex, nofollow, noarchive");
+    expect(feed.headers()["cache-control"]).toContain("no-store");
+    const xml = await feed.text();
+    expect(xml).toContain('<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">');
+    expect(xml).toContain("<g:brand>Sony</g:brand>");
+    expect(xml).toContain("<g:mpn>WH1000XM5/B</g:mpn>");
+    expect(xml).toContain("<g:price>1450000.00 COP</g:price>");
+    expect(xml).toContain("<g:availability>in stock</g:availability>");
+    expect(xml).toContain("<g:image_link>");
+    expect(xml).toContain("<g:item_group_id>");
+    expect(xml).toContain("?variant=");
+    expect(xml).not.toContain("<script>");
 
-  await page.goto("/producto/sony-wh-1000xm5");
-  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
-    "href",
-    "https://mundonettech.co/producto/sony-wh-1000xm5",
-  );
-  const scripts = await page.locator('script[type="application/ld+json"]').allTextContents();
-  expect(scripts.length).toBeGreaterThanOrEqual(2);
-  for (const script of scripts) {
-    expect(() => JSON.parse(script)).not.toThrow();
+    const pdpResponse = await page.request.get("/producto/sony-wh-1000xm5");
+    const pdpHtml = await pdpResponse.text();
+    const headEnd = pdpHtml.indexOf("</head>");
+    expect(headEnd).toBeGreaterThan(0);
+    expect(pdpHtml.slice(0, headEnd)).toContain(
+      '<meta name="description" content="Sony WH-1000XM5 con cancelación de ruido y Bluetooth multipunto."/>',
+    );
+
+    await page.goto("/producto/sony-wh-1000xm5");
+    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+      "href",
+      "https://mundonettech.co/producto/sony-wh-1000xm5",
+    );
+    const scripts = await page.locator('script[type="application/ld+json"]').allTextContents();
+    expect(scripts.length).toBeGreaterThanOrEqual(2);
+    for (const script of scripts) {
+      expect(() => JSON.parse(script)).not.toThrow();
+    }
+    const productScript = scripts.find((script) => script.includes('"@type":"Product"'));
+    expect(productScript).toBeTruthy();
+    const productData = JSON.parse(productScript!);
+    expect(productData[0]).toMatchObject({
+      "@type": "Product",
+      name: "Audífonos Sony WH-1000XM5",
+      sku: "SONY-WH1000XM5-BLACK",
+      mpn: "WH1000XM5/B",
+    });
+    expect(productData[0].brand.name).toBe("Sony");
+    expect(productData[0].offers[0]).toMatchObject({
+      price: "1450000.00",
+      priceCurrency: "COP",
+      availability: "https://schema.org/InStock",
+    });
+    expect(productData[1]["@type"]).toBe("BreadcrumbList");
+    expect(productScript).not.toContain("aggregateRating");
+  } finally {
+    if (temporaryMediaId) {
+      await db.productMedia.delete({ where: { id: temporaryMediaId } }).catch(() => undefined);
+    }
+    await db.$disconnect();
   }
-  const productScript = scripts.find((script) => script.includes('"@type":"Product"'));
-  expect(productScript).toBeTruthy();
-  const productData = JSON.parse(productScript!);
-  expect(productData[0]).toMatchObject({
-    "@type": "Product",
-    name: "Audífonos Sony WH-1000XM5",
-    sku: "SONY-WH1000XM5-BLACK",
-    mpn: "WH1000XM5/B",
-  });
-  expect(productData[0].brand.name).toBe("Sony");
-  expect(productData[0].offers[0]).toMatchObject({
-    price: "1450000.00",
-    priceCurrency: "COP",
-    availability: "https://schema.org/InStock",
-  });
-  expect(productData[1]["@type"]).toBe("BreadcrumbList");
-  expect(productScript).not.toContain("aggregateRating");
 });

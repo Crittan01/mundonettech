@@ -385,12 +385,17 @@ export class OperationsService {
           CASE WHEN listings."lastProviderError" IN ('PROVIDER_UNCERTAIN', 'SYNC_UNCERTAIN', 'CLAIM_EXPIRED', 'PERSISTENCE_CONFLICT', 'INVALID_RESPONSE')
             THEN 'CRITICAL' ELSE 'WARNING' END,
           'Publicación de canal requiere revisión',
-          left('La sincronización se detuvo (' || listings."lastProviderError" || '). Revisa el job y concilia antes de reintentar.', 500),
+          left('La sincronización se detuvo (' || COALESCE(listings."lastProviderError", 'VERSION_DIVERGENCE') || '). Revisa el job y concilia antes de reintentar.', 500),
           '/admin/canales', 'ChannelListing', listings."id"::text
         FROM "ChannelListing" listings
-        WHERE listings."lastProviderError" IS NOT NULL AND
-          (listings."status" = 'RECONCILE_REQUIRED' OR
-           (listings."status" = 'DRAFT' AND listings."lastProviderError" <> 'ACCOUNT_DISCONNECTED'))
+        WHERE (
+          listings."status" = 'RECONCILE_REQUIRED' OR
+          (listings."status" = 'DRAFT' AND listings."lastProviderError" IS NOT NULL AND listings."lastProviderError" <> 'ACCOUNT_DISCONNECTED') OR
+          (listings."status" <> 'CLOSED' AND listings."syncClaimId" IS NULL AND EXISTS (
+            SELECT 1 FROM "ChannelOffer" offers
+            WHERE offers."listingId" = listings."id" AND offers."status" = 'RECONCILE_REQUIRED'
+          ))
+        )
         UNION ALL
         SELECT 'channel-order-review:' || channel_orders."id", 'channels.orders',
           CASE WHEN channel_orders."reconciliationStatus" = 'REVIEW_REQUIRED' THEN 'CRITICAL' ELSE 'WARNING' END,

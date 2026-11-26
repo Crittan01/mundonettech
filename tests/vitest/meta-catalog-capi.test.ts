@@ -270,6 +270,18 @@ describe("F6.4 — Meta Conversions API transport", () => {
     const responses = [
       new Response("{}", { status: 429, headers: { "retry-after": "120" } }),
       new Response("{}", { status: 401 }),
+      new Response(JSON.stringify({ error: { type: "OAuthException", code: 190 } }), {
+        status: 400,
+      }),
+      new Response(JSON.stringify({ error: { code: 4 } }), { status: 400 }),
+      new Response(
+        JSON.stringify({
+          events_received: 1,
+          fbtrace_id: "trace-additive",
+          custom_match_keys: ["em"],
+        }),
+        { status: 200 },
+      ),
       new Response("{}", { status: 408 }),
       new Response("{}", { status: 500 }),
       new Response(JSON.stringify({ events_received: 0, fbtrace_id: "trace" }), { status: 200 }),
@@ -282,6 +294,18 @@ describe("F6.4 — Meta Conversions API transport", () => {
     expect(await client.send(request(), "secret-token")).toEqual({
       kind: "REJECTED",
       code: "CREDENTIAL_REJECTED",
+    });
+    expect(await client.send(request(), "secret-token")).toEqual({
+      kind: "REJECTED",
+      code: "CREDENTIAL_REJECTED",
+    });
+    expect(await client.send(request(), "secret-token")).toEqual({
+      kind: "RATE_LIMITED",
+      retryAfterSeconds: 60,
+    });
+    expect(await client.send(request(), "secret-token")).toEqual({
+      kind: "SENT",
+      providerTraceId: "trace-additive",
     });
     expect(await client.send(request(), "secret-token")).toEqual({
       kind: "UNCERTAIN",

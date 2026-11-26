@@ -302,7 +302,11 @@ export function ChannelListingCreateForm({
 
 export function ChannelOfferEditForm({ offer }: { readonly offer: ChannelOfferView }) {
   const [state, action, pending] = useActionState(updateChannelOfferAction, initialActionState);
-  const [expectedVersion] = useState(offer.version);
+  const [initialVersion] = useState(offer.version);
+  const expectedVersion =
+    state.status === "success" && state.values?.version
+      ? Number(state.values.version)
+      : initialVersion;
   return (
     <details className="rounded-lg border border-border p-4">
       <summary className="cursor-pointer text-sm font-medium">Editar precio y tarifas</summary>
@@ -348,6 +352,7 @@ function SyncButton({
   kind,
   label,
   pendingLabel,
+  ariaLabel,
   desiredStatus,
   force = false,
   confirmation = false,
@@ -358,6 +363,7 @@ function SyncButton({
   readonly kind: "SYNC_PRICE" | "SYNC_CONTENT" | "SYNC_LOCAL_STOCK" | "RECONCILE_REMOTE";
   readonly label: string;
   readonly pendingLabel: string;
+  readonly ariaLabel?: string;
   readonly desiredStatus?: "ACTIVE" | "PAUSED" | "CLOSED";
   readonly force?: boolean;
   readonly confirmation?: boolean;
@@ -382,11 +388,17 @@ function SyncButton({
             name="confirmation"
             minLength={6}
             maxLength={6}
+            disabled={pending}
             required
           />
         </div>
       ) : null}
-      <Button type="submit" variant={destructive ? "destructive" : "outline"} disabled={pending}>
+      <Button
+        type="submit"
+        variant={destructive ? "destructive" : "outline"}
+        disabled={pending}
+        aria-label={ariaLabel}
+      >
         {pending ? pendingLabel : label}
       </Button>
       <FormMessage state={state} />
@@ -417,6 +429,11 @@ export function ChannelListingSyncActions({ listing }: { readonly listing: Chann
                   offer.logisticType === "FULFILLMENT"
                     ? "Leer stock Full"
                     : "Sincronizar stock local"
+                }
+                ariaLabel={
+                  offer.logisticType === "FULFILLMENT"
+                    ? `Leer stock Full ${offer.externalItemId}`
+                    : `Sincronizar stock local ${offer.externalItemId}`
                 }
                 pendingLabel="Conciliando stock…"
               />

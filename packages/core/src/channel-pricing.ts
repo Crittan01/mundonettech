@@ -128,6 +128,9 @@ function grossUp(
     }
     candidate = maxBelow;
   }
+  if (candidate < copCentStep) {
+    candidate = copCentStep;
+  }
   while (netAt(candidate, input) < targetNetCents) {
     candidate = add(candidate, copCentStep);
   }

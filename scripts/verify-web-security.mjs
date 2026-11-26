@@ -499,6 +499,7 @@ export async function verifyWebSecurity(
     ["/admin/analitica-rfm", "/admin/login"],
     ["/admin/salud", "/admin/login"],
     ["/admin/canales", "/admin/login"],
+    ["/admin/integraciones", "/admin/login"],
     ["/admin/b2b", "/admin/login"],
     ["/admin/b2b?next=https%3A%2F%2Fevil.example", "/admin/login"],
     ["/admin/usuarios?next=https%3A%2F%2Fevil.example", "/admin/login"],
@@ -875,6 +876,37 @@ export async function verifyWebSecurity(
       (mlOversized.headers.get("cache-control") ?? "").includes("no-store"),
     "/api/webhooks/mercado-libre: oversized POST must return 413 with no-store.",
   );
+  const mlOversizedStream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(16_385));
+      controller.close();
+    },
+  });
+  const mlStreamed = await request(origin, "/api/webhooks/mercado-libre", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: mlOversizedStream,
+    duplex: "half",
+  });
+  requireCondition(
+    mlStreamed.status === 413 &&
+      (mlStreamed.headers.get("cache-control") ?? "").includes("no-store"),
+    "/api/webhooks/mercado-libre: chunked oversized POST must return 413 with no-store.",
+  );
+  const mlDuplicateDataId = await request(
+    origin,
+    "/api/webhooks/mercado-libre?data.id=first&data.id=second",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  requireCondition(
+    mlDuplicateDataId.status === 400 &&
+      (mlDuplicateDataId.headers.get("cache-control") ?? "").includes("no-store"),
+    "/api/webhooks/mercado-libre: duplicate data.id query parameter must return 400.",
+  );
 
   const funnelGet = await request(origin, "/api/metrics/funnel");
   requireCondition(
@@ -910,6 +942,12 @@ export async function verifyWebSecurity(
     body: "{not-json",
   });
   requireCondition(malformed.status === 400, "Funnel accepted malformed JSON.");
+  const extraField = await request(origin, "/api/metrics/funnel", {
+    method: "POST",
+    headers: { Origin: origin, "Content-Type": "application/json" },
+    body: JSON.stringify({ pageViews: 1, unexpected: 1 }),
+  });
+  requireCondition(extraField.status === 400, "Funnel accepted an unknown property.");
 
   const multipartBody =
     '--a2\r\nContent-Disposition: form-data; name="altText"\r\n\r\nPrueba\r\n--a2--\r\n';
@@ -1051,7 +1089,13 @@ export async function verifyWebSecurity(
     "Cross-site preflight received CORS permission.",
   );
 
-  for (const postOnlyPath of ["/api/jobs/orders", "/api/webhooks/wompi", "/api/metrics/funnel"]) {
+  for (const postOnlyPath of [
+    "/api/jobs/orders",
+    "/api/jobs/channels",
+    "/api/webhooks/wompi",
+    "/api/webhooks/mercado-libre",
+    "/api/metrics/funnel",
+  ]) {
     for (const method of ["HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
       await requestMethodNotAllowed(origin, postOnlyPath, method, "POST");
     }

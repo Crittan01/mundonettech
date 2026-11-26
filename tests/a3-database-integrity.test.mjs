@@ -2918,7 +2918,16 @@ describe("A8 — omnichannel chronology and ownership integrity", () => {
         randomBytes(32),
       ],
     );
-    return { adminUserId, accountId, catalog, locationId, packId, shipmentId, channelOrderId };
+    return {
+      adminUserId,
+      credentialId,
+      accountId,
+      catalog,
+      locationId,
+      packId,
+      shipmentId,
+      channelOrderId,
+    };
   }
 
   it("rejects invalid chronology, excess refunds, pack regression and cross-order shipment ownership", async () => {
@@ -3028,6 +3037,87 @@ describe("A8 — omnichannel chronology and ownership integrity", () => {
         `UPDATE "SerializedUnit" SET "status" = 'SOLD', "channelOrderId" = $2,
          "reservationKey" = NULL, "soldAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
         [serializedUnitId, fixture.channelOrderId],
+        "23514",
+      );
+    });
+  });
+
+  it("enforces migration #47 vault no-delete, shipment ownership, ledger uniqueness/paymentId and fulfillment ledger parity", async () => {
+    await withRollback(async (client) => {
+      const fixture = await createChannelFixture(client);
+      await expectSqlViolation(
+        client,
+        `DELETE FROM "IntegrationCredential" WHERE "id" = $1`,
+        [fixture.credentialId],
+        "55000",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "ChannelShipment" (
+          "accountId", "externalShipmentId", "logisticType", "status",
+          "costCents", "sourceHash", "externalCreatedAt", "externalUpdatedAt"
+        ) VALUES ($1, $2, 'ME2', 'PENDING', 0, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [
+          fixture.accountId,
+          String(Math.floor(3000000000 + Math.random() * 6999999999)),
+          randomBytes(32),
+        ],
+        "23514",
+        "ChannelShipment_ownership_valid",
+      );
+      await client.query(
+        `INSERT INTO "ChannelLedgerEntry" (
+          "accountId", "orderId", "entryType", "direction", "amountCents",
+          "deduplicationKey", "sourceHash", "occurredAt"
+        ) VALUES ($1, $2, 'SALE_EXPECTED', 'CREDIT', 100000, $3, $4, CURRENT_TIMESTAMP)`,
+        [
+          fixture.accountId,
+          fixture.channelOrderId,
+          `channel-ledger:${fixture.channelOrderId}:sale-1:${randomUUID()}`,
+          randomBytes(32),
+        ],
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "ChannelLedgerEntry" (
+          "accountId", "orderId", "entryType", "direction", "amountCents",
+          "deduplicationKey", "sourceHash", "occurredAt"
+        ) VALUES ($1, $2, 'SALE_EXPECTED', 'CREDIT', 100000, $3, $4, CURRENT_TIMESTAMP)`,
+        [
+          fixture.accountId,
+          fixture.channelOrderId,
+          `channel-ledger:${fixture.channelOrderId}:sale-2:${randomUUID()}`,
+          randomBytes(32),
+        ],
+        "23505",
+        "ChannelLedgerEntry_sale_expected_unique",
+      );
+      await expectSqlViolation(
+        client,
+        `INSERT INTO "ChannelLedgerEntry" (
+          "accountId", "orderId", "entryType", "direction", "amountCents",
+          "deduplicationKey", "sourceHash", "occurredAt"
+        ) VALUES ($1, $2, 'PAYMENT_CAPTURE', 'CREDIT', 100000, $3, $4, CURRENT_TIMESTAMP)`,
+        [
+          fixture.accountId,
+          fixture.channelOrderId,
+          `channel-ledger:${fixture.channelOrderId}:cap-null:${randomUUID()}`,
+          randomBytes(32),
+        ],
+        "23514",
+        "ChannelLedgerEntry_payment_id_required",
+      );
+      const reservationKey = `channel-order:${fixture.channelOrderId}:reservation:v1`;
+      await client.query(
+        `UPDATE "ChannelOrder" SET "stockStatus" = 'RESERVED', "reservationKey" = $2,
+         "reservedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [fixture.channelOrderId, reservationKey],
+      );
+      await expectSqlViolation(
+        client,
+        `UPDATE "ChannelOrder" SET "stockStatus" = 'FULFILLED', "fulfilledAt" = CURRENT_TIMESTAMP
+         WHERE "id" = $1`,
+        [fixture.channelOrderId],
         "23514",
       );
     });

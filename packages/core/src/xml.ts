@@ -28,8 +28,11 @@ export function normalizeXmlText(value: string, maxLength: number, field = "text
   ) {
     throw new TypeError(`${field} and its length bound are invalid.`);
   }
-  const normalized = value
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+  const wellFormed = value.replace(/[\ud800-\udbff][\udc00-\udfff]|[\ud800-\udfff]/g, (match) =>
+    match.length === 2 ? match : " ",
+  );
+  const normalized = wellFormed
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\ufffe\uffff]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (!normalized) throw new TypeError(`${field} must not be empty.`);

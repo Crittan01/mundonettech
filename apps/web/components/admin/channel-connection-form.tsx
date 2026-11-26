@@ -45,7 +45,7 @@ export function ChannelConnectionForm({
     );
   }
   return (
-    <form action={action} className="space-y-4">
+    <form action={action} className="space-y-4" aria-busy={pending}>
       {account ? <input type="hidden" name="accountId" value={account.id} /> : null}
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="space-y-2">
@@ -56,6 +56,7 @@ export function ChannelConnectionForm({
             defaultValue={state.values?.label ?? account?.label ?? ""}
             maxLength={120}
             autoComplete="off"
+            disabled={pending}
             required
           />
           <p className="text-xs text-muted-foreground">
@@ -71,6 +72,7 @@ export function ChannelConnectionForm({
             inputMode="numeric"
             pattern="[0-9]{5,64}"
             autoComplete="off"
+            disabled={pending}
             required
           />
         </div>
@@ -85,6 +87,7 @@ export function ChannelConnectionForm({
           maxLength={255}
           autoComplete="new-password"
           spellCheck={false}
+          disabled={pending}
           required
         />
         <p className="text-xs text-muted-foreground">

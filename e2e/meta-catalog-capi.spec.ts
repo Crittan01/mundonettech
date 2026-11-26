@@ -111,6 +111,41 @@ async function seedScenario() {
       pricing,
       adminId: admin.id,
     });
+    const wompiCredentialId = randomUUID();
+    const wompiAttemptId = randomUUID();
+    await sql.query(
+      `INSERT INTO "IntegrationCredential" (
+        "id", "provider", "environment", "accountName", "keyVersion", "nonce", "ciphertext", "authTag", "createdByAdminUserId"
+      ) VALUES ($1, 'wompi', 'LOCAL', $2, 1, $3, $4, $5, $6)`,
+      [
+        wompiCredentialId,
+        `meta-e2e-wompi-${randomUUID().slice(0, 8)}`,
+        randomBytes(12),
+        randomBytes(32),
+        randomBytes(16),
+        admin.id,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentAttempt" (
+        "id", "orderId", "provider", "environment", "status", "idempotencyKey", "requestHash",
+        "reference", "amountCents", "credentialId", "providerStatus", "completedAt"
+      ) VALUES ($1, $2, 'WOMPI', 'LOCAL', 'SUCCEEDED', $3, $4, $5, 195000, $6, 'APPROVED', CURRENT_TIMESTAMP)`,
+      [
+        wompiAttemptId,
+        checkout.orderId,
+        `meta-e2e-wompi-${randomUUID()}`,
+        randomBytes(32),
+        randomUUID(),
+        wompiCredentialId,
+      ],
+    );
+    await sql.query(
+      `INSERT INTO "PaymentTransaction" (
+        "attemptId", "provider", "kind", "status", "amountCents", "externalId", "requestHash", "completedAt"
+      ) VALUES ($1, 'WOMPI', 'CAPTURE', 'SUCCEEDED', 195000, $2, $3, CURRENT_TIMESTAMP)`,
+      [wompiAttemptId, `trx-${randomUUID()}`, randomBytes(32)],
+    );
     await sql.query("COMMIT");
   } catch (error) {
     await sql.query("ROLLBACK").catch(() => undefined);

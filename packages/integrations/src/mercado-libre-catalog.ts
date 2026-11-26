@@ -1,4 +1,5 @@
 import { fetchWithLimit, IntegrationTransportError, parseHttpJson } from "./integration-http.js";
+import { isPrivateOrLocalHostname } from "./integration-utils.js";
 import type { MercadoLibreTokenCredential } from "./mercado-libre.js";
 
 const mercadoLibreApiUrl = "https://api.mercadolibre.com/";
@@ -83,6 +84,7 @@ function apiEndpoint(value: string, allowLoopback: boolean): string {
   const official =
     url.protocol === "https:" &&
     url.hostname === "api.mercadolibre.com" &&
+    url.port === "" &&
     (url.pathname === "/" || url.pathname === "") &&
     !url.username &&
     !url.password &&
@@ -504,9 +506,12 @@ export class MercadoLibreUserProductsClient {
     } catch {
       throw new MercadoLibreCatalogError("INVALID_INPUT", "The picture source is not a URL.");
     }
-    const loopback = this.allowLoopback && loopbackHosts.has(url.hostname.toLowerCase());
+    const host = url.hostname.toLowerCase();
+    const loopback = this.allowLoopback && loopbackHosts.has(host);
+    const hostBlocked = isPrivateOrLocalHostname(host) && !loopback;
     if (
       (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+      hostBlocked ||
       url.username ||
       url.password ||
       url.hash

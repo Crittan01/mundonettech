@@ -7,7 +7,13 @@ import { ChannelCatalogError, type ChannelOfferConfiguration } from "@mundonette
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
-import { actionError, actionSuccess, formString, type ActionState } from "@/lib/action-state";
+import {
+  actionError,
+  actionSuccess,
+  closedFormObject,
+  formString,
+  type ActionState,
+} from "@/lib/action-state";
 import { channelCatalogService } from "@/lib/integrations";
 import { AdminAuthorizationError, getAdminSession } from "@/lib/security/admin-auth";
 import { getRequestSecurityContext } from "@/lib/security/request-context";
@@ -122,11 +128,48 @@ function parseOffer(formData: FormData): ChannelOfferConfiguration {
   };
 }
 
-async function authorize() {
+const offerFieldNames = [
+  "pricingMode",
+  "listingTypeId",
+  "logisticType",
+  "commissionBps",
+  "fixedFeeCop",
+  "shippingCostCop",
+  "targetNetCop",
+  "manualPriceCop",
+] as const;
+
+const createListingFields = [
+  "accountId",
+  "variantId",
+  "externalCategoryId",
+  "familyName",
+  "sellerStoreId",
+  "sellerNetworkNodeId",
+  ...offerFieldNames,
+] as const;
+const addOfferFields = ["listingId", ...offerFieldNames] as const;
+const updateOfferFields = ["offerId", "version", ...offerFieldNames] as const;
+const syncListingFields = [
+  "listingId",
+  "offerId",
+  "kind",
+  "desiredStatus",
+  "force",
+  "confirmation",
+] as const;
+
+async function authorize(formData: FormData | undefined, allowedFields: readonly string[]) {
   const session = await getAdminSession({
     permission: "integrations:write",
     requireRecentMfa: true,
   });
+  if (formData && !closedFormObject(formData, allowedFields)) {
+    throw new ChannelCatalogError(
+      "INVALID_INPUT",
+      "Channel catalog form fields must be known, unique strings.",
+    );
+  }
   const context = await getRequestSecurityContext();
   return {
     actorAdminUserId: session.profile.id,
@@ -212,7 +255,7 @@ export async function createChannelListingAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, createListingFields);
     const parsed = listingSchema.safeParse({
       accountId: formString(formData, "accountId"),
       variantId: formString(formData, "variantId"),
@@ -250,7 +293,7 @@ export async function addChannelOfferAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, addOfferFields);
     const listingId = z.string().uuid().parse(formString(formData, "listingId"));
     await channelCatalogService().addOffer({ listingId, offer: parseOffer(formData), audit });
     revalidatePath("/admin/canales");
@@ -266,7 +309,7 @@ export async function updateChannelOfferAction(
 ): Promise<ActionState> {
   const values = publicValues(formData);
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, updateOfferFields);
     const offerId = z.string().uuid().parse(formString(formData, "offerId"));
     const expectedVersion = versionSchema.parse(formString(formData, "version"));
     await channelCatalogService().updateOffer({
@@ -278,6 +321,7 @@ export async function updateChannelOfferAction(
     revalidatePath("/admin/canales");
     return actionSuccess(
       "Precio y condiciones actualizados. Procesa el job para confirmarlos en Mercado Libre.",
+      { version: String(expectedVersion + 1) },
     );
   } catch (error) {
     return failure(error, values);
@@ -289,7 +333,7 @@ export async function synchronizeChannelListingAction(
   formData: FormData,
 ): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, syncListingFields);
     const listingId = z.string().uuid().parse(formString(formData, "listingId"));
     const offerId = z
       .union([z.literal(""), z.string().uuid()])
@@ -324,9 +368,12 @@ export async function synchronizeChannelListingAction(
   }
 }
 
-export async function processChannelSyncJobsAction(): Promise<ActionState> {
+export async function processChannelSyncJobsAction(
+  _previous?: ActionState,
+  formData?: FormData,
+): Promise<ActionState> {
   try {
-    const audit = await authorize();
+    const audit = await authorize(formData, []);
     const result = await channelCatalogService().processSyncJobs(audit, { limit: 10 });
     revalidatePath("/admin/canales");
     return syncMessage(result);

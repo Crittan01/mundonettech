@@ -5,12 +5,18 @@ export async function cancelPendingMetaCapiForCustomerInTransaction(
   customerId: string,
   completedAt: Date,
 ): Promise<number> {
-  const cancellableRows = await tx.metaCapiEvent.findMany({
-    where: { customerId, status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] } },
-    select: { id: true },
-  });
+  const cancellableRows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT "id"
+    FROM "MetaCapiEvent"
+    WHERE "customerId" = ${customerId}::uuid
+      AND "status" IN ('PENDING', 'DISPATCHING', 'UNCERTAIN', 'FAILED')
+    ORDER BY "id"
+    FOR UPDATE
+  `;
+  if (cancellableRows.length === 0) return 0;
+  const ids = cancellableRows.map((row) => row.id);
   const result = await tx.metaCapiEvent.updateMany({
-    where: { customerId, status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] } },
+    where: { id: { in: ids } },
     data: {
       status: "SKIPPED",
       completedAt,
@@ -26,14 +32,12 @@ export async function cancelPendingMetaCapiForCustomerInTransaction(
       requestStartedAt: null,
     },
   });
-  if (cancellableRows.length > 0) {
-    await tx.notification.updateMany({
-      where: {
-        deduplicationKey: { in: cancellableRows.map((row) => `meta-capi:${row.id}:review`) },
-        resolvedAt: null,
-      },
-      data: { resolvedAt: completedAt },
-    });
-  }
+  await tx.notification.updateMany({
+    where: {
+      deduplicationKey: { in: ids.map((id) => `meta-capi:${id}:review`) },
+      resolvedAt: null,
+    },
+    data: { resolvedAt: completedAt },
+  });
   return result.count;
 }

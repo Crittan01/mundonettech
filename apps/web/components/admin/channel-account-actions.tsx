@@ -35,7 +35,7 @@ export function ChannelAccountActions({
   return (
     <div className="mt-5 space-y-4 border-t border-border pt-4">
       {canRefresh ? (
-        <form action={refreshAction} className="space-y-3">
+        <form action={refreshAction} className="space-y-3" aria-busy={refreshing}>
           <input type="hidden" name="accountId" value={account.id} />
           <Button
             type="submit"
@@ -53,7 +53,11 @@ export function ChannelAccountActions({
           <summary className="cursor-pointer text-sm font-medium text-destructive">
             Desvincular {account.label}
           </summary>
-          <form action={disconnectAction} className="mt-4 max-w-md space-y-3">
+          <form
+            action={disconnectAction}
+            className="mt-4 max-w-md space-y-3"
+            aria-busy={disconnecting}
+          >
             <input type="hidden" name="accountId" value={account.id} />
             <p className="text-xs text-muted-foreground">
               Se revocará el acceso local y se solicitará la revocación a Mercado Libre. Si el

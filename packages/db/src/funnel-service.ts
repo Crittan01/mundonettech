@@ -1,4 +1,4 @@
-import { assertMoney, isAdminRole } from "@mundonettech/core";
+import { assertMoney, hasAdminPermission, isAdminRole } from "@mundonettech/core";
 
 import { assertUuid } from "./inventory-shared.js";
 import { notificationWhereForRole } from "./operations-service.js";
@@ -102,7 +102,7 @@ export class FunnelService {
       where: { id: adminUserId, status: "ACTIVE", deletedAt: null },
       select: { role: true },
     });
-    if (!actor || !isAdminRole(actor.role)) {
+    if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, "dashboard:read")) {
       throw new Error("Active administrator not found.");
     }
     const [days, unreadNotifications] = await Promise.all([

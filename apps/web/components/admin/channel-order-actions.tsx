@@ -32,13 +32,17 @@ function SubmitForm({
   readonly label: string;
   readonly pendingLabel: string;
   readonly children?:
-    React.ReactNode | ((values: Readonly<Record<string, string>> | undefined) => React.ReactNode);
+    | React.ReactNode
+    | ((context: {
+        readonly values: Readonly<Record<string, string>> | undefined;
+        readonly pending: boolean;
+      }) => React.ReactNode);
 }) {
   const [state, submit, pending] = useActionState(action, initialActionState);
   return (
     <form action={submit} className="space-y-3" aria-busy={pending}>
       <input type="hidden" name="orderId" value={orderId} />
-      {typeof children === "function" ? children(state.values) : children}
+      {typeof children === "function" ? children({ values: state.values, pending }) : children}
       <Button type="submit" variant="outline" disabled={pending}>
         {pending ? pendingLabel : label}
       </Button>
@@ -50,9 +54,11 @@ function SubmitForm({
 function EvidenceFields({
   suffix,
   values,
+  disabled = false,
 }: {
   readonly suffix: string;
   readonly values?: Readonly<Record<string, string>> | undefined;
+  readonly disabled?: boolean;
 }) {
   const evidenceDefault = values?.evidenceReference ?? "";
   const reasonDefault = values?.reasonCode ?? "PROVIDER_SETTLEMENT_MATCH";
@@ -68,6 +74,7 @@ function EvidenceFields({
           pattern="[A-Za-z0-9][A-Za-z0-9._:/-]{2,127}"
           maxLength={128}
           defaultValue={evidenceDefault}
+          disabled={disabled}
           required
         />
       </div>
@@ -80,6 +87,7 @@ function EvidenceFields({
           className="flex py-2"
           compact
           defaultValue={reasonDefault}
+          disabled={disabled}
           required
         >
           <option value="PROVIDER_SETTLEMENT_MATCH">Liquidación verificada</option>
@@ -90,6 +98,13 @@ function EvidenceFields({
     </div>
   );
 }
+
+const nonLocationStockErrors = new Set([
+  "SKU_DIVERGENCE",
+  "USER_PRODUCT_DIVERGENCE",
+  "LISTING_NOT_MAPPED",
+  "SHIPMENT_LOGISTIC_DIVERGENCE",
+]);
 
 export function ChannelOrderActions({
   order,
@@ -102,10 +117,13 @@ export function ChannelOrderActions({
   readonly locations: readonly ChannelStockLocationChoice[];
   readonly adjustmentIdempotencyKey: string;
 }) {
+  const [reconcileVersion] = useState(order.version);
   const [adjustmentRequest] = useState(() => ({
     expectedVersion: order.version,
     idempotencyKey: adjustmentIdempotencyKey,
   }));
+  const canAssignLocation =
+    order.stockStatus === "REVIEW_REQUIRED" && !nonLocationStockErrors.has(order.stockError ?? "");
   return (
     <div className="space-y-4 rounded-lg border border-border p-4">
       <div className="flex flex-wrap gap-3">
@@ -128,7 +146,7 @@ export function ChannelOrderActions({
           />
         ) : null}
       </div>
-      {order.stockStatus === "REVIEW_REQUIRED" && order.stockError !== "INSUFFICIENT_STOCK" ? (
+      {canAssignLocation ? (
         <details>
           <summary className="cursor-pointer text-sm font-medium">Asignar bodega de origen</summary>
           <div className="mt-3">
@@ -144,7 +162,7 @@ export function ChannelOrderActions({
                 label="Confirmar bodega y reservar"
                 pendingLabel="Asignando bodega…"
               >
-                {(values) => {
+                {({ values, pending }) => {
                   const selectedLocation =
                     values?.locationId ??
                     locations.find((location) => location.code === order.stockLocationCode)?.id ??
@@ -159,6 +177,7 @@ export function ChannelOrderActions({
                         className="flex py-2"
                         compact
                         defaultValue={selectedLocation}
+                        disabled={pending}
                         required
                       >
                         <option value="" disabled>
@@ -193,10 +212,14 @@ export function ChannelOrderActions({
                   label="Marcar como conciliado"
                   pendingLabel="Conciliando…"
                 >
-                  {(values) => (
+                  {({ values, pending }) => (
                     <>
-                      <input type="hidden" name="version" value={order.version} />
-                      <EvidenceFields suffix={`reconcile-${order.id}`} values={values} />
+                      <input type="hidden" name="version" value={reconcileVersion} />
+                      <EvidenceFields
+                        suffix={`reconcile-${order.id}`}
+                        values={values}
+                        disabled={pending}
+                      />
                     </>
                   )}
                 </SubmitForm>
@@ -214,7 +237,7 @@ export function ChannelOrderActions({
                 label="Agregar ajuste auditable"
                 pendingLabel="Agregando ajuste…"
               >
-                {(values) => {
+                {({ values, pending }) => {
                   const amountDefault = values?.amountCop ?? "";
                   const directionDefault = values?.direction ?? "CREDIT";
                   return (
@@ -236,10 +259,11 @@ export function ChannelOrderActions({
                             key={`amount-${order.id}-${amountDefault}`}
                             id={`amount-${order.id}`}
                             name="amountCop"
-                            inputMode="numeric"
-                            pattern="[0-9]{1,15}"
-                            maxLength={15}
+                            inputMode="decimal"
+                            pattern="[0-9]{1,15}([.,][0-9]{1,2})?"
+                            maxLength={18}
                             defaultValue={amountDefault}
+                            disabled={pending}
                             required
                           />
                         </div>
@@ -252,6 +276,7 @@ export function ChannelOrderActions({
                             className="flex py-2"
                             compact
                             defaultValue={directionDefault}
+                            disabled={pending}
                             required
                           >
                             <option value="CREDIT">Crédito a favor</option>
@@ -259,7 +284,11 @@ export function ChannelOrderActions({
                           </Select>
                         </div>
                       </div>
-                      <EvidenceFields suffix={`adjust-${order.id}`} values={values} />
+                      <EvidenceFields
+                        suffix={`adjust-${order.id}`}
+                        values={values}
+                        disabled={pending}
+                      />
                     </>
                   );
                 }}

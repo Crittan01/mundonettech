@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 
 import type { MetaCapiEventStatus } from "@mundonettech/db";
 import type { MetaCapiEventView } from "@mundonettech/integrations";
@@ -55,8 +55,13 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
   const [state, action, pending] = useActionState(reconcileMetaCapiAction, initialActionState);
   const defaultResolution =
     event.status === "UNCERTAIN" ? "CONFIRMED_SENT" : event.retryable ? "RETRY" : "DISCARD";
+  const [resolution, setResolution] = useState<string>(defaultResolution);
   return (
-    <form action={action} className="mt-4 space-y-3 rounded-lg bg-secondary/40 p-4">
+    <form
+      action={action}
+      className="mt-4 space-y-3 rounded-lg bg-secondary/40 p-4"
+      aria-busy={pending}
+    >
       <input type="hidden" name="metaEventId" value={event.id} />
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] sm:items-end">
         <div className="space-y-2">
@@ -64,7 +69,8 @@ function ReconcileForm({ event }: { readonly event: MetaCapiEventView }) {
           <select
             id={`resolution-${event.id}`}
             name="resolution"
-            defaultValue={defaultResolution}
+            value={resolution}
+            onChange={(changeEvent) => setResolution(changeEvent.target.value)}
             className="h-11 w-full rounded-md border border-input bg-background px-3 text-sm"
             disabled={pending}
           >

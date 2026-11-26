@@ -2,7 +2,9 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { hasAdminPermission, isAdminRole, normalizeEmail } from "@mundonettech/core";
 import {
+  acquireOperationLocks,
   IntegrationEnvironment,
+  isAdminSelfDealingCustomer,
   Prisma,
   PrismaClient,
   type MetaCapiEvent,
@@ -104,6 +106,10 @@ type Db = PrismaClient | Prisma.TransactionClient;
 
 function hash(value: string): Uint8Array<ArrayBuffer> {
   return createHash("sha256").update(value, "utf8").digest();
+}
+
+function consentUpperBound(eventTime: Date): Date {
+  return new Date(Math.floor(eventTime.getTime()) + 1);
 }
 
 function contentsOf(event: MetaCapiEvent): MetaCapiContent[] {
@@ -292,6 +298,11 @@ export class MetaCapiService {
       select: { id: true },
     });
     if (existing) return { status: "ALREADY_ENQUEUED", metaEventId: existing.id };
+    const orderPeek = await this.db.order.findUnique({
+      where: { id: input.orderId },
+      select: { customerId: true },
+    });
+    if (!orderPeek?.customerId) return { status: "NOT_ELIGIBLE" };
     const configured = await this.db.integrationCredential.findFirst({
       where: { provider: "meta", environment: this.options.environment, revokedAt: null },
       select: { id: true },
@@ -301,6 +312,8 @@ export class MetaCapiService {
     const metaEventId = randomUUID();
     try {
       return await this.db.$transaction(async (tx) => {
+        await acquireOperationLocks(tx, [`growth-customer:${orderPeek.customerId}`]);
+        await tx.$executeRaw`SELECT "id" FROM "Customer" WHERE "id" = ${orderPeek.customerId}::uuid FOR SHARE`;
         const now = await databaseTimestamp(tx);
         const order = await tx.order.findUnique({
           where: { id: input.orderId },
@@ -329,11 +342,19 @@ export class MetaCapiService {
           orderBy: [{ completedAt: "desc" }, { id: "desc" }],
         });
         const paidAt = capture?.completedAt;
-        if (!paidAt || paidAt < order.createdAt || input.paidAt < paidAt) {
+        if (
+          !paidAt ||
+          paidAt < order.createdAt ||
+          paidAt.getTime() > input.paidAt.getTime() + 300_000
+        ) {
           return { status: "NOT_ELIGIBLE" } as const;
         }
         if (now.getTime() - paidAt.getTime() > 7 * 24 * 3_600_000) {
           return { status: "STALE" } as const;
+        }
+        const contents = aggregatedContents(order.items);
+        if (contents.length === 0 || contents.length > 100) {
+          return { status: "NOT_ELIGIBLE" } as const;
         }
         const consent = await tx.consent.findFirst({
           where: {
@@ -341,7 +362,7 @@ export class MetaCapiService {
             purpose: "ADVERTISING",
             status: "GRANTED",
             revokedBy: null,
-            occurredAt: { lte: paidAt },
+            occurredAt: { lt: consentUpperBound(paidAt) },
           },
           orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
         });
@@ -365,7 +386,7 @@ export class MetaCapiService {
             eventTime: paidAt,
             eventSourceUrl: `${this.publicSiteUrl}/checkout`,
             valueCents: order.totalCents,
-            contents: aggregatedContents(order.items),
+            contents,
             externalIdHash: hashes.externalIdHash,
             emailHash: hashes.emailHash,
             phoneHash: hashes.phoneHash,
@@ -388,7 +409,7 @@ export class MetaCapiService {
             eventTime: paidAt,
             eventSourceUrl: `${this.publicSiteUrl}/checkout`,
             valueCents: order.totalCents,
-            contents: aggregatedContents(order.items) as unknown as Prisma.InputJsonValue,
+            contents: contents as unknown as Prisma.InputJsonValue,
             requestHash: request.requestHash,
             ...hashes,
           },
@@ -470,7 +491,7 @@ export class MetaCapiService {
         purpose: "ADVERTISING",
         status: "GRANTED",
         revokedBy: null,
-        occurredAt: { lte: event.eventTime },
+        occurredAt: { lt: consentUpperBound(event.eventTime) },
         customer: { deletedAt: null, status: { in: ["GUEST", "ACTIVE"] } },
       },
       select: { id: true },
@@ -496,14 +517,12 @@ export class MetaCapiService {
       const current = rows[0];
       if (!current) throw new MetaCapiServiceError("NOT_FOUND", "Meta CAPI event not found.");
       if (claimId && (current.status !== "DISPATCHING" || current.claimId !== claimId)) {
+        if (current.status === "SKIPPED" && current.failureCode === "NO_CONSENT") {
+          return "SKIPPED";
+        }
         throw new MetaCapiServiceError("CONFLICT", "Meta CAPI claim changed before completion.");
       }
       let outcome = input;
-      if (input.status === "PENDING" || input.status === "UNCERTAIN") {
-        if (!(await this.hasActiveConsent(tx, current))) {
-          outcome = { status: "SKIPPED", failureCode: "NO_CONSENT", availableAt: now };
-        }
-      }
       if (
         outcome.status !== "SKIPPED" &&
         claimId &&
@@ -512,6 +531,11 @@ export class MetaCapiService {
         current.claimExpiresAt <= now
       ) {
         outcome = { status: "UNCERTAIN", failureCode: "CLAIM_EXPIRED" };
+      }
+      if (outcome.status === "PENDING" || outcome.status === "UNCERTAIN") {
+        if (!(await this.hasActiveConsent(tx, current))) {
+          outcome = { status: "SKIPPED", failureCode: "NO_CONSENT", availableAt: now };
+        }
       }
       const terminal =
         outcome.status === "SENT" || outcome.status === "SKIPPED" || outcome.status === "FAILED";
@@ -640,7 +664,7 @@ export class MetaCapiService {
             purpose: "ADVERTISING",
             status: "GRANTED",
             revokedBy: null,
-            occurredAt: { lte: event.eventTime },
+            occurredAt: { lt: consentUpperBound(event.eventTime) },
             customer: { deletedAt: null, status: { in: ["GUEST", "ACTIVE"] } },
           },
           select: { id: true },
@@ -849,9 +873,18 @@ export class MetaCapiService {
     }
     const ipHash = assertOptionalHash(input.audit.ipHash, "ipHash");
     const userAgentHash = assertOptionalHash(input.audit.userAgentHash, "userAgentHash");
+    const peekEvent =
+      input.resolution === "RETRY"
+        ? await this.db.metaCapiEvent.findUnique({
+            where: { id: input.metaEventId },
+            select: { customerId: true },
+          })
+        : null;
     return this.db.$transaction(async (tx) => {
-      const actorRows = await tx.$queryRaw<Array<{ id: string; role: string }>>`
-        SELECT "id", "role"::text AS "role"
+      const actorRows = await tx.$queryRaw<
+        Array<{ id: string; role: string; email: string; authUserId: string }>
+      >`
+        SELECT "id", "role"::text AS "role", "email", "authUserId"
         FROM "AdminUser"
         WHERE "id" = ${input.audit.actorAdminUserId}::uuid
           AND "status" = 'ACTIVE'
@@ -868,6 +901,10 @@ export class MetaCapiService {
           "UNAUTHORIZED",
           "Active integrations administrator required.",
         );
+      }
+      if (peekEvent?.customerId) {
+        await acquireOperationLocks(tx, [`growth-customer:${peekEvent.customerId}`]);
+        await tx.$executeRaw`SELECT "id" FROM "Customer" WHERE "id" = ${peekEvent.customerId}::uuid FOR SHARE`;
       }
       const rows = await tx.$queryRaw<Array<MetaCapiEvent & { order: { orderNumber: string } }>>`
         SELECT * FROM "MetaCapiEvent" WHERE "id" = ${input.metaEventId}::uuid FOR UPDATE
@@ -992,7 +1029,7 @@ export class MetaCapiService {
             purpose: "ADVERTISING",
             status: "GRANTED",
             revokedBy: null,
-            occurredAt: { lte: event.eventTime },
+            occurredAt: { lt: consentUpperBound(event.eventTime) },
           },
           select: { id: true },
         });
@@ -1067,6 +1104,9 @@ export class MetaCapiService {
           },
         });
       }
+      const selfDealing = await isAdminSelfDealingCustomer(tx, actor, {
+        customerId: event.customerId,
+      });
       await tx.adminActionLog.create({
         data: {
           actorAdminUserId: actor.id,
@@ -1078,6 +1118,7 @@ export class MetaCapiService {
                 : "META_CAPI_RETRY_RECONCILED",
           targetType: "MetaCapiEvent",
           targetId: event.id,
+          selfDealing,
           requestId: input.audit.requestId ?? null,
           ipHash,
           userAgentHash,
@@ -1098,57 +1139,5 @@ export class MetaCapiService {
       });
       return view(saved);
     });
-  }
-
-  async cancelPendingForConsentRevocation(tx: Db, customerId: string): Promise<number> {
-    assertIntegrationUuid(customerId, "customerId");
-    const now = await databaseTimestamp(tx);
-    const revocationCondition: Prisma.MetaCapiEventWhereInput = {
-      OR: [
-        { consent: { status: "REVOKED" } },
-        { consent: { revokedBy: { isNot: null } } },
-        { customer: { status: "ANONYMIZED" } },
-        { customer: { deletedAt: { not: null } } },
-      ],
-    };
-    const cancellableRows = await tx.metaCapiEvent.findMany({
-      where: {
-        customerId,
-        status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] },
-        ...revocationCondition,
-      },
-      select: { id: true },
-    });
-    const result = await tx.metaCapiEvent.updateMany({
-      where: {
-        customerId,
-        status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] },
-        ...revocationCondition,
-      },
-      data: {
-        status: "SKIPPED",
-        completedAt: now,
-        failureCode: "NO_CONSENT",
-        externalIdHash: null,
-        emailHash: null,
-        phoneHash: null,
-        availableAt: now,
-        claimId: null,
-        claimedBy: null,
-        claimedAt: null,
-        claimExpiresAt: null,
-        requestStartedAt: null,
-      },
-    });
-    if (cancellableRows.length > 0) {
-      await tx.notification.updateMany({
-        where: {
-          deduplicationKey: { in: cancellableRows.map((row) => `meta-capi:${row.id}:review`) },
-          resolvedAt: null,
-        },
-        data: { resolvedAt: now },
-      });
-    }
-    return result.count;
   }
 }

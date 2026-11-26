@@ -5,7 +5,11 @@ import {
 } from "@mundonettech/core";
 import { Prisma } from "@mundonettech/db";
 
-import { canonicalIntegrationJson, integrationDigest } from "./integration-utils.js";
+import {
+  canonicalIntegrationJson,
+  integrationDigest,
+  isPrivateOrLocalHostname,
+} from "./integration-utils.js";
 import type { MercadoLibreAttributeInput } from "./mercado-libre-catalog.js";
 
 export const channelVariantInclude = {
@@ -81,10 +85,12 @@ export function channelStockQuantities(variant: ChannelVariantSnapshot): {
 
 function mediaOrigin(value: string, allowLoopback: boolean): string {
   const url = new URL(value);
-  const loopback =
-    allowLoopback && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
+  const host = url.hostname.toLowerCase();
+  const loopback = allowLoopback && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host);
+  const hostBlocked = isPrivateOrLocalHostname(host) && !loopback;
   if (
     (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    hostBlocked ||
     url.username ||
     url.password ||
     url.search ||
@@ -196,11 +202,19 @@ export function buildChannelContentSnapshot(options: {
   ];
   const gtin = resolveCommercialGtin(variant.gtin, variant.ean);
   if (gtin) attributes.push({ id: "GTIN", valueName: gtin });
+  const seenAttributeKeys = new Set(
+    attributes.map((attribute) => attribute.id ?? attribute.name ?? ""),
+  );
   for (const link of [...variant.optionLinks].sort((left, right) =>
     compareCodePoints(left.optionDefinition.key, right.optionDefinition.key),
   )) {
+    const optionName = printable(link.optionDefinition.name, "option name", 120);
+    if (seenAttributeKeys.has(optionName)) {
+      throw new TypeError("Duplicate channel attribute name detected in variant options.");
+    }
+    seenAttributeKeys.add(optionName);
     attributes.push({
-      name: printable(link.optionDefinition.name, "option name", 120),
+      name: optionName,
       valueName: printable(link.optionValue.label, "option value", 120),
     });
   }

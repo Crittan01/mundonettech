@@ -7,6 +7,7 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 
 import * as core from "../../packages/core/dist/index.js";
+import * as integrations from "../../packages/integrations/dist/index.js";
 
 const webRequire = createRequire(new URL("../../apps/web/package.json", import.meta.url));
 const actorAdminUserId = "123e4567-e89b-42d3-a456-426614174000";
@@ -39,6 +40,7 @@ function loadPage(mocks: Record<string, unknown>): PageModule {
   const pageModule = { exports: {} as Record<string, unknown> };
   const localRequire = (id: string): unknown => {
     if (Object.hasOwn(mocks, id)) return mocks[id];
+    if (id === "@mundonettech/integrations") return integrations;
     return webRequire(id) as unknown;
   };
   const context = createContext({
@@ -243,12 +245,13 @@ describe("A2 — channel request stability across RSC refreshes", () => {
     expect(source).toContain("value={adjustmentRequest.idempotencyKey}");
   });
 
-  it("pins offer optimistic version to the original client request", () => {
+  it("pins offer optimistic version to the original client request and advances only on own success", () => {
     const filename = fileURLToPath(
       new URL("../../apps/web/components/admin/channel-catalog-forms.tsx", import.meta.url),
     );
     const source = readFileSync(filename, "utf8");
-    expect(source).toContain("const [expectedVersion] = useState(offer.version);");
+    expect(source).toContain("const [initialVersion] = useState(offer.version);");
+    expect(source).toContain('state.status === "success" && state.values?.version');
     expect(source).toContain('name="version" value={expectedVersion}');
   });
 });
@@ -279,10 +282,10 @@ describe("A8 — credential form progress and repeated success", () => {
       ),
       "utf8",
     );
-    expect(source).toContain("setDismissSuccess(false);");
-    expect(source).toContain("encrypt(event.currentTarget);");
+    expect(source).toContain("dismissedState !== state");
+    expect(source).toContain("advanceOrEncrypt();");
     expect(source).toContain('pending ? "Recifrando…"');
     expect(source).toContain('pending ? "Revocando…"');
-    expect(source.match(/aria-busy=\{pending\}/g)).toHaveLength(2);
+    expect(source.match(/aria-busy=\{pending\}/g)).toHaveLength(4);
   });
 });

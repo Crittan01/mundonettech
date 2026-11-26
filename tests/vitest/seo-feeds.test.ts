@@ -213,6 +213,7 @@ describe("F2.3 — Merchant XML and scalable sitemap", () => {
       ]),
     ).toThrow(/HTTPS/);
     expect(normalizeXmlText("a\u0000\n b", 20)).toBe("a b");
+    expect(normalizeXmlText("a\ud800b\udfff\u0085\ufffe\uffffc", 20)).toBe("a b c");
     expect(Array.from(normalizeXmlText("😀".repeat(200), 150))).toHaveLength(150);
   });
 

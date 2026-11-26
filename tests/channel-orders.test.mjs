@@ -1026,4 +1026,94 @@ describe("A8 — pack membership and shipment logistics safety", () => {
     });
     assert.equal(level.committed, 0);
   });
+
+  it("enqueues distinct lifecycle notifications for the same order while rejecting mutated x-request-id replays", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const remote = remoteResources(listing);
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sign = (dataId, requestId) =>
+      `ts=${ts},v1=${createHmac("sha256", clientSecret)
+        .update(`id:${dataId};request-id:${requestId};ts:${ts};`)
+        .digest("hex")}`;
+    const body = JSON.stringify({
+      topic: "orders_v2",
+      resource: `/orders/${remote.orderId}`,
+      user_id: Number(account.externalAccountId),
+      data: { id: remote.orderId },
+    });
+    const first = await orderService
+      .enqueueNotification({
+        body,
+        requestId: `req-lifecycle-1-${randomUUID()}`,
+        signature: "",
+        queryDataId: remote.orderId,
+      })
+      .catch(() => null);
+    assert.equal(first, null);
+
+    const requestId1 = `req-life-1-${randomUUID()}`;
+    const requestId2 = `req-life-2-${randomUUID()}`;
+    const accepted1 = await orderService.enqueueNotification({
+      body,
+      requestId: requestId1,
+      signature: sign(remote.orderId, requestId1),
+      queryDataId: remote.orderId,
+    });
+    const accepted2 = await orderService.enqueueNotification({
+      body,
+      requestId: requestId2,
+      signature: sign(remote.orderId, requestId2),
+      queryDataId: remote.orderId,
+    });
+    assert.equal(accepted1.status, "ENQUEUED");
+    assert.equal(accepted2.status, "ENQUEUED");
+    assert.notEqual(accepted1.eventId, accepted2.eventId);
+
+    const mutatedBody = JSON.stringify({
+      topic: "orders_v2",
+      resource: `/orders/${Number(remote.orderId) + 1}`,
+      user_id: Number(account.externalAccountId),
+      data: { id: remote.orderId },
+    });
+    await assert.rejects(
+      orderService.enqueueNotification({
+        body: mutatedBody,
+        requestId: requestId1,
+        signature: sign(remote.orderId, requestId1),
+        queryDataId: remote.orderId,
+      }),
+      (error) => error instanceof ChannelOrderError && error.code === "CONFLICT",
+    );
+  });
+
+  it("flags in_mediation payments for financial review and rejects assignStockLocation on SKU divergence", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const remote = remoteResources(listing);
+    remote.order.payments[0].status = "in_mediation";
+    await synchronize("orders", remote.orderId);
+    const mediated = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: remote.orderId },
+    });
+    assert.equal(mediated.reconciliationStatus, "REVIEW_REQUIRED");
+    assert.equal(mediated.reconciliationReason, "PAYMENT_MEDIATION_REVIEW");
+
+    const mismatched = remoteResources(listing);
+    mismatched.order.order_items[0].item.seller_sku = "WRONG-SKU-999";
+    await synchronize("orders", mismatched.orderId);
+    const skuDiverged = await db.channelOrder.findFirstOrThrow({
+      where: { externalOrderId: mismatched.orderId },
+    });
+    assert.equal(skuDiverged.stockStatus, "REVIEW_REQUIRED");
+    assert.equal(skuDiverged.stockError, "SKU_DIVERGENCE");
+    await assert.rejects(
+      orderService.assignStockLocation({
+        orderId: skuDiverged.id,
+        locationId: catalog.inventory.locationId,
+        audit: audit(),
+      }),
+      (error) => error instanceof ChannelOrderError && error.code === "CONFLICT",
+    );
+  });
 });

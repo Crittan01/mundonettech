@@ -388,11 +388,15 @@ describe("A8 — channel catalog reconciliation invariants", () => {
         id: "MCO111111111",
         userProductId: "MCOU123456789",
         priceCents: 166_700n,
+        fulfillment: false,
+        status: "active",
       },
       MCO222222222: {
         id: "MCO222222222",
         userProductId: "MCOU123456789",
         priceCents: 166_800n,
+        fulfillment: false,
+        status: "active",
       },
     };
     const client = {
@@ -518,5 +522,17 @@ describe("A8 — channel catalog reconciliation invariants", () => {
       },
       data: { status: "SUPERSEDED", failureCode: "SUPERSEDED" },
     });
+  });
+
+  it("clamps FORMULA gross-up to the minimum 1 COP step when target net and fees are zero", () => {
+    const result = calculateMercadoLibreOfferPrice({
+      mode: "FORMULA",
+      targetNetCents: 0n,
+      commissionBps: 1_000,
+      fixedFeeCents: 0n,
+      shippingCostCents: 0n,
+    });
+    expect(result.priceCents).toBe(100n);
+    expect(result.netProceedsCents).toBeGreaterThanOrEqual(0n);
   });
 });

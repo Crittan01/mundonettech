@@ -1066,4 +1066,66 @@ describe("F6.4 — credential rebinding, discard reconciliation, consent truncat
     });
     assert.equal(recovered.status, "PENDING");
   });
+
+  it("cancels FAILED events with purged hashes on consent revocation and records selfDealing on reconcile", async () => {
+    const { catalog, checkout, paidAt } = await makePaidOrder();
+    await grantConsent(catalog);
+    await createCredential();
+    const metaEventId = await enqueue(catalog, checkout, paidAt);
+    behavior = () => ({ status: 400, body: { error: { type: "OAuthException", code: 190 } } });
+    const failedDispatch = await service.dispatch(metaEventId, "worker:failed-oauth");
+    assert.equal(failedDispatch.status, "FAILED");
+    const failedRow = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(failedRow.failureCode, "CREDENTIAL_REJECTED");
+
+    const customerBefore = await db.customer.findUniqueOrThrow({
+      where: { id: catalog.customerId },
+    });
+    const selfAdmin = await db.adminUser.create({
+      data: {
+        authUserId: randomUUID(),
+        email: customerBefore.email,
+        displayName: "Admin mismo titular",
+        role: "SUPERADMIN",
+        status: "ACTIVE",
+      },
+    });
+    await service.reconcile({
+      metaEventId,
+      resolution: "RETRY",
+      reference: "SELF-DEALING-CHECK-001",
+      audit: { ...audit(), actorAdminUserId: selfAdmin.id },
+    });
+    const log = await db.adminActionLog.findFirstOrThrow({
+      where: {
+        actorAdminUserId: selfAdmin.id,
+        action: "META_CAPI_RETRY_RECONCILED",
+        targetId: metaEventId,
+      },
+    });
+    assert.equal(log.selfDealing, true);
+
+    behavior = () => ({ status: 400, body: { error: { type: "OAuthException", code: 190 } } });
+    await service.dispatch(metaEventId, "worker:failed-before-revoke");
+    const accounts = new AccountService(db, { privacyPolicyVersion: "1.1.0" });
+    const customer = await db.customer.findUniqueOrThrow({ where: { id: catalog.customerId } });
+    await accounts.updateProfile(
+      catalog.customerId,
+      {
+        givenName: "Cliente",
+        familyName: "Prueba",
+        phoneE164: customer.phoneE164 ?? "+573001234567",
+        marketingEmail: false,
+        advertising: false,
+      },
+      customer.updatedAt,
+      { ipHash: hash(), userAgentHash: hash() },
+    );
+    const skipped = await db.metaCapiEvent.findUniqueOrThrow({ where: { id: metaEventId } });
+    assert.equal(skipped.status, "SKIPPED");
+    assert.equal(skipped.failureCode, "NO_CONSENT");
+    assert.equal(skipped.externalIdHash, null);
+    assert.equal(skipped.emailHash, null);
+    assert.equal(skipped.phoneHash, null);
+  });
 });

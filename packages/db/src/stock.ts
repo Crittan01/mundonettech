@@ -235,12 +235,71 @@ async function settleReservation(
       if (!order) throw new InventoryNotFoundError("Order not found for stock fulfillment.");
     }
     if (fulfill && channelOrderId) {
-      const order = await tx.channelOrder.findUnique({
-        where: { id: channelOrderId },
-        select: { id: true },
-      });
+      const lockedOrders = await tx.$queryRaw<
+        Array<{
+          id: string;
+          status: string;
+          stockStatus: string;
+          variantId: string | null;
+          stockLocationId: string | null;
+          reservationKey: string | null;
+          quantity: number;
+        }>
+      >`
+        SELECT "id", "status"::text AS "status", "stockStatus"::text AS "stockStatus",
+               "variantId", "stockLocationId", "reservationKey", "quantity"
+        FROM "ChannelOrder"
+        WHERE "id" = ${channelOrderId}::uuid
+        FOR UPDATE
+      `;
+      const order = lockedOrders[0];
       if (!order) {
         throw new InventoryNotFoundError("Channel order not found for stock fulfillment.");
+      }
+      const single = items.length === 1 ? items[0] : undefined;
+      if (
+        !single ||
+        order.status !== "PAID" ||
+        order.stockStatus !== "RESERVED" ||
+        order.reservationKey !== reservationKey ||
+        order.variantId !== single.variantId ||
+        order.stockLocationId !== single.locationId ||
+        order.quantity !== single.quantity
+      ) {
+        throw new InventoryConflictError(
+          "Channel stock fulfillment must match the reserved channel order exactly.",
+        );
+      }
+    }
+    if (!fulfill) {
+      const channelOrderByReservation = await tx.$queryRaw<
+        Array<{
+          id: string;
+          stockStatus: string;
+          variantId: string | null;
+          stockLocationId: string | null;
+          quantity: number;
+        }>
+      >`
+        SELECT "id", "stockStatus"::text AS "stockStatus", "variantId", "stockLocationId", "quantity"
+        FROM "ChannelOrder"
+        WHERE "reservationKey" = ${reservationKey}
+        FOR UPDATE
+      `;
+      const reservedChannelOrder = channelOrderByReservation[0];
+      if (reservedChannelOrder) {
+        const single = items.length === 1 ? items[0] : undefined;
+        if (
+          !single ||
+          reservedChannelOrder.stockStatus !== "RESERVED" ||
+          reservedChannelOrder.variantId !== single.variantId ||
+          reservedChannelOrder.stockLocationId !== single.locationId ||
+          reservedChannelOrder.quantity !== single.quantity
+        ) {
+          throw new InventoryConflictError(
+            "Channel stock release must release the full reserved channel order.",
+          );
+        }
       }
     }
     await assertReservationBalance(tx, reservationKey, items);

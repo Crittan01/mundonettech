@@ -12,7 +12,7 @@ import {
   revokeCredentialAction,
   rotateWompiCredentialAction,
 } from "@/lib/actions/admin-integrations";
-import { initialActionState } from "@/lib/action-state";
+import { initialActionState, type ActionState } from "@/lib/action-state";
 
 export interface IntegrationCredentialView {
   readonly id: string;
@@ -31,11 +31,13 @@ function SecretField({
   name,
   label,
   required = true,
+  disabled = false,
 }: {
   id: string;
   name: string;
   label: string;
   required?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-2">
@@ -49,6 +51,7 @@ function SecretField({
         minLength={20}
         maxLength={255}
         required={required}
+        disabled={disabled}
       />
     </div>
   );
@@ -57,7 +60,7 @@ function SecretField({
 export function WompiCredentialWizard({ environment }: { environment: string }) {
   const [state, action, pending] = useActionState(createWompiCredentialAction, initialActionState);
   const [step, setStep] = useState(1);
-  const [dismissSuccess, setDismissSuccess] = useState(false);
+  const [dismissedState, setDismissedState] = useState<ActionState | null>(null);
   const sections = useRef<Record<number, HTMLFieldSetElement | null>>({});
   const form = useRef<HTMLFormElement>(null);
   const values = state.values;
@@ -75,7 +78,6 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
   }
 
   function encrypt(currentForm: HTMLFormElement) {
-    setDismissSuccess(false);
     startTransition(() => action(new FormData(currentForm)));
   }
 
@@ -89,7 +91,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
     encrypt(currentForm);
   }
 
-  if (state.status === "success" && !dismissSuccess) {
+  if (!pending && state.status === "success" && dismissedState !== state) {
     return (
       <div className="space-y-4 rounded-lg border border-success bg-card p-5">
         <FormMessage state={state} />
@@ -101,7 +103,7 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
           type="button"
           variant="outline"
           onClick={() => {
-            setDismissSuccess(true);
+            setDismissedState(state);
             setStep(1);
           }}
         >
@@ -116,10 +118,10 @@ export function WompiCredentialWizard({ environment }: { environment: string }) 
       ref={form}
       onSubmit={(event) => {
         event.preventDefault();
-        if (step !== 3) return;
-        encrypt(event.currentTarget);
+        advanceOrEncrypt();
       }}
       className="space-y-5"
+      aria-busy={pending}
       noValidate
     >
       <ol aria-label="Pasos para conectar Wompi" className="grid gap-2 sm:grid-cols-3">
@@ -244,7 +246,7 @@ export function CredentialRotationForm({ credential }: { credential: Integration
   const [state, action, pending] = useActionState(rotateWompiCredentialAction, initialActionState);
   const values = state.values;
   return (
-    <form action={action} className="space-y-4">
+    <form action={action} className="space-y-4" aria-busy={pending}>
       <input type="hidden" name="credentialId" value={credential.id} />
       <div className="space-y-2">
         <Label htmlFor={`public-${credential.id}`}>Nueva llave pública</Label>
@@ -254,6 +256,7 @@ export function CredentialRotationForm({ credential }: { credential: Integration
           defaultValue={values?.publicKey ?? ""}
           minLength={20}
           maxLength={255}
+          disabled={pending}
           required
         />
       </div>
@@ -262,16 +265,19 @@ export function CredentialRotationForm({ credential }: { credential: Integration
           id={`private-${credential.id}`}
           name="privateKey"
           label="Nueva llave privada"
+          disabled={pending}
         />
         <SecretField
           id={`integrity-${credential.id}`}
           name="integritySecret"
           label="Nuevo secreto de integridad"
+          disabled={pending}
         />
         <SecretField
           id={`events-${credential.id}`}
           name="eventsSecret"
           label="Nuevo secreto de eventos"
+          disabled={pending}
         />
       </div>
       <Button type="submit" variant="outline" disabled={pending}>

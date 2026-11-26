@@ -121,7 +121,7 @@ export function centsToDecimal(value: bigint): string {
   return `${whole}.${cents}`;
 }
 
-function isPrivateOrLocalHostname(hostname: string): boolean {
+export function isPrivateOrLocalHostname(hostname: string): boolean {
   const lower = hostname.toLowerCase();
   const unwrapped = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower;
   const bare = unwrapped.replace(/\.+$/, "");
@@ -171,6 +171,9 @@ function isPrivateOrLocalHostname(hostname: string): boolean {
       bare.startsWith("ff") ||
       bare.startsWith("100::") ||
       bare.startsWith("64:ff9b:") ||
+      bare.startsWith("2002:") ||
+      bare.startsWith("2001:0:") ||
+      bare.startsWith("2001:0000:") ||
       bare.startsWith("::ffff:") ||
       /^::[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(bare) ||
       /^0+:/.test(bare)

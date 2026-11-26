@@ -498,12 +498,19 @@ test("Mercado Libre OAuth, encrypted refresh, scheduler, reconnection and revoca
     const ingested = await page.request.post("/api/jobs/channels", {
       headers: { authorization: `Bearer ${channelCronSecret}` },
     });
-    expect(ingested.status()).toBe(200);
+    expect(ingested.status()).toBe(500);
     const ingestionResult = await ingested.json();
     expect(ingestionResult.ingestion.claimed).toBe(1);
     expect(ingestionResult.ingestion.completed).toBe(0);
-    expect(ingestionResult.ingestion.retries).toBe(1);
+    expect(ingestionResult.ingestion.retries).toBe(0);
     expect(ingestionResult.ingestion.failed).toBe(0);
+    expect(ingestionResult.ingestion.failures).toEqual([
+      { eventId: expect.any(String), code: "CLAIM_EXPIRED" },
+    ]);
+    expect(ingestionResult.sync).toBeUndefined();
+    expect(ingestionResult.errors).toEqual([
+      { stage: "processResourceEvents", code: "INGESTION_INCOMPLETE" },
+    ]);
     await expectChannelAvailability(5);
   } finally {
     await db.$executeRawUnsafe(`DROP TRIGGER IF EXISTS "${faultTrigger}" ON "AdminActionLog"`);

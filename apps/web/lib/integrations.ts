@@ -32,6 +32,14 @@ const state = globalThis as typeof globalThis & {
 export function getIntegrationEnvironment(): IntegrationEnvironment {
   const configured = process.env.INTEGRATION_ENVIRONMENT;
   const vercelEnvironment = process.env.VERCEL_ENV;
+  if (
+    !configured &&
+    !vercelEnvironment &&
+    process.env.NODE_ENV === "production" &&
+    process.env.NEXT_PHASE !== "phase-production-build"
+  ) {
+    throw new Error("INTEGRATION_ENVIRONMENT is required in production outside Vercel.");
+  }
   const inferred =
     vercelEnvironment === "production"
       ? IntegrationEnvironment.PRD
@@ -51,7 +59,11 @@ export function getIntegrationEnvironment(): IntegrationEnvironment {
   return value as IntegrationEnvironment;
 }
 
-export function getIntegrationCredentialVault(): IntegrationCredentialVault {
+export function getIntegrationCredentialVault(db?: PrismaClient): IntegrationCredentialVault {
+  if (db) {
+    const environment = getIntegrationEnvironment();
+    return new IntegrationCredentialVault(db, loadCredentialKeyRing(environment));
+  }
   if (!state.__integrationCredentialVault) {
     const environment = getIntegrationEnvironment();
     state.__integrationCredentialVault = new IntegrationCredentialVault(
@@ -65,16 +77,24 @@ export function getIntegrationCredentialVault(): IntegrationCredentialVault {
 export function getPublicSiteUrl(): string {
   const raw = (process.env.SITE_URL ?? storeConfig.url).trim();
   const url = new URL(raw);
-  const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
+  const loopback = ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
+  const isProductionEnvironment =
+    process.env.INTEGRATION_ENVIRONMENT === IntegrationEnvironment.PRD ||
+    process.env.VERCEL_ENV === "production";
   if (
-    (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) ||
+    (url.protocol !== "https:" &&
+      !(url.protocol === "http:" && loopback && !isProductionEnvironment)) ||
     url.username ||
     url.password ||
-    url.hash
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
   ) {
-    throw new Error("SITE_URL requires HTTPS outside loopback and no credentials or fragment.");
+    throw new Error(
+      "SITE_URL requires a root HTTPS origin outside non-PRD loopback without credentials, query or fragment.",
+    );
   }
-  return url.toString().replace(/\/$/, "");
+  return url.origin;
 }
 
 export function getBankTransferInstructions(): string | null {
@@ -90,21 +110,28 @@ export function getBankTransferInstructions(): string | null {
   return value;
 }
 
-export function paymentService(db: PrismaClient = getDatabase()): PaymentService {
-  return new PaymentService(db, {
-    vault: getIntegrationCredentialVault().forSystemProvider("wompi"),
+function resolveVault(db?: PrismaClient): IntegrationCredentialVault {
+  return db ? getIntegrationCredentialVault(db) : getIntegrationCredentialVault();
+}
+
+export function paymentService(db?: PrismaClient): PaymentService {
+  const database = db ?? getDatabase();
+  return new PaymentService(database, {
+    vault: resolveVault(db).forSystemProvider("wompi"),
   });
 }
 
-export function paymentRefundService(db: PrismaClient = getDatabase()): PaymentRefundService {
-  return new PaymentRefundService(db, {
-    vault: getIntegrationCredentialVault().forSystemProvider("wompi"),
+export function paymentRefundService(db?: PrismaClient): PaymentRefundService {
+  const database = db ?? getDatabase();
+  return new PaymentRefundService(database, {
+    vault: resolveVault(db).forSystemProvider("wompi"),
   });
 }
 
-export function wompiWebhookService(db: PrismaClient = getDatabase()): WompiWebhookService {
-  return new WompiWebhookService(db, {
-    vault: getIntegrationCredentialVault().forSystemProvider("wompi"),
+export function wompiWebhookService(db?: PrismaClient): WompiWebhookService {
+  const database = db ?? getDatabase();
+  return new WompiWebhookService(database, {
+    vault: resolveVault(db).forSystemProvider("wompi"),
   });
 }
 
@@ -122,40 +149,45 @@ export function blockedIdentityService(db: PrismaClient = getDatabase()): Blocke
   return new BlockedIdentityService(db);
 }
 
-export function shippingService(db: PrismaClient = getDatabase()): ShippingService {
-  return new ShippingService(db, {
-    vault: getIntegrationCredentialVault().forSystemProvider("aveonline"),
+export function shippingService(db?: PrismaClient): ShippingService {
+  const database = db ?? getDatabase();
+  return new ShippingService(database, {
+    vault: resolveVault(db).forSystemProvider("aveonline"),
     environment: getIntegrationEnvironment(),
   });
 }
 
-export function emailService(db: PrismaClient = getDatabase()): EmailService {
-  return new EmailService(db, {
-    vault: getIntegrationCredentialVault().forSystemProvider("resend"),
+export function emailService(db?: PrismaClient): EmailService {
+  const database = db ?? getDatabase();
+  return new EmailService(database, {
+    vault: resolveVault(db).forSystemProvider("resend"),
     publicSiteUrl: getPublicSiteUrl(),
     environment: getIntegrationEnvironment(),
   });
 }
 
-export function invoiceService(db: PrismaClient = getDatabase()): InvoiceService {
-  return new InvoiceService(db, {
-    vault: getIntegrationCredentialVault().forSystemProvider("dian"),
+export function invoiceService(db?: PrismaClient): InvoiceService {
+  const database = db ?? getDatabase();
+  return new InvoiceService(database, {
+    vault: resolveVault(db).forSystemProvider("dian"),
     environment: getIntegrationEnvironment(),
   });
 }
 
-export function b2bCopilotService(db: PrismaClient = getDatabase()): B2bCopilotService {
-  return new B2bCopilotService(db, {
-    vault: getIntegrationCredentialVault().forSystemProvider("gemini"),
+export function b2bCopilotService(db?: PrismaClient): B2bCopilotService {
+  const database = db ?? getDatabase();
+  return new B2bCopilotService(database, {
+    vault: resolveVault(db).forSystemProvider("gemini"),
     environment: getIntegrationEnvironment(),
   });
 }
 
-export function guestOrderAccessService(db: PrismaClient = getDatabase()): GuestOrderAccessService {
-  return new GuestOrderAccessService(db, {
+export function guestOrderAccessService(db?: PrismaClient): GuestOrderAccessService {
+  const database = db ?? getDatabase();
+  return new GuestOrderAccessService(database, {
     secret: getSessionHmacSecret(),
     storeName: storeConfig.name,
-    vault: getIntegrationCredentialVault().forSystemProvider("resend"),
+    vault: resolveVault(db).forSystemProvider("resend"),
     environment: getIntegrationEnvironment(),
   });
 }
@@ -199,13 +231,14 @@ export function channelOrderService(db: PrismaClient = getDatabase()): ChannelOr
   });
 }
 
-export function metaCapiService(db: PrismaClient = getDatabase()): MetaCapiService {
+export function metaCapiService(db?: PrismaClient): MetaCapiService {
+  const database = db ?? getDatabase();
   const environment = getIntegrationEnvironment();
   const apiUrl = process.env.META_CAPI_API_URL?.trim();
-  return new MetaCapiService(db, {
+  return new MetaCapiService(database, {
     environment,
     publicSiteUrl: getPublicSiteUrl(),
-    vault: getIntegrationCredentialVault().forSystemProvider("meta"),
+    vault: resolveVault(db).forSystemProvider("meta"),
     ...(apiUrl ? { apiUrl } : {}),
     allowLoopback: environment === IntegrationEnvironment.LOCAL,
   });

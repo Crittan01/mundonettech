@@ -15,8 +15,10 @@ import {
   reencryptIntegrationCredential,
   type CredentialKeyRing,
 } from "./credential-crypto.js";
+import { databaseTimestamp } from "./integration-utils.js";
+import { parseMetaCredentials } from "./meta-capi.js";
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const providerPattern = /^[a-z][a-z0-9._-]{0,99}$/;
 
 export class CredentialNotFoundError extends Error {
@@ -348,6 +350,7 @@ export class IntegrationCredentialVault {
     validateAuditContext(options.audit);
     return this.db.$transaction(async (tx) => {
       await assertActor(tx, options.actorAdminUserId, "integrations:write");
+      await tx.$executeRaw`SELECT "id" FROM "IntegrationCredential" WHERE "id" = ${options.credentialId}::uuid FOR UPDATE`;
       const existing = await tx.integrationCredential.findUnique({
         where: { id: options.credentialId },
       });
@@ -367,6 +370,34 @@ export class IntegrationCredentialVault {
       if (existing.provider === "dian") {
         await assertDianCredentialAvailable(tx, existing.id, false);
       }
+      if (existing.provider === "meta") {
+        const nextMeta = parseMetaCredentials(options.plaintext, existing.environment);
+        const currentPlaintext = decryptIntegrationCredential(
+          {
+            ...existing,
+            credentialId: existing.id,
+            provider: existing.provider,
+            accountName: existing.accountName,
+          },
+          this.ring,
+        );
+        let currentMeta: ReturnType<typeof parseMetaCredentials>;
+        try {
+          currentMeta = parseMetaCredentials(currentPlaintext, existing.environment);
+        } finally {
+          currentPlaintext.fill(0);
+        }
+        if (
+          currentMeta.pixelId !== nextMeta.pixelId ||
+          currentMeta.testEventCode !== nextMeta.testEventCode
+        ) {
+          const inflightMeta = await tx.$queryRaw<
+            Array<{ id: string }>
+          >`SELECT "id" FROM "MetaCapiEvent" WHERE "credentialId" = ${existing.id}::uuid AND "status" IN ('PENDING', 'DISPATCHING') ORDER BY "id" FOR UPDATE`;
+          if (inflightMeta.length > 0) throw new CredentialConflictError();
+        }
+      }
+      const now = await databaseTimestamp(tx);
       const sealed = encryptIntegrationCredential({
         credentialId: existing.id,
         environment: existing.environment,
@@ -383,7 +414,7 @@ export class IntegrationCredentialVault {
           ciphertext: sealed.ciphertext,
           authTag: sealed.authTag,
           lastRotatedByAdminUserId: options.actorAdminUserId,
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       });
       if (result.count !== 1) throw new CredentialConflictError();
@@ -411,6 +442,7 @@ export class IntegrationCredentialVault {
     validateAuditContext(audit);
     return this.db.$transaction(async (tx) => {
       await assertActor(tx, actorAdminUserId, "integrations:write");
+      await tx.$executeRaw`SELECT "id" FROM "IntegrationCredential" WHERE "id" = ${credentialId}::uuid FOR UPDATE`;
       const existing = await tx.integrationCredential.findUnique({ where: { id: credentialId } });
       if (!existing || existing.environment !== this.ring.environment) {
         throw new CredentialNotFoundError();
@@ -419,6 +451,7 @@ export class IntegrationCredentialVault {
       if (existing.provider === "mercado-libre") {
         await assertChannelCredentialAvailable(tx, existing.id, "REFRESH");
       }
+      const now = await databaseTimestamp(tx);
       const sealed = reencryptIntegrationCredential(
         {
           ...existing,
@@ -436,7 +469,7 @@ export class IntegrationCredentialVault {
           ciphertext: sealed.ciphertext,
           authTag: sealed.authTag,
           lastRotatedByAdminUserId: actorAdminUserId,
-          updatedAt: new Date(),
+          updatedAt: now,
         },
       });
       if (result.count !== 1) throw new CredentialConflictError();
@@ -458,6 +491,7 @@ export class IntegrationCredentialVault {
     validateAuditContext(audit);
     return this.db.$transaction(async (tx) => {
       await assertActor(tx, actorAdminUserId, "integrations:write");
+      await tx.$executeRaw`SELECT "id" FROM "IntegrationCredential" WHERE "id" = ${credentialId}::uuid FOR UPDATE`;
       const existing = await tx.integrationCredential.findUnique({ where: { id: credentialId } });
       if (!existing || existing.environment !== this.ring.environment) {
         throw new CredentialNotFoundError();
@@ -469,9 +503,10 @@ export class IntegrationCredentialVault {
       if (existing.provider === "dian") {
         await assertDianCredentialAvailable(tx, existing.id, true);
       }
+      const now = await databaseTimestamp(tx);
       const result = await tx.integrationCredential.updateMany({
         where: { id: existing.id, nonce: existing.nonce, revokedAt: null },
-        data: { revokedAt: new Date(), updatedAt: new Date() },
+        data: { revokedAt: now, updatedAt: now },
       });
       if (result.count !== 1) throw new CredentialConflictError();
       const updated = await tx.integrationCredential.findUniqueOrThrow({

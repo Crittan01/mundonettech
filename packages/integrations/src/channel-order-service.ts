@@ -440,7 +440,7 @@ export class ChannelOrderService {
       signature: options.signature,
       clientSecret: credential.clientSecret,
     });
-    const deduplicationKey = `channel-notification:${account.id}:${notification.notificationId}`;
+    const deduplicationKey = `channel-notification:${account.id}:${options.requestId!}`;
     const payload: Prisma.JsonObject = {
       accountId: account.id,
       kind: notification.kind,
@@ -667,6 +667,8 @@ export class ChannelOrderService {
     if (stale) return { orderIds: [], changedOrderIds: new Set(), shipmentId: null, stale: true };
     const orderIds: string[] = [];
     const changedOrderIds = new Set<string>();
+    const childShipmentIds = new Set<string>();
+    const ordersNeedingStock = new Set<string>();
     for (const externalOrderId of snapshot.orderIds) {
       const result = await this.syncOrder(account, credential, externalOrderId, audit, {
         pack: snapshot,
@@ -675,18 +677,34 @@ export class ChannelOrderService {
       if (!result.stale) {
         orderIds.push(result.orderId);
         if (result.changed) changedOrderIds.add(result.orderId);
+        if (result.externalShipmentId) {
+          childShipmentIds.add(result.externalShipmentId);
+          ordersNeedingStock.add(result.orderId);
+        }
       }
     }
     let shipmentId: string | null = null;
-    if (!skipShipment && snapshot.externalShipmentId) {
-      const shipment = await this.syncShipment(
-        account,
-        credential,
-        snapshot.externalShipmentId,
-        audit,
-        { changedOrderIds },
-      );
-      shipmentId = shipment.shipmentId;
+    if (!skipShipment) {
+      const shipmentTargets = snapshot.externalShipmentId
+        ? [snapshot.externalShipmentId]
+        : [...childShipmentIds];
+      const processedOrderIds = new Set<string>();
+      for (const externalShipmentId of shipmentTargets) {
+        const shipment = await this.syncShipment(account, credential, externalShipmentId, audit, {
+          changedOrderIds,
+          packSynced: true,
+        });
+        if (!shipmentId) shipmentId = shipment.shipmentId;
+        for (const id of shipment.orderIds) processedOrderIds.add(id);
+      }
+      for (const orderId of ordersNeedingStock) {
+        if (!processedOrderIds.has(orderId)) {
+          await this.reprocessStock(orderId, audit, {
+            account,
+            remoteChanged: changedOrderIds.has(orderId),
+          });
+        }
+      }
     }
     return { orderIds, changedOrderIds, shipmentId, stale: false };
   }
@@ -697,7 +715,13 @@ export class ChannelOrderService {
     externalOrderId: string,
     audit: ChannelAuditContext,
     context: { pack?: MercadoLibrePackSnapshot; skipShipment?: boolean } = {},
-  ): Promise<{ orderId: string; shipmentId: string | null; stale: boolean; changed: boolean }> {
+  ): Promise<{
+    orderId: string;
+    shipmentId: string | null;
+    externalShipmentId: string | null;
+    stale: boolean;
+    changed: boolean;
+  }> {
     const snapshot = await this.client.getOrder(credential, externalOrderId);
     let pack = context.pack;
     if (snapshot.externalPackId && (!pack || pack.externalId !== snapshot.externalPackId)) {
@@ -705,7 +729,13 @@ export class ChannelOrderService {
     }
     const persisted = await this.persistOrder(account, snapshot, pack ?? null, audit);
     if (persisted.stale) {
-      return { orderId: persisted.orderId, shipmentId: null, stale: true, changed: false };
+      return {
+        orderId: persisted.orderId,
+        shipmentId: null,
+        externalShipmentId: snapshot.externalShipmentId,
+        stale: true,
+        changed: false,
+      };
     }
     let shipmentId: string | null = null;
     if (!context.skipShipment && snapshot.externalShipmentId) {
@@ -723,7 +753,13 @@ export class ChannelOrderService {
         remoteChanged: persisted.changed,
       });
     }
-    return { orderId: persisted.orderId, shipmentId, stale: false, changed: persisted.changed };
+    return {
+      orderId: persisted.orderId,
+      shipmentId,
+      externalShipmentId: snapshot.externalShipmentId,
+      stale: false,
+      changed: persisted.changed,
+    };
   }
 
   private async syncShipment(
@@ -731,7 +767,11 @@ export class ChannelOrderService {
     credential: ReturnType<ChannelOrderService["reveal"]>,
     externalShipmentId: string,
     audit: ChannelAuditContext,
-    context: { orderChanged?: boolean; changedOrderIds?: ReadonlySet<string> } = {},
+    context: {
+      orderChanged?: boolean;
+      changedOrderIds?: ReadonlySet<string>;
+      packSynced?: boolean;
+    } = {},
   ): Promise<{ orderIds: string[]; shipmentId: string | null; stale: boolean }> {
     const snapshot = await this.client.getShipment(credential, externalShipmentId);
     if (!snapshot.externalOrderId && !snapshot.externalPackId) {
@@ -739,14 +779,16 @@ export class ChannelOrderService {
     }
     const syncedOrderChanges = new Set<string>(context.changedOrderIds ?? []);
     if (snapshot.externalPackId) {
-      const packResult = await this.syncPack(
-        account,
-        credential,
-        snapshot.externalPackId,
-        audit,
-        true,
-      );
-      for (const id of packResult.changedOrderIds) syncedOrderChanges.add(id);
+      if (!context.packSynced) {
+        const packResult = await this.syncPack(
+          account,
+          credential,
+          snapshot.externalPackId,
+          audit,
+          true,
+        );
+        for (const id of packResult.changedOrderIds) syncedOrderChanges.add(id);
+      }
     } else if (snapshot.externalOrderId) {
       const existing = await this.db.channelOrder.findUnique({
         where: {
@@ -755,9 +797,13 @@ export class ChannelOrderService {
             externalOrderId: snapshot.externalOrderId,
           },
         },
-        select: { id: true },
+        select: { id: true, status: true },
       });
-      if (!existing) {
+      if (
+        !existing ||
+        existing.status === "PENDING" ||
+        ["SHIPPED", "DELIVERED", "NOT_DELIVERED", "CANCELLED"].includes(snapshot.status)
+      ) {
         const orderResult = await this.syncOrder(
           account,
           credential,
@@ -868,24 +914,31 @@ export class ChannelOrderService {
           "The external item belongs to another channel account.",
         );
       }
-      let stockError: string | null = null;
-      if (!offer) {
-        stockError = "LISTING_NOT_MAPPED";
-      } else if (offer.listing.externalUserProductId !== snapshot.externalUserProductId) {
-        stockError = "USER_PRODUCT_DIVERGENCE";
-      } else if (snapshot.sellerSku && offer.listing.variant.sku !== snapshot.sellerSku) {
-        stockError = "SKU_DIVERGENCE";
-      } else if (
-        offer.listing.sellerStoreId !== null ||
-        offer.listing.sellerNetworkNodeId !== null ||
-        snapshot.stockReferences.length > 0
-      ) {
-        const matches = snapshot.stockReferences.some(
-          (reference) =>
-            reference.storeId === offer.listing.sellerStoreId &&
-            reference.networkNodeId === offer.listing.sellerNetworkNodeId,
-        );
-        if (!matches) stockError = "STOCK_ORIGIN_DIVERGENCE";
+      const stockSettledOrReserved = Boolean(
+        existing && ["RESERVED", "FULFILLED", "RELEASED"].includes(existing.stockStatus),
+      );
+      let stockError: string | null = stockSettledOrReserved
+        ? (existing?.stockError ?? null)
+        : null;
+      if (!stockSettledOrReserved) {
+        if (!offer) {
+          stockError = "LISTING_NOT_MAPPED";
+        } else if (offer.listing.externalUserProductId !== snapshot.externalUserProductId) {
+          stockError = "USER_PRODUCT_DIVERGENCE";
+        } else if (snapshot.sellerSku && offer.listing.variant.sku !== snapshot.sellerSku) {
+          stockError = "SKU_DIVERGENCE";
+        } else if (
+          offer.listing.sellerStoreId !== null ||
+          offer.listing.sellerNetworkNodeId !== null ||
+          snapshot.stockReferences.length > 0
+        ) {
+          const matches = snapshot.stockReferences.some(
+            (reference) =>
+              reference.storeId === offer.listing.sellerStoreId &&
+              reference.networkNodeId === offer.listing.sellerNetworkNodeId,
+          );
+          if (!matches) stockError = "STOCK_ORIGIN_DIVERGENCE";
+        }
       }
       const expectedLocationType =
         offer?.logisticType === "FULFILLMENT" ? "MELI_FULL" : "LOCAL_MAIN";
@@ -926,6 +979,9 @@ export class ChannelOrderService {
       }
       if (snapshot.status === "PAID" && snapshot.paidAmountCents !== snapshot.grossAmountCents) {
         reconciliationIssues.push("PAID_TOTAL_DIVERGENCE");
+      }
+      if (snapshot.payments.some((payment) => payment.status === "in_mediation")) {
+        reconciliationIssues.push("PAYMENT_MEDIATION_REVIEW");
       }
       if (
         snapshot.payments.some(
@@ -979,7 +1035,10 @@ export class ChannelOrderService {
       }
       const reviewReason = reconciliationIssues[0] ?? null;
       const changed = !existing || sourceHash(existing) !== hashHex;
-      const preserveExistingReconciliation = Boolean(existing && !changed);
+      const packStateDiverged = Boolean(
+        pack?.status === "CANCELLED" && snapshot.status !== "CANCELLED",
+      );
+      const preserveExistingReconciliation = Boolean(existing && !changed && !packStateDiverged);
       const reconciliationStatus: "PENDING" | "RECONCILED" | "REVIEW_REQUIRED" =
         preserveExistingReconciliation && existing
           ? existing.reconciliationStatus
@@ -1400,8 +1459,16 @@ export class ChannelOrderService {
           },
         );
       }
+      const orderedOrderIds = [...linkedOrders]
+        .sort(
+          (left, right) =>
+            left.externalCreatedAt.getTime() - right.externalCreatedAt.getTime() ||
+            left.externalOrderId.localeCompare(right.externalOrderId) ||
+            left.id.localeCompare(right.id),
+        )
+        .map((candidate) => candidate.id);
       return {
-        orderIds: linkedOrders.map((candidate) => candidate!.id),
+        orderIds: orderedOrderIds,
         shipmentId: shipment.id,
         stale: false,
         changed,
@@ -1595,7 +1662,9 @@ export class ChannelOrderService {
         }
       }
       if (order.stockError && order.stockError !== "INSUFFICIENT_STOCK") {
-        if (order.stockStatus !== "REVIEW_REQUIRED") {
+        if (order.stockStatus === "RESERVED") {
+          await this.reviewOrder(tx, order, order.stockError, now, audit);
+        } else if (order.stockStatus !== "REVIEW_REQUIRED") {
           await tx.channelOrder.update({
             where: { id: order.id },
             data: { stockStatus: "REVIEW_REQUIRED", updatedAt: now },
@@ -1604,27 +1673,41 @@ export class ChannelOrderService {
         return;
       }
       if (!order.variant || order.variant.deletedAt || !order.stockLocation || !order.offer) {
-        await tx.channelOrder.update({
-          where: { id: order.id },
-          data: {
-            stockStatus: "REVIEW_REQUIRED",
-            stockError: order.stockError ?? "STOCK_MAPPING_REQUIRED",
-            updatedAt: now,
-          },
-        });
+        if (order.stockStatus === "RESERVED") {
+          await this.reviewOrder(
+            tx,
+            order,
+            order.stockError ?? "STOCK_MAPPING_REQUIRED",
+            now,
+            audit,
+          );
+        } else {
+          await tx.channelOrder.update({
+            where: { id: order.id },
+            data: {
+              stockStatus: "REVIEW_REQUIRED",
+              stockError: order.stockError ?? "STOCK_MAPPING_REQUIRED",
+              updatedAt: now,
+            },
+          });
+        }
         return;
       }
       const expectedType = order.offer.logisticType === "FULFILLMENT" ? "MELI_FULL" : "LOCAL_MAIN";
       if (order.stockLocation.deletedAt || order.stockLocation.type !== expectedType) {
-        await tx.channelOrder.update({
-          where: { id: order.id },
-          data: {
-            stockLocationId: null,
-            stockStatus: "REVIEW_REQUIRED",
-            stockError: "STOCK_ORIGIN_INVALID",
-            updatedAt: now,
-          },
-        });
+        if (order.stockStatus === "RESERVED") {
+          await this.reviewOrder(tx, order, "STOCK_ORIGIN_INVALID", now, audit);
+        } else {
+          await tx.channelOrder.update({
+            where: { id: order.id },
+            data: {
+              stockLocationId: null,
+              stockStatus: "REVIEW_REQUIRED",
+              stockError: "STOCK_ORIGIN_INVALID",
+              updatedAt: now,
+            },
+          });
+        }
         return;
       }
       const shipmentMatchesOffer =
@@ -1801,6 +1884,20 @@ export class ChannelOrderService {
       if (!["NOT_REQUIRED", "REVIEW_REQUIRED"].includes(order.stockStatus)) {
         throw new ChannelOrderError("CONFLICT", "Reserved stock origins cannot be reassigned.");
       }
+      if (
+        order.stockError &&
+        [
+          "SKU_DIVERGENCE",
+          "USER_PRODUCT_DIVERGENCE",
+          "LISTING_NOT_MAPPED",
+          "SHIPMENT_LOGISTIC_DIVERGENCE",
+        ].includes(order.stockError)
+      ) {
+        throw new ChannelOrderError(
+          "CONFLICT",
+          "Resolve listing identity or logistics divergence before assigning a stock origin.",
+        );
+      }
       if (!order.variantId || !order.offer) {
         throw new ChannelOrderError(
           "CONFLICT",
@@ -1883,7 +1980,11 @@ export class ChannelOrderService {
     readonly audit: ChannelAuditContext;
   }): Promise<void> {
     assertUuid(options.orderId, "orderId");
-    if (!Number.isInteger(options.expectedVersion) || options.expectedVersion < 0) {
+    if (
+      !Number.isInteger(options.expectedVersion) ||
+      options.expectedVersion < 0 ||
+      options.expectedVersion > 2_147_483_647
+    ) {
       throw new ChannelOrderError("INVALID_INPUT", "The order version is invalid.");
     }
     const evidenceReference = evidence(options.evidenceReference, "evidenceReference");
@@ -1954,7 +2055,11 @@ export class ChannelOrderService {
     ) {
       throw new ChannelOrderError("INVALID_INPUT", "The order version is invalid.");
     }
-    if (typeof options.amountCents !== "bigint" || options.amountCents <= 0n) {
+    if (
+      typeof options.amountCents !== "bigint" ||
+      options.amountCents <= 0n ||
+      options.amountCents > 9_223_372_036_854_775_807n
+    ) {
       throw new ChannelOrderError(
         "INVALID_INPUT",
         "The adjustment must use positive BigInt cents.",
@@ -2233,7 +2338,7 @@ export class ChannelOrderService {
           error instanceof MercadoLibreCatalogError || error instanceof ChannelOrderError
             ? error.code
             : "CHANNEL_SYNC_UNCERTAIN";
-        const terminal = event.attempts >= 8 || code === "UNAUTHORIZED" || code === "INVALID_INPUT";
+        const terminal = event.attempts >= 8 || code === "INVALID_INPUT";
         if (terminal) {
           const failedNow = await failDomainOutbox(this.db, {
             id: event.id,

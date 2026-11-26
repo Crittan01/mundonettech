@@ -57,6 +57,10 @@ const providerErrorLabels: Record<string, string> = {
     "Mercado Libre Full reporta una cantidad distinta al snapshot local. Full solo se concilia por lectura; no se escribe desde la tienda.",
   REMOTE_DIVERGENCE:
     "El precio, stock o identidad remota difiere del snapshot esperado. Revisa el vendedor antes de reintentar.",
+  REMOTE_STATUS_DIVERGENCE:
+    "El estado remoto en Mercado Libre difiere del esperado o está en revisión del proveedor. Revisa tu cuenta de vendedor antes de reintentar.",
+  VERSION_DIVERGENCE:
+    "El precio o las condiciones locales cambiaron y requieren sincronización o conciliación con Mercado Libre.",
   PROVIDER_UNCERTAIN:
     "Mercado Libre no confirmó un resultado duradero. Concilia por SKU antes de cualquier reintento.",
   VERSION_CONFLICT:
@@ -118,38 +122,43 @@ function providerErrorMessage(code: string): string {
 export default async function ChannelsPage({
   searchParams,
 }: {
-  readonly searchParams: Promise<{ readonly oauth?: string }>;
+  readonly searchParams: Promise<{ readonly oauth?: string | string[] }>;
 }) {
   const session = await requireAdminPage("integrations:read");
+  const canWrite = hasAdminPermission(session.profile.role, "integrations:write");
+  const canReadFinance = hasAdminPermission(session.profile.role, "finance:read");
+  const canReconcile = canWrite && canReadFinance;
   const catalog = channelCatalogService();
   const channelOrders = channelOrderService();
   const [accounts, listings, variants, jobs, orderDashboard, environment, params] =
     await Promise.all([
       channelAccountService().listAccounts(session.profile.id),
       catalog.listListings(session.profile.id),
-      catalog.listPublishableVariants(session.profile.id),
+      canWrite ? catalog.listPublishableVariants(session.profile.id) : Promise.resolve([]),
       catalog.listSyncJobs(session.profile.id),
       channelOrders.dashboard(session.profile.id),
       Promise.resolve(getIntegrationEnvironment()),
       searchParams,
     ]);
-  const locationEntries = await Promise.all(
-    orderDashboard.orders
-      .filter((order) => order.stockStatus === "REVIEW_REQUIRED")
-      .map(
-        async (order) =>
-          [
-            order.id,
-            await channelOrders.listStockLocationChoices(session.profile.id, order.id),
-          ] as const,
-      ),
-  );
+  const locationEntries = canWrite
+    ? await Promise.all(
+        orderDashboard.orders
+          .filter((order) => order.stockStatus === "REVIEW_REQUIRED")
+          .map(
+            async (order) =>
+              [
+                order.id,
+                await channelOrders.listStockLocationChoices(session.profile.id, order.id),
+              ] as const,
+          ),
+      )
+    : [];
   const locations = Object.fromEntries(locationEntries);
-  const canWrite = hasAdminPermission(session.profile.role, "integrations:write");
-  const canReconcile = canWrite && hasAdminPermission(session.profile.role, "finance:read");
   const activeAccounts = accounts.filter((account) => account.status === "ACTIVE");
   const redirectUri = mercadoLibreOAuthRedirectUri();
-  const outcome = params.oauth ? oauthMessages[params.oauth] : undefined;
+  const oauthKey = typeof params.oauth === "string" ? params.oauth : undefined;
+  const outcome =
+    oauthKey && Object.hasOwn(oauthMessages, oauthKey) ? oauthMessages[oauthKey] : undefined;
   return (
     <div className="space-y-10">
       <div>
@@ -438,10 +447,14 @@ export default async function ChannelsPage({
                     ))}
                   </div>
                   {canWrite && listing.externalUserProductId && listing.status !== "CLOSED" ? (
-                    <>
-                      <ChannelOfferAddForm listing={listing} />
-                      <ChannelListingSyncActions listing={listing} />
-                    </>
+                    <ChannelOfferAddForm listing={listing} />
+                  ) : null}
+                  {canWrite &&
+                  listing.status !== "CLOSED" &&
+                  (Boolean(listing.externalUserProductId) ||
+                    listing.status === "RECONCILE_REQUIRED" ||
+                    listing.lastProviderError !== null) ? (
+                    <ChannelListingSyncActions listing={listing} />
                   ) : null}
                   <details>
                     <summary className="cursor-pointer text-sm font-medium">
@@ -480,6 +493,7 @@ export default async function ChannelsPage({
         dashboard={orderDashboard}
         canWrite={canWrite}
         canReconcile={canReconcile}
+        canReadFinance={canReadFinance}
         locations={locations}
       />
     </div>

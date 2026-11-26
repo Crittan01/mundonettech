@@ -138,9 +138,14 @@ function money(value: unknown, field: string): bigint {
   if (typeof value !== "number" && typeof value !== "string") {
     return invalid(`${field} is not an amount.`);
   }
-  if (typeof value === "number" && !Number.isFinite(value))
-    return invalid(`${field} is not finite.`);
+  if (
+    typeof value === "number" &&
+    (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER)
+  ) {
+    return invalid(`${field} is not a safe non-negative amount.`);
+  }
   const raw = String(value);
+  if (raw.length > 40) return invalid(`${field} exceeds maximum decimal length.`);
   const match = /^(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(raw);
   if (!match) return invalid(`${field} must be a non-negative decimal amount.`);
   const integer = match[1] ?? "0";
@@ -275,7 +280,13 @@ function parsePayment(
   if (root.currency_id !== undefined && root.currency_id !== "COP") {
     invalid("Only COP payments are supported.");
   }
-  const captures = ["approved", "partially_refunded", "refunded", "charged_back"].includes(status);
+  const captures = [
+    "approved",
+    "in_mediation",
+    "partially_refunded",
+    "refunded",
+    "charged_back",
+  ].includes(status);
   const capturedCents = captures ? money(root.total_paid_amount ?? 0, "total_paid_amount") : 0n;
   const refundedCents = captures
     ? money(root.transaction_amount_refunded ?? 0, "transaction_amount_refunded")
@@ -418,10 +429,18 @@ function parseOrder(
   };
 }
 
-function parseShipment(body: string, expectedId: string): MercadoLibreShipmentSnapshot {
+function parseShipment(
+  body: string,
+  expectedId: string,
+  expectedSellerId?: string,
+): MercadoLibreShipmentSnapshot {
   const root = record(parseHttpJson(body));
   const id = externalId(root.id, "shipment id");
   if (id !== expectedId) invalid("The shipment response identifier does not match the request.");
+  if (expectedSellerId !== undefined && root.sender_id !== undefined && root.sender_id !== null) {
+    const senderId = externalId(root.sender_id, "shipment sender_id");
+    if (senderId !== expectedSellerId) invalid("The shipment belongs to another seller.");
+  }
   const providerStatus = text(root.status, "shipment status", 40);
   const statusMap = {
     pending: "PENDING",
@@ -600,11 +619,12 @@ export function verifyMercadoLibreNotificationSignature(options: {
     throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification request ID is missing.");
   }
   const pairs = (options.signature ?? "").split(",").map((part) => {
-    const separator = part.indexOf("=");
+    const trimmed = part.trim();
+    const separator = trimmed.indexOf("=");
     if (separator <= 0) {
       throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification signature is invalid.");
     }
-    return [part.slice(0, separator), part.slice(separator + 1)] as const;
+    return [trimmed.slice(0, separator).trim(), trimmed.slice(separator + 1).trim()] as const;
   });
   if (pairs.length !== 2 || new Set(pairs.map(([key]) => key)).size !== 2) {
     throw new MercadoLibreCatalogError("INVALID_INPUT", "The notification signature is invalid.");
@@ -675,6 +695,6 @@ export class MercadoLibreOrderClient extends MercadoLibreUserProductsClient {
     const response = await this.request(credential, "GET", `shipments/${id}`);
     if (Buffer.byteLength(response.body, "utf8") > maximumResponseBytes)
       invalid("The shipment response is too large.");
-    return parseShipment(response.body, id);
+    return parseShipment(response.body, id, credential.externalAccountId);
   }
 }

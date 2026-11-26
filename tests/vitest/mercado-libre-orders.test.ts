@@ -387,5 +387,20 @@ describe("Mercado Libre signed notifications", () => {
         nowMs: Number.NaN,
       }),
     ).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+
+    const nowMs = 1_760_000_000_000;
+    const ts = String(Math.floor(nowMs / 1000));
+    const sig = createHmac("sha256", credential.clientSecret)
+      .update(`id:abc-987;request-id:request-unit-4;ts:${ts};`)
+      .digest("hex");
+    expect(() =>
+      verifyMercadoLibreNotificationSignature({
+        notificationId: "abc-987",
+        requestId: "request-unit-4",
+        signature: `ts=${ts}, v1=${sig}`,
+        clientSecret: credential.clientSecret,
+        nowMs,
+      }),
+    ).not.toThrow();
   });
 });

@@ -523,6 +523,12 @@ export class WompiWebhookService {
             return finish("IGNORED", "LATE_APPROVAL_REVIEW");
           }
           if (capture?.status !== "SUCCEEDED") {
+            const captureCompletedAt = new Date(
+              Math.min(
+                now.getTime(),
+                Math.max(order.createdAt.getTime(), effectiveOccurredAt.getTime()),
+              ),
+            );
             if (capture?.status === "FAILED") {
               capture = await tx.paymentTransaction.update({
                 where: { id: capture.id },
@@ -534,7 +540,7 @@ export class WompiWebhookService {
                   where: { id: capture.id },
                   data: {
                     status: "SUCCEEDED",
-                    completedAt: effectiveOccurredAt,
+                    completedAt: captureCompletedAt,
                     ...captureData,
                   },
                 })
@@ -546,7 +552,7 @@ export class WompiWebhookService {
                     status: "SUCCEEDED",
                     amountCents: attempt.amountCents,
                     requestHash: operationHash,
-                    completedAt: effectiveOccurredAt,
+                    completedAt: captureCompletedAt,
                     ...captureData,
                   },
                 });

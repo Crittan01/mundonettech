@@ -46,14 +46,15 @@ function harness(options: { marketingGranted?: boolean; advertisingGranted?: boo
       if (sql.includes('FROM "CustomerSegmentMembership"')) return [];
       if (sql.includes('FROM "LifecycleEnrollment"')) return [];
       if (sql.includes('FROM "LifecycleMessage"')) return [];
+      if (sql.includes('FROM "MetaCapiEvent"')) return [];
       if (sql.includes("CURRENT_TIMESTAMP")) return [{ now }];
       throw new TypeError(`Unexpected query: ${sql}`);
     }),
     customer: { update: customerUpdate },
     consent: {
-      findFirst: vi.fn(async ({ where }: { where: { purpose: string } }) => {
+      findMany: vi.fn(async ({ where }: { where: { purpose: string } }) => {
         const granted = where.purpose === "MARKETING_EMAIL" ? marketingGranted : advertisingGranted;
-        return granted ? { id: randomUUID() } : null;
+        return granted ? [{ id: randomUUID() }] : [];
       }),
       create: consentCreate,
     },
@@ -241,26 +242,37 @@ describe("A6 — cursor de pedidos y obligaciones de anonimización", () => {
 });
 
 describe("A8 — cancelación Meta por privacidad", () => {
-  it("cierra y purga PENDING, DISPATCHING y UNCERTAIN sin tocar terminales", async () => {
-    const rows = [{ id: randomUUID() }, { id: randomUUID() }, { id: randomUUID() }];
-    const findMany = vi.fn(async () => rows);
+  it("bloquea con FOR UPDATE y purga PENDING, DISPATCHING, UNCERTAIN y FAILED sin tocar terminales", async () => {
+    const rows = [
+      { id: randomUUID() },
+      { id: randomUUID() },
+      { id: randomUUID() },
+      { id: randomUUID() },
+    ];
+    let lockedSql = "";
+    const queryRaw = vi.fn(async (strings: TemplateStringsArray) => {
+      lockedSql = strings.join("?");
+      return rows;
+    });
     const updateMany = vi.fn(async () => ({ count: rows.length }));
     const resolveAlerts = vi.fn(async () => ({ count: rows.length }));
     const tx = {
-      metaCapiEvent: { findMany, updateMany },
+      $queryRaw: queryRaw,
+      metaCapiEvent: { updateMany },
       notification: { updateMany: resolveAlerts },
     };
 
     const count = await cancelPendingMetaCapiForCustomerInTransaction(tx as never, customerId, now);
 
-    expect(count).toBe(3);
-    const expectedWhere = {
-      customerId,
-      status: { in: ["PENDING", "DISPATCHING", "UNCERTAIN"] },
-    };
-    expect(findMany).toHaveBeenCalledWith({ where: expectedWhere, select: { id: true } });
+    expect(count).toBe(4);
+    expect(lockedSql).toContain("FOR UPDATE");
+    expect(lockedSql).toContain("'PENDING', 'DISPATCHING', 'UNCERTAIN', 'FAILED'");
+    expect(lockedSql).not.toContain("'SENT'");
+    expect(lockedSql).not.toContain("'SKIPPED'");
     expect(updateMany).toHaveBeenCalledWith({
-      where: expectedWhere,
+      where: {
+        id: { in: rows.map((row) => row.id) },
+      },
       data: {
         status: "SKIPPED",
         completedAt: now,
@@ -276,8 +288,6 @@ describe("A8 — cancelación Meta por privacidad", () => {
         requestStartedAt: null,
       },
     });
-    expect(expectedWhere.status.in).not.toContain("FAILED");
-    expect(expectedWhere.status.in).not.toContain("SENT");
     expect(resolveAlerts).toHaveBeenCalledWith({
       where: {
         deduplicationKey: { in: rows.map((row) => `meta-capi:${row.id}:review`) },

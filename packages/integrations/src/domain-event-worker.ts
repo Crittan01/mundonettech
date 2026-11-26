@@ -842,9 +842,18 @@ export class DomainEventWorker {
               if (typeof metaEventId === "string" && /^[0-9a-f-]{36}$/i.test(metaEventId)) {
                 await this.db.$transaction(async (tx) => {
                   const rows = await tx.$queryRaw<
-                    Array<{ id: string; status: string; requestStartedAt: Date | null }>
+                    Array<{
+                      id: string;
+                      status: string;
+                      customerId: string;
+                      consentId: string;
+                      eventTime: Date;
+                      claimExpiresAt: Date | null;
+                      requestStartedAt: Date | null;
+                    }>
                   >`
-                    SELECT "id", "status"::text AS "status", "requestStartedAt"
+                    SELECT "id", "status"::text AS "status", "customerId", "consentId",
+                           "eventTime", "claimExpiresAt", "requestStartedAt"
                     FROM "MetaCapiEvent"
                     WHERE "id" = ${metaEventId}::uuid
                     FOR UPDATE
@@ -852,6 +861,51 @@ export class DomainEventWorker {
                   const current = rows[0];
                   if (!current || !["PENDING", "DISPATCHING"].includes(current.status)) return;
                   const now = await databaseTimestamp(tx);
+                  if (
+                    current.status === "DISPATCHING" &&
+                    current.claimExpiresAt &&
+                    current.claimExpiresAt > now
+                  ) {
+                    return;
+                  }
+                  const activeConsent = await tx.consent.findFirst({
+                    where: {
+                      id: current.consentId,
+                      customerId: current.customerId,
+                      purpose: "ADVERTISING",
+                      status: "GRANTED",
+                      revokedBy: null,
+                      occurredAt: { lt: new Date(Math.floor(current.eventTime.getTime()) + 1) },
+                      customer: { deletedAt: null, status: { in: ["GUEST", "ACTIVE"] } },
+                    },
+                    select: { id: true },
+                  });
+                  if (!activeConsent) {
+                    await tx.metaCapiEvent.update({
+                      where: { id: current.id },
+                      data: {
+                        status: "SKIPPED",
+                        claimId: null,
+                        claimedBy: null,
+                        claimedAt: null,
+                        claimExpiresAt: null,
+                        requestStartedAt: null,
+                        completedAt: now,
+                        failureCode: "NO_CONSENT",
+                        externalIdHash: null,
+                        emailHash: null,
+                        phoneHash: null,
+                      },
+                    });
+                    await tx.notification.updateMany({
+                      where: {
+                        deduplicationKey: `meta-capi:${current.id}:review`,
+                        resolvedAt: null,
+                      },
+                      data: { resolvedAt: now },
+                    });
+                    return;
+                  }
                   const uncertain =
                     current.status === "DISPATCHING" && current.requestStartedAt !== null;
                   const failureCode = "OUTBOX_RETRY_EXHAUSTED";

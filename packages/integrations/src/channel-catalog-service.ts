@@ -194,7 +194,7 @@ interface ExecutionSuccess {
   readonly remoteLocalQuantity?: number | null;
   readonly remoteFullQuantity?: number | null;
   readonly remoteStockVersion?: bigint | null;
-  readonly status: "ACTIVE" | "PAUSED" | "CLOSED" | "RECONCILE_REQUIRED";
+  readonly status: "DRAFT" | "ACTIVE" | "PAUSED" | "CLOSED" | "RECONCILE_REQUIRED";
   readonly providerError?: string;
 }
 
@@ -238,7 +238,7 @@ function calculatedOffer(input: ChannelOfferConfiguration) {
       if (code === "PRICE_DEAD_ZONE") {
         throw new ChannelCatalogError("CONFLICT", error.message);
       }
-      if (code === "NEGATIVE_NET" || code === "INVALID_INPUT") {
+      if (code === "NEGATIVE_NET" || code === "INVALID_INPUT" || code === "MONEY_OVERFLOW") {
         throw new ChannelCatalogError("INVALID_INPUT", error.message);
       }
     }
@@ -804,7 +804,14 @@ export class ChannelCatalogService {
       : options.kind === "RECONCILE_REMOTE"
         ? (options.listing.offers.find((candidate) => !candidate.externalItemId) ??
           options.listing.offers[0])
-        : options.listing.offers[0];
+        : options.kind === "SYNC_LOCAL_STOCK"
+          ? (options.listing.offers.find(
+              (candidate) =>
+                candidate.logisticType === "CROSS_DOCKING" &&
+                candidate.externalItemId !== null &&
+                candidate.status !== "CLOSED",
+            ) ?? options.listing.offers[0])
+          : options.listing.offers[0];
     if (
       (options.offerId && !offer) ||
       (["SYNC_PRICE", "PUBLISH"].includes(options.kind) && !offer)
@@ -821,15 +828,32 @@ export class ChannelCatalogService {
       );
     }
     if (options.kind === "PUBLISH" && offer && !offer.externalItemId) {
-      const uncertain = await tx.channelSyncJob.findFirst({
-        where: {
-          listingId: options.listing.id,
-          offerId: offer.id,
-          kind: "PUBLISH",
-          status: "UNCERTAIN",
-        },
-      });
-      if (uncertain) {
+      const [latestUncertain, latestReconcile] = await Promise.all([
+        tx.channelSyncJob.findFirst({
+          where: {
+            listingId: options.listing.id,
+            offerId: offer.id,
+            kind: "PUBLISH",
+            status: "UNCERTAIN",
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          select: { createdAt: true },
+        }),
+        tx.channelSyncJob.findFirst({
+          where: {
+            listingId: options.listing.id,
+            kind: "RECONCILE_REMOTE",
+            status: "SUCCEEDED",
+            OR: [{ offerId: offer.id }, { offerId: null }],
+          },
+          orderBy: [{ completedAt: "desc" }, { id: "desc" }],
+          select: { completedAt: true },
+        }),
+      ]);
+      if (
+        latestUncertain &&
+        (!latestReconcile?.completedAt || latestReconcile.completedAt <= latestUncertain.createdAt)
+      ) {
         throw new ChannelCatalogError(
           "RECONCILE_REQUIRED",
           "Reconcile the uncertain publication before creating another item.",
@@ -1073,90 +1097,108 @@ export class ChannelCatalogService {
     }
     await this.actor(this.db, options.audit.actorAdminUserId, "integrations:write");
     const calculated = calculatedOffer(options.offer);
-    await this.db.$transaction(async (tx) => {
-      await this.lockedActor(tx, options.audit.actorAdminUserId, "integrations:write");
-      await tx.$executeRaw`
-        SELECT account_record."id" FROM "ChannelOffer" offer_record
-        JOIN "ChannelListing" listing_record ON listing_record."id" = offer_record."listingId"
-        JOIN "ChannelAccount" account_record ON account_record."id" = listing_record."accountId"
-        WHERE offer_record."id" = ${options.offerId}::uuid
-        FOR SHARE OF account_record`;
-      await tx.$executeRaw`
-        SELECT listing_record."id" FROM "ChannelOffer" offer_record
-        JOIN "ChannelListing" listing_record ON listing_record."id" = offer_record."listingId"
-        WHERE offer_record."id" = ${options.offerId}::uuid
-        FOR UPDATE OF listing_record`;
-      const current = await tx.channelOffer.findUnique({
-        where: { id: options.offerId },
-        include: { listing: { include: { account: true, offers: true } } },
+    try {
+      await this.db.$transaction(async (tx) => {
+        await this.lockedActor(tx, options.audit.actorAdminUserId, "integrations:write");
+        await tx.$executeRaw`
+          SELECT account_record."id" FROM "ChannelOffer" offer_record
+          JOIN "ChannelListing" listing_record ON listing_record."id" = offer_record."listingId"
+          JOIN "ChannelAccount" account_record ON account_record."id" = listing_record."accountId"
+          WHERE offer_record."id" = ${options.offerId}::uuid
+          FOR SHARE OF account_record`;
+        await tx.$executeRaw`
+          SELECT listing_record."id" FROM "ChannelOffer" offer_record
+          JOIN "ChannelListing" listing_record ON listing_record."id" = offer_record."listingId"
+          WHERE offer_record."id" = ${options.offerId}::uuid
+          FOR UPDATE OF listing_record`;
+        const current = await tx.channelOffer.findUnique({
+          where: { id: options.offerId },
+          include: { listing: { include: { account: true, offers: true } } },
+        });
+        if (!current) throw new ChannelCatalogError("NOT_FOUND", "Channel offer was not found.");
+        this.assertEnvironment(current.listing.account.environment);
+        if (current.listing.account.status && current.listing.account.status !== "ACTIVE") {
+          throw new ChannelCatalogError(
+            "REAUTH_REQUIRED",
+            "Reconnect the account before changing offers.",
+          );
+        }
+        if (current.version !== options.expectedVersion) {
+          throw new ChannelCatalogError("CONFLICT", "The offer changed before the update.");
+        }
+        if (current.listing.status === "CLOSED" || current.status === "CLOSED") {
+          throw new ChannelCatalogError("CONFLICT", "A closed offer cannot be changed.");
+        }
+        if (
+          current.externalItemId &&
+          (current.listingTypeId !== options.offer.listingTypeId ||
+            (current.logisticType === "FULFILLMENT") !== options.offer.fulfillment)
+        ) {
+          throw new ChannelCatalogError(
+            "CONFLICT",
+            "Listing type and logistics require a new offer after publication.",
+          );
+        }
+        const result = await tx.channelOffer.updateMany({
+          where: { id: current.id, version: options.expectedVersion },
+          data: {
+            ...(!current.externalItemId
+              ? {
+                  listingTypeId: options.offer.listingTypeId,
+                  logisticType: options.offer.fulfillment
+                    ? ChannelLogisticType.FULFILLMENT
+                    : ChannelLogisticType.CROSS_DOCKING,
+                }
+              : {}),
+            pricingMode: options.offer.mode,
+            manualPriceCents:
+              options.offer.mode === "MANUAL" ? (options.offer.manualPriceCents ?? null) : null,
+            targetNetCents:
+              options.offer.mode === "FORMULA" ? (options.offer.targetNetCents ?? null) : null,
+            commissionBps: options.offer.commissionBps,
+            fixedFeeCents: options.offer.fixedFeeCents,
+            shippingCostCents: options.offer.shippingCostCents,
+            priceCents: calculated.priceCents,
+            commissionAmountCents: calculated.commissionAmountCents,
+            fixedFeeAppliedCents: calculated.fixedFeeAppliedCents,
+            shippingAppliedCents: calculated.shippingAppliedCents,
+            netProceedsCents: calculated.netProceedsCents,
+            deadZoneAdjustmentCents: calculated.deadZoneAdjustmentCents,
+            sourceHash: Buffer.from(hash({ configuration: options.offer, calculated })),
+            status: current.externalItemId ? "RECONCILE_REQUIRED" : "DRAFT",
+            version: { increment: 1 },
+            updatedAt: await this.now(tx),
+          },
+        });
+        if (result.count !== 1) {
+          throw new ChannelCatalogError("CONFLICT", "The offer changed concurrently.");
+        }
+        const offer = await tx.channelOffer.findUniqueOrThrow({ where: { id: current.id } });
+        const listing = await tx.channelListing.findUniqueOrThrow({
+          where: { id: current.listingId },
+          include: { offers: true },
+        });
+        await this.enqueueExisting(tx, {
+          audit: options.audit,
+          listing,
+          offerId: offer.id,
+          kind: current.externalItemId ? ChannelSyncJobKind.SYNC_PRICE : ChannelSyncJobKind.PUBLISH,
+        });
+        await this.audit(tx, options.audit, "CHANNEL_OFFER_UPDATED", "ChannelOffer", offer.id, {
+          listingId: current.listingId,
+          version: offer.version,
+          priceCents: offer.priceCents.toString(),
+        });
       });
-      if (!current) throw new ChannelCatalogError("NOT_FOUND", "Channel offer was not found.");
-      this.assertEnvironment(current.listing.account.environment);
-      if (current.listing.account.status && current.listing.account.status !== "ACTIVE") {
-        throw new ChannelCatalogError(
-          "REAUTH_REQUIRED",
-          "Reconnect the account before changing offers.",
-        );
-      }
-      if (current.version !== options.expectedVersion) {
-        throw new ChannelCatalogError("CONFLICT", "The offer changed before the update.");
-      }
-      if (current.listing.status === "CLOSED" || current.status === "CLOSED") {
-        throw new ChannelCatalogError("CONFLICT", "A closed offer cannot be changed.");
-      }
-      if (
-        current.externalItemId &&
-        (current.listingTypeId !== options.offer.listingTypeId ||
-          (current.logisticType === "FULFILLMENT") !== options.offer.fulfillment)
-      ) {
+    } catch (error) {
+      if (hasUniqueViolation(error)) {
         throw new ChannelCatalogError(
           "CONFLICT",
-          "Listing type and logistics require a new offer after publication.",
+          "An equivalent listing type and logistics offer already exists.",
         );
       }
-      const result = await tx.channelOffer.updateMany({
-        where: { id: current.id, version: options.expectedVersion },
-        data: {
-          pricingMode: options.offer.mode,
-          manualPriceCents:
-            options.offer.mode === "MANUAL" ? (options.offer.manualPriceCents ?? null) : null,
-          targetNetCents:
-            options.offer.mode === "FORMULA" ? (options.offer.targetNetCents ?? null) : null,
-          commissionBps: options.offer.commissionBps,
-          fixedFeeCents: options.offer.fixedFeeCents,
-          shippingCostCents: options.offer.shippingCostCents,
-          priceCents: calculated.priceCents,
-          commissionAmountCents: calculated.commissionAmountCents,
-          fixedFeeAppliedCents: calculated.fixedFeeAppliedCents,
-          shippingAppliedCents: calculated.shippingAppliedCents,
-          netProceedsCents: calculated.netProceedsCents,
-          deadZoneAdjustmentCents: calculated.deadZoneAdjustmentCents,
-          sourceHash: Buffer.from(hash({ configuration: options.offer, calculated })),
-          status: current.externalItemId ? "RECONCILE_REQUIRED" : "DRAFT",
-          version: { increment: 1 },
-          updatedAt: await this.now(tx),
-        },
-      });
-      if (result.count !== 1) {
-        throw new ChannelCatalogError("CONFLICT", "The offer changed concurrently.");
-      }
-      const offer = await tx.channelOffer.findUniqueOrThrow({ where: { id: current.id } });
-      const listing = await tx.channelListing.findUniqueOrThrow({
-        where: { id: current.listingId },
-        include: { offers: true },
-      });
-      await this.enqueueExisting(tx, {
-        audit: options.audit,
-        listing,
-        offerId: offer.id,
-        kind: current.externalItemId ? ChannelSyncJobKind.SYNC_PRICE : ChannelSyncJobKind.PUBLISH,
-      });
-      await this.audit(tx, options.audit, "CHANNEL_OFFER_UPDATED", "ChannelOffer", offer.id, {
-        listingId: current.listingId,
-        version: offer.version,
-        priceCents: offer.priceCents.toString(),
-      });
-    });
+      throw error;
+    }
   }
 
   private reveal(account: ChannelAccount & { credential: IntegrationCredential }) {
@@ -1211,22 +1253,23 @@ export class ChannelCatalogService {
         await this.lockedActor(tx, audit.actorAdminUserId, "integrations:write");
         await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${candidate.listing.accountId}::uuid FOR SHARE`;
         await tx.$executeRaw`SELECT "id" FROM "ChannelListing" WHERE "id" = ${candidate.listingId}::uuid FOR UPDATE`;
+        const txNow = await this.now(tx);
         const updated = await tx.channelSyncJob.updateMany({
           where: {
             id: candidate.id,
             status: "PROCESSING",
             claimId,
-            claimExpiresAt: { lte: now },
+            claimExpiresAt: { lte: txNow },
           },
           data: {
             status: "UNCERTAIN",
-            completedAt: now,
+            completedAt: txNow,
             failureCode: "CLAIM_EXPIRED",
             claimId: null,
             claimedBy: null,
             claimedAt: null,
             claimExpiresAt: null,
-            updatedAt: now,
+            updatedAt: txNow,
           },
         });
         if (updated.count !== 1) return false;
@@ -1238,9 +1281,9 @@ export class ChannelCatalogService {
           },
           data: {
             status: "SUPERSEDED",
-            completedAt: now,
+            completedAt: txNow,
             failureCode: "SUPERSEDED",
-            updatedAt: now,
+            updatedAt: txNow,
           },
         });
         const job = await tx.channelSyncJob.findUniqueOrThrow({ where: { id: candidate.id } });
@@ -1256,7 +1299,7 @@ export class ChannelCatalogService {
               syncClaimId: null,
               syncClaimedAt: null,
               syncClaimExpiresAt: null,
-              updatedAt: now,
+              updatedAt: txNow,
             },
           });
         }
@@ -1267,7 +1310,7 @@ export class ChannelCatalogService {
               externalItemId: { not: null },
               status: { not: "CLOSED" },
             },
-            data: { status: "RECONCILE_REQUIRED", updatedAt: now },
+            data: { status: "RECONCILE_REQUIRED", updatedAt: txNow },
           });
         }
         await this.audit(tx, audit, "CHANNEL_SYNC_UNCERTAIN", "ChannelSyncJob", job.id, {
@@ -1320,6 +1363,7 @@ export class ChannelCatalogService {
             AND listing."syncClaimId" IS NULL
             AND account."environment" = ${this.options.ring.environment}::"IntegrationEnvironment"
             AND account."status" = 'ACTIVE'
+            AND account."refreshClaimId" IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM "ChannelSyncJob" active_job
               WHERE active_job."listingId" = job."listingId"
@@ -1349,7 +1393,12 @@ export class ChannelCatalogService {
         const job = await tx.channelSyncJob.findUnique({
           where: { id: candidate.id },
           include: {
-            listing: { include: { account: { include: { credential: true } }, offers: true } },
+            listing: {
+              include: {
+                account: { include: { credential: true } },
+                offers: { orderBy: [{ createdAt: "asc" }, { id: "asc" }] },
+              },
+            },
             offer: true,
           },
         });
@@ -1359,6 +1408,7 @@ export class ChannelCatalogService {
           job.availableAt > now ||
           job.listing.syncClaimId ||
           job.listing.account.status !== "ACTIVE" ||
+          job.listing.account.refreshClaimId !== null ||
           job.attempts >= maxJobAttempts
         ) {
           return null;
@@ -1515,10 +1565,19 @@ export class ChannelCatalogService {
       externalUserProductId: item.userProductId,
     };
     let stock: MercadoLibreStockSnapshot | null = null;
-    if (!payload.fulfillment && content.sellerStoreId && content.sellerNetworkNodeId) {
-      stock = await this.warehouseStock(credential, listing, quantity);
-    } else {
-      stock = await this.client.getStock(credential, item.userProductId);
+    try {
+      if (!payload.fulfillment && content.sellerStoreId && content.sellerNetworkNodeId) {
+        stock = await this.warehouseStock(credential, listing, quantity);
+      } else {
+        stock = await this.client.getStock(credential, item.userProductId);
+      }
+    } catch {
+      return {
+        externalUserProductId: item.userProductId,
+        externalItemId: item.id,
+        status: "RECONCILE_REQUIRED",
+        providerError: "REMOTE_DIVERGENCE",
+      };
     }
     const remote = remoteQuantities(stock, job.listing);
     return {
@@ -1568,11 +1627,12 @@ export class ChannelCatalogService {
     const desired = payload.desiredStatus ?? "ACTIVE";
     const providerStatus =
       desired === "ACTIVE" ? "active" : desired === "PAUSED" ? "paused" : "closed";
-    for (const [index, offer] of job.listing.offers.entries()) {
-      if (!offer.externalItemId) continue;
+    let contentSent = false;
+    for (const offer of job.listing.offers) {
+      if (!offer.externalItemId || offer.status === "CLOSED") continue;
       const item = await this.client.updateItem(credential, offer.externalItemId, {
         status: providerStatus,
-        ...(index === 0
+        ...(!contentSent
           ? {
               familyName: content.familyName,
               description: content.description,
@@ -1581,12 +1641,16 @@ export class ChannelCatalogService {
             }
           : {}),
       });
+      contentSent = true;
       if (item.status !== providerStatus) {
         throw new MercadoLibreCatalogError(
           "INVALID_RESPONSE",
           "Mercado Libre did not confirm the item status.",
         );
       }
+    }
+    if (!contentSent) {
+      throw new ChannelCatalogError("CONFLICT", "No active external items exist to update.");
     }
     return { status: desired };
   }
@@ -1602,7 +1666,16 @@ export class ChannelCatalogService {
     const localOffer =
       job.offer?.logisticType === "FULFILLMENT"
         ? undefined
-        : job.listing.offers.find((offer) => offer.logisticType === "CROSS_DOCKING");
+        : job.offer?.logisticType === "CROSS_DOCKING" &&
+            job.offer.externalItemId !== null &&
+            job.offer.status !== "CLOSED"
+          ? job.offer
+          : job.listing.offers.find(
+              (offer) =>
+                offer.logisticType === "CROSS_DOCKING" &&
+                offer.externalItemId !== null &&
+                offer.status !== "CLOSED",
+            );
     let stock = await this.client.getStock(credential, job.listing.externalUserProductId);
     if (localOffer) {
       if (job.listing.sellerStoreId && job.listing.sellerNetworkNodeId) {
@@ -1656,43 +1729,57 @@ export class ChannelCatalogService {
     const content = requiredContent(payload);
     let externalUserProductId = job.listing.externalUserProductId;
     let externalItemId = job.offer?.externalItemId ?? undefined;
+    let draftConfirmedUnpublished = false;
     if (!externalItemId && job.offer) {
       const expected = payload.expectedOffers?.find(
         (candidate) => candidate.offerId === job.offer?.id,
       );
+      const expectedFulfillment =
+        (expected?.logisticType ?? job.offer.logisticType) === "FULFILLMENT";
       const ids = await this.client.findItemIdsBySellerSku(credential, content.sellerSku);
       const linkedItemIds = new Set(
         job.listing.offers.map((offer) => offer.externalItemId).filter((id) => id !== null),
       );
+      let unlinkedCount = 0;
       const candidates = [];
       for (const id of ids) {
         const item = await this.client.getItem(credential, id);
+        if (linkedItemIds.has(item.id)) continue;
+        unlinkedCount += 1;
         if (
-          linkedItemIds.has(item.id) ||
           (externalUserProductId && item.userProductId !== externalUserProductId) ||
-          (expected && item.priceCents.toString() !== expected.priceCents)
+          (expected && item.priceCents.toString() !== expected.priceCents) ||
+          item.fulfillment !== expectedFulfillment
         ) {
           continue;
         }
         candidates.push(item);
       }
       if (candidates.length === 0) {
-        throw new ChannelCatalogError(
-          "NOT_FOUND",
-          "No unique remote publication matches this seller SKU and offer.",
-        );
+        if (!externalUserProductId && ids.length === 0) {
+          return { status: "DRAFT" };
+        }
+        if (externalUserProductId && unlinkedCount === 0) {
+          draftConfirmedUnpublished = true;
+        } else {
+          throw new ChannelCatalogError(
+            "NOT_FOUND",
+            "No unique remote publication matches this seller SKU and offer.",
+          );
+        }
+      } else {
+        const adopted = candidates[0];
+        if (candidates.length !== 1 || !adopted) {
+          throw new ChannelCatalogError(
+            "CONFLICT",
+            "Multiple remote items require manual seller review.",
+          );
+        }
+        externalUserProductId = adopted.userProductId;
+        externalItemId = adopted.id;
       }
-      const adopted = candidates[0];
-      if (candidates.length !== 1 || !adopted) {
-        throw new ChannelCatalogError(
-          "CONFLICT",
-          "Multiple remote items require manual seller review.",
-        );
-      }
-      externalUserProductId = adopted.userProductId;
-      externalItemId = adopted.id;
     }
-    if (!externalUserProductId || !externalItemId) {
+    if (!externalUserProductId || (!externalItemId && !draftConfirmedUnpublished)) {
       throw new ChannelCatalogError(
         "CONFLICT",
         "The remote User Product and offer could not be identified.",
@@ -1701,18 +1788,22 @@ export class ChannelCatalogService {
     const stock = await this.client.getStock(credential, externalUserProductId);
     const remote = remoteQuantities(stock, job.listing);
     let matches = true;
+    const remoteStatuses = new Set<string>();
     for (const expected of payload.expectedOffers ?? []) {
       const offer = job.listing.offers.find((candidate) => candidate.id === expected.offerId);
       const itemId =
         offer?.externalItemId ?? (expected.offerId === job.offer?.id ? externalItemId : undefined);
       if (!itemId) {
+        if (draftConfirmedUnpublished && expected.offerId === job.offer?.id) continue;
         matches = false;
         continue;
       }
       const item = await this.client.getItem(credential, itemId);
+      remoteStatuses.add(item.status);
       if (
         item.userProductId !== externalUserProductId ||
-        item.priceCents.toString() !== expected.priceCents
+        item.priceCents.toString() !== expected.priceCents ||
+        item.fulfillment !== (expected.logisticType === "FULFILLMENT")
       ) {
         matches = false;
       }
@@ -1729,14 +1820,32 @@ export class ChannelCatalogService {
         matches = false;
       }
     }
+    let resolvedStatus: ExecutionSuccess["status"] = "ACTIVE";
+    let providerError: string | undefined;
+    const allowedRemoteStatuses = new Set(["active", "paused", "closed"]);
+    const remoteStatusList = [...remoteStatuses];
+    const invalidRemoteStatus =
+      remoteStatusList.length > 1 ||
+      remoteStatusList.some((entry) => !allowedRemoteStatuses.has(entry));
+    if (invalidRemoteStatus) {
+      resolvedStatus = "RECONCILE_REQUIRED";
+      providerError = "REMOTE_STATUS_DIVERGENCE";
+    } else if (!matches) {
+      resolvedStatus = "RECONCILE_REQUIRED";
+      providerError = "REMOTE_DIVERGENCE";
+    } else if (remoteStatusList[0] === "paused") {
+      resolvedStatus = "PAUSED";
+    } else if (remoteStatusList[0] === "closed") {
+      resolvedStatus = "CLOSED";
+    }
     return {
       externalUserProductId,
       ...(externalItemId ? { externalItemId } : {}),
       remoteLocalQuantity: remote.local,
       remoteFullQuantity: remote.full,
       remoteStockVersion: stock?.version ?? null,
-      status: matches ? "ACTIVE" : "RECONCILE_REQUIRED",
-      ...(matches ? {} : { providerError: "REMOTE_DIVERGENCE" }),
+      status: resolvedStatus,
+      ...(providerError ? { providerError } : {}),
     };
   }
 
@@ -2073,10 +2182,13 @@ export class ChannelCatalogService {
           JOIN "ChannelOffer" offer ON offer."listingId" = listing."id"
           WHERE listing."status" = 'ACTIVE'
             AND listing."lastProviderError" IS NULL
+            AND listing."syncClaimId" IS NULL
             AND listing."id" = ${listingId}::uuid
             AND account."environment" = ${this.options.ring.environment}::"IntegrationEnvironment"
             AND account."status" = 'ACTIVE'
+            AND account."refreshClaimId" IS NULL
             AND offer."externalItemId" IS NOT NULL
+            AND offer."status" <> 'CLOSED'
             AND offer."stockQuantity" <> COALESCE((
               SELECT SUM(GREATEST(0, sl."onHand" - sl."committed" - sl."safetyStock"))::bigint
               FROM "StockLevel" sl
@@ -2098,9 +2210,12 @@ export class ChannelCatalogService {
           JOIN "ChannelOffer" offer ON offer."listingId" = listing."id"
           WHERE listing."status" = 'ACTIVE'
             AND listing."lastProviderError" IS NULL
+            AND listing."syncClaimId" IS NULL
             AND account."environment" = ${this.options.ring.environment}::"IntegrationEnvironment"
             AND account."status" = 'ACTIVE'
+            AND account."refreshClaimId" IS NULL
             AND offer."externalItemId" IS NOT NULL
+            AND offer."status" <> 'CLOSED'
             AND offer."stockQuantity" <> COALESCE((
               SELECT SUM(GREATEST(0, sl."onHand" - sl."committed" - sl."safetyStock"))::bigint
               FROM "StockLevel" sl
@@ -2116,12 +2231,17 @@ export class ChannelCatalogService {
           LIMIT 10
         `;
     for (const candidate of drifted) {
-      await this.enqueueSync({
-        listingId: candidate.listingId,
-        offerId: candidate.offerId,
-        kind: ChannelSyncJobKind.SYNC_LOCAL_STOCK,
-        audit: { ...audit, requestId: randomUUID() },
-      });
+      try {
+        await this.enqueueSync({
+          listingId: candidate.listingId,
+          offerId: candidate.offerId,
+          kind: ChannelSyncJobKind.SYNC_LOCAL_STOCK,
+          audit: { ...audit, requestId: randomUUID() },
+        });
+      } catch (error) {
+        if (error instanceof ChannelCatalogError) continue;
+        throw error;
+      }
     }
   }
 
@@ -2190,6 +2310,7 @@ export class ChannelCatalogService {
         const retry =
           error instanceof MercadoLibreCatalogError &&
           error.code === "VERSION_CONFLICT" &&
+          job.kind !== "PUBLISH" &&
           job.attempts < maxJobAttempts;
         const failure = retry
           ? { status: "RETRY_SCHEDULED" as const, code: "VERSION_CONFLICT" }

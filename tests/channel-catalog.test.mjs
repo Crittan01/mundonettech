@@ -857,6 +857,83 @@ describe("F6.2 — claims, reconciliation and failure safety", () => {
     assert.equal(current.remoteLocalQuantity, 6);
   });
 
+  it("persists external IDs without duplicating items when post-create stock sync fails", async () => {
+    const catalog = await makeCatalog();
+    const listing = await createListing(catalog, { warehouse: true });
+    warehouseBehavior = () => ({ status: 500, body: { error: "warehouse_unavailable" } });
+    const result = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(result.succeeded, 1);
+    const saved = await db.channelListing.findUniqueOrThrow({
+      where: { id: listing.id },
+      include: { offers: true },
+    });
+    assert.ok(saved.externalUserProductId);
+    assert.ok(saved.offers[0].externalItemId);
+    assert.equal(saved.status, "RECONCILE_REQUIRED");
+    assert.equal(saved.lastProviderError, "REMOTE_DIVERGENCE");
+    assert.equal(
+      fixture.calls.filter((call) => call.method === "POST" && call.path === "/items").length,
+      1,
+    );
+  });
+
+  it("unbricks an uncertain publish when reconciliation confirms zero remote items for the SKU", async () => {
+    const catalog = await makeCatalog();
+    const listing = await createListing(catalog);
+    createBehavior = () => ({ destroy: true });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).uncertain, 1);
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "RECONCILE_REMOTE",
+      force: true,
+      audit: audit(),
+    });
+    const reconciled = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(reconciled.succeeded, 1);
+    const reset = await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } });
+    assert.equal(reset.status, "DRAFT");
+    assert.equal(reset.lastProviderError, null);
+    createBehavior = undefined;
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "PUBLISH",
+      force: true,
+      audit: audit(),
+    });
+    const republished = await service.processSyncJobs(audit(), { listingId: listing.id });
+    assert.equal(republished.succeeded, 1);
+  });
+
+  it("maps remote paused and under_review statuses faithfully during reconciliation", async () => {
+    const catalog = await makeCatalog();
+    const listing = await publish(catalog);
+    const item = fixture.items.get(listing.offers[0].externalItemId);
+    item.status = "paused";
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "RECONCILE_REMOTE",
+      force: true,
+      audit: audit(),
+    });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    assert.equal(
+      (await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } })).status,
+      "PAUSED",
+    );
+
+    item.status = "under_review";
+    await service.enqueueSync({
+      listingId: listing.id,
+      kind: "RECONCILE_REMOTE",
+      force: true,
+      audit: audit(),
+    });
+    assert.equal((await service.processSyncJobs(audit(), { listingId: listing.id })).succeeded, 1);
+    const underReview = await db.channelListing.findUniqueOrThrow({ where: { id: listing.id } });
+    assert.equal(underReview.status, "RECONCILE_REQUIRED");
+    assert.equal(underReview.lastProviderError, "REMOTE_STATUS_DIVERGENCE");
+  });
+
   it("revokes the account on provider authentication failure without retrying", async () => {
     const catalog = await makeCatalog();
     const listing = await createListing(catalog);

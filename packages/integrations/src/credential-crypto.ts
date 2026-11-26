@@ -6,7 +6,7 @@ const keyBytes = 32;
 const nonceBytes = 12;
 const authTagBytes = 16;
 const maximumPlaintextBytes = 64 * 1024;
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const providerPattern = /^[a-z][a-z0-9._-]{0,99}$/;
 
 export class CredentialKeyRingError extends Error {
@@ -260,11 +260,15 @@ function validateEncryptedRecord(record: EncryptedCredentialRecord): void {
 export function decryptIntegrationCredential(
   record: EncryptedCredentialRecord,
   ring: CredentialKeyRing,
+  options?: { readonly allowRevoked?: boolean },
 ): Uint8Array {
   try {
     validateEncryptedRecord(record);
     assertIdentityContext(record.provider, record.accountName);
   } catch {
+    throw new CredentialDecryptionError();
+  }
+  if (record.revokedAt != null && options?.allowRevoked !== true) {
     throw new CredentialDecryptionError();
   }
   if (record.environment !== ring.environment) throw new CredentialDecryptionError();
