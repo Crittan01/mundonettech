@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 import { hasAdminPermission, isAdminRole } from "@mundonettech/core";
 import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
   hasUniqueViolation,
   Prisma,
   type IntegrationCredential,
@@ -167,7 +169,13 @@ export class B2bCopilotService {
   }
 
   private async actor(audit: B2bCopilotAudit) {
-    if (!uuidPattern.test(audit.actorAdminUserId) || audit.ipHash.length !== 32) {
+    if (
+      !uuidPattern.test(audit.actorAdminUserId) ||
+      audit.ipHash.length !== 32 ||
+      (audit.userAgentHash !== undefined &&
+        audit.userAgentHash !== null &&
+        audit.userAgentHash.length !== 32)
+    ) {
       throw new B2bCopilotError("FORBIDDEN", "Invalid Copilot audit context.");
     }
     const actor = await this.db.adminUser.findFirst({
@@ -179,6 +187,17 @@ export class B2bCopilotService {
     return actor;
   }
 
+  private async lockedActor(tx: Prisma.TransactionClient, actorAdminUserId: string): Promise<void> {
+    try {
+      await assertAdminActorInTransaction(tx, actorAdminUserId, "b2b:write");
+    } catch (error) {
+      if (error instanceof AdminActorAuthorizationError) {
+        throw new B2bCopilotError("FORBIDDEN", "The administrator cannot run the B2B Copilot.");
+      }
+      throw error;
+    }
+  }
+
   private async completeRun(options: {
     readonly runId: string;
     readonly audit: B2bCopilotAudit;
@@ -187,6 +206,7 @@ export class B2bCopilotService {
     readonly failureCode?: string;
   }) {
     await this.db.$transaction(async (tx) => {
+      await this.lockedActor(tx, options.audit.actorAdminUserId);
       const nowRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const updated = await tx.opportunityCopilotRun.updateMany({
         where: { id: options.runId, status: "REQUESTED" },
@@ -239,10 +259,7 @@ export class B2bCopilotService {
     assertUuid(input.opportunityId, "opportunityId");
     assertUuid(input.requestId, "requestId");
     assertUuid(input.credentialId, "credentialId");
-    const [actor, credential] = await Promise.all([
-      this.actor(input.audit),
-      this.credential(input.credentialId),
-    ]);
+    const actor = await this.actor(input.audit);
     const existing = await this.db.opportunityCopilotRun.findUnique({
       where: { id: input.requestId },
     });
@@ -250,7 +267,7 @@ export class B2bCopilotService {
       if (
         existing.status === "SUCCEEDED" &&
         existing.opportunityId === input.opportunityId &&
-        existing.credentialId === credential.id &&
+        existing.credentialId === input.credentialId &&
         existing.output
       ) {
         return {
@@ -290,6 +307,7 @@ export class B2bCopilotService {
       },
     });
     if (!opportunity) throw new B2bCopilotError("NOT_FOUND", "Opportunity not found.");
+    const credential = await this.credential(input.credentialId);
     const aggregate = aggregateInput(opportunity, nowRows[0]!.now);
     const request = createGeminiRequest(aggregate);
     const inputHash = Uint8Array.from(
@@ -301,6 +319,7 @@ export class B2bCopilotService {
       plaintext = await this.options.vault.reveal(credential.id);
       const credentials = parseGeminiCredentials(plaintext);
       await this.db.$transaction(async (tx) => {
+        await this.lockedActor(tx, actor.id);
         await tx.opportunityCopilotRun.create({
           data: {
             id: input.requestId,

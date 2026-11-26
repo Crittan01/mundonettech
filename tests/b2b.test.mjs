@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 
 import pg from "pg";
@@ -9,6 +9,8 @@ import {
   AccountService,
   B2bError,
   B2bService,
+  CartService,
+  CartStateError,
   CrmMergeService,
   CrmRetentionService,
   CrmService,
@@ -16,6 +18,7 @@ import {
   OperationsService,
   OrderLifecycleService,
   OrderService,
+  OrderValidationError,
   createDatabaseClient,
 } from "../packages/db/dist/index.js";
 import {
@@ -123,6 +126,65 @@ async function issueForLead(opportunityId, quantity = 2) {
   const afterDraft = await service.getOpportunity(opportunityId);
   const issued = await service.issueProposal(proposal.id, afterDraft.version, audit);
   return { list, active, proposal, issued };
+}
+
+async function insertSentProposalFixture({
+  id,
+  opportunityId,
+  version,
+  cartId,
+  expiresAt,
+  discountCents = 0,
+}) {
+  const variant = await db.productVariant.findUniqueOrThrow({
+    where: { id: catalog.variantId },
+    include: { product: { include: { taxGroup: true } } },
+  });
+  const unitPriceCents = 100000 - discountCents;
+  const totalCents = unitPriceCents + 1000000;
+  await sql.query("BEGIN");
+  try {
+    await sql.query(
+      `INSERT INTO "OpportunityProposal" (
+         "id", "opportunityId", "version", "status", "contentHash", "subtotalCents", "discountCents",
+         "taxCents", "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
+         "reservationMinutes", "expiresAt", "createdByAdminUserId"
+       ) VALUES ($1, $2, $3, 'DRAFT', $4, 100000, $5, 0, 1000000, $6, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120, $7, $8)`,
+      [id, opportunityId, version, randomBytes(32), discountCents, totalCents, expiresAt, adminId],
+    );
+    await sql.query(
+      `INSERT INTO "OpportunityProposalItem" (
+         "proposalId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot",
+         "catalogUnitPriceCents", "unitPriceCents", "discountCents", "lineTotalCents", "taxGroupCode",
+         "taxGroupName", "treatment", "taxRule", "catalogRateBps", "appliedRateBps", "uvtLimit",
+         "unitValueCents", "taxableBaseCents", "taxCents"
+       ) VALUES ($1, $2, 1, $3, $4, $5, 100000, $6, $7, $6, $8, $9, $10, 'NOT_RESPONSABLE', $11, 0, $12, $6, $6, 0)`,
+      [
+        id,
+        variant.id,
+        variant.product.name,
+        variant.product.slug,
+        variant.sku,
+        unitPriceCents,
+        discountCents,
+        variant.product.taxGroup.code,
+        variant.product.taxGroup.name,
+        variant.product.taxGroup.treatment,
+        variant.product.taxGroup.rateBps,
+        variant.product.taxGroup.uvtLimit,
+      ],
+    );
+    await sql.query(
+      `UPDATE "OpportunityProposal"
+       SET "status" = 'SENT', "publicTokenHash" = $2, "cartId" = $3, "issuedAt" = CURRENT_TIMESTAMP - INTERVAL '1 day'
+       WHERE "id" = $1`,
+      [id, randomBytes(32), cartId],
+    );
+    await sql.query("COMMIT");
+  } catch (error) {
+    await sql.query("ROLLBACK");
+    throw error;
+  }
 }
 
 function checkoutInput(publicProposal, preview, key = idempotency()) {
@@ -344,26 +406,18 @@ describe("F4B.2 production B2B flow", () => {
         `INSERT INTO "Cart" ("id", "accessTokenHash", "kind", "expiresAt") VALUES ($1, $2, 'B2B', CURRENT_TIMESTAMP - INTERVAL '1 hour')`,
         [expiredCartId, randomBytes(32)],
       );
-      await sql.query(
-        `INSERT INTO "OpportunityProposal" (
-         "id", "opportunityId", "version", "status", "publicTokenHash", "contentHash", "subtotalCents", "discountCents",
-         "taxCents", "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
-         "reservationMinutes", "expiresAt", "issuedAt", "cartId", "createdByAdminUserId"
-       ) VALUES ($1, $2, 99, 'SENT', $3, $4, 100000, 15000, 0, 1000000, 1085000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
-         CURRENT_TIMESTAMP - INTERVAL '1 hour', CURRENT_TIMESTAMP - INTERVAL '2 days', $5, $6)`,
-        [
-          expiredProposalId,
-          lead.opportunityId,
-          randomBytes(32),
-          randomBytes(32),
-          expiredCartId,
-          adminId,
-        ],
-      );
+      await insertSentProposalFixture({
+        id: expiredProposalId,
+        opportunityId: lead.opportunityId,
+        version: 3,
+        cartId: expiredCartId,
+        expiresAt: new Date(Date.now() - 3_600_000),
+        discountCents: 15000,
+      });
       current = await service.getOpportunity(lead.opportunityId);
       await db.opportunity.update({
         where: { id: lead.opportunityId },
-        data: { currentVersion: 99, version: { increment: 1 } },
+        data: { currentVersion: 3, version: { increment: 1 } },
       });
       assert.equal((await service.expireDueProposals()) >= 1, true);
       assert.equal(
@@ -691,15 +745,26 @@ describe("F4B.2 production B2B flow", () => {
       );
 
       const oldExpiredId = randomUUID();
-      await sql.query(
-        `INSERT INTO "OpportunityProposal" (
-           "id", "opportunityId", "version", "status", "contentHash", "subtotalCents", "discountCents",
-           "taxCents", "shippingCents", "totalCents", "taxRegime", "uvtValueCents", "uvtYear", "deliveryPromiseDays",
-           "reservationMinutes", "expiresAt", "createdByAdminUserId"
-         ) VALUES ($1, $2, 98, 'EXPIRED', $3, 100000, 0, 0, 1000000, 1100000, 'NO_RESPONSABLE_IVA', 5237400, 2026, 30, 120,
-           CURRENT_TIMESTAMP - INTERVAL '2 hours', $4)`,
-        [oldExpiredId, ceilingLead.opportunityId, randomBytes(32), adminId],
-      );
+      const oldExpiredCartId = randomUUID();
+      await db.cart.create({
+        data: {
+          id: oldExpiredCartId,
+          accessTokenHash: randomBytes(32),
+          kind: "B2B",
+          expiresAt: new Date(Date.now() - 7_200_000),
+        },
+      });
+      await insertSentProposalFixture({
+        id: oldExpiredId,
+        opportunityId: ceilingLead.opportunityId,
+        version: 2,
+        cartId: oldExpiredCartId,
+        expiresAt: new Date(Date.now() - 7_200_000),
+      });
+      await db.opportunityProposal.update({
+        where: { id: oldExpiredId },
+        data: { status: "EXPIRED" },
+      });
       const beforeCancelOld = await service.getOpportunity(ceilingLead.opportunityId);
       assert.equal(beforeCancelOld.status, "PROPOSAL_SENT");
       await service.cancelProposal(oldExpiredId, beforeCancelOld.version, audit);
@@ -820,6 +885,291 @@ describe("F4B.2 production B2B flow", () => {
     },
     { timeout: 120_000 },
   );
+
+  it(
+    "rolls back mismatched signatures and DANE data and converts once with different submission keys",
+    async () => {
+      const lead = await captureLead();
+      const { issued, proposal } = await issueForLead(lead.opportunityId, 1);
+      const publicProposal = await service.getPublicProposal(
+        Uint8Array.from(createHash("sha256").update(issued.token).digest()),
+      );
+      const preview = await orders.preview({ cartId: publicProposal.cartId });
+      const valid = checkoutInput(publicProposal, preview);
+      const stockBefore = await db.stockLevel.findFirstOrThrow({
+        where: { variantId: catalog.variantId, locationId: inventory.locationId },
+      });
+
+      await assert.rejects(
+        orders.checkout({
+          ...valid,
+          idempotency: idempotency(),
+          b2bAcceptance: { ...valid.b2bAcceptance, proposalId: randomUUID() },
+        }),
+        OrderValidationError,
+      );
+      await assert.rejects(
+        orders.checkout({
+          ...valid,
+          idempotency: idempotency(),
+          fulfillment: { ...valid.fulfillment, departmentCode: "05" },
+        }),
+        OrderValidationError,
+      );
+      assert.equal(await db.order.count({ where: { cartId: publicProposal.cartId } }), 0);
+      assert.equal(
+        (await db.opportunityProposal.findUniqueOrThrow({ where: { id: proposal.id } })).status,
+        "SENT",
+      );
+      assert.equal(
+        (
+          await db.stockLevel.findFirstOrThrow({
+            where: { variantId: catalog.variantId, locationId: inventory.locationId },
+          })
+        ).committed,
+        stockBefore.committed,
+      );
+
+      const first = checkoutInput(publicProposal, preview);
+      const second = checkoutInput(publicProposal, preview);
+      const attempts = await Promise.allSettled([orders.checkout(first), orders.checkout(second)]);
+      const succeeded = attempts.filter((attempt) => attempt.status === "fulfilled");
+      assert.equal(succeeded.length, 1);
+      assert.equal(attempts.filter((attempt) => attempt.status === "rejected").length, 1);
+      assert.equal(await db.order.count({ where: { cartId: publicProposal.cartId } }), 1);
+      const winningInput = attempts[0].status === "fulfilled" ? first : second;
+      const replay = await orders.checkout(winningInput);
+      assert.equal(replay.replayed, true);
+      assert.equal(replay.orderId, succeeded[0].value.orderId);
+      assert.equal(
+        (await db.opportunityProposal.findUniqueOrThrow({ where: { id: proposal.id } })).status,
+        "CONVERTED",
+      );
+      assert.equal(
+        (
+          await db.stockLevel.findFirstOrThrow({
+            where: { variantId: catalog.variantId, locationId: inventory.locationId },
+          })
+        ).committed,
+        stockBefore.committed + 1,
+      );
+    },
+    { timeout: 120_000 },
+  );
+
+  it(
+    "enforces the active list ceiling and keeps issued carts sealed across reassignment and repricing",
+    async () => {
+      const lead = await captureLead();
+      const { issued, proposal, active } = await issueForLead(lead.opportunityId, 1);
+      const beforeRejected = await service.getOpportunity(lead.opportunityId);
+      await assert.rejects(
+        service.createProposal({
+          opportunityId: lead.opportunityId,
+          expectedVersion: beforeRejected.version,
+          expiresAt: future(72),
+          items: [{ sku: catalog.sku, quantity: 1, unitPriceCents: "95000" }],
+          audit,
+        }),
+        (error) =>
+          error instanceof B2bError &&
+          error.code === "VALIDATION" &&
+          /assigned price list ceiling/.test(error.message),
+      );
+      assert.equal(
+        (await service.getOpportunity(lead.opportunityId)).version,
+        beforeRejected.version,
+      );
+      assert.equal(
+        await db.opportunityProposal.count({ where: { opportunityId: lead.opportunityId } }),
+        1,
+      );
+
+      priceListSequence += 1;
+      const replacement = await service.createPriceList(
+        { code: `B2B-REPLACEMENT-${priceListSequence}`, name: "Lista posterior" },
+        audit,
+      );
+      await service.upsertPriceListItem(
+        replacement.id,
+        replacement.version,
+        { sku: catalog.sku, unitPriceCents: "80000" },
+        audit,
+      );
+      const replacementCurrent = await service.getPriceList(replacement.id);
+      const replacementActive = await service.activatePriceList(
+        replacement.id,
+        replacementCurrent.version,
+        audit,
+      );
+      const current = await service.getOpportunity(lead.opportunityId);
+      await service.assignOrganizationPriceList(
+        current.organization.id,
+        current.organization.version,
+        replacementActive.id,
+        replacementActive.version,
+        audit,
+      );
+
+      const originalVariant = await db.productVariant.findUniqueOrThrow({
+        where: { id: catalog.variantId },
+      });
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: 120_000n },
+      });
+      try {
+        const carts = new CartService(db);
+        const cart = await carts.getById(issued.proposal.cartId);
+        assert.equal(cart.items[0].unitPriceCents, "100000");
+        assert.equal(cart.items[0].lineTotalCents, "90000");
+        assert.equal(cart.totalCents, "90000");
+        assert.equal(
+          cart.issues.some((issue) => issue.code === "PRICE_CHANGED"),
+          false,
+        );
+
+        const coupon = await db.coupon.create({
+          data: {
+            code: `B2B-BLOCK-${randomUUID().replaceAll("-", "").slice(0, 12).toUpperCase()}`,
+            name: "Cupón prohibido en B2B",
+            discountType: "PERCENTAGE",
+            status: "ACTIVE",
+            percentageBps: 1000,
+          },
+        });
+        await assert.rejects(carts.applyCoupon({ cartId: cart.id }, coupon.code), CartStateError);
+        await assert.rejects(
+          carts.addVariant({ cartId: cart.id }, catalog.variantId, 1),
+          CartStateError,
+        );
+        await assert.rejects(
+          carts.setVariantQuantity({ cartId: cart.id }, cart.items[0].id, 2),
+          CartStateError,
+        );
+        assert.equal(await db.couponUsage.count({ where: { cartId: cart.id } }), 0);
+
+        const publicAfter = await service.getPublicProposal(
+          Uint8Array.from(createHash("sha256").update(issued.token).digest()),
+        );
+        assert.equal(publicAfter.items[0].unitPriceCents, "90000");
+        assert.equal(publicAfter.totalCents, "1090000");
+        const preview = await orders.preview({ cartId: cart.id });
+        assert.equal(preview.homeDelivery.totalCents, publicAfter.totalCents);
+        const persisted = await db.opportunityProposal.findUniqueOrThrow({
+          where: { id: proposal.id },
+        });
+        assert.equal(persisted.priceListId, active.id);
+        assert.notEqual(persisted.priceListId, replacementActive.id);
+      } finally {
+        await db.productVariant.update({
+          where: { id: catalog.variantId },
+          data: { priceCents: originalVariant.priceCents },
+        });
+      }
+    },
+    { timeout: 120_000 },
+  );
+
+  it("re-reads catalog ceilings under FOR SHARE when activation races a price drop", async () => {
+    priceListSequence += 1;
+    const list = await service.createPriceList(
+      { code: `B2B-LOCK-${priceListSequence}`, name: "Activación con bloqueo" },
+      audit,
+    );
+    await service.upsertPriceListItem(
+      list.id,
+      list.version,
+      { sku: catalog.sku, unitPriceCents: "90000" },
+      audit,
+    );
+    const current = await service.getPriceList(list.id);
+    const original = await db.productVariant.findUniqueOrThrow({
+      where: { id: catalog.variantId },
+    });
+    await sql.query("BEGIN");
+    let pending;
+    try {
+      await sql.query(`UPDATE "ProductVariant" SET "priceCents" = 80000 WHERE "id" = $1`, [
+        catalog.variantId,
+      ]);
+      pending = service.activatePriceList(list.id, current.version, audit);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await sql.query("COMMIT");
+    } catch (error) {
+      await sql.query("ROLLBACK");
+      throw error;
+    }
+    try {
+      await assert.rejects(
+        pending,
+        (error) => error instanceof B2bError && error.code === "CONFLICT",
+      );
+      assert.equal(
+        (await db.priceList.findUniqueOrThrow({ where: { id: list.id } })).status,
+        "DRAFT",
+      );
+    } finally {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: original.priceCents },
+      });
+    }
+  });
+
+  it("expires an old sent version without changing the newer cart or opportunity", async () => {
+    const lead = await captureLead();
+    const oldCartId = randomUUID();
+    const newCartId = randomUUID();
+    const oldProposalId = randomUUID();
+    const newProposalId = randomUUID();
+    await db.cart.createMany({
+      data: [
+        {
+          id: oldCartId,
+          accessTokenHash: randomBytes(32),
+          kind: "B2B",
+          expiresAt: new Date(Date.now() - 3_600_000),
+        },
+        { id: newCartId, accessTokenHash: randomBytes(32), kind: "B2B", expiresAt: future(72) },
+      ],
+    });
+    for (const [id, version, cartId, expiresAt] of [
+      [oldProposalId, 1, oldCartId, new Date(Date.now() - 3_600_000)],
+      [newProposalId, 2, newCartId, future(72)],
+    ]) {
+      await insertSentProposalFixture({
+        id,
+        opportunityId: lead.opportunityId,
+        version,
+        cartId,
+        expiresAt,
+      });
+    }
+    await db.opportunity.update({
+      where: { id: lead.opportunityId },
+      data: { status: "PROPOSAL_SENT", currentVersion: 2, version: { increment: 1 } },
+    });
+    const before = await service.getOpportunity(lead.opportunityId);
+    assert.equal(await service.expireDueProposals(), 1);
+    assert.equal(
+      (await db.opportunityProposal.findUniqueOrThrow({ where: { id: oldProposalId } })).status,
+      "EXPIRED",
+    );
+    assert.equal(
+      (await db.cart.findUniqueOrThrow({ where: { id: oldCartId } })).status,
+      "CANCELLED",
+    );
+    assert.equal(
+      (await db.opportunityProposal.findUniqueOrThrow({ where: { id: newProposalId } })).status,
+      "SENT",
+    );
+    assert.equal((await db.cart.findUniqueOrThrow({ where: { id: newCartId } })).status, "ACTIVE");
+    const after = await service.getOpportunity(lead.opportunityId);
+    assert.equal(after.status, "PROPOSAL_SENT");
+    assert.equal(after.currentVersion, 2);
+    assert.equal(after.version, before.version);
+  });
 });
 
 describe("A2 — B2B audit before/after, redaction and conflict atomicity", () => {

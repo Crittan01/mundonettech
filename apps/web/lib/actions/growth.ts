@@ -19,9 +19,22 @@ function isNextRedirect(error: unknown): boolean {
   );
 }
 
-function failure(error: unknown, values: Record<string, string>): ActionState {
+function failure(
+  error: unknown,
+  values: Record<string, string>,
+  operation: "create" | "attribute" = "attribute",
+): ActionState {
   if (isNextRedirect(error)) throw error;
   if (error instanceof GrowthError) {
+    if (operation === "create") {
+      const messages = {
+        VALIDATION: "No pudimos validar la solicitud para generar tu código.",
+        NOT_FOUND: "Tu cuenta no está disponible para generar un código de referidos.",
+        CONFLICT: "Tu código de referidos ya no está disponible. Actualiza la página.",
+        FORBIDDEN: "Tu sesión no está autorizada para esta operación.",
+      } as const;
+      return actionError(messages[error.code], values);
+    }
     const messages = {
       VALIDATION: "El código debe tener 12 caracteres válidos, sin espacios internos.",
       NOT_FOUND: "El código de referido no está disponible. Revisa que esté completo y vigente.",
@@ -50,7 +63,7 @@ export async function createReferralCodeAction(
     revalidatePath("/mi-cuenta/beneficios");
     return actionSuccess(`Tu código ${result.code} está listo para compartir.`);
   } catch (error) {
-    return failure(error, {});
+    return failure(error, {}, "create");
   }
 }
 

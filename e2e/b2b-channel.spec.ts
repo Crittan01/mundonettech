@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 
 import { expect, test, type Page } from "@playwright/test";
@@ -151,6 +151,29 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
     include: { organization: true, contact: true },
   });
   expect(opportunity.organization.legalName).toBe(legalName);
+  await db.integrationCredential.create({
+    data: {
+      provider: "gemini",
+      environment: "LOCAL",
+      accountName: `gemini-e2e-${runSuffix}`,
+      keyVersion: 1,
+      nonce: randomBytes(12),
+      ciphertext: randomBytes(64),
+      authTag: randomBytes(16),
+      createdByAdminUserId: admin.id,
+    },
+  });
+
+  await authenticateAdmin(page, 900);
+  await page.goto(`/admin/b2b/${opportunity.id}`);
+  await expect(
+    page.getByText("Confirma tu autenticador para habilitar el Copiloto 0-PII", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Credencial Gemini")).toHaveCount(0);
+
+  await authenticateAdmin(page);
+  await page.goto(`/admin/b2b/${opportunity.id}`);
+  await expect(page.getByLabel("Credencial Gemini")).toBeVisible();
 
   await authenticateAdmin(page, 900);
   await page.goto("/admin/b2b");
@@ -177,18 +200,41 @@ test("B2B capture, MFA administration, proposal signature and receipt work end t
     .first()
     .click();
 
-  const variant = await db.productVariant.findFirstOrThrow({
+  const sellableVariants = await db.productVariant.findMany({
     where: {
       status: "ACTIVE",
       deletedAt: null,
-      product: { status: "ACTIVE", deletedAt: null, variants: { none: { isDefault: false } } },
+      product: {
+        status: "ACTIVE",
+        deletedAt: null,
+        brand: { deletedAt: null },
+        category: { deletedAt: null },
+        variants: { none: { isDefault: false } },
+      },
     },
     select: {
       sku: true,
       priceCents: true,
       product: { select: { slug: true } },
+      stockLevels: {
+        where: { location: { deletedAt: null, type: { not: "QUARANTINE" } } },
+        select: { onHand: true, committed: true, safetyStock: true },
+      },
     },
+    orderBy: { sku: "asc" },
+    take: 100,
   });
+  const variant = sellableVariants.find(
+    (candidate) =>
+      candidate.stockLevels.reduce(
+        (available, level) =>
+          available + Math.max(0, level.onHand - level.committed - level.safetyStock),
+        0,
+      ) > 0,
+  );
+  expect(variant).toBeDefined();
+  if (!variant)
+    throw new Error("No sellable variant with effective stock is available for B2B E2E.");
   const unitPrice = Math.max(1, Math.floor((Number(variant.priceCents) * 0.9) / 100));
   await page.getByLabel("SKU activo").fill(variant.sku);
   await page.getByLabel("Precio unitario COP (pesos enteros)").fill(String(unitPrice));

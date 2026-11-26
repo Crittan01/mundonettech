@@ -10,6 +10,7 @@ import {
 } from "../packages/db/dist/index.js";
 import {
   DomainEventWorker,
+  EmailConflictError,
   EmailService,
   InvoiceService,
   ShippingService,
@@ -417,5 +418,58 @@ describe("F5.1 — abandoned-cart recovery with privacy enforcement", () => {
     const erasedEvent = await db.emailEvent.findUniqueOrThrow({ where: { id: recoveryEvent.id } });
     assert.ok(erasedEvent.anonymizedAt !== null);
     assert.match(erasedEvent.recipientEmail, /^anon-[0-9a-f]{32}@anonymized\.invalid$/);
+  });
+
+  it("revalidates consent inside the enqueue transaction before creating email or outbox", async () => {
+    const { customer, abandoned } = await makeAbandoned();
+    const consent = await db.consent.findFirstOrThrow({
+      where: { customerId: customer.id, purpose: "MARKETING_EMAIL", status: "GRANTED" },
+    });
+    await db.consent.create({
+      data: {
+        customerId: customer.id,
+        purpose: "MARKETING_EMAIL",
+        status: "REVOKED",
+        source: "recovery-enqueue-race",
+        policyVersion: "2026-01",
+        proofHash: hash(),
+        revokesId: consent.id,
+      },
+    });
+    const outboxBefore = await db.domainOutbox.count({
+      where: { eventType: "email.requested.v1", aggregateType: "EmailEvent" },
+    });
+    await assert.rejects(
+      email.queue({
+        customerId: customer.id,
+        abandonedCartId: abandoned.id,
+        credentialId: resendCredentialId,
+        templateKey: "cart.recovery",
+        topic: "cart-recovery",
+        recipientEmail: customer.email,
+        idempotencyKey: `domain:cart.recovery:${abandoned.id}:${abandoned.lastActivityAt.toISOString()}`,
+        variables: {
+          storeName: "Tienda de pruebas",
+          itemCount: "1",
+          totalCop: "$ 1.000",
+          cartUrl: "https://example.test/carrito",
+        },
+      }),
+      (error) => error instanceof EmailConflictError && error.code === "NO_CONSENT",
+    );
+    assert.equal(await db.emailEvent.count({ where: { abandonedCartId: abandoned.id } }), 0);
+    assert.equal(
+      await db.domainOutbox.count({
+        where: { eventType: "email.requested.v1", aggregateType: "EmailEvent" },
+      }),
+      outboxBefore,
+    );
+    await worker.runBatch(10);
+    assert.equal(
+      (await db.abandonedCart.findUniqueOrThrow({ where: { id: abandoned.id } }))
+        .lastReminderOutcome,
+      "NO_CONSENT",
+    );
+    assert.equal(providerCalls.length, 0);
   });
 });

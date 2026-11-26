@@ -100,9 +100,15 @@ export async function lifecycleActor(
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
   auditHash(audit.ipHash, "ipHash");
   if (audit.userAgentHash !== null) auditHash(audit.userAgentHash, "userAgentHash");
-  const actor = await tx.adminUser.findFirst({
-    where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-  });
+  const actors = await tx.$queryRaw<Array<{ id: string; role: string }>>`
+    SELECT "id", "role"::text AS "role"
+    FROM "AdminUser"
+    WHERE "id" = ${audit.actorAdminUserId}::uuid
+      AND "status" = 'ACTIVE'
+      AND "deletedAt" IS NULL
+    FOR SHARE
+  `;
+  const actor = actors[0];
   if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
     throw new LifecycleError(
       "FORBIDDEN",

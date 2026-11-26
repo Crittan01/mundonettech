@@ -34,6 +34,7 @@ import {
   crmOptionalText,
   crmRetentionMonths,
   crmRetentionReviewAt,
+  crmSelfDealing,
   crmSource,
   crmText,
   crmVersion,
@@ -135,10 +136,20 @@ export class CrmService {
     tx: Prisma.TransactionClient,
     contactId: string,
   ): Promise<ContactVerificationLevel> {
-    const identities = await tx.contactIdentity.findMany({
-      where: { contactId, retiredAt: null },
-      select: { kind: true, verifiedAt: true },
-    });
+    const identities = await tx.$queryRaw<
+      Array<{ kind: ContactIdentityKindValue; verifiedAt: Date | null }>
+    >`
+      WITH RECURSIVE lineage AS (
+        SELECT "id" FROM "Contact" WHERE "id" = ${contactId}::uuid
+        UNION
+        SELECT contact."id" FROM "Contact" contact
+        JOIN lineage parent ON contact."mergedIntoContactId" = parent."id"
+      )
+      SELECT identity."kind", identity."verifiedAt"
+      FROM "ContactIdentity" identity
+      JOIN lineage ON lineage."id" = identity."contactId"
+      WHERE identity."retiredAt" IS NULL
+    `;
     return deriveContactVerificationLevel({
       emailVerified: identities.some((item) => item.kind === "EMAIL" && item.verifiedAt !== null),
       phoneVerified: identities.some((item) => item.kind === "PHONE" && item.verifiedAt !== null),
@@ -1044,7 +1055,6 @@ export class CrmService {
       id: task.id,
       contactId: task.contactId,
       title: task.title,
-      description: task.description,
       status: task.status,
       priority: task.priority,
       dueAt: task.dueAt,
@@ -1172,16 +1182,25 @@ export class CrmService {
         resolved.push({ id: candidate.id, pairKey, created: true });
       }
       if (resolved.length > 0) {
+        let selfDealing = false;
+        for (const candidate of resolved) {
+          const pair = pairs.get(candidate.pairKey)!;
+          selfDealing =
+            (await crmSelfDealing(tx, audit, "Contact", pair.leftId)) ||
+            (await crmSelfDealing(tx, audit, "Contact", pair.rightId));
+          if (selfDealing) break;
+        }
         await crmLog(
           tx,
           audit,
           "CRM_DUPLICATES_DETECTED",
-          "Contact",
+          options.contactId ? "Contact" : "IdentityMergeCandidate",
           options.contactId ?? resolved[0]!.id,
           {
             candidateCount: resolved.length,
             createdCount: resolved.filter((item) => item.created).length,
           },
+          selfDealing,
         );
       }
       return { candidates: resolved, created: resolved.filter((item) => item.created).length };

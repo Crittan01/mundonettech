@@ -25,7 +25,11 @@ import { bogotaInputValue } from "@/lib/admin-pricing-presenters";
 import { b2bService } from "@/lib/b2b";
 import { getDatabase } from "@/lib/db";
 import { getIntegrationCredentialVault } from "@/lib/integrations";
-import { requireAdminPage } from "@/lib/security/admin-auth";
+import {
+  AdminAuthorizationError,
+  getAdminSession,
+  requireAdminPage,
+} from "@/lib/security/admin-auth";
 
 export const metadata = {
   title: "Detalle de oportunidad B2B",
@@ -85,7 +89,16 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
   const canReadCrm = hasAdminPermission(session.profile.role, "crm:read");
   const canReadOrders = hasAdminPermission(session.profile.role, "orders:read");
   const active = !["WON", "LOST", "CANCELLED"].includes(opportunity.status);
-  const credentials = canWrite
+  let copilotAuthorized = false;
+  if (canWrite) {
+    try {
+      await getAdminSession({ permission: "b2b:write", requireRecentMfa: true });
+      copilotAuthorized = true;
+    } catch (error) {
+      if (!(error instanceof AdminAuthorizationError && error.code === "MFA_STALE")) throw error;
+    }
+  }
+  const credentials = copilotAuthorized
     ? (await getIntegrationCredentialVault().forSystemProvider("gemini").list({ limit: 100 })).items
         .filter((credential) => credential.provider === "gemini" && !credential.revokedAt)
         .map((credential, index) => ({
@@ -283,7 +296,12 @@ export default async function B2bOpportunityPage({ params }: PageProps<"/admin/b
           </p>
         </div>
         {canWrite ? (
-          credentials.length > 0 ? (
+          !copilotAuthorized ? (
+            <p className="rounded-lg border border-border p-4 text-sm text-muted-foreground">
+              Confirma tu autenticador para habilitar el Copiloto 0-PII y leer las credenciales
+              disponibles.
+            </p>
+          ) : credentials.length > 0 ? (
             <B2bCopilotForm
               opportunityId={opportunity.id}
               requestId={randomUUID()}

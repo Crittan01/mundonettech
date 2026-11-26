@@ -3,21 +3,20 @@ import { createHash } from "node:crypto";
 import {
   assertCartQuantity,
   assertMoney,
-  hasAdminPermission,
-  isAdminRole,
   normalizeContactPhone,
   normalizeEmail,
   type AdminPermission,
 } from "@mundonettech/core";
 
-import type {
-  AdminUser,
-  OpportunityProposal,
-  OpportunityProposalItem,
-  Prisma,
-} from "./generated/client.js";
+import type { OpportunityProposal, OpportunityProposalItem, Prisma } from "./generated/client.js";
 import { assertUuid } from "./inventory-shared.js";
-import { databaseNow, recordAdminAction, type DatabaseExecutor } from "./primitives.js";
+import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
+  databaseNow,
+  recordAdminAction,
+  type DatabaseExecutor,
+} from "./primitives.js";
 import type { B2bAudit } from "./b2b-types.js";
 
 export type B2bErrorCode = "NOT_FOUND" | "CONFLICT" | "VALIDATION" | "FORBIDDEN" | "EXPIRED";
@@ -168,17 +167,18 @@ export async function b2bActor(
   tx: Prisma.TransactionClient,
   audit: B2bAudit,
   permission: B2bPermission,
-): Promise<AdminUser> {
+): Promise<void> {
   assertUuid(audit.actorAdminUserId, "actorAdminUserId");
   b2bHash(audit.ipHash, "ipHash");
   if (audit.userAgentHash !== null) b2bHash(audit.userAgentHash, "userAgentHash");
-  const actor = await tx.adminUser.findFirst({
-    where: { id: audit.actorAdminUserId, status: "ACTIVE", deletedAt: null },
-  });
-  if (!actor || !isAdminRole(actor.role) || !hasAdminPermission(actor.role, permission)) {
-    throw new B2bError("FORBIDDEN", "The administrator is not authorized for B2B operations.");
+  try {
+    await assertAdminActorInTransaction(tx, audit.actorAdminUserId, permission);
+  } catch (error) {
+    if (error instanceof AdminActorAuthorizationError) {
+      throw new B2bError("FORBIDDEN", "The administrator is not authorized for B2B operations.");
+    }
+    throw error;
   }
-  return actor;
 }
 
 export async function b2bLog(

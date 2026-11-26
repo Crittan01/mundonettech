@@ -101,7 +101,7 @@ export function normalizeReferralCode(value: string): string {
 
 export const loyaltyTxnTypeLabels = {
   EARN: "Puntos por compra",
-  EARN_REVERSAL: "Reversa por reembolso",
+  EARN_REVERSAL: "Reversa de puntos por compra",
   REFERRAL_EARN: "Bono por referido",
   REFERRAL_REVERSAL: "Reversa del bono por referido",
   FORFEIT: "Renuncia por eliminación de cuenta",

@@ -470,11 +470,52 @@ export class EmailService {
         .map((name) => [name, values[name]!]),
     );
     const rendered = renderEmailTemplate(baseTemplate, renderValues);
-    const suppression = await this.db.emailSuppression.findUnique({
-      where: { recipientHash_topic: { recipientHash, topic } },
-    });
     try {
-      return await this.db.$transaction(async (tx) => {
+      return await inInventoryTransaction(this.db, async (tx) => {
+        if (key === "cart.recovery") {
+          const customerId = input.customerId!;
+          const abandonedCartId = input.abandonedCartId!;
+          await acquireOperationLocks(tx, [`growth-customer:${customerId}`]);
+          const abandoned = await tx.abandonedCart.findUnique({
+            where: { id: abandonedCartId },
+            include: {
+              customer: true,
+              cart: { select: { status: true, kind: true, order: { select: { id: true } } } },
+            },
+          });
+          if (!abandoned) {
+            throw new EmailConflictError("Abandoned cart is stale.", "STALE");
+          }
+          const activityPrefix = `domain:cart.recovery:${abandonedCartId}:`;
+          const activityAt = input.idempotencyKey.startsWith(activityPrefix)
+            ? input.idempotencyKey.slice(activityPrefix.length)
+            : null;
+          if (
+            abandoned.status !== "DETECTED" ||
+            abandoned.lastActivityAt.toISOString() !== activityAt ||
+            abandoned.cart.status !== "ACTIVE" ||
+            abandoned.cart.kind === "B2B" ||
+            abandoned.cart.order !== null
+          ) {
+            throw new EmailConflictError("Abandoned cart is stale.", "STALE");
+          }
+          if (
+            !abandoned.customer ||
+            abandoned.customer.id !== customerId ||
+            abandoned.customer.status !== "ACTIVE" ||
+            abandoned.customer.deletedAt !== null ||
+            abandoned.contactEmail !== recipientEmail ||
+            abandoned.customer.email !== recipientEmail
+          ) {
+            throw new EmailConflictError("Abandoned cart has no active contact.", "NO_CONTACT");
+          }
+          if (!(await marketingEmailConsentGranted(tx, customerId))) {
+            throw new EmailConflictError("Marketing email consent is not current.", "NO_CONSENT");
+          }
+        }
+        const suppression = await tx.emailSuppression.findUnique({
+          where: { recipientHash_topic: { recipientHash, topic } },
+        });
         const created = await tx.emailEvent.create({
           data: {
             id: eventId,
@@ -713,7 +754,10 @@ export class EmailService {
     }
   }
 
-  private async suppressedBeforeSend(claimed: EmailEvent): Promise<EmailSendOutcome | null> {
+  private async suppressedBeforeSend(
+    claimed: EmailEvent,
+    options: { readonly deferOnPause?: boolean } = {},
+  ): Promise<EmailSendOutcome | null> {
     const suppression = await this.db.emailSuppression.findUnique({
       where: {
         recipientHash_topic: { recipientHash: claimed.recipientHash, topic: claimed.topic },
@@ -735,7 +779,7 @@ export class EmailService {
     const lifecycle = new LifecycleService(this.db);
     if (!outcome && claimed.templateKey === "lifecycle.campaign" && claimed.lifecycleMessageId) {
       const eligibility = await lifecycle.messageEligibility(claimed.lifecycleMessageId);
-      if (eligibility.reason === "PAUSED") {
+      if (eligibility.reason === "PAUSED" && options.deferOnPause !== false) {
         const deferred = await inInventoryTransaction(this.db, async (tx) => {
           const lockedRows = await tx.$queryRaw<
             EmailEvent[]
@@ -771,7 +815,7 @@ export class EmailService {
       }
       if (eligibility.reason === "ENROLLMENT_INACTIVE" || eligibility.reason === "MISSING") {
         outcome = "CANCELLED";
-      } else if (eligibility.reason !== "ELIGIBLE") {
+      } else if (!["ELIGIBLE", "PAUSED"].includes(eligibility.reason)) {
         outcome = "SUPPRESSED";
         lifecycleReason =
           eligibility.reason === "CUSTOMER_INACTIVE"
@@ -791,7 +835,7 @@ export class EmailService {
             where: { id: claimed.abandonedCartId },
             include: {
               customer: true,
-              cart: { select: { status: true, order: { select: { id: true } } } },
+              cart: { select: { status: true, kind: true, order: { select: { id: true } } } },
             },
           })
         : null;
@@ -805,6 +849,7 @@ export class EmailService {
         !abandoned ||
         abandoned.status !== "DETECTED" ||
         abandoned.cart.status !== "ACTIVE" ||
+        abandoned.cart.kind === "B2B" ||
         abandoned.cart.order !== null ||
         !abandoned.customer ||
         abandoned.customer.id !== claimed.customerId ||
@@ -971,7 +1016,10 @@ export class EmailService {
       const tokenEventUrl = (claimed.variablesSnapshot as Record<string, unknown>).unsubscribeUrl;
       if (typeof tokenEventUrl !== "string")
         throw new EmailValidationError("Stored unsubscribe URL is missing.");
-      const result = await this.provider(credentials).send({
+      const provider = this.provider(credentials);
+      const revalidated = await this.suppressedBeforeSend(claimed);
+      if (revalidated) return revalidated;
+      const result = await provider.send({
         idempotencyKey: claimed.idempotencyKey,
         to: claimed.recipientEmail,
         subject: claimed.subjectSnapshot,
@@ -979,6 +1027,10 @@ export class EmailService {
         text: claimed.textBodySnapshot,
         unsubscribeUrl: tokenEventUrl,
       });
+      const revalidatedAfterSend = await this.suppressedBeforeSend(claimed, {
+        deferOnPause: false,
+      });
+      if (revalidatedAfterSend) return revalidatedAfterSend;
       const { event: sent, updated } = await this.db.$transaction(async (tx) => {
         const lockedRows = await tx.$queryRaw<
           EmailEvent[]

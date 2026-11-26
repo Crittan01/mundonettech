@@ -2,7 +2,6 @@ import {
   deriveContactVerificationLevel,
   hasAdminPermission,
   isAdminRole,
-  strongestContactVerificationLevel,
 } from "@mundonettech/core";
 
 import type {
@@ -276,12 +275,12 @@ export class CrmMergeService {
         tx.task.findMany({ where: { contactId: source.id }, select: { id: true } }),
         tx.opportunity.findMany({ where: { contactId: source.id }, select: { id: true } }),
       ]);
-      const targetIdentityKeys = new Set(
-        targetIdentities.map((item) => `${item.kind}:${item.normalizedValue}`),
+      const targetIdentityByKey = new Map(
+        targetIdentities.map((item) => [`${item.kind}:${item.normalizedValue}`, item]),
       );
       if (
         !sourceIdentities.some((identity) =>
-          targetIdentityKeys.has(`${identity.kind}:${identity.normalizedValue}`),
+          targetIdentityByKey.has(`${identity.kind}:${identity.normalizedValue}`),
         )
       ) {
         throw new CrmError("CONFLICT", "The original duplicate evidence no longer exists.");
@@ -289,7 +288,11 @@ export class CrmMergeService {
       const movedIdentityIds: string[] = [];
       const retiredIdentityIds: string[] = [];
       for (const identity of sourceIdentities) {
-        if (targetIdentityKeys.has(`${identity.kind}:${identity.normalizedValue}`)) {
+        const targetIdentity = targetIdentityByKey.get(
+          `${identity.kind}:${identity.normalizedValue}`,
+        );
+        if (targetIdentity) {
+          if (targetIdentity.verifiedAt === null && identity.verifiedAt !== null) continue;
           await tx.contactIdentity.update({
             where: { id: identity.id },
             data: { retiredAt: now },
@@ -335,36 +338,33 @@ export class CrmMergeService {
           version: { increment: 1 },
         },
       });
-      const remainingIdentities = await tx.contactIdentity.findMany({
-        where: { contactId: target.id, retiredAt: null },
-        select: { kind: true, verifiedAt: true },
-      });
+      const remainingIdentities = await tx.$queryRaw<
+        Array<{ kind: "EMAIL" | "PHONE" | "DOCUMENT"; verifiedAt: Date | null }>
+      >`
+        WITH RECURSIVE lineage AS (
+          SELECT "id" FROM "Contact" WHERE "id" = ${target.id}::uuid
+          UNION
+          SELECT contact."id" FROM "Contact" contact
+          JOIN lineage parent ON contact."mergedIntoContactId" = parent."id"
+        )
+        SELECT identity."kind", identity."verifiedAt"
+        FROM "ContactIdentity" identity
+        JOIN lineage ON lineage."id" = identity."contactId"
+        WHERE identity."retiredAt" IS NULL
+      `;
       const mergedEmail = target.email ?? source.email;
       const mergedPhone = target.phoneE164 ?? source.phoneE164;
-      const combinedIdentities = [...remainingIdentities, ...sourceIdentities];
-      const combinedDerived = deriveContactVerificationLevel({
-        emailVerified: combinedIdentities.some(
+      const derivedLevel = deriveContactVerificationLevel({
+        emailVerified: remainingIdentities.some(
           (item) => item.kind === "EMAIL" && item.verifiedAt !== null,
         ),
-        phoneVerified: combinedIdentities.some(
+        phoneVerified: remainingIdentities.some(
           (item) => item.kind === "PHONE" && item.verifiedAt !== null,
         ),
-        identityVerified: combinedIdentities.some(
+        identityVerified: remainingIdentities.some(
           (item) => item.kind === "DOCUMENT" && item.verifiedAt !== null,
         ),
       });
-      let derivedLevel = strongestContactVerificationLevel(
-        strongestContactVerificationLevel(source.verificationLevel, target.verificationLevel),
-        combinedDerived,
-      );
-      if (!mergedEmail && !mergedPhone) {
-        derivedLevel = "UNVERIFIED";
-      } else if (
-        (!mergedEmail || !mergedPhone) &&
-        (derivedLevel === "DUAL_CHANNEL_VERIFIED" || derivedLevel === "IDENTITY_VERIFIED")
-      ) {
-        derivedLevel = "SINGLE_CHANNEL_VERIFIED";
-      }
       const mergedTarget = await tx.contact.update({
         where: { id: target.id },
         data: {

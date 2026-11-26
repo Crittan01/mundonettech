@@ -19,6 +19,7 @@ import {
   crmLog,
   crmNow,
   crmRetentionMonths,
+  crmSelfDealing,
   crmVersion,
   redactCrmActivitiesInTransaction,
   redactCrmMergeHistoryInTransaction,
@@ -76,7 +77,11 @@ export class CrmRetentionService {
     if (!suppressionReasons.has(input.reason)) {
       throw new CrmError("VALIDATION", "The suppression reason is invalid.");
     }
-    if (!input.privacyPolicyVersion || input.privacyPolicyVersion.length > 50) {
+    if (
+      !input.privacyPolicyVersion ||
+      input.privacyPolicyVersion.trim() !== input.privacyPolicyVersion ||
+      input.privacyPolicyVersion.length > 50
+    ) {
       throw new CrmError("VALIDATION", "A valid privacy policy version is required.");
     }
     return inInventoryTransaction(this.db, async (tx) => {
@@ -221,6 +226,7 @@ export class CrmRetentionService {
           );
         }
       }
+      const selfDealing = await crmSelfDealing(tx, audit, "Contact", requested.id);
       const lockedCustomerMap = new Map(
         locked.customers.map((customer) => [customer.id, customer]),
       );
@@ -283,12 +289,20 @@ export class CrmRetentionService {
         });
       }
       await tx.contactIdentity.deleteMany({ where: { contactId: { in: lineageIds } } });
-      await crmLog(tx, audit, "CRM_CONTACT_SUPPRESSED", "Contact", requested.id, {
-        reason: input.reason,
-        lineageCount: contacts.length,
-        anonymizedCustomerCount: anonymizedCustomers.length,
-        redactedMergeCount,
-      });
+      await crmLog(
+        tx,
+        audit,
+        "CRM_CONTACT_SUPPRESSED",
+        "Contact",
+        requested.id,
+        {
+          reason: input.reason,
+          lineageCount: contacts.length,
+          anonymizedCustomerCount: anonymizedCustomers.length,
+          redactedMergeCount,
+        },
+        selfDealing,
+      );
       return {
         contactId: requested.id,
         lineage: lineageIds,
@@ -354,10 +368,16 @@ export class CrmRetentionService {
           throw error;
         }
         if (
+          (error instanceof CrmError || error instanceof AccountError) &&
+          error.code === "NOT_FOUND"
+        ) {
+          continue;
+        }
+        if (
           !(error instanceof CrmError && error.code === "CONFLICT") &&
           !(error instanceof AccountError && error.code === "CONFLICT")
         ) {
-          continue;
+          throw error;
         }
         try {
           await inInventoryTransaction(this.db, async (tx) => {
@@ -389,7 +409,13 @@ export class CrmRetentionService {
           if (deferError instanceof CrmError && deferError.code === "FORBIDDEN") {
             throw deferError;
           }
-          continue;
+          if (
+            (deferError instanceof CrmError || deferError instanceof AccountError) &&
+            deferError.code === "NOT_FOUND"
+          ) {
+            continue;
+          }
+          throw deferError;
         }
       }
     }

@@ -98,7 +98,7 @@ function failure(error: unknown, values: Record<string, string>): ActionState {
     const messages = {
       NOT_FOUND: "El registro ya no está disponible. Recarga la página.",
       CONFLICT:
-        "El estado cambió o hay un saldo pendiente por resolver. Recarga y revisa antes de continuar.",
+        "El estado cambió o hay obligaciones o saldos pendientes por resolver. Recarga y revisa antes de continuar.",
       VALIDATION: "Revisa los datos ingresados y la confirmación solicitada.",
     } as const;
     return actionError(messages[error.code], values);

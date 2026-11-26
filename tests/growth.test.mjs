@@ -278,6 +278,142 @@ describe("F5.1 — persistent loyalty and referral ledger", () => {
     );
   });
 
+  it("replays a zero-point partial refund after later cumulative reversals", async () => {
+    const customer = await makeCustomer();
+    const variant = await db.productVariant.findUniqueOrThrow({
+      where: { id: catalog.variantId },
+      select: { priceCents: true, compareAtPriceCents: true },
+    });
+    let orderId;
+    let totalCents;
+    try {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: 4_000_000n, compareAtPriceCents: null },
+      });
+      ({ orderId, totalCents } = await createOrder(customer, 3));
+    } finally {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: variant.priceCents, compareAtPriceCents: variant.compareAtPriceCents },
+      });
+    }
+    await payOrder(orderId, totalCents, customer.id);
+    assert.equal(await balance(customer.id), 1);
+
+    const zeroPointRefundId = await requestRefund(orderId, 1);
+    assert.equal(await balance(customer.id), 1);
+    assert.equal(await db.loyaltyTxn.count({ where: { refundId: zeroPointRefundId } }), 0);
+    const reversingRefundId = await requestRefund(orderId, 1);
+    assert.equal(await balance(customer.id), 0);
+    assert.equal(await db.loyaltyTxn.count({ where: { refundId: reversingRefundId } }), 1);
+
+    const replay = await db.$transaction((tx) =>
+      growth.reverseCompletedRefundInTransaction(tx, zeroPointRefundId),
+    );
+    assert.equal(replay.reversedPoints, 0);
+    assert.equal(await balance(customer.id), 0);
+    assert.equal(await db.loyaltyTxn.count({ where: { refundId: zeroPointRefundId } }), 0);
+    assert.equal(await db.loyaltyTxn.count({ where: { orderId, type: "EARN_REVERSAL" } }), 1);
+  });
+
+  it("reverses split captures, partial voids and referral bonuses cumulatively", async () => {
+    const referrer = await makeCustomer();
+    const referred = await makeCustomer();
+    const { code } = await growth.createReferralCode(referrer.id);
+    const attributed = await growth.attributeReferral(referred.id, code);
+    const variant = await db.productVariant.findUniqueOrThrow({
+      where: { id: catalog.variantId },
+      select: { priceCents: true, compareAtPriceCents: true },
+    });
+    let orderId;
+    try {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: 4_000_000n, compareAtPriceCents: null },
+      });
+      ({ orderId } = await createOrder(referred, 3));
+    } finally {
+      await db.productVariant.update({
+        where: { id: catalog.variantId },
+        data: { priceCents: variant.priceCents, compareAtPriceCents: variant.compareAtPriceCents },
+      });
+    }
+    await credits.adjust({
+      customerId: referred.id,
+      type: "GRANT",
+      amountCents: 8_000_000n,
+      operationKey: `growth-split-credit:${randomUUID()}`,
+      reason: "Saldo para captura parcial elegible",
+      audit,
+    });
+    await payments.start({
+      orderId,
+      provider: "STORE_CREDIT",
+      environment: "LOCAL",
+      idempotencyKey: `growth-split-credit:${randomUUID()}`,
+      amountCents: 8_000_000n,
+    });
+    assert.equal(await balance(referred.id), 0);
+    assert.equal(await balance(referrer.id), 0);
+    const bank = await payments.start({
+      orderId,
+      provider: "BANK_TRANSFER",
+      environment: "LOCAL",
+      idempotencyKey: `growth-split-bank:${randomUUID()}`,
+    });
+    assert.equal(bank.amountCents, "4000000");
+    await payments.confirmBankTransfer({
+      paymentAttemptId: bank.id,
+      externalReference: `GROWTH-SPLIT-${randomUUID()}`,
+      audit,
+    });
+    assert.equal(await balance(referred.id), 51);
+    assert.equal(await balance(referrer.id), 50);
+
+    const voidStarted = await refunds.void(bank.id, audit);
+    const voidTxnId = voidStarted.transactionIds[0];
+    await refunds.completeManualTransaction({
+      transactionId: voidTxnId,
+      externalId: `GROWTH-VOID-${randomUUID()}`,
+      audit,
+    });
+    assert.equal(await balance(referred.id), 34);
+    assert.equal(await balance(referrer.id), 33);
+    assert.equal(await db.loyaltyTxn.count({ where: { paymentTransactionId: voidTxnId } }), 2);
+
+    const secondRefundId = await requestRefund(orderId, 1);
+    assert.equal(await balance(referred.id), 17);
+    assert.equal(await balance(referrer.id), 17);
+    const thirdRefundId = await requestRefund(orderId, 1);
+    assert.equal(await balance(referred.id), 0);
+    assert.equal(await balance(referrer.id), 0);
+    assert.equal(
+      (await db.referral.findUniqueOrThrow({ where: { id: attributed.id } })).status,
+      "REVERSED",
+    );
+
+    const replays = await Promise.all([
+      db.$transaction((tx) => growth.reverseVoidedPaymentInTransaction(tx, voidTxnId)),
+      db.$transaction((tx) => growth.reverseCompletedRefundInTransaction(tx, secondRefundId)),
+      db.$transaction((tx) => growth.reverseCompletedRefundInTransaction(tx, thirdRefundId)),
+    ]);
+    assert.ok(replays.every((result) => result.reversedPoints === 0));
+    assert.equal(await balance(referred.id), 0);
+    assert.equal(await balance(referrer.id), 0);
+    const referralReversals = await db.loyaltyTxn.findMany({
+      where: { orderId, type: "REFERRAL_REVERSAL" },
+      orderBy: [{ customerId: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    });
+    assert.equal(referralReversals.length, 6);
+    assert.ok(referralReversals.every((entry) => entry.points < 0 && Math.abs(entry.points) <= 17));
+    assert.equal(
+      referralReversals.reduce((sum, entry) => sum + Math.abs(entry.points), 0),
+      100,
+    );
+    assert.equal(await db.loyaltyTxn.count({ where: { orderId, type: "EARN_REVERSAL" } }), 1);
+  });
+
   it("serializes concurrent first purchases and awards one verifiable referral", async () => {
     const referrer = await makeCustomer();
     const referred = await makeCustomer();

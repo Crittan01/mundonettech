@@ -39,7 +39,8 @@ export default async function BenefitsPage({ searchParams }: PageProps<"/mi-cuen
         <h1 className="text-3xl font-bold">Puntos y referidos</h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
           Consulta movimientos confirmados y comparte tu código. Las recompensas se otorgan solo
-          sobre compras pagadas elegibles y se reversan proporcionalmente con los reembolsos.
+          sobre compras pagadas elegibles y se reversan proporcionalmente con reembolsos y
+          anulaciones.
         </p>
       </div>
       {!parsedCode.success && single(raw.codigo) ? (

@@ -711,7 +711,12 @@ export class LifecycleService {
         take: 20,
       });
       for (const journey of journeys) {
-        enrolled += (await this.enrollForJourney(journey.id, limit)).enrolled;
+        try {
+          enrolled += (await this.enrollForJourney(journey.id, limit)).enrolled;
+        } catch (error) {
+          if (error instanceof LifecycleError && error.code === "CONFLICT") continue;
+          throw error;
+        }
       }
       if (journeys.length < 20) return enrolled;
       cursor = journeys[journeys.length - 1]!.id;
@@ -786,6 +791,44 @@ export class LifecycleService {
     });
   }
 
+  private async failEnrollmentMessage(
+    tx: Prisma.TransactionClient,
+    message: LifecycleMessage,
+    now: Date,
+    error: string,
+    exitReason: "DELIVERY_FAILED" | "DELIVERY_DISPATCH_FAILED",
+  ): Promise<boolean> {
+    const failed = await tx.lifecycleMessage.updateMany({
+      where: { id: message.id, status: { in: ["DISPATCHING", "QUEUED"] } },
+      data: {
+        status: "FAILED",
+        processedAt: now,
+        lastError: error.slice(0, 500),
+      },
+    });
+    if (failed.count !== 1) return false;
+    await tx.lifecycleMessage.updateMany({
+      where: {
+        enrollmentId: message.enrollmentId,
+        id: { not: message.id },
+        status: { in: ["SCHEDULED", "DISPATCHING", "QUEUED"] },
+      },
+      data: { status: "CANCELLED", processedAt: now, lastError: null },
+    });
+    await tx.emailEvent.updateMany({
+      where: {
+        lifecycleMessage: { enrollmentId: message.enrollmentId },
+        status: { in: ["QUEUED", "SENDING"] },
+      },
+      data: { status: "CANCELLED", statusRank: 70, finalAt: now, nextAttemptAt: null },
+    });
+    await tx.lifecycleEnrollment.updateMany({
+      where: { id: message.enrollmentId, status: "ACTIVE" },
+      data: { status: "FAILED", failedAt: now, exitReason },
+    });
+    return true;
+  }
+
   async markQueued(messageId: string, emailEventId: string, emailStatus: string) {
     assertUuid(messageId, "messageId");
     assertUuid(emailEventId, "emailEventId");
@@ -848,27 +891,13 @@ export class LifecycleService {
         return "CANCELLED" as const;
       }
       if (effectiveStatus === "FAILED") {
-        const failed = await tx.lifecycleMessage.updateMany({
-          where: { id: messageId, status: { in: ["DISPATCHING", "QUEUED"] } },
-          data: {
-            status: "FAILED",
-            processedAt: now,
-            lastError: (email.lastError ?? "PROVIDER_FAILURE").slice(0, 500),
-          },
-        });
-        if (failed.count === 1) {
-          await tx.lifecycleEnrollment.updateMany({
-            where: { id: message.enrollmentId, status: "ACTIVE" },
-            data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_FAILED" },
-          });
-          await tx.lifecycleMessage.updateMany({
-            where: {
-              enrollmentId: message.enrollmentId,
-              status: { in: ["SCHEDULED", "DISPATCHING"] },
-            },
-            data: { status: "CANCELLED", processedAt: now },
-          });
-        }
+        await this.failEnrollmentMessage(
+          tx,
+          message,
+          now,
+          email.lastError ?? "PROVIDER_FAILURE",
+          "DELIVERY_FAILED",
+        );
         return "FAILED" as const;
       }
       if (enrollment.status !== "ACTIVE") {
@@ -939,20 +968,13 @@ export class LifecycleService {
       if (!email || email.lifecycleMessageId !== messageId || email.status !== "FAILED")
         return false;
       if (message.status !== "QUEUED") return false;
-      const now = await databaseNow(tx);
-      await tx.lifecycleEnrollment.updateMany({
-        where: { id: message.enrollmentId, status: "ACTIVE" },
-        data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_FAILED" },
-      });
-      await tx.lifecycleMessage.updateMany({
-        where: { id: messageId, status: "QUEUED" },
-        data: { status: "FAILED", processedAt: now, lastError: error.slice(0, 500) },
-      });
-      await tx.lifecycleMessage.updateMany({
-        where: { enrollmentId: message.enrollmentId, status: { in: ["SCHEDULED", "DISPATCHING"] } },
-        data: { status: "CANCELLED", processedAt: now },
-      });
-      return true;
+      return this.failEnrollmentMessage(
+        tx,
+        message,
+        await databaseNow(tx),
+        error,
+        "DELIVERY_FAILED",
+      );
     });
   }
 
@@ -963,24 +985,13 @@ export class LifecycleService {
       if (!locked) return false;
       const { message } = locked;
       if (message.status !== "DISPATCHING") return false;
-      const now = await databaseNow(tx);
-      await tx.lifecycleEnrollment.updateMany({
-        where: { id: message.enrollmentId, status: "ACTIVE" },
-        data: { status: "FAILED", failedAt: now, exitReason: "DELIVERY_DISPATCH_FAILED" },
-      });
-      await tx.lifecycleMessage.updateMany({
-        where: { id: messageId, status: "DISPATCHING" },
-        data: { status: "FAILED", processedAt: now, lastError: error.slice(0, 500) },
-      });
-      await tx.lifecycleMessage.updateMany({
-        where: { enrollmentId: message.enrollmentId, status: { in: ["SCHEDULED", "DISPATCHING"] } },
-        data: { status: "CANCELLED", processedAt: now },
-      });
-      await tx.emailEvent.updateMany({
-        where: { lifecycleMessageId: messageId, status: { in: ["QUEUED", "SENDING"] } },
-        data: { status: "CANCELLED", statusRank: 70, finalAt: now, nextAttemptAt: null },
-      });
-      return true;
+      return this.failEnrollmentMessage(
+        tx,
+        message,
+        await databaseNow(tx),
+        error,
+        "DELIVERY_DISPATCH_FAILED",
+      );
     });
   }
 

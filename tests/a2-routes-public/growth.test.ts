@@ -86,6 +86,7 @@ describe("referral route", () => {
     expect(response.headers.get("location")).toBe(
       `https://mundonettech.co/mi-cuenta/beneficios?codigo=${validCode}`,
     );
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   });
 
   it("does not set a cookie for an inactive or unknown code", async () => {

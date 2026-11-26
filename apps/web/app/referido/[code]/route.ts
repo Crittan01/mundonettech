@@ -8,6 +8,7 @@ const headers = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
+  "Referrer-Policy": "no-referrer",
 } as const;
 
 function methodNotAllowed(): Response {

@@ -202,6 +202,21 @@ describe("A6 growth customer actions", () => {
     expect(actionMocks.revalidatePath).toHaveBeenCalledWith("/mi-cuenta/beneficios");
   });
 
+  it("reports code-generation conflicts without reusing attribution errors", async () => {
+    actionMocks.createReferralCode.mockRejectedValue(
+      new GrowthError("CONFLICT", "disabled referral identity"),
+    );
+
+    const result = await growthActions.createReferralCodeAction!(idle, new FormData());
+    expect(result.status).toBe("error");
+    expect(result.message).toBe(
+      "Tu código de referidos ya no está disponible. Actualiza la página.",
+    );
+    expect(result.message).not.toContain("atribuir");
+    expect(JSON.stringify(result)).not.toContain("disabled referral identity");
+    expect(actionMocks.revalidatePath).not.toHaveBeenCalled();
+  });
+
   it("returns safe domain errors without clearing the referral cookie", async () => {
     actionMocks.attributeReferral.mockRejectedValue(
       new GrowthError("CONFLICT", "private persistence detail"),

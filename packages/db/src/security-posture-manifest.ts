@@ -5800,6 +5800,18 @@ export const securityPostureManifest = {
     },
     {
       table: "OpportunityCopilotRun",
+      name: "OpportunityCopilotRun_failure_code_valid",
+      kind: "c",
+      columns: ["failureCode"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition:
+        'CHECK ("failureCode" IS NULL OR "failureCode"::text ~ \'^[A-Z][A-Z0-9_]{1,99}$\'::text)',
+    },
+    {
+      table: "OpportunityCopilotRun",
       name: "OpportunityCopilotRun_hashes_length",
       kind: "c",
       columns: ["inputHash", "promptHash"],
@@ -5831,6 +5843,17 @@ export const securityPostureManifest = {
       validated: true,
       definition:
         'FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"(id) ON UPDATE CASCADE ON DELETE RESTRICT',
+    },
+    {
+      table: "OpportunityCopilotRun",
+      name: "OpportunityCopilotRun_output_zero_pii",
+      kind: "c",
+      columns: ["output"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition: "CHECK (validate_copilot_output_zero_pii(output))",
     },
     {
       table: "OpportunityCopilotRun",
@@ -6063,6 +6086,17 @@ export const securityPostureManifest = {
       deleteAction: null,
       validated: true,
       definition: "CHECK (quantity > 0)",
+    },
+    {
+      table: "OpportunityProposalItem",
+      name: "OpportunityProposalItem_tax_balanced",
+      kind: "c",
+      columns: ["taxCents", "taxableBaseCents", "appliedRateBps"],
+      referencedTable: null,
+      referencedColumns: [],
+      deleteAction: null,
+      validated: true,
+      definition: 'CHECK ("taxCents" = (("taxableBaseCents" * "appliedRateBps" + 5000) / 10000))',
     },
     {
       table: "OpportunityProposalItem",
@@ -10563,6 +10597,20 @@ export const securityPostureManifest = {
       searchPath: ["search_path=pg_catalog,public"],
     },
     {
+      identity: "enforce_b2b_cart_item_state()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
+      identity: "enforce_b2b_cart_state()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
       identity: "enforce_cms_media_immutability()",
       kind: "f",
       securityDefiner: true,
@@ -11091,6 +11139,13 @@ export const securityPostureManifest = {
     {
       identity: "validate_consent_revocation()",
       kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
+      identity: "validate_copilot_output_zero_pii(jsonb)",
+      kind: "f",
       securityDefiner: false,
       owner: "postgres",
       searchPath: ["search_path=pg_catalog,public"],
@@ -11104,6 +11159,13 @@ export const securityPostureManifest = {
     },
     {
       identity: "validate_credit_note_document()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
+      identity: "validate_crm_organization_reference()",
       kind: "f",
       securityDefiner: true,
       owner: "postgres",
@@ -11244,6 +11306,13 @@ export const securityPostureManifest = {
     },
     {
       identity: "validate_product_inventory_lifecycle()",
+      kind: "f",
+      securityDefiner: true,
+      owner: "postgres",
+      searchPath: ["search_path=pg_catalog,public"],
+    },
+    {
+      identity: "validate_proposal_balance()",
       kind: "f",
       securityDefiner: true,
       owner: "postgres",
@@ -19093,6 +19162,19 @@ export const securityPostureManifest = {
     },
     {
       table: "Cart",
+      name: "Cart_enforce_b2b_seal",
+      function: "enforce_b2b_cart_state()",
+      timing: "BEFORE",
+      level: "ROW",
+      events: ["UPDATE"],
+      enabled: "O",
+      deferrable: false,
+      initiallyDeferred: false,
+      definition:
+        'CREATE TRIGGER "Cart_enforce_b2b_seal" BEFORE UPDATE ON "Cart" FOR EACH ROW EXECUTE FUNCTION enforce_b2b_cart_state()',
+    },
+    {
+      table: "Cart",
       name: "Cart_set_updated_at",
       function: "set_updated_at()",
       timing: "BEFORE",
@@ -19103,6 +19185,19 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "Cart_set_updated_at" BEFORE UPDATE ON "Cart" FOR EACH ROW EXECUTE FUNCTION set_updated_at()',
+    },
+    {
+      table: "CartItem",
+      name: "CartItem_enforce_b2b_seal",
+      function: "enforce_b2b_cart_item_state()",
+      timing: "BEFORE",
+      level: "ROW",
+      events: ["INSERT", "DELETE", "UPDATE"],
+      enabled: "O",
+      deferrable: false,
+      initiallyDeferred: false,
+      definition:
+        'CREATE TRIGGER "CartItem_enforce_b2b_seal" BEFORE INSERT OR DELETE OR UPDATE ON "CartItem" FOR EACH ROW EXECUTE FUNCTION enforce_b2b_cart_item_state()',
     },
     {
       table: "CartItem",
@@ -19584,6 +19679,19 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "Contact_set_updated_at" BEFORE UPDATE ON "Contact" FOR EACH ROW EXECUTE FUNCTION set_updated_at()',
+    },
+    {
+      table: "Contact",
+      name: "Contact_validate_organization",
+      function: "validate_crm_organization_reference()",
+      timing: "BEFORE",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: false,
+      initiallyDeferred: false,
+      definition:
+        'CREATE TRIGGER "Contact_validate_organization" BEFORE INSERT OR UPDATE OF "organizationId" ON "Contact" FOR EACH ROW EXECUTE FUNCTION validate_crm_organization_reference()',
     },
     {
       table: "ContactActivity",
@@ -20327,6 +20435,19 @@ export const securityPostureManifest = {
         'CREATE TRIGGER "Opportunity_set_updated_at" BEFORE UPDATE ON "Opportunity" FOR EACH ROW EXECUTE FUNCTION set_updated_at()',
     },
     {
+      table: "Opportunity",
+      name: "Opportunity_validate_organization",
+      function: "validate_crm_organization_reference()",
+      timing: "BEFORE",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: false,
+      initiallyDeferred: false,
+      definition:
+        'CREATE TRIGGER "Opportunity_validate_organization" BEFORE INSERT OR UPDATE OF "organizationId", "contactId" ON "Opportunity" FOR EACH ROW EXECUTE FUNCTION validate_crm_organization_reference()',
+    },
+    {
       table: "OpportunityCopilotRun",
       name: "OpportunityCopilotRun_enforce_state",
       function: "enforce_copilot_run_state()",
@@ -20345,12 +20466,12 @@ export const securityPostureManifest = {
       function: "enforce_proposal_state()",
       timing: "BEFORE",
       level: "ROW",
-      events: ["DELETE", "UPDATE"],
+      events: ["INSERT", "DELETE", "UPDATE"],
       enabled: "O",
       deferrable: false,
       initiallyDeferred: false,
       definition:
-        'CREATE TRIGGER "OpportunityProposal_enforce_state" BEFORE DELETE OR UPDATE ON "OpportunityProposal" FOR EACH ROW EXECUTE FUNCTION enforce_proposal_state()',
+        'CREATE TRIGGER "OpportunityProposal_enforce_state" BEFORE INSERT OR DELETE OR UPDATE ON "OpportunityProposal" FOR EACH ROW EXECUTE FUNCTION enforce_proposal_state()',
     },
     {
       table: "OpportunityProposal",
@@ -20364,6 +20485,19 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "OpportunityProposal_set_updated_at" BEFORE UPDATE ON "OpportunityProposal" FOR EACH ROW EXECUTE FUNCTION set_updated_at()',
+    },
+    {
+      table: "OpportunityProposal",
+      name: "OpportunityProposal_validate_balance",
+      function: "validate_proposal_balance()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT", "UPDATE"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "OpportunityProposal_validate_balance" AFTER INSERT OR UPDATE ON "OpportunityProposal" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_proposal_balance()',
     },
     {
       table: "OpportunityProposalItem",
@@ -20390,6 +20524,32 @@ export const securityPostureManifest = {
       initiallyDeferred: false,
       definition:
         'CREATE TRIGGER "OpportunityProposalItem_immutable_update" BEFORE UPDATE ON "OpportunityProposalItem" FOR EACH ROW EXECUTE FUNCTION enforce_proposal_item_immutable()',
+    },
+    {
+      table: "OpportunityProposalItem",
+      name: "OpportunityProposalItem_validate_balance",
+      function: "validate_proposal_balance()",
+      timing: "AFTER",
+      level: "ROW",
+      events: ["INSERT"],
+      enabled: "O",
+      deferrable: true,
+      initiallyDeferred: true,
+      definition:
+        'CREATE CONSTRAINT TRIGGER "OpportunityProposalItem_validate_balance" AFTER INSERT ON "OpportunityProposalItem" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_proposal_balance()',
+    },
+    {
+      table: "OpportunityProposalItem",
+      name: "OpportunityProposalItem_validate_insert",
+      function: "enforce_proposal_item_immutable()",
+      timing: "BEFORE",
+      level: "ROW",
+      events: ["INSERT"],
+      enabled: "O",
+      deferrable: false,
+      initiallyDeferred: false,
+      definition:
+        'CREATE TRIGGER "OpportunityProposalItem_validate_insert" BEFORE INSERT ON "OpportunityProposalItem" FOR EACH ROW EXECUTE FUNCTION enforce_proposal_item_immutable()',
     },
     {
       table: "OptionDefinition",
@@ -22249,6 +22409,7 @@ export const securityPostureManifest = {
     "20261125120000_a5_checkout_flex_document",
     "20261125120100_a5_checkout_flex_document_constraints",
     "20261125130000_a6_postsale_financial_integrity",
+    "20261125140000_a7_crm_b2b_growth_integrity",
   ],
   signedColumns: [
     {

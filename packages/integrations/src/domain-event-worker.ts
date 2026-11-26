@@ -30,7 +30,7 @@ import {
   ShippingValidationError,
 } from "./shipping-types.js";
 import { ShippingService } from "./shipping-service.js";
-import { EmailProviderError, EmailValidationError } from "./email-types.js";
+import { EmailConflictError, EmailProviderError, EmailValidationError } from "./email-types.js";
 import type { MetaCapiService } from "./meta-capi-service.js";
 import { MetaCapiServiceError } from "./meta-capi-service.js";
 
@@ -308,31 +308,40 @@ export class DomainEventWorker {
       await record("NO_CONSENT");
       return;
     }
-    const queued = await this.options.email.queue({
-      customerId: abandoned.customer.id,
-      abandonedCartId: abandoned.id,
-      credentialId: await this.emailCredentialId(),
-      templateKey: "cart.recovery",
-      topic: "cart-recovery",
-      recipientEmail: abandoned.customer.email,
-      idempotencyKey: `domain:cart.recovery:${abandoned.id}:${activityValue}`,
-      variables: {
-        storeName: this.options.storeName,
-        itemCount: String(abandoned.cart.itemCount),
-        totalCop: formatCopCents(abandoned.cart.totalCents),
-        cartUrl: `${this.publicSiteUrl}/carrito`,
-      },
-    });
-    await record(queued.status === "SUPPRESSED" ? "SUPPRESSED" : "QUEUED");
+    try {
+      const queued = await this.options.email.queue({
+        customerId: abandoned.customer.id,
+        abandonedCartId: abandoned.id,
+        credentialId: await this.emailCredentialId(),
+        templateKey: "cart.recovery",
+        topic: "cart-recovery",
+        recipientEmail: abandoned.customer.email,
+        idempotencyKey: `domain:cart.recovery:${abandoned.id}:${activityValue}`,
+        variables: {
+          storeName: this.options.storeName,
+          itemCount: String(abandoned.cart.itemCount),
+          totalCop: formatCopCents(abandoned.cart.totalCents),
+          cartUrl: `${this.publicSiteUrl}/carrito`,
+        },
+      });
+      await record(queued.status === "SUPPRESSED" ? "SUPPRESSED" : "QUEUED");
+    } catch (error) {
+      if (
+        !(error instanceof EmailConflictError) ||
+        !["NO_CONTACT", "NO_CONSENT", "STALE"].includes(error.code)
+      ) {
+        throw error;
+      }
+      await record(error.code as "NO_CONTACT" | "NO_CONSENT" | "STALE");
+    }
   }
 
   private async queueLifecycleEmail(event: DomainOutbox): Promise<void> {
     const dispatchVersion = this.payload(event).dispatchVersion;
     if (
-      dispatchVersion !== undefined &&
-      (typeof dispatchVersion !== "number" ||
-        !Number.isInteger(dispatchVersion) ||
-        dispatchVersion < 1)
+      typeof dispatchVersion !== "number" ||
+      !Number.isInteger(dispatchVersion) ||
+      dispatchVersion < 1
     ) {
       throw new EmailValidationError("Lifecycle dispatch version is invalid.");
     }
@@ -783,7 +792,7 @@ export class DomainEventWorker {
               const payload = recordValue(event.payload);
               const emailEventId = payload?.emailEventId;
               const messageId = payload?.lifecycleMessageId;
-              if (typeof emailEventId === "string" && typeof messageId === "string") {
+              if (typeof emailEventId === "string" && /^[0-9a-f-]{36}$/i.test(emailEventId)) {
                 const failureCode = this.errorText(error);
                 await this.db.emailEvent.updateMany({
                   where: { id: emailEventId, status: { in: ["QUEUED", "SENDING"] } },
@@ -795,11 +804,13 @@ export class DomainEventWorker {
                     lastError: failureCode,
                   },
                 });
-                await new LifecycleService(this.db).markEmailFailed(
-                  messageId,
-                  emailEventId,
-                  failureCode,
-                );
+                if (typeof messageId === "string" && /^[0-9a-f-]{36}$/i.test(messageId)) {
+                  await new LifecycleService(this.db).markEmailFailed(
+                    messageId,
+                    emailEventId,
+                    failureCode,
+                  );
+                }
               }
             }
             failed += 1;

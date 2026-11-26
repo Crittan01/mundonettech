@@ -2011,3 +2011,238 @@ describe("A3 — newly hardened domain concurrency and anti-starvation regressio
     }
   });
 });
+
+describe("A7 — direct SQL write-skew barriers for B2B and lifecycle", () => {
+  async function twoClients() {
+    const first = new pg.Client({ connectionString: harness.databaseUrl });
+    const second = new pg.Client({ connectionString: harness.databaseUrl });
+    await Promise.all([first.connect(), second.connect()]);
+    return [first, second];
+  }
+
+  async function closeClients(...clients) {
+    await Promise.all(
+      clients.map(async (client) => {
+        await client.query("ROLLBACK").catch(() => undefined);
+        await client.end();
+      }),
+    );
+  }
+
+  it("rejects price-list activation after the final draft item commits deletion", async () => {
+    const list = await b2b.createPriceList(
+      { code: `A7-LOCK-${randomUUID().slice(0, 8).toUpperCase()}`, name: "A7 activation lock" },
+      audit,
+    );
+    await b2b.upsertPriceListItem(
+      list.id,
+      list.version,
+      { sku: catalog.sku, unitPriceCents: "90000" },
+      audit,
+    );
+    const [writer, activator] = await twoClients();
+    let activation;
+    try {
+      await writer.query("BEGIN");
+      await writer.query(`DELETE FROM "PriceListItem" WHERE "priceListId" = $1`, [list.id]);
+      activation = activator.query(`UPDATE "PriceList" SET "status" = 'ACTIVE' WHERE "id" = $1`, [
+        list.id,
+      ]);
+      await waitForRowLockWaiters(1);
+      await writer.query("COMMIT");
+      await assert.rejects(activation, (error) => error.code === "23514");
+      assert.equal(
+        (await db.priceList.findUniqueOrThrow({ where: { id: list.id } })).status,
+        "DRAFT",
+      );
+      assert.equal(await db.priceListItem.count({ where: { priceListId: list.id } }), 0);
+    } finally {
+      await closeClients(writer, activator);
+      await Promise.allSettled([activation]);
+    }
+  });
+
+  it("rejects journey activation after the final draft step commits deletion", async () => {
+    const segmentation = new SegmentationService(db);
+    const campaigns = new LifecycleService(db);
+    const draftSegment = await segmentation.createSegment(
+      {
+        name: `A7 segment ${randomUUID().slice(0, 8)}`,
+        definition: {
+          minFrequency: null,
+          maxFrequency: null,
+          minNetLtvCents: null,
+          maxNetLtvCents: null,
+          lastPurchaseWithinDays: null,
+          lastPurchaseOlderThanDays: null,
+          rfmClass: "PROSPECT",
+        },
+      },
+      audit,
+    );
+    const activeSegment = await segmentation.transitionSegment(
+      { segmentId: draftSegment.id, expectedVersion: draftSegment.version, action: "ACTIVATE" },
+      audit,
+    );
+    const journey = await campaigns.createJourney(
+      {
+        name: `A7 journey ${randomUUID().slice(0, 8)}`,
+        segmentId: activeSegment.id,
+        steps: [
+          {
+            position: 0,
+            offsetMinutes: 0,
+            subject: "A7 step",
+            htmlBody: '<a href="{{unsubscribeUrl}}">Baja</a>',
+            textBody: "Baja {{unsubscribeUrl}}",
+            variables: ["unsubscribeUrl"],
+          },
+        ],
+      },
+      audit,
+    );
+    const [writer, activator] = await twoClients();
+    let activation;
+    try {
+      await writer.query("BEGIN");
+      await writer.query(`DELETE FROM "LifecycleStep" WHERE "journeyId" = $1`, [journey.id]);
+      activation = activator.query(
+        `UPDATE "LifecycleJourney" SET "status" = 'ACTIVE', "segmentVersion" = $2, "activatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [journey.id, activeSegment.version],
+      );
+      await waitForRowLockWaiters(1);
+      await writer.query("COMMIT");
+      await assert.rejects(activation, (error) => error.code === "23514");
+      assert.equal(
+        (await db.lifecycleJourney.findUniqueOrThrow({ where: { id: journey.id } })).status,
+        "DRAFT",
+      );
+      assert.equal(await db.lifecycleStep.count({ where: { journeyId: journey.id } }), 0);
+    } finally {
+      await closeClients(writer, activator);
+      await Promise.allSettled([activation]);
+    }
+  });
+
+  it("rejects a segment entry after its consent revocation commits", async () => {
+    const segmentation = new SegmentationService(db);
+    const draftSegment = await segmentation.createSegment(
+      {
+        name: `A7 consent ${randomUUID().slice(0, 8)}`,
+        definition: {
+          minFrequency: null,
+          maxFrequency: null,
+          minNetLtvCents: null,
+          maxNetLtvCents: null,
+          lastPurchaseWithinDays: null,
+          lastPurchaseOlderThanDays: null,
+          rfmClass: "PROSPECT",
+        },
+      },
+      audit,
+    );
+    const activeSegment = await segmentation.transitionSegment(
+      { segmentId: draftSegment.id, expectedVersion: draftSegment.version, action: "ACTIVATE" },
+      audit,
+    );
+    const customer = await db.customer.create({
+      data: {
+        authUserId: randomUUID(),
+        email: `a7-consent-${randomUUID()}@example.test`,
+        status: "ACTIVE",
+      },
+    });
+    const consent = await db.consent.create({
+      data: {
+        customerId: customer.id,
+        purpose: "MARKETING_EMAIL",
+        status: "GRANTED",
+        source: "a7-concurrency",
+        policyVersion: "2026-01",
+        proofHash: hash(),
+      },
+    });
+    const segment = await db.customerSegment.findUniqueOrThrow({
+      where: { id: activeSegment.id },
+      select: { version: true, definitionHash: true },
+    });
+    const [revoker, writer] = await twoClients();
+    let insertion;
+    try {
+      await revoker.query("BEGIN");
+      await revoker.query(
+        `INSERT INTO "Consent" ("customerId", "purpose", "status", "source", "policyVersion", "proofHash", "revokesId")
+         VALUES ($1, 'MARKETING_EMAIL', 'REVOKED', 'a7-concurrency', '2026-01', $2, $3)`,
+        [customer.id, randomBytes(32), consent.id],
+      );
+      insertion = writer.query(
+        `INSERT INTO "CustomerSegmentMembership" (
+           "segmentId", "customerId", "consentId", "sequence", "segmentVersion", "status", "reason", "metrics", "definitionHash"
+         ) VALUES ($1, $2, $3, 1, $4, 'ENTERED', 'QUALIFIED', '{}'::jsonb, $5)`,
+        [activeSegment.id, customer.id, consent.id, segment.version, segment.definitionHash],
+      );
+      await waitForAdvisoryWaiters(1);
+      await revoker.query("COMMIT");
+      await assert.rejects(insertion, (error) => error.code === "23514");
+      assert.equal(
+        await db.customerSegmentMembership.count({
+          where: { segmentId: activeSegment.id, customerId: customer.id },
+        }),
+        0,
+      );
+    } finally {
+      await closeClients(revoker, writer);
+      await Promise.allSettled([insertion]);
+    }
+  });
+
+  it("rejects proposal items inserted after proposal issue commits", async () => {
+    const lead = await captureLead();
+    const current = await b2b.getOpportunity(lead.opportunityId);
+    const proposal = await b2b.createProposal({
+      opportunityId: lead.opportunityId,
+      expectedVersion: current.version,
+      expiresAt: future(72),
+      commercialNotes: "A7 issue lock",
+      items: [{ sku: catalog.sku, quantity: 1 }],
+      audit,
+    });
+    const secondCatalog = await seedCatalogFixture(sql);
+    const cartId = randomUUID();
+    await sql.query(
+      `INSERT INTO "Cart" ("id", "accessTokenHash", "kind", "expiresAt") VALUES ($1, $2, 'B2B', CURRENT_TIMESTAMP + INTERVAL '1 day')`,
+      [cartId, randomBytes(32)],
+    );
+    const [issuer, writer] = await twoClients();
+    let insertion;
+    try {
+      await issuer.query("BEGIN");
+      await issuer.query(
+        `UPDATE "OpportunityProposal" SET "status" = 'SENT', "publicTokenHash" = $2, "cartId" = $3, "issuedAt" = CURRENT_TIMESTAMP WHERE "id" = $1`,
+        [proposal.id, randomBytes(32), cartId],
+      );
+      insertion = writer.query(
+        `INSERT INTO "OpportunityProposalItem" (
+           "proposalId", "variantId", "quantity", "titleSnapshot", "productSlugSnapshot", "skuSnapshot",
+           "catalogUnitPriceCents", "unitPriceCents", "discountCents", "lineTotalCents", "taxGroupCode",
+           "taxGroupName", "treatment", "taxRule", "catalogRateBps", "appliedRateBps", "unitValueCents",
+           "taxableBaseCents", "taxCents"
+         ) VALUES (
+           $1, $2, 1, 'Late A7 item', 'late-a7-item', 'LATE-A7-SKU', 100000, 100000, 0, 100000,
+           'A7', 'A7 Tax', 'EXEMPT', 'EXEMPT', 0, 0, 100000, 100000, 0
+         )`,
+        [proposal.id, secondCatalog.variantId],
+      );
+      await waitForRowLockWaiters(1);
+      await issuer.query("COMMIT");
+      await assert.rejects(insertion, (error) => error.code === "55000");
+      assert.equal(
+        await db.opportunityProposalItem.count({ where: { proposalId: proposal.id } }),
+        1,
+      );
+    } finally {
+      await closeClients(issuer, writer);
+      await Promise.allSettled([insertion]);
+    }
+  });
+});

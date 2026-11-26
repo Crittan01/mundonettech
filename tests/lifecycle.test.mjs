@@ -23,6 +23,7 @@ let lifecycle;
 let segments;
 let email;
 let worker;
+let emailSendWait;
 const sent = [];
 
 const definition = {
@@ -177,6 +178,10 @@ before(
       providerFactory: () => ({
         send: async (input) => {
           sent.push(input);
+          if (emailSendWait) {
+            emailSendWait.started();
+            await emailSendWait.wait;
+          }
           return { providerMessageId: `message_${randomUUID().replaceAll("-", "")}` };
         },
       }),
@@ -199,6 +204,7 @@ before(
 
 beforeEach(async () => {
   sent.length = 0;
+  emailSendWait = null;
   const previousConsents = await db.consent.findMany({
     where: { purpose: "MARKETING_EMAIL", status: "GRANTED", revokedBy: null },
     select: { id: true, customerId: true },
@@ -357,7 +363,7 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
         aggregateType: "LifecycleMessage",
         aggregateId: message.id,
         deduplicationKey: `lifecycle:replay:${randomUUID()}`,
-        payload: { lifecycleMessageId: message.id },
+        payload: { lifecycleMessageId: message.id, dispatchVersion: message.dispatchVersion },
       },
     });
     await worker.runBatch(100);
@@ -775,6 +781,220 @@ describe("F5.2 — consented persistent segments and lifecycle journeys", () => 
       });
       assert.equal(enrollment.status, "CANCELLED");
       assert.equal(enrollment.exitReason, "SUPPRESSED");
+    }
+  });
+
+  it("records acceptance when a journey pauses during HTTP and resumes without another send", async () => {
+    const { customer } = await makeCustomer();
+    const { journey } = await createAutomation("Journey pausa durante proveedor");
+    await lifecycle.runScheduledWork(20);
+    await worker.runBatch(100);
+    const emailEvent = await db.emailEvent.findFirstOrThrow({
+      where: {
+        lifecycleMessage: { enrollment: { journeyId: journey.id, customerId: customer.id } },
+      },
+    });
+    let releaseSend;
+    let markStarted;
+    emailSendWait = {
+      wait: new Promise((resolve) => {
+        releaseSend = resolve;
+      }),
+      started: () => markStarted(),
+    };
+    const started = new Promise((resolve) => {
+      markStarted = resolve;
+    });
+    try {
+      const pending = email.send(emailEvent.id);
+      await started;
+      await lifecycle.transitionJourney(
+        { journeyId: journey.id, expectedVersion: 1, action: "PAUSE" },
+        audit,
+      );
+      releaseSend();
+      assert.equal((await pending).status, "SENT");
+      emailSendWait = null;
+      await lifecycle.transitionJourney(
+        { journeyId: journey.id, expectedVersion: 2, action: "RESUME" },
+        audit,
+      );
+      await worker.runBatch(100);
+      assert.equal(sent.length, 1);
+      const enrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+        where: { journeyId_customerId: { journeyId: journey.id, customerId: customer.id } },
+      });
+      assert.equal(enrollment.status, "COMPLETED");
+    } finally {
+      releaseSend?.();
+      emailSendWait = null;
+    }
+  });
+
+  it("revalidates consent after HTTP before recording provider acceptance", async () => {
+    const { customer, consent } = await makeCustomer();
+    const { journey } = await createAutomation("Journey revocación durante proveedor");
+    await lifecycle.runScheduledWork(20);
+    await worker.runBatch(100);
+    const emailEvent = await db.emailEvent.findFirstOrThrow({
+      where: {
+        lifecycleMessage: { enrollment: { journeyId: journey.id, customerId: customer.id } },
+      },
+    });
+    let releaseSend;
+    let markStarted;
+    emailSendWait = {
+      wait: new Promise((resolve) => {
+        releaseSend = resolve;
+      }),
+      started: () => markStarted(),
+    };
+    const started = new Promise((resolve) => {
+      markStarted = resolve;
+    });
+    try {
+      const pending = email.send(emailEvent.id);
+      await started;
+      await db.consent.create({
+        data: {
+          customerId: customer.id,
+          purpose: "MARKETING_EMAIL",
+          status: "REVOKED",
+          source: "lifecycle-during-provider",
+          policyVersion: "2026-01",
+          proofHash: hash(),
+          revokesId: consent.id,
+        },
+      });
+      releaseSend();
+      assert.equal((await pending).status, "SUPPRESSED");
+      assert.equal(
+        (await db.emailEvent.findUniqueOrThrow({ where: { id: emailEvent.id } })).status,
+        "SUPPRESSED",
+      );
+      const enrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+        where: { journeyId_customerId: { journeyId: journey.id, customerId: customer.id } },
+      });
+      assert.equal(enrollment.status, "CANCELLED");
+      assert.equal(enrollment.exitReason, "CONSENT_REVOKED");
+    } finally {
+      releaseSend?.();
+      emailSendWait = null;
+    }
+  });
+
+  it("fails only its enrollment and cancels queued sibling steps without touching another journey", async () => {
+    const { customer } = await makeCustomer();
+    const journeySteps = steps();
+    journeySteps.push({ ...journeySteps[0], position: 1, offsetMinutes: 1 });
+    const { journey } = await createAutomation("Journey fallo terminal", journeySteps);
+    const { journey: otherJourney } = await createAutomation("Journey independiente");
+    await lifecycle.runScheduledWork(20);
+    const secondStep = await db.lifecycleMessage.findFirstOrThrow({
+      where: { enrollment: { journeyId: journey.id }, status: "SCHEDULED" },
+    });
+    await db.lifecycleMessage.update({
+      where: { id: secondStep.id },
+      data: { status: "DISPATCHING", dispatchVersion: { increment: 1 } },
+    });
+    await db.domainOutbox.create({
+      data: {
+        eventType: "lifecycle.message.dispatch.v1",
+        aggregateType: "LifecycleMessage",
+        aggregateId: secondStep.id,
+        deduplicationKey: `lifecycle:test:${secondStep.id}:dispatch:v1`,
+        payload: { lifecycleMessageId: secondStep.id, dispatchVersion: 1 },
+      },
+    });
+    await worker.runBatch(100);
+    const messages = await db.lifecycleMessage.findMany({
+      where: { enrollment: { journeyId: journey.id, customerId: customer.id } },
+      include: { emailEvent: true },
+      orderBy: { scheduledAt: "asc" },
+    });
+    assert.equal(messages.length, 2);
+    assert.ok(messages.every((message) => message.status === "QUEUED"));
+    assert.ok(messages.every((message) => message.emailEvent?.status === "QUEUED"));
+    const firstEmail = messages[0].emailEvent;
+    await db.emailEvent.update({
+      where: { id: firstEmail.id },
+      data: {
+        status: "FAILED",
+        statusRank: 70,
+        finalAt: new Date(),
+        nextAttemptAt: null,
+        lastError: "HTTP_ERROR",
+      },
+    });
+    assert.equal(
+      await lifecycle.markEmailFailed(messages[0].id, firstEmail.id, "HTTP_ERROR"),
+      true,
+    );
+    const failedEnrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+      where: { journeyId_customerId: { journeyId: journey.id, customerId: customer.id } },
+    });
+    assert.equal(failedEnrollment.status, "FAILED");
+    assert.equal(failedEnrollment.exitReason, "DELIVERY_FAILED");
+    const closedMessages = await db.lifecycleMessage.findMany({
+      where: { enrollmentId: failedEnrollment.id },
+      orderBy: { scheduledAt: "asc" },
+    });
+    assert.deepEqual(
+      closedMessages.map((message) => message.status),
+      ["FAILED", "CANCELLED"],
+    );
+    assert.equal(
+      (await db.emailEvent.findUniqueOrThrow({ where: { id: messages[1].emailEvent.id } })).status,
+      "CANCELLED",
+    );
+    const otherEnrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+      where: { journeyId_customerId: { journeyId: otherJourney.id, customerId: customer.id } },
+      include: { messages: { include: { emailEvent: true } } },
+    });
+    assert.equal(otherEnrollment.status, "ACTIVE");
+    assert.equal(otherEnrollment.messages[0].status, "QUEUED");
+    assert.equal(otherEnrollment.messages[0].emailEvent.status, "QUEUED");
+  });
+
+  it("dead-letters a dispatch without its version and preserves the trigger state order", async () => {
+    const { customer } = await makeCustomer();
+    const { journey } = await createAutomation("Journey versión obligatoria");
+    await lifecycle.runScheduledWork(20);
+    const message = await db.lifecycleMessage.findFirstOrThrow({
+      where: { enrollment: { journeyId: journey.id, customerId: customer.id } },
+    });
+    const dispatch = await db.domainOutbox.findFirstOrThrow({
+      where: { eventType: "lifecycle.message.dispatch.v1", aggregateId: message.id },
+    });
+    await db.domainOutbox.update({
+      where: { id: dispatch.id },
+      data: { payload: { lifecycleMessageId: message.id }, attempts: 2 },
+    });
+    const result = await worker.runBatch(100);
+    assert.equal(result.failed, 1);
+    assert.equal(await db.emailEvent.count({ where: { lifecycleMessageId: message.id } }), 0);
+    assert.equal(
+      (await db.lifecycleMessage.findUniqueOrThrow({ where: { id: message.id } })).status,
+      "FAILED",
+    );
+    const enrollment = await db.lifecycleEnrollment.findUniqueOrThrow({
+      where: { id: message.enrollmentId },
+    });
+    assert.equal(enrollment.status, "FAILED");
+    assert.equal(enrollment.exitReason, "DELIVERY_DISPATCH_FAILED");
+    assert.ok((await db.domainOutbox.findUniqueOrThrow({ where: { id: dispatch.id } })).failedAt);
+  });
+
+  it("propagates unexpected enrollment failures instead of hiding infrastructure errors", async () => {
+    await createAutomation("Journey error de infraestructura");
+    const enrollForJourney = lifecycle.enrollForJourney;
+    lifecycle.enrollForJourney = async () => {
+      throw new Error("database unavailable");
+    };
+    try {
+      await assert.rejects(() => lifecycle.runScheduledWork(20), /database unavailable/);
+    } finally {
+      lifecycle.enrollForJourney = enrollForJourney;
     }
   });
 
