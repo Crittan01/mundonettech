@@ -49,8 +49,8 @@ const assetColors = {
 } as const;
 
 const fonts = {
-  sans: 'var(--font-sans-local), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-  mono: 'var(--font-mono-local), ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace',
+  sans: 'var(--font-sans-local, ui-sans-serif), ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+  mono: 'var(--font-mono-local, ui-monospace), ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace',
 } as const;
 
 const toCssVariables = (values: Readonly<Record<string, string>>): Record<string, string> =>

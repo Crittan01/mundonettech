@@ -62,6 +62,8 @@ describe("M1 — Admin grouped sidebar, breadcrumb, RBAC filtering and search no
     const allHrefs = items.map((item) => item.href);
 
     expect(isAdminNavItemActive("/admin", "/admin", allHrefs)).toBe(true);
+    expect(isAdminNavItemActive("/admin/", "/admin", allHrefs)).toBe(true);
+    expect(isAdminNavItemActive("/admin/pedidos/", "/admin/pedidos", allHrefs)).toBe(true);
     expect(isAdminNavItemActive("/admin/hoy", "/admin", allHrefs)).toBe(false);
     expect(isAdminNavItemActive("/admin/contenido/medios", "/admin/contenido", allHrefs)).toBe(
       false,
@@ -70,25 +72,69 @@ describe("M1 — Admin grouped sidebar, breadcrumb, RBAC filtering and search no
       isAdminNavItemActive("/admin/contenido/medios", "/admin/contenido/medios", allHrefs),
     ).toBe(true);
 
+    expect(resolveAdminBreadcrumb(null, items)).toEqual({
+      groupTitle: "Operación diaria",
+      itemLabel: "Panel",
+      itemHref: null,
+      subLabel: null,
+    });
     expect(resolveAdminBreadcrumb("/admin", items)).toEqual({
       groupTitle: "Operación diaria",
       itemLabel: "Resumen",
+      itemHref: "/admin",
+      subLabel: null,
+    });
+    expect(resolveAdminBreadcrumb("/admin/", items)).toEqual({
+      groupTitle: "Operación diaria",
+      itemLabel: "Resumen",
+      itemHref: "/admin",
       subLabel: null,
     });
     expect(resolveAdminBreadcrumb("/admin/catalogo/nuevo", items)).toEqual({
       groupTitle: "Comercial y catálogo",
       itemLabel: "Catálogo",
+      itemHref: "/admin/catalogo",
       subLabel: "Nuevo registro",
     });
-    expect(resolveAdminBreadcrumb("/admin/pedidos/12345", items)).toEqual({
+    expect(resolveAdminBreadcrumb("/admin/pedidos/12345/", items)).toEqual({
       groupTitle: "Pedidos y posventa",
       itemLabel: "Pedidos",
+      itemHref: "/admin/pedidos",
       subLabel: "Detalle",
     });
     expect(resolveAdminBreadcrumb("/admin/precios/cupones/abc", items)).toEqual({
       groupTitle: "Comercial y catálogo",
       itemLabel: "Precios",
+      itemHref: "/admin/precios",
       subLabel: "Detalle de cupón",
+    });
+    expect(resolveAdminBreadcrumb("/admin/precios/mayoristas/abc", items)).toEqual({
+      groupTitle: "Comercial y catálogo",
+      itemLabel: "Precios",
+      itemHref: "/admin/precios",
+      subLabel: "Detalle mayorista",
+    });
+    expect(resolveAdminBreadcrumb("/admin/precios/bundles/abc", items)).toEqual({
+      groupTitle: "Comercial y catálogo",
+      itemLabel: "Precios",
+      itemHref: "/admin/precios",
+      subLabel: "Detalle de paquete",
+    });
+    expect(resolveAdminBreadcrumb("/admin/ruta-no-autorizada", items)).toEqual({
+      groupTitle: "Administración",
+      itemLabel: "Sección",
+      itemHref: null,
+      subLabel: null,
+    });
+
+    const groupedWithUnknown = groupAdminNavigation([
+      ...items,
+      { href: "/admin/modulo-experimental", label: "Experimental" },
+    ]);
+    expect(groupedWithUnknown.at(-1)).toEqual({
+      id: "otros",
+      title: "Otros módulos",
+      items: [{ href: "/admin/modulo-experimental", label: "Experimental" }],
     });
   });
 

@@ -4,14 +4,16 @@ import type { CatalogMedia } from "@mundonettech/db";
 import {
   buildPictureSources,
   buildSpinFrames,
-  Model3d,
-  Spin360,
   type ResponsiveDerivativeDescriptor,
   type SpinFrame,
 } from "@mundonettech/media/viewers";
+import dynamic from "next/dynamic";
 import Image from "next/image";
 
 import { resolveCatalogMediaUrl } from "./media-url";
+
+const Spin360 = dynamic(() => import("@mundonettech/media/viewers").then((mod) => mod.Spin360));
+const Model3d = dynamic(() => import("@mundonettech/media/viewers").then((mod) => mod.Model3d));
 
 function resolveSpin360Frames(
   media: CatalogMedia,

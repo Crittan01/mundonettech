@@ -2,7 +2,16 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import {
   getAdminNavMetadata,
@@ -32,6 +41,9 @@ interface PaletteEntry {
   readonly searchText: string;
   readonly external?: boolean;
 }
+
+const focusableSelector =
+  'a[href], button:not([disabled]):not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
 
 function GroupIcon({ groupId }: { readonly groupId: string }) {
   const props = {
@@ -175,33 +187,52 @@ function DesktopBreadcrumbView({
 }) {
   const breadcrumb = useMemo(() => resolveAdminBreadcrumb(pathname, items), [pathname, items]);
   return (
-    <nav
-      aria-label="Ruta actual administrativa"
-      className="hidden min-w-0 items-center gap-1.5 text-sm lg:flex"
-    >
-      <Link
-        href="/admin"
-        prefetch={false}
-        className="rounded-sm font-medium text-muted-foreground outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        Administración
-      </Link>
-      <span aria-hidden="true" className="text-muted-foreground">
-        /
-      </span>
-      <span className="text-muted-foreground">{breadcrumb.groupTitle}</span>
-      <span aria-hidden="true" className="text-muted-foreground">
-        /
-      </span>
-      <span className="truncate font-semibold text-foreground">{breadcrumb.itemLabel}</span>
-      {breadcrumb.subLabel ? (
-        <>
-          <span aria-hidden="true" className="text-muted-foreground">
-            /
-          </span>
-          <span className="truncate text-muted-foreground">{breadcrumb.subLabel}</span>
-        </>
-      ) : null}
+    <nav aria-label="Ruta actual administrativa" className="hidden min-w-0 lg:block">
+      <ol className="flex min-w-0 items-center gap-1.5 text-sm">
+        <li>
+          <Link
+            href="/admin"
+            prefetch={false}
+            className="rounded-sm font-medium text-muted-foreground outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            Administración
+          </Link>
+        </li>
+        <li aria-hidden="true" className="text-muted-foreground">
+          /
+        </li>
+        <li className="text-muted-foreground">{breadcrumb.groupTitle}</li>
+        <li aria-hidden="true" className="text-muted-foreground">
+          /
+        </li>
+        <li className="min-w-0 truncate">
+          {breadcrumb.subLabel && breadcrumb.itemHref ? (
+            <Link
+              href={breadcrumb.itemHref}
+              prefetch={false}
+              className="rounded-sm font-medium text-muted-foreground outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {breadcrumb.itemLabel}
+            </Link>
+          ) : (
+            <span aria-current="page" className="font-semibold text-foreground">
+              {breadcrumb.itemLabel}
+            </span>
+          )}
+        </li>
+        {breadcrumb.subLabel ? (
+          <>
+            <li aria-hidden="true" className="text-muted-foreground">
+              /
+            </li>
+            <li className="min-w-0 truncate">
+              <span aria-current="page" className="font-semibold text-foreground">
+                {breadcrumb.subLabel}
+              </span>
+            </li>
+          </>
+        ) : null}
+      </ol>
     </nav>
   );
 }
@@ -222,7 +253,7 @@ function MobileSectionStripView({
 }) {
   const breadcrumb = useMemo(() => resolveAdminBreadcrumb(pathname, items), [pathname, items]);
   return (
-    <div className="flex items-center justify-between gap-2 border-t border-border/70 bg-secondary/40 px-4 py-1.5 text-xs text-muted-foreground lg:hidden">
+    <div className="flex h-8 items-center justify-between gap-2 border-t border-border/70 bg-secondary/40 px-4 text-xs text-muted-foreground lg:hidden">
       <span className="truncate">
         {breadcrumb.groupTitle} ·{" "}
         <strong className="text-foreground">{breadcrumb.itemLabel}</strong>
@@ -272,6 +303,7 @@ function AdminCommandPaletteContent({
   const pathname = usePathname() ?? "/admin";
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const titleId = useId();
   const listboxId = useId();
@@ -310,6 +342,7 @@ function AdminCommandPaletteContent({
   }, [entries, query]);
 
   const clampedIndex = filtered.length > 0 ? Math.min(activeIndex, filtered.length - 1) : 0;
+  const activeOptionId = filtered.length > 0 ? `${listboxId}-opt-${clampedIndex}` : undefined;
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -319,15 +352,34 @@ function AdminCommandPaletteContent({
   }, []);
 
   useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
+    if (!activeOptionId) return;
+    const activeElement = document.getElementById(activeOptionId);
+    activeElement?.scrollIntoView({ block: "nearest" });
+  }, [activeOptionId]);
+
+  function handleDialogKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Tab") return;
+    const focusables = dialogRef.current?.querySelectorAll<HTMLElement>(focusableSelector);
+    if (!focusables || focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (!first || !last) return;
+    if (event.shiftKey) {
+      if (
+        document.activeElement === first ||
+        !dialogRef.current?.contains(document.activeElement)
+      ) {
         event.preventDefault();
-        onClose();
+        last.focus();
       }
+    } else if (
+      document.activeElement === last ||
+      !dialogRef.current?.contains(document.activeElement)
+    ) {
+      event.preventDefault();
+      first.focus();
     }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+  }
 
   function executeEntry(entry: PaletteEntry) {
     setQuery("");
@@ -350,9 +402,11 @@ function AdminCommandPaletteContent({
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        onKeyDown={handleDialogKeyDown}
         className="w-full max-w-xl overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-2xl"
       >
         <div className="flex items-center gap-3 border-b border-border px-4 py-3">
@@ -377,6 +431,12 @@ function AdminCommandPaletteContent({
           <input
             ref={inputRef}
             type="search"
+            role="combobox"
+            aria-expanded={filtered.length > 0}
+            aria-autocomplete="list"
+            aria-controls={filtered.length > 0 ? listboxId : undefined}
+            aria-activedescendant={activeOptionId}
+            aria-label="Buscar módulo administrativo"
             value={query}
             onChange={(event) => {
               setQuery(event.target.value);
@@ -385,17 +445,15 @@ function AdminCommandPaletteContent({
             onKeyDown={(event) => {
               if (event.key === "ArrowDown" && filtered.length > 0) {
                 event.preventDefault();
-                setActiveIndex((prev) => (prev + 1) % filtered.length);
+                setActiveIndex((clampedIndex + 1) % filtered.length);
               } else if (event.key === "ArrowUp" && filtered.length > 0) {
                 event.preventDefault();
-                setActiveIndex((prev) => (prev - 1 + filtered.length) % filtered.length);
+                setActiveIndex((clampedIndex - 1 + filtered.length) % filtered.length);
               } else if (event.key === "Enter" && filtered[clampedIndex]) {
                 event.preventDefault();
                 executeEntry(filtered[clampedIndex]);
               }
             }}
-            aria-controls={listboxId}
-            aria-label="Buscar módulo administrativo"
             placeholder="Ir a un módulo (ej. pedidos, inventario, finanzas, seguridad)…"
             className="w-full bg-transparent text-base text-foreground outline-hidden placeholder:text-muted-foreground sm:text-sm"
           />
@@ -407,26 +465,32 @@ function AdminCommandPaletteContent({
             Cerrar
           </button>
         </div>
-        <div
-          id={listboxId}
-          role="listbox"
-          aria-label="Módulos autorizados"
-          className="max-h-80 overflow-y-auto p-2"
-        >
-          {filtered.length === 0 ? (
-            <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-              No hay módulos autorizados que coincidan con «{query}».
-            </p>
-          ) : (
-            filtered.map((entry, index) => {
+        {filtered.length === 0 ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className="px-4 py-8 text-center text-sm text-muted-foreground"
+          >
+            No hay módulos autorizados que coincidan con «{query}».
+          </p>
+        ) : (
+          <div
+            id={listboxId}
+            role="listbox"
+            aria-label="Módulos autorizados"
+            className="max-h-80 overflow-y-auto p-2"
+          >
+            {filtered.map((entry, index) => {
               const selected = index === clampedIndex;
               const isCurrent =
                 !entry.external && isAdminNavItemActive(pathname, entry.href, allHrefs);
               return (
                 <button
                   key={entry.id}
+                  id={`${listboxId}-opt-${index}`}
                   type="button"
                   role="option"
+                  tabIndex={-1}
                   aria-selected={selected}
                   onMouseEnter={() => setActiveIndex(index)}
                   onClick={() => executeEntry(entry)}
@@ -454,9 +518,9 @@ function AdminCommandPaletteContent({
                   </span>
                 </button>
               );
-            })
-          )}
-        </div>
+            })}
+          </div>
+        )}
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-secondary/50 px-4 py-2.5 text-xs text-muted-foreground">
           <span>
             Filtrado para <strong className="text-foreground">{roleLabel}</strong> · Anillo {ring}
@@ -479,32 +543,83 @@ export function AdminShellClient({
   const [mobileOpen, setMobileOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const toggleButtonRef = useRef<HTMLButtonElement>(null);
-  const paletteTriggerRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  const openPalette = useCallback(() => {
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setMobileOpen(false);
+    setPaletteOpen(true);
+  }, []);
+
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    const target = previousFocusRef.current;
+    previousFocusRef.current = null;
+    if (target && target.isConnected) {
+      window.requestAnimationFrame(() => target.focus());
+    }
+  }, []);
+
+  const closeMobile = useCallback((restoreFocus = false) => {
+    setMobileOpen(false);
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => toggleButtonRef.current?.focus());
+    }
+  }, []);
+
+  const handleRouteChange = useCallback(() => {
+    setMobileOpen(false);
+    setPaletteOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileOpen && !paletteOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [mobileOpen, paletteOpen]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(min-width: 1024px)");
+    function handleBreakpoint(event: MediaQueryListEvent) {
+      if (event.matches) {
+        setMobileOpen(false);
+      }
+    }
+    mediaQuery.addEventListener("change", handleBreakpoint);
+    return () => mediaQuery.removeEventListener("change", handleBreakpoint);
+  }, []);
 
   useEffect(() => {
     function handleGlobalKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setMobileOpen(false);
-        setPaletteOpen((current) => !current);
-      } else if (event.key === "Escape" && mobileOpen) {
-        setMobileOpen(false);
-        toggleButtonRef.current?.focus();
+        if (paletteOpen) {
+          closePalette();
+        } else {
+          openPalette();
+        }
+      } else if (event.key === "Escape") {
+        if (paletteOpen) {
+          event.preventDefault();
+          closePalette();
+        } else if (mobileOpen) {
+          event.preventDefault();
+          closeMobile(true);
+        }
       }
     }
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [mobileOpen]);
+  }, [mobileOpen, paletteOpen, openPalette, closePalette, closeMobile]);
 
   return (
     <div className="flex min-h-screen flex-col bg-secondary/35 lg:flex-row">
       <Suspense fallback={null}>
-        <RouteChangeCloser
-          onRouteChange={() => {
-            setMobileOpen(false);
-            setPaletteOpen(false);
-          }}
-        />
+        <RouteChangeCloser onRouteChange={handleRouteChange} />
       </Suspense>
 
       {/* Desktop Midnight Cyan Sidebar */}
@@ -521,7 +636,7 @@ export function AdminShellClient({
         <div className="border-b border-brand-surface-border px-3 py-3">
           <button
             type="button"
-            onClick={() => setPaletteOpen(true)}
+            onClick={openPalette}
             className="flex min-h-10 w-full items-center justify-between gap-2 rounded-lg border border-brand-surface-input bg-brand-surface-elevated px-3 text-left text-xs font-medium text-brand-surface-muted outline-hidden transition-colors hover:border-brand-cyan hover:text-brand-surface-foreground focus-visible:ring-2 focus-visible:ring-brand-cyan"
           >
             <span className="flex items-center gap-2 truncate">
@@ -573,8 +688,8 @@ export function AdminShellClient({
       {/* Main Column — children stays OUTSIDE Suspense */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Sticky Topbar (Desktop & Mobile) */}
-        <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur-md">
-          <div className="mx-auto flex min-h-16 w-full max-w-7xl items-center justify-between gap-3 px-4 py-2 sm:px-6">
+        <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur-md">
+          <div className="mx-auto flex h-16 w-full max-w-7xl items-center justify-between gap-3 px-4 sm:px-6">
             <div className="flex min-w-0 items-center gap-3">
               <Link
                 href="/admin"
@@ -593,9 +708,8 @@ export function AdminShellClient({
 
             <div className="flex shrink-0 items-center gap-2">
               <button
-                ref={paletteTriggerRef}
                 type="button"
-                onClick={() => setPaletteOpen(true)}
+                onClick={openPalette}
                 className="inline-flex min-h-10 items-center gap-2 rounded-md border border-input bg-background px-2.5 text-xs font-medium text-foreground outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:px-3"
               >
                 <svg
@@ -647,7 +761,7 @@ export function AdminShellClient({
                 ref={toggleButtonRef}
                 type="button"
                 aria-expanded={mobileOpen}
-                aria-controls="admin-mobile-menu"
+                aria-controls={mobileOpen ? "admin-mobile-menu" : undefined}
                 onClick={() => setMobileOpen((open) => !open)}
                 className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-md border border-input bg-background px-3 py-2 text-xs font-semibold text-foreground outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background lg:hidden"
               >
@@ -666,15 +780,7 @@ export function AdminShellClient({
 
         {/* Mobile Dark Midnight Drawer */}
         {mobileOpen ? (
-          <div
-            className="fixed inset-x-0 top-24 bottom-0 z-40 flex lg:hidden"
-            onMouseDown={(event) => {
-              if (event.target === event.currentTarget) {
-                setMobileOpen(false);
-                toggleButtonRef.current?.focus();
-              }
-            }}
-          >
+          <div className="fixed inset-x-0 top-24 bottom-0 z-40 flex lg:hidden">
             <div
               id="admin-mobile-menu"
               className="flex h-full w-72 max-w-[85vw] flex-col border-r border-brand-surface-border bg-brand-surface text-brand-surface-foreground shadow-2xl"
@@ -696,11 +802,11 @@ export function AdminShellClient({
                     <SidebarNavList
                       items={items}
                       pathname={null}
-                      onNavigate={() => setMobileOpen(false)}
+                      onNavigate={() => closeMobile(false)}
                     />
                   }
                 >
-                  <ActiveSidebarNavList items={items} onNavigate={() => setMobileOpen(false)} />
+                  <ActiveSidebarNavList items={items} onNavigate={() => closeMobile(false)} />
                 </Suspense>
               </nav>
               <div className="flex items-center justify-between gap-2 border-t border-brand-surface-border bg-brand-surface-elevated p-3">
@@ -708,7 +814,7 @@ export function AdminShellClient({
                   href="/"
                   target="_blank"
                   rel="noopener noreferrer"
-                  onClick={() => setMobileOpen(false)}
+                  onClick={() => closeMobile(false)}
                   className="inline-flex min-h-10 items-center rounded-md border border-brand-surface-input bg-brand-surface px-3 text-xs font-medium text-brand-surface-foreground outline-hidden hover:border-brand-cyan focus-visible:ring-2 focus-visible:ring-brand-cyan"
                 >
                   Ver tienda
@@ -717,7 +823,11 @@ export function AdminShellClient({
                 <div>{signOutSlot}</div>
               </div>
             </div>
-            <div className="flex-1 bg-brand-surface/65 backdrop-blur-xs" aria-hidden="true" />
+            <div
+              aria-hidden="true"
+              onMouseDown={() => closeMobile(true)}
+              className="flex-1 cursor-pointer bg-brand-surface/65 backdrop-blur-xs"
+            />
           </div>
         ) : null}
 
@@ -733,10 +843,7 @@ export function AdminShellClient({
       {paletteOpen ? (
         <Suspense fallback={null}>
           <AdminCommandPaletteContent
-            onClose={() => {
-              setPaletteOpen(false);
-              paletteTriggerRef.current?.focus();
-            }}
+            onClose={closePalette}
             items={items}
             roleLabel={roleLabel}
             ring={ring}

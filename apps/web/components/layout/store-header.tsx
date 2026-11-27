@@ -13,7 +13,7 @@ export async function StoreHeader() {
   cacheTag("storefront:header");
 
   return (
-    <header className="sticky top-0 z-50 border-b border-border/85 bg-background/95 backdrop-blur-md">
+    <header className="sticky top-0 z-40 border-b border-border/85 bg-background/95 backdrop-blur-md">
       <div className="mx-auto flex min-h-16 w-full max-w-6xl items-center justify-between gap-3 px-4 py-2.5 sm:px-6 lg:px-8">
         <Link
           href="/"

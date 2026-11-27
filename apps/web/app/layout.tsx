@@ -13,7 +13,7 @@ const interFont = localFont({
   src: "../assets/fonts/inter-latin.woff2",
   weight: "400 700",
   style: "normal",
-  display: "swap",
+  display: "optional",
   variable: "--font-sans-local",
 });
 
@@ -30,7 +30,7 @@ const sourceCodeProFont = localFont({
       style: "normal",
     },
   ],
-  display: "swap",
+  display: "optional",
   preload: false,
   variable: "--font-mono-local",
 });

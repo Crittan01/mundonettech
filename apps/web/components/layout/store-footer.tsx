@@ -11,8 +11,7 @@ export async function StoreFooter() {
   cacheTag("storefront:footer");
   cacheTag("legal");
 
-  const linkClass =
-    "inline-flex min-h-8 items-center rounded-sm text-brand-surface-muted underline-offset-4 outline-hidden transition-colors hover:text-brand-cyan hover:underline focus-visible:ring-2 focus-visible:ring-brand-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-brand-surface";
+  const linkClass = "mnt-footer-link";
 
   return (
     <footer className="border-t border-brand-surface-border bg-brand-surface text-brand-surface-foreground">

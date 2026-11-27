@@ -8,6 +8,7 @@ import { Suspense } from "react";
 
 import { CatalogBrowser } from "@/components/catalog/catalog-browser";
 import { JsonLd } from "@/components/seo/json-ld";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { getCatalogCategory, searchCatalog } from "@/lib/catalog";
 import { parseCatalogParams } from "@/lib/catalog-params";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -32,8 +33,14 @@ export async function generateMetadata({
       url: canonical,
       title: category.name,
       description,
+      images: [defaultSocialImage],
     },
-    twitter: { card: "summary", title: category.name, description },
+    twitter: {
+      card: "summary_large_image",
+      title: category.name,
+      description,
+      images: [defaultSocialImage.url],
+    },
   };
 }
 

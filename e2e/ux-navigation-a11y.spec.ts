@@ -728,6 +728,14 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
         const assetRes = await page.request.get(brandAsset);
         expect(assetRes.status(), `Brand asset ${brandAsset}`).toBe(200);
       }
+      await expect(page.locator('meta[property="og:image"]')).toHaveAttribute(
+        "content",
+        /\/opengraph-image\.png/,
+      );
+      await expect(page.locator('meta[name="twitter:image"]')).toHaveAttribute(
+        "content",
+        /\/opengraph-image\.png/,
+      );
       await expect(
         page.getByRole("navigation", { name: "Navegación principal" }).getByRole("link", {
           name: "Empresas",
@@ -794,6 +802,16 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
   for (const route of publicCustomerRoutes) {
     const response = await page.goto(route, { waitUntil: "domcontentloaded" });
     expect(response?.status(), `Mobile status for ${route}`).toBe(200);
+    if (route === "/") {
+      const mobileMenuTrigger = page.getByRole("button", { name: "Abrir menú de tienda" });
+      await mobileMenuTrigger.click();
+      const mobileDrawer = page.getByRole("dialog", { name: "Menú de navegación de la tienda" });
+      await expect(mobileDrawer).toBeVisible();
+      await expectWcagAndNoOverflow(page, "Mobile storefront drawer /");
+      await page.keyboard.press("Escape");
+      await expect(mobileDrawer).toHaveCount(0);
+      await expect(mobileMenuTrigger).toBeFocused();
+    }
     if (route === compareTwoRoute) {
       await expect(page.locator('section[tabindex="0"] table')).toBeVisible();
     }
@@ -927,12 +945,26 @@ test("all 43 admin routes pass WCAG 2.1 AA axe, RBAC/PII/filter contracts and ze
     name: "Paleta rápida de módulos administrativos",
   });
   await expect(paletteDialog).toBeVisible();
-  await paletteDialog.getByLabel("Buscar módulo administrativo").fill("integraciones");
+  await expectWcagAndNoOverflow(page, "Desktop STORE_MANAGER Cmd+K palette populated");
+  const paletteCombobox = paletteDialog.getByRole("combobox", {
+    name: "Buscar módulo administrativo",
+  });
+  await expect(paletteCombobox).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(paletteDialog.getByRole("button", { name: "Cerrar" })).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(paletteCombobox).toBeFocused();
+  await paletteCombobox.fill("integraciones");
   await expect(paletteDialog.getByText(/No hay módulos autorizados que coincidan/)).toBeVisible();
+  await expectWcagAndNoOverflow(page, "Desktop STORE_MANAGER Cmd+K palette empty");
   await page.keyboard.press("Escape");
   await expect(paletteDialog).toHaveCount(0);
   await page.keyboard.press("Control+k");
   await expect(paletteDialog).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await expect(
+    paletteDialog.getByRole("combobox", { name: "Buscar módulo administrativo" }),
+  ).toHaveAttribute("aria-activedescendant", /-opt-1$/);
   await page.keyboard.press("Escape");
   await expect(paletteDialog).toHaveCount(0);
   await expectWcagAndNoOverflow(page, "Desktop STORE_MANAGER /admin/b2b/[id]");
@@ -1064,6 +1096,12 @@ test("all 43 admin routes pass WCAG 2.1 AA axe, RBAC/PII/filter contracts and ze
       await expectWcagAndNoOverflow(page, "Mobile /admin expanded menu");
 
       await page.keyboard.press("Escape");
+      await expect(menuButton).toHaveAttribute("aria-expanded", "false");
+      await expect(menuButton).toBeFocused();
+
+      await menuButton.click();
+      await expect(closeMenuButton).toHaveAttribute("aria-expanded", "true");
+      await page.locator("#admin-mobile-menu + div").click();
       await expect(menuButton).toHaveAttribute("aria-expanded", "false");
       await expect(menuButton).toBeFocused();
 

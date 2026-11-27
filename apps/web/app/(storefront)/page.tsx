@@ -6,6 +6,7 @@ import { helpArticles } from "@mundonettech/config/help";
 import { storeConfig } from "@mundonettech/config/store";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { ProductCard } from "@/components/catalog/product-card";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { searchCatalog } from "@/lib/catalog";
 import { getPublicCmsPageLinks } from "@/lib/cms";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -20,11 +21,13 @@ export const metadata: Metadata = {
     url: "/",
     title: storeConfig.name,
     description: storeConfig.description,
+    images: [defaultSocialImage],
   },
   twitter: {
     card: "summary_large_image",
     title: storeConfig.name,
     description: storeConfig.description,
+    images: [defaultSocialImage.url],
   },
 };
 
@@ -105,11 +108,17 @@ const trustHighlights = [
     description:
       "Cinco días hábiles tras la entrega y acompañamiento claro para cambios, devoluciones y PQR.",
   },
-  {
-    title: "Retail y mayorista B2B",
-    description:
-      "Escalas de precio por volumen y propuestas formales para empresas en todo el país.",
-  },
+  storeConfig.modules.wholesale
+    ? {
+        title: "Retail y mayorista B2B",
+        description:
+          "Escalas de precio por volumen y propuestas formales para empresas con cobertura verificada en checkout.",
+      }
+    : {
+        title: "Soporte y posventa clara",
+        description:
+          "Seguimiento de pedidos, comprobante verificable y atención de solicitudes desde tu cuenta o como invitado.",
+      },
 ] as const;
 
 export default async function HomePage() {
@@ -141,7 +150,9 @@ export default async function HomePage() {
             </h1>
             <p className="max-w-xl text-base leading-7 text-brand-surface-muted sm:text-lg sm:leading-8">
               {storeConfig.description} Precios en pesos colombianos, inventario real y respaldo en
-              cada compra retail o corporativa.
+              {storeConfig.modules.wholesale
+                ? " cada compra retail o corporativa."
+                : " cada compra."}
             </p>
             <div className="flex flex-wrap gap-3 pt-1">
               <Link

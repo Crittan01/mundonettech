@@ -12,6 +12,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 
 import { JsonLd } from "@/components/seo/json-ld";
+import { defaultSocialImage } from "@/lib/brand-seo";
 
 const canonicalUrl = new URL("/ayuda", storeConfig.url).toString();
 
@@ -26,11 +27,13 @@ export const metadata: Metadata = {
     url: canonicalUrl,
     title: "Centro de ayuda",
     description: "Encuentra respuestas y canales reales de atención.",
+    images: [defaultSocialImage],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: "Centro de ayuda",
     description: "Encuentra respuestas y canales reales de atención.",
+    images: [defaultSocialImage.url],
   },
 };
 

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 
 import { CatalogBrowser } from "@/components/catalog/catalog-browser";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { searchCatalog } from "@/lib/catalog";
 import { parseCatalogParams } from "@/lib/catalog-params";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -16,11 +17,13 @@ export const metadata: Metadata = {
     url: "/productos",
     title: "Catálogo de tecnología",
     description: "Explora computadores, audio, energía y accesorios con disponibilidad real.",
+    images: [defaultSocialImage],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: "Catálogo de tecnología",
     description: "Explora computadores, audio, energía y accesorios con disponibilidad real.",
+    images: [defaultSocialImage.url],
   },
 };
 

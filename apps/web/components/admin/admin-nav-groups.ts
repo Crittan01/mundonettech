@@ -208,20 +208,28 @@ const itemMetadataByHref: Readonly<Record<string, AdminNavMetadata>> = {
   },
 };
 
+function normalizeAdminPathname(pathname: string): string {
+  return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+}
+
 export function isAdminNavItemActive(
   pathname: string,
   href: string,
   allHrefs: readonly string[],
 ): boolean {
-  if (pathname === href) return true;
-  if (href === "/admin") return false;
-  if (!pathname.startsWith(`${href}/`)) return false;
-  return !allHrefs.some(
-    (other) =>
-      other !== href &&
-      other.length > href.length &&
-      (pathname === other || pathname.startsWith(`${other}/`)),
-  );
+  const normalizedPath = normalizeAdminPathname(pathname);
+  const normalizedHref = normalizeAdminPathname(href);
+  if (normalizedPath === normalizedHref) return true;
+  if (normalizedHref === "/admin") return false;
+  if (!normalizedPath.startsWith(`${normalizedHref}/`)) return false;
+  return !allHrefs.some((other) => {
+    const normalizedOther = normalizeAdminPathname(other);
+    return (
+      normalizedOther !== normalizedHref &&
+      normalizedOther.length > normalizedHref.length &&
+      (normalizedPath === normalizedOther || normalizedPath.startsWith(`${normalizedOther}/`))
+    );
+  });
 }
 
 export function groupAdminNavigation(items: readonly AdminNavItem[]): readonly AdminNavGroup[] {
@@ -282,31 +290,38 @@ export function resolveAdminBreadcrumb(
 ): {
   readonly groupTitle: string;
   readonly itemLabel: string;
+  readonly itemHref: string | null;
   readonly subLabel: string | null;
 } {
   if (!pathname) {
-    return { groupTitle: "Operación diaria", itemLabel: "Panel", subLabel: null };
+    return { groupTitle: "Operación diaria", itemLabel: "Panel", itemHref: null, subLabel: null };
   }
+  const normalizedPath = normalizeAdminPathname(pathname);
   const allHrefs = items.map((item) => item.href);
-  const active = items.find((item) => isAdminNavItemActive(pathname, item.href, allHrefs));
+  const active = items.find((item) => isAdminNavItemActive(normalizedPath, item.href, allHrefs));
   if (!active) {
-    return { groupTitle: "Administración", itemLabel: "Sección", subLabel: null };
+    return { groupTitle: "Administración", itemLabel: "Sección", itemHref: null, subLabel: null };
   }
   const meta = getAdminNavMetadata(active.href);
   let subLabel: string | null = null;
-  if (pathname !== active.href && pathname.startsWith(`${active.href}/`)) {
-    const remainder = pathname.slice(active.href.length + 1);
+  if (normalizedPath !== active.href && normalizedPath.startsWith(`${active.href}/`)) {
+    const remainder = normalizedPath.slice(active.href.length + 1);
     if (remainder === "nuevo") {
       subLabel = "Nuevo registro";
     } else if (remainder.startsWith("cupones/")) {
       subLabel = "Detalle de cupón";
-    } else {
+    } else if (remainder.startsWith("mayoristas/")) {
+      subLabel = "Detalle mayorista";
+    } else if (remainder.startsWith("bundles/")) {
+      subLabel = "Detalle de paquete";
+    } else if (remainder.length > 0) {
       subLabel = "Detalle";
     }
   }
   return {
     groupTitle: meta.groupTitle,
     itemLabel: active.label,
+    itemHref: active.href,
     subLabel,
   };
 }

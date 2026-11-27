@@ -7,6 +7,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { JsonLd } from "@/components/seo/json-ld";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { getLegalDocument, getLegalDocuments } from "@/lib/legal";
 
 export function generateStaticParams() {
@@ -32,11 +33,13 @@ export async function generateMetadata({ params }: PageProps<"/legal/[slug]">): 
       url: canonical,
       title: document.title,
       description: document.summary,
+      images: [defaultSocialImage],
     },
     twitter: {
-      card: "summary",
+      card: "summary_large_image",
       title: document.title,
       description: document.summary,
+      images: [defaultSocialImage.url],
     },
   };
 }

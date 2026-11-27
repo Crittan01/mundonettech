@@ -55,15 +55,24 @@ function buildCompareHref(
   return parts.length > 0 ? `/comparar?${parts.join("&")}` : "/comparar";
 }
 
+function parseNonNegativeBigInt(raw: string | null): bigint | null {
+  if (!raw || !/^\d+$/.test(raw)) return null;
+  try {
+    return BigInt(raw);
+  } catch {
+    return null;
+  }
+}
+
 function computeDiscountPercent(
-  priceCents: string,
-  compareAtPriceCents: string | null,
+  priceCents: bigint | null,
+  compareAtPriceCents: bigint | null,
 ): number | null {
-  if (!compareAtPriceCents) return null;
-  const price = BigInt(priceCents);
-  const compare = BigInt(compareAtPriceCents);
-  if (compare <= price || compare <= 0n) return null;
-  const percent = Number(((compare - price) * 100n + compare / 2n) / compare);
+  if (priceCents === null || compareAtPriceCents === null) return null;
+  if (compareAtPriceCents <= priceCents || compareAtPriceCents <= 0n) return null;
+  const percent = Number(
+    ((compareAtPriceCents - priceCents) * 100n + compareAtPriceCents / 2n) / compareAtPriceCents,
+  );
   return percent >= 1 && percent <= 99 ? percent : null;
 }
 
@@ -87,7 +96,13 @@ export function ProductCard({
     ? compareSlugs.filter((slug) => slug !== product.slug)
     : [...compareSlugs, product.slug];
   const compareHref = buildCompareHref(nextSlugs, compareExtraParams);
-  const discountPct = computeDiscountPercent(product.priceCents, product.compareAtPriceCents);
+  const parsedPriceCents = parseNonNegativeBigInt(product.priceCents);
+  const parsedCompareAtCents = parseNonNegativeBigInt(product.compareAtPriceCents);
+  const hasCompareAtDiscount =
+    parsedPriceCents !== null &&
+    parsedCompareAtCents !== null &&
+    parsedCompareAtCents > parsedPriceCents;
+  const discountPct = computeDiscountPercent(parsedPriceCents, parsedCompareAtCents);
   const inStock = product.available > 0;
 
   return (
@@ -182,8 +197,7 @@ export function ProductCard({
                 ? formatCopCents(product.priceCents)
                 : `Desde ${formatCopCents(product.priceCents)}`}
             </p>
-            {product.compareAtPriceCents &&
-            BigInt(product.compareAtPriceCents) > BigInt(product.priceCents) ? (
+            {hasCompareAtDiscount && product.compareAtPriceCents ? (
               <p className="text-xs text-muted-foreground tabular-nums">
                 Antes <s>{formatCopCents(product.compareAtPriceCents)}</s>
               </p>

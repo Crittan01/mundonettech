@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -98,6 +100,15 @@ function linearToSrgb8(channel: number): number {
   return Math.round(gamma * 255) / 255;
 }
 
+function oklchToHex(oklchValue: string): string {
+  const [linR, linG, linB] = oklchToLinearRgb(parseOklch(oklchValue));
+  const toHexByte = (channel: number) =>
+    Math.round(linearToSrgb8(channel) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${toHexByte(linR)}${toHexByte(linG)}${toHexByte(linB)}`;
+}
+
 function relativeLuminance(oklchValue: string): number {
   const [linR, linG, linB] = oklchToLinearRgb(parseOklch(oklchValue));
   const srgb = [linR, linG, linB].map((channel) => {
@@ -185,6 +196,7 @@ describe("A9 UX, accessibility tokens, language guards and navigation contracts"
       ["mutedForeground on card", tokens.mutedForeground, tokens.card],
       ["mutedForeground on secondary", tokens.mutedForeground, tokens.secondary],
       ["mutedForeground on muted", tokens.mutedForeground, tokens.muted],
+      ["mutedForeground on accent", tokens.mutedForeground, tokens.accent],
       ["accentForeground on accent", tokens.accentForeground, tokens.accent],
       ["primary with primaryForeground", tokens.primary, tokens.primaryForeground],
       ["primary on background", tokens.primary, tokens.background],
@@ -252,6 +264,30 @@ describe("A9 UX, accessibility tokens, language guards and navigation contracts"
 
     for (const [label, fg, bg] of uiPairs) {
       expect(contrastRatio(fg, bg), label).toBeGreaterThanOrEqual(3);
+    }
+
+    for (const [key, hex] of Object.entries(themeConfig.assetColors)) {
+      const tokenValue = tokens[key as keyof typeof tokens];
+      expect(tokenValue, `assetColors.${key} must exist in tokens`).toBeDefined();
+      expect(hex.toLowerCase(), `assetColors.${key} must match OKLCH->sRGB hex`).toBe(
+        oklchToHex(tokenValue),
+      );
+    }
+  });
+
+  it("vendors compact local WOFF2 fonts with zero external font dependency", () => {
+    const interPath = resolve("apps/web/assets/fonts/inter-latin.woff2");
+    const monoRegularPath = resolve("apps/web/assets/fonts/source-code-pro-regular.woff2");
+    const monoSemiboldPath = resolve("apps/web/assets/fonts/source-code-pro-semibold.woff2");
+
+    for (const [label, filePath, maxBytes] of [
+      ["inter-latin.woff2", interPath, 40_000],
+      ["source-code-pro-regular.woff2", monoRegularPath, 25_000],
+      ["source-code-pro-semibold.woff2", monoSemiboldPath, 25_000],
+    ] as const) {
+      const bytes = readFileSync(filePath);
+      expect(bytes.subarray(0, 4).toString("ascii"), `${label} WOFF2 header`).toBe("wOF2");
+      expect(bytes.byteLength, `${label} size budget`).toBeLessThan(maxBytes);
     }
   });
 
@@ -322,6 +358,12 @@ describe("A9 UX, accessibility tokens, language guards and navigation contracts"
       "/%63omparar",
       "/empresas",
       "/carrito",
+      "/manifest.webmanifest",
+      "/favicon.ico",
+      "/icon.svg",
+      "/apple-icon.png",
+      "/opengraph-image.png",
+      "/twitter-image.png",
     ]) {
       expect(isReservedRedirectSource(reserved), reserved).toBe(true);
     }

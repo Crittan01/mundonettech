@@ -189,14 +189,14 @@ test("N-level breadcrumbs, category/brand, malformed URLs, validation, empty and
     page.getByRole("heading", { name: "No hay productos con estos criterios" }),
   ).toBeVisible();
 
-  for (const missingPath of [
-    "/producto/no-existe",
-    "/producto/invalid_slug!!",
-    "/categoria/invalid_slug!!",
-    "/marca/invalid_slug!!",
-  ]) {
+  for (const [missingPath, expectedStatus] of [
+    ["/producto/no-existe", 404],
+    ["/producto/invalid_slug!!", 404],
+    ["/categoria/invalid_slug!!", 200],
+    ["/marca/invalid_slug!!", 200],
+  ] as const) {
     const response = await page.goto(missingPath);
-    expect(response?.status()).toBe(200);
+    expect(response?.status(), missingPath).toBe(expectedStatus);
     await expect(page.getByRole("heading", { level: 1 })).toContainText(
       "No encontramos esta página",
     );

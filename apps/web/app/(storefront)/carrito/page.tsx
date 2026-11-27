@@ -141,22 +141,22 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                           </Link>
                         </h3>
                         <p className="mt-1 font-mono text-xs text-muted-foreground">{line.sku}</p>
-                        <p className="mt-2 text-sm text-muted-foreground">
+                        <p className="mt-2 text-sm text-muted-foreground tabular-nums">
                           {line.quantity} × {formatCopCents(line.unitPriceCents)} · {line.available}{" "}
                           disponibles
                         </p>
                         {BigInt(line.wholesaleDiscountCents) > 0n ? (
-                          <p className="text-sm text-success">
+                          <p className="text-sm text-success tabular-nums">
                             Descuento mayorista: −{formatCopCents(line.wholesaleDiscountCents)}
                           </p>
                         ) : null}
                         {BigInt(line.bundleDiscountCents) > 0n ? (
-                          <p className="text-sm text-success">
+                          <p className="text-sm text-success tabular-nums">
                             Descuento de paquete: −{formatCopCents(line.bundleDiscountCents)}
                           </p>
                         ) : null}
                         {BigInt(line.couponDiscountCents) > 0n ? (
-                          <p className="text-sm text-success">
+                          <p className="text-sm text-success tabular-nums">
                             Cupón distribuido: −{formatCopCents(line.couponDiscountCents)}
                           </p>
                         ) : null}

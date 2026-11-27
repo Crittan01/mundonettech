@@ -14,8 +14,7 @@ export interface BrandMarkProps {
 export function BrandMark({ size = 32, variant = "on-light", className }: BrandMarkProps) {
   const plateFill =
     variant === "on-light" ? "var(--brand-surface)" : "var(--brand-surface-elevated)";
-  const plateStroke =
-    variant === "on-light" ? "var(--brand-surface-border)" : "var(--brand-surface-border)";
+  const plateStroke = "var(--brand-surface-border)";
   const ringStroke = "var(--brand-cyan)";
   const coreStroke = "var(--brand-surface-foreground)";
 

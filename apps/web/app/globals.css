@@ -40,8 +40,11 @@
   --color-brand-cyan: var(--brand-cyan);
   --color-brand-cyan-foreground: var(--brand-cyan-foreground);
   --color-brand-cyan-muted: var(--brand-cyan-muted);
-  --font-sans: var(--font-sans);
-  --font-mono: var(--font-mono);
+  --font-sans:
+    var(--font-sans-local, ui-sans-serif), ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono:
+    var(--font-mono-local, ui-monospace), ui-monospace, "Cascadia Code", "Segoe UI Mono", monospace;
 }
 
 @layer base {
@@ -74,17 +77,19 @@
     font-variant-numeric: tabular-nums;
   }
 
-  button:not(:disabled),
+  button:not(:disabled):not([aria-disabled="true"]),
   [role="button"]:not([aria-disabled="true"]),
   label[for],
   summary,
-  select:not(:disabled),
-  a[href] {
+  select:not(:disabled):not([aria-disabled="true"]),
+  a[href]:not([aria-disabled="true"]) {
     cursor: pointer;
   }
 
   button:disabled,
+  button[aria-disabled="true"],
   [role="button"][aria-disabled="true"],
+  a[aria-disabled="true"],
   [aria-disabled="true"] {
     cursor: not-allowed;
   }
@@ -124,6 +129,10 @@
   }
 }
 
+.mnt-footer-link {
+  @apply inline-flex min-h-8 items-center rounded-sm text-brand-surface-muted underline-offset-4 outline-hidden transition-colors hover:text-brand-cyan hover:underline focus-visible:ring-2 focus-visible:ring-brand-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-brand-surface;
+}
+
 .mnt-card-hover {
   transition:
     transform 180ms ease,
@@ -135,4 +144,10 @@
   transform: translateY(-2px);
   border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
   box-shadow: 0 10px 24px -12px color-mix(in oklch, var(--brand-surface) 22%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mnt-card-hover:hover {
+    transform: none;
+  }
 }
