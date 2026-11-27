@@ -8,6 +8,7 @@ import { ProductCard } from "@/components/catalog/product-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { compareCatalogProducts, searchCatalog } from "@/lib/catalog";
 import { authenticityLabels } from "@/lib/catalog-presenters";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -25,11 +26,13 @@ export const metadata: Metadata = {
     url: "/comparar",
     title: "Comparador de productos",
     description,
+    images: [defaultSocialImage],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: "Comparador de productos",
     description,
+    images: [defaultSocialImage.url],
   },
 };
 

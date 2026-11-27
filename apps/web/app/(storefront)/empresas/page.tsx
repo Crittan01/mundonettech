@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
 import { B2bLeadForm } from "@/components/b2b/lead-form";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { getAuthPageSecurity } from "@/lib/security/auth-page";
 
 const canonical = new URL("/empresas", storeConfig.url).toString();
@@ -17,11 +18,13 @@ export const metadata: Metadata = {
     url: canonical,
     title: "Ventas a empresas",
     description: "Solicita una propuesta comercial para compras corporativas y al por mayor.",
+    images: [defaultSocialImage],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: "Ventas a empresas",
     description: "Solicita una propuesta comercial para compras corporativas y al por mayor.",
+    images: [defaultSocialImage.url],
   },
 };
 

@@ -5,6 +5,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 
 import { JsonLd } from "@/components/seo/json-ld";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { getLegalDocuments, getLegalOperator } from "@/lib/legal";
 
 const canonicalUrl = new URL("/legal", storeConfig.url).toString();
@@ -22,11 +23,13 @@ export const metadata: Metadata = {
     url: canonicalUrl,
     title: pageTitle,
     description: pageDescription,
+    images: [defaultSocialImage],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: pageTitle,
     description: pageDescription,
+    images: [defaultSocialImage.url],
   },
 };
 

@@ -8,6 +8,7 @@ import { Suspense } from "react";
 
 import { CatalogBrowser } from "@/components/catalog/catalog-browser";
 import { JsonLd } from "@/components/seo/json-ld";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { getCatalogBrand, searchCatalog } from "@/lib/catalog";
 import { parseCatalogParams } from "@/lib/catalog-params";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -30,8 +31,14 @@ export async function generateMetadata({ params }: PageProps<"/marca/[slug]">): 
       url: canonical,
       title: brand.name,
       description,
+      images: [defaultSocialImage],
     },
-    twitter: { card: "summary", title: brand.name, description },
+    twitter: {
+      card: "summary_large_image",
+      title: brand.name,
+      description,
+      images: [defaultSocialImage.url],
+    },
   };
 }
 

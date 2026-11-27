@@ -207,9 +207,9 @@ function ProductVariantPanel({
       ) : null}
 
       <div aria-live="polite" aria-atomic="true">
-        <p className="text-3xl font-bold">{formatCopCents(selected.priceCents)}</p>
+        <p className="text-3xl font-bold tabular-nums">{formatCopCents(selected.priceCents)}</p>
         {hasStrikethrough && selected.compareAtPriceCents ? (
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-1 text-sm text-muted-foreground tabular-nums">
             Antes <s>{formatCopCents(selected.compareAtPriceCents)}</s>
           </p>
         ) : null}

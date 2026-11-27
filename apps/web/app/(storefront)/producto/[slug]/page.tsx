@@ -10,6 +10,7 @@ import { ProductCard } from "@/components/catalog/product-card";
 import { ProductReviews } from "@/components/catalog/product-reviews";
 import { ProductShowcase } from "@/components/catalog/product-variant-panel";
 import { JsonLd } from "@/components/seo/json-ld";
+import { defaultSocialImage } from "@/lib/brand-seo";
 import { getCatalogProduct, searchCatalog } from "@/lib/catalog";
 import { authenticityLabels } from "@/lib/catalog-presenters";
 import { getPublicMediaOrigin } from "@/lib/env";
@@ -37,6 +38,8 @@ export async function generateMetadata({ params }: PageProps<"/producto/[slug]">
   }
   const description = product.seoDescription ?? product.shortDescription ?? product.description;
   const images = getProductImageUrls(product, getPublicMediaOrigin());
+  const ogImages = images.length > 0 ? images : [defaultSocialImage];
+  const twitterImages = images.length > 0 ? images : [defaultSocialImage.url];
   const canonical = productUrl(product);
   return {
     title: product.seoTitle ?? product.name,
@@ -48,13 +51,13 @@ export async function generateMetadata({ params }: PageProps<"/producto/[slug]">
       url: canonical,
       title: product.seoTitle ?? product.name,
       description: description ?? undefined,
-      images,
+      images: ogImages,
     },
     twitter: {
-      card: images.length ? "summary_large_image" : "summary",
+      card: "summary_large_image",
       title: product.seoTitle ?? product.name,
       description: description ?? undefined,
-      images,
+      images: twitterImages,
     },
   };
 }

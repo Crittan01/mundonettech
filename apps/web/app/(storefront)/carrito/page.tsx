@@ -141,28 +141,28 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                           </Link>
                         </h3>
                         <p className="mt-1 font-mono text-xs text-muted-foreground">{line.sku}</p>
-                        <p className="mt-2 text-sm text-muted-foreground">
+                        <p className="mt-2 text-sm text-muted-foreground tabular-nums">
                           {line.quantity} × {formatCopCents(line.unitPriceCents)} · {line.available}{" "}
                           disponibles
                         </p>
                         {BigInt(line.wholesaleDiscountCents) > 0n ? (
-                          <p className="text-sm text-success">
+                          <p className="text-sm text-success tabular-nums">
                             Descuento mayorista: −{formatCopCents(line.wholesaleDiscountCents)}
                           </p>
                         ) : null}
                         {BigInt(line.bundleDiscountCents) > 0n ? (
-                          <p className="text-sm text-success">
+                          <p className="text-sm text-success tabular-nums">
                             Descuento de paquete: −{formatCopCents(line.bundleDiscountCents)}
                           </p>
                         ) : null}
                         {BigInt(line.couponDiscountCents) > 0n ? (
-                          <p className="text-sm text-success">
+                          <p className="text-sm text-success tabular-nums">
                             Cupón distribuido: −{formatCopCents(line.couponDiscountCents)}
                           </p>
                         ) : null}
                       </div>
                       <div className="sm:text-right">
-                        <p className="text-lg font-bold">{linePrice(line)}</p>
+                        <p className="text-lg font-bold tabular-nums">{linePrice(line)}</p>
                         {!line.bundle ? (
                           <div className="mt-4 space-y-2 sm:justify-items-end">
                             <CartQuantityForm
@@ -179,9 +179,9 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
                 );
               })}
             </section>
-            <aside className="space-y-5 rounded-xl border border-border bg-card p-5 lg:sticky lg:top-6">
+            <aside className="space-y-5 rounded-xl border border-border bg-card p-5 lg:sticky lg:top-24">
               <h2 className="text-xl font-bold">Resumen</h2>
-              <dl className="space-y-3 text-sm">
+              <dl className="space-y-3 text-sm tabular-nums">
                 <div className="flex justify-between gap-4">
                   <dt>Subtotal</dt>
                   <dd>{formatCopCents(cart.subtotalCents)}</dd>

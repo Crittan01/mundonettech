@@ -7,6 +7,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { JsonLd } from "@/components/seo/json-ld";
+import { defaultSocialImage } from "@/lib/brand-seo";
 
 export function generateStaticParams() {
   return helpArticles.map((article) => ({ slug: article.slug }));
@@ -27,11 +28,13 @@ export async function generateMetadata({ params }: PageProps<"/ayuda/[slug]">): 
       url: canonical,
       title: article.title,
       description: article.summary,
+      images: [defaultSocialImage],
     },
     twitter: {
-      card: "summary",
+      card: "summary_large_image",
       title: article.title,
       description: article.summary,
+      images: [defaultSocialImage.url],
     },
   };
 }

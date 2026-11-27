@@ -50,9 +50,12 @@ export default async function AdminDashboardPage() {
       {cards.length ? (
         <section aria-label="Indicadores" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {cards.map((card) => (
-            <article key={card.label} className="rounded-xl border border-border bg-card p-5">
+            <article
+              key={card.label}
+              className="rounded-xl border border-border bg-card p-5 shadow-xs"
+            >
               <h2 className="text-sm text-muted-foreground">{card.label}</h2>
-              <p className="mt-3 text-3xl font-bold">{card.value}</p>
+              <p className="mt-3 text-3xl font-bold tabular-nums">{card.value}</p>
             </article>
           ))}
         </section>

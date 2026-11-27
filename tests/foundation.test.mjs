@@ -63,8 +63,8 @@ describe("F0.2 — Store and Theme Configuration Contracts", () => {
     assert.equal(storeConfig.modules.wholesale, true);
   });
 
-  it("maps Tech Precision tokens into semantic CSS custom properties", () => {
-    assert.equal(themeConfig.name, "Tech Precision");
+  it("maps Midnight Cyan tokens into semantic CSS custom properties", () => {
+    assert.equal(themeConfig.name, "Midnight Cyan");
 
     const requiredCssVars = [
       "--background",
@@ -92,6 +92,15 @@ describe("F0.2 — Store and Theme Configuration Contracts", () => {
       "--border",
       "--input",
       "--ring",
+      "--brand-surface",
+      "--brand-surface-elevated",
+      "--brand-surface-foreground",
+      "--brand-surface-muted",
+      "--brand-surface-border",
+      "--brand-surface-input",
+      "--brand-cyan",
+      "--brand-cyan-foreground",
+      "--brand-cyan-muted",
       "--font-sans",
       "--font-mono",
     ];
