@@ -10,7 +10,8 @@ export function assertSafeTestProcess(env = process.env) {
   if (env.EMAIL_SEND_DISABLED !== "1") throw new Error("Tests require EMAIL_SEND_DISABLED=1.");
   if (
     /^production$/i.test(env.VERCEL_ENV ?? "") ||
-    /^(?:prd|prod|production|live)$/i.test(env.APP_ENV ?? "")
+    /^(?:prd|prod|production|live)$/i.test(env.APP_ENV ?? "") ||
+    /^(?:prd|prod|production|live)$/i.test(env.INTEGRATION_ENVIRONMENT ?? "")
   ) {
     throw new Error("Tests cannot run with production environment flags enabled.");
   }
@@ -63,13 +64,13 @@ export function assertSafeTestDatabase(databaseUrl, options = {}) {
 
 export function assertSafeTestEnvironment(
   env = process.env,
-  databaseUrl = env.TEST_DATABASE_URL ?? env.DATABASE_URL,
+  databaseUrl = env.TEST_DATABASE_URL?.trim() || env.DATABASE_URL?.trim(),
 ) {
   assertSafeTestProcess(env);
   if (!databaseUrl) throw new Error("TEST_DATABASE_URL or DATABASE_URL is required.");
   const ci = env.CI === "true";
   const primary = assertSafeTestDatabase(databaseUrl, { ci });
-  for (const candidate of [env.DIRECT_URL, env.DR_DATABASE_URL]) {
+  for (const candidate of [env.DATABASE_URL, env.DIRECT_URL, env.DR_DATABASE_URL]) {
     if (candidate?.trim()) assertSafeTestDatabase(candidate, { ci });
   }
   for (const candidate of [env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_URL]) {
@@ -83,6 +84,7 @@ export function assertSafeTestEnvironment(
     ["MERCADO_LIBRE_TOKEN_URL", env.MERCADO_LIBRE_TOKEN_URL],
     ["MERCADO_LIBRE_API_URL", env.MERCADO_LIBRE_API_URL],
     ["META_CAPI_API_URL", env.META_CAPI_API_URL],
+    ["TURNSTILE_VERIFY_ENDPOINT", env.TURNSTILE_VERIFY_ENDPOINT],
   ]) {
     if (!value?.trim()) continue;
     let r2Url;

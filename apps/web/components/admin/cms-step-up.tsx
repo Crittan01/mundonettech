@@ -8,6 +8,17 @@ export async function CmsStepUp({ session }: { session: AdminSession }) {
     getDatabaseClock(getDatabase()),
     session.supabase.auth.mfa.listFactors(),
   ]);
+  if (factors.error) {
+    return (
+      <p
+        role="alert"
+        className="rounded-lg border border-destructive bg-card p-4 text-sm text-destructive"
+      >
+        No pudimos consultar tu autenticador en este momento. Recarga la página e inténtalo de
+        nuevo.
+      </p>
+    );
+  }
   const factor = factors.data?.totp.find((item) => item.status === "verified");
   if (!factor) return null;
   const mfaAge = session.lastMfaAt ? now.getTime() - session.lastMfaAt.getTime() : null;

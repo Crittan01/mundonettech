@@ -20,6 +20,13 @@ export async function expectMethodAllowlist(
     expect(response.status, method).toBe(405);
     expect(response.headers.get("allow"), method).toBe(allowed);
     expectNoStoreNoIndex(response);
-    expect(await response.json(), method).toEqual({ error: "Method not allowed." });
+    if (method === "HEAD") {
+      const body = await response.text();
+      if (body.length > 0) {
+        expect(JSON.parse(body), method).toEqual({ error: "Method not allowed." });
+      }
+    } else {
+      expect(await response.json(), method).toEqual({ error: "Method not allowed." });
+    }
   }
 }

@@ -89,12 +89,34 @@ export function AdministratorEditor({
   actorRole,
   labels,
 }: {
-  target: { id: string; role: AdminRoleValue; status: "INVITED" | "ACTIVE" | "SUSPENDED" };
+  target: {
+    id: string;
+    role: AdminRoleValue;
+    status: "INVITED" | "ACTIVE" | "SUSPENDED";
+    canReactivate?: boolean;
+  };
   actorRole: AdminRoleValue;
   labels: Record<AdminRoleValue, string>;
 }) {
   const [state, action, pending] = useActionState(updateAdministratorAction, initialActionState);
   const roles = adminRoles.filter((role) => canAssignAdminRole(actorRole, role));
+  const allowedStatuses: Array<{ value: "INVITED" | "ACTIVE" | "SUSPENDED"; label: string }> =
+    target.status === "INVITED"
+      ? [
+          { value: "INVITED", label: "Invitado" },
+          { value: "SUSPENDED", label: "Suspendido" },
+        ]
+      : target.status === "ACTIVE"
+        ? [
+            { value: "ACTIVE", label: "Activo" },
+            { value: "SUSPENDED", label: "Suspendido" },
+          ]
+        : target.canReactivate === false
+          ? [{ value: "SUSPENDED", label: "Suspendido" }]
+          : [
+              { value: "SUSPENDED", label: "Suspendido" },
+              { value: "ACTIVE", label: "Activo" },
+            ];
   if (!canAssignAdminRole(actorRole, target.role)) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -104,6 +126,7 @@ export function AdministratorEditor({
   }
   return (
     <form
+      key={`${target.role}:${target.status}`}
       onSubmit={(event) => {
         event.preventDefault();
         if (pending) return;
@@ -138,9 +161,11 @@ export function AdministratorEditor({
             defaultValue={target.status}
             disabled={pending}
           >
-            <option value="INVITED">Invitado</option>
-            <option value="ACTIVE">Activo</option>
-            <option value="SUSPENDED">Suspendido</option>
+            {allowedStatuses.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </Select>
         </div>
         <Button type="submit" variant="outline" disabled={pending}>

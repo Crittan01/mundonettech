@@ -37,6 +37,7 @@ import {
   assertUuid,
   inInventoryTransaction,
   isSellableVariant,
+  isTransactionConflictError,
 } from "./inventory-shared.js";
 import { acquireIdempotencyKey, completeIdempotencyKey } from "./primitives.js";
 import type { CheckoutDefaults } from "./order-types.js";
@@ -1591,8 +1592,14 @@ export class B2bService {
             return true;
           });
           if (changed) expired += 1;
-        } catch {
-          continue;
+        } catch (error) {
+          if (
+            (error instanceof B2bError && error.code === "CONFLICT") ||
+            isTransactionConflictError(error)
+          ) {
+            continue;
+          }
+          throw error;
         }
       }
     }

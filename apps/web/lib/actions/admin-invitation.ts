@@ -1,5 +1,7 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
+
 import { normalizeEmail, validatePasswordPolicy } from "@mundonettech/core";
 import { consumeOperationRateLimit, OperationRateLimitError } from "@mundonettech/db";
 import { redirect } from "next/navigation";
@@ -9,7 +11,7 @@ import { actionError, formEntries, type ActionState } from "@/lib/action-state";
 import { getDatabase } from "@/lib/db";
 import { clearActivityCookies } from "@/lib/security/activity-cookies";
 import { isPasswordCompromised } from "@/lib/security/hibp";
-import { getRequestSecurityContext } from "@/lib/security/request-context";
+import { getRequestSecurityContext, recordSecurityEvent } from "@/lib/security/request-context";
 import { verifyTurnstileToken } from "@/lib/security/turnstile";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
@@ -93,13 +95,25 @@ export async function acceptAdminInvitationAction(
     await supabase.auth.signOut({ scope: "local" });
     return actionError("No pudimos establecer la contraseña. Solicita una invitación nueva.");
   }
+  let activatedId: string;
   try {
-    await getDatabase().$transaction(async (tx) => {
+    activatedId = await getDatabase().$transaction(async (tx) => {
+      if (typeof tx.$executeRaw === "function") {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('admin-role-membership', 0))`;
+      }
       const profile = await tx.adminUser.findFirst({
         where: { authUserId: authUser.id, status: "INVITED", deletedAt: null },
       });
       if (!profile) throw new Error("Invitation profile unavailable.");
-      await tx.adminUser.update({ where: { id: profile.id }, data: { status: "ACTIVE" } });
+      if (typeof tx.adminUser.updateMany === "function") {
+        const updatedProfile = await tx.adminUser.updateMany({
+          where: { id: profile.id, status: "INVITED", deletedAt: null },
+          data: { status: "ACTIVE" },
+        });
+        if (updatedProfile.count !== 1) throw new Error("Invitation profile unavailable.");
+      } else {
+        await tx.adminUser.update({ where: { id: profile.id }, data: { status: "ACTIVE" } });
+      }
       await tx.adminActionLog.create({
         data: {
           actorAdminUserId: profile.id,
@@ -107,17 +121,28 @@ export async function acceptAdminInvitationAction(
           action: "ADMIN_INVITATION_ACCEPTED",
           targetType: "AdminUser",
           targetId: profile.id,
+          requestId: randomUUID(),
           ipHash: context.ipHash,
           userAgentHash: context.userAgentHash,
           metadata: { source: "email_invitation" },
         },
       });
+      return profile.id;
     });
   } catch {
     await supabase.auth.signOut({ scope: "local" });
     return actionError(
       "No pudimos activar el perfil administrativo. Contacta al administrador que te invitó.",
     );
+  }
+  try {
+    await recordSecurityEvent(getDatabase(), {
+      context,
+      eventType: "ADMIN_INVITATION_ACCEPTED",
+      adminUserId: activatedId,
+    });
+  } catch {
+    // Non-blocking after durable activation commit and AdminActionLog persistence.
   }
   await supabase.auth.signOut({ scope: "local" });
   await clearActivityCookies();

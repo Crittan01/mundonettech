@@ -1,4 +1,4 @@
-import { matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
+import { verifyCronBearer } from "@mundonettech/core";
 import { OperationalHealthService, OperationsService } from "@mundonettech/db";
 
 import { getDatabase } from "@/lib/db";
@@ -31,15 +31,17 @@ export const DELETE = methodNotAllowed;
 export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
-  const secret = process.env.HEALTH_CRON_SECRET?.trim() ?? "";
-  const authorization = request.headers.get("authorization") ?? "";
-  if (secret.length < 16) {
+  const auth = verifyCronBearer(
+    request.headers.get("authorization"),
+    process.env.HEALTH_CRON_SECRET,
+  );
+  if (auth === "UNCONFIGURED") {
     return Response.json(
       { error: "Health scheduler is not configured." },
       { status: 503, headers },
     );
   }
-  if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
+  if (auth === "UNAUTHORIZED") {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers });
   }
   try {

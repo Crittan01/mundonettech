@@ -142,8 +142,6 @@ try {
   }
   console.log(`k6 load and ${verification.checks.length} database invariants passed.`);
 } finally {
-  if (gateway) await gateway.close();
-  if (runtime) await runtime.stop();
-  if (authFixture) await authFixture.stop();
+  await Promise.allSettled([gateway?.close(), runtime?.stop(), authFixture?.stop()]);
   await harness.stop();
 }

@@ -21,7 +21,6 @@ try {
   });
   await verifyWebSecurity(runtime.origin, runtime.environment);
 } finally {
-  if (runtime) await runtime.stop();
-  if (authFixture) await authFixture.stop();
+  await Promise.allSettled([runtime?.stop(), authFixture?.stop()]);
   await harness.stop();
 }

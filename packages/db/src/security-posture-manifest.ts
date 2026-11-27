@@ -11669,6 +11669,18 @@ export const securityPostureManifest = {
       definition: 'CREATE UNIQUE INDEX "Address_pkey" ON public."Address" USING btree (id)',
     },
     {
+      name: "AdminActionLog_action_createdAt_id_idx",
+      table: "AdminActionLog",
+      method: "btree",
+      unique: false,
+      valid: true,
+      ready: true,
+      columns: ["action", '"createdAt"', "id"],
+      predicate: null,
+      definition:
+        'CREATE INDEX "AdminActionLog_action_createdAt_id_idx" ON public."AdminActionLog" USING btree (action, "createdAt" DESC, id DESC)',
+    },
+    {
       name: "AdminActionLog_actorAdminUserId_createdAt_idx",
       table: "AdminActionLog",
       method: "btree",
@@ -11679,6 +11691,18 @@ export const securityPostureManifest = {
       predicate: null,
       definition:
         'CREATE INDEX "AdminActionLog_actorAdminUserId_createdAt_idx" ON public."AdminActionLog" USING btree ("actorAdminUserId", "createdAt")',
+    },
+    {
+      name: "AdminActionLog_createdAt_id_idx",
+      table: "AdminActionLog",
+      method: "btree",
+      unique: false,
+      valid: true,
+      ready: true,
+      columns: ['"createdAt"', "id"],
+      predicate: null,
+      definition:
+        'CREATE INDEX "AdminActionLog_createdAt_id_idx" ON public."AdminActionLog" USING btree ("createdAt" DESC, id DESC)',
     },
     {
       name: "AdminActionLog_pkey",
@@ -11727,6 +11751,18 @@ export const securityPostureManifest = {
       predicate: null,
       definition:
         'CREATE INDEX "AdminActionLog_targetAdminUserId_createdAt_idx" ON public."AdminActionLog" USING btree ("targetAdminUserId", "createdAt")',
+    },
+    {
+      name: "AdminActionLog_targetType_createdAt_id_idx",
+      table: "AdminActionLog",
+      method: "btree",
+      unique: false,
+      valid: true,
+      ready: true,
+      columns: ['"targetType"', '"createdAt"', "id"],
+      predicate: null,
+      definition:
+        'CREATE INDEX "AdminActionLog_targetType_createdAt_id_idx" ON public."AdminActionLog" USING btree ("targetType", "createdAt" DESC, id DESC)',
     },
     {
       name: "AdminRecoveryCode_adminUserId_codeHash_key",
@@ -17708,6 +17744,30 @@ export const securityPostureManifest = {
         'CREATE INDEX "SecurityEvent_adminUserId_occurredAt_idx" ON public."SecurityEvent" USING btree ("adminUserId", "occurredAt")',
     },
     {
+      name: "SecurityEvent_admin_dedup_key",
+      table: "SecurityEvent",
+      method: "btree",
+      unique: true,
+      valid: true,
+      ready: true,
+      columns: ['"eventType"', '"adminUserId"', '"ipHash"', '"dedupMinute"'],
+      predicate: '"adminUserId" IS NOT NULL',
+      definition:
+        'CREATE UNIQUE INDEX "SecurityEvent_admin_dedup_key" ON public."SecurityEvent" USING btree ("eventType", "adminUserId", "ipHash", "dedupMinute") WHERE ("adminUserId" IS NOT NULL)',
+    },
+    {
+      name: "SecurityEvent_anon_dedup_key",
+      table: "SecurityEvent",
+      method: "btree",
+      unique: true,
+      valid: true,
+      ready: true,
+      columns: ['"eventType"', '"ipHash"', '"dedupMinute"'],
+      predicate: '"adminUserId" IS NULL',
+      definition:
+        'CREATE UNIQUE INDEX "SecurityEvent_anon_dedup_key" ON public."SecurityEvent" USING btree ("eventType", "ipHash", "dedupMinute") WHERE ("adminUserId" IS NULL)',
+    },
+    {
       name: "SecurityEvent_customerId_occurredAt_idx",
       table: "SecurityEvent",
       method: "btree",
@@ -17720,16 +17780,16 @@ export const securityPostureManifest = {
         'CREATE INDEX "SecurityEvent_customerId_occurredAt_idx" ON public."SecurityEvent" USING btree ("customerId", "occurredAt")',
     },
     {
-      name: "SecurityEvent_eventType_ipHash_dedupMinute_key",
+      name: "SecurityEvent_occurredAt_idx",
       table: "SecurityEvent",
       method: "btree",
-      unique: true,
+      unique: false,
       valid: true,
       ready: true,
-      columns: ['"eventType"', '"ipHash"', '"dedupMinute"'],
+      columns: ['"occurredAt"'],
       predicate: null,
       definition:
-        'CREATE UNIQUE INDEX "SecurityEvent_eventType_ipHash_dedupMinute_key" ON public."SecurityEvent" USING btree ("eventType", "ipHash", "dedupMinute")',
+        'CREATE INDEX "SecurityEvent_occurredAt_idx" ON public."SecurityEvent" USING btree ("occurredAt")',
     },
     {
       name: "SecurityEvent_pkey",
@@ -22504,6 +22564,7 @@ export const securityPostureManifest = {
     "20261125150000_a8_channel_order_integrity",
     "20261125230000_a8_meta_capi_consent_cancellation",
     "20261126120000_a8_audit_hardening",
+    "20261126220000_a10_ops_audit_indexes",
   ],
   signedColumns: [
     {

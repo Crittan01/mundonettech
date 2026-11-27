@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
+import { hasAdminPermission, verifyCronBearer } from "@mundonettech/core";
 import { OperationsService } from "@mundonettech/db";
 import { revalidateTag } from "next/cache";
 import { z } from "zod";
@@ -39,18 +39,52 @@ export const PATCH = methodNotAllowed;
 export const DELETE = methodNotAllowed;
 export const OPTIONS = methodNotAllowed;
 
+const closedStageErrorCodes = new Set([
+  "FORBIDDEN",
+  "ENVIRONMENT_MISMATCH",
+  "CONFLICT",
+  "NOT_FOUND",
+  "INVALID_INPUT",
+  "REAUTH_REQUIRED",
+  "REFRESH_IN_PROGRESS",
+  "RATE_LIMITED",
+  "PROVIDER_UNCERTAIN",
+  "INVALID_RESPONSE",
+  "RECONCILE_REQUIRED",
+  "CLAIM_EXPIRED",
+  "CHANNEL_SYNC_UNCERTAIN",
+]);
+
+function isForbiddenDomainError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "FORBIDDEN" &&
+    (!("reason" in error) || error.reason !== "ENVIRONMENT_MISMATCH")
+  );
+}
+
 export async function POST(request: Request) {
-  const secret = process.env.CHANNEL_CRON_SECRET?.trim() ?? "";
-  const actorId = process.env.CHANNEL_JOB_ACTOR_ID?.trim() ?? "";
-  const authorization = request.headers.get("authorization") ?? "";
-  if (secret.length < 16 || !z.uuid().safeParse(actorId).success) {
+  const auth = verifyCronBearer(
+    request.headers.get("authorization"),
+    process.env.CHANNEL_CRON_SECRET,
+  );
+  if (auth === "UNCONFIGURED") {
     return Response.json(
       { error: "Channel scheduler is not configured." },
       { status: 503, headers },
     );
   }
-  if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
+  if (auth === "UNAUTHORIZED") {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers });
+  }
+  const actorId = process.env.CHANNEL_JOB_ACTOR_ID?.trim() ?? "";
+  if (!z.uuid().safeParse(actorId).success) {
+    return Response.json(
+      { error: "Channel scheduler is not configured." },
+      { status: 503, headers },
+    );
   }
   try {
     const db = getDatabase();
@@ -77,11 +111,12 @@ export async function POST(request: Request) {
         typeof error === "object" &&
         error !== null &&
         "code" in error &&
-        typeof error.code === "string"
+        typeof error.code === "string" &&
+        closedStageErrorCodes.has(error.code)
       ) {
         return error.code;
       }
-      return error instanceof Error ? error.name : "STAGE_FAILED";
+      return "STAGE_FAILED";
     };
 
     let refresh: Awaited<
@@ -93,6 +128,12 @@ export async function POST(request: Request) {
         errors.push({ stage: "refreshDueAccounts", code: "REFRESH_INCOMPLETE" });
       }
     } catch (error) {
+      if (isForbiddenDomainError(error)) {
+        return Response.json(
+          { error: "Scheduler actor is not authorized." },
+          { status: 403, headers },
+        );
+      }
       errors.push({ stage: "refreshDueAccounts", code: stageErrorCode(error) });
     }
 
@@ -107,6 +148,12 @@ export async function POST(request: Request) {
       if (ingestion.claimed > 0) revalidateTag("catalog:inventory", { expire: 0 });
     } catch (error) {
       revalidateTag("catalog:inventory", { expire: 0 });
+      if (isForbiddenDomainError(error)) {
+        return Response.json(
+          { error: "Scheduler actor is not authorized." },
+          { status: 403, headers },
+        );
+      }
       errors.push({ stage: "processResourceEvents", code: stageErrorCode(error) });
     }
 
@@ -133,6 +180,12 @@ export async function POST(request: Request) {
           }
         }
       } catch (error) {
+        if (isForbiddenDomainError(error)) {
+          return Response.json(
+            { error: "Scheduler actor is not authorized." },
+            { status: 403, headers },
+          );
+        }
         errors.push({ stage: "processSyncJobs", code: stageErrorCode(error) });
       }
     } else if (ingestion !== null) {

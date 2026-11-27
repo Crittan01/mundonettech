@@ -23,14 +23,17 @@ function variable(status, name) {
 }
 
 async function expectOk(name, url, headers) {
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`${name} returned HTTP ${response.status}.`);
   console.log(`${name}: HTTP ${response.status}.`);
 }
 
 async function expectRestDenied(roleLabel, apiUrl, key, tableName) {
   const headers = { apikey: key, Authorization: `Bearer ${key}` };
-  const rest = await fetch(`${apiUrl}/rest/v1/${tableName}?select=*`, { headers });
+  const rest = await fetch(`${apiUrl}/rest/v1/${tableName}?select=*`, {
+    headers,
+    signal: AbortSignal.timeout(10_000),
+  });
   const restBody = await rest.text();
   if (![401, 403].includes(rest.status) || !restBody.includes("42501")) {
     throw new Error(
@@ -60,10 +63,16 @@ const databaseUrl =
   variable(status, "DB_URL") ??
   "postgresql://postgres:postgres@127.0.0.1:54422/postgres";
 
-const database = new pg.Client({ connectionString: databaseUrl });
-await database.connect();
-await database.query("NOTIFY pgrst, 'reload schema'");
-await database.end();
+const database = new pg.Client({
+  connectionString: databaseUrl,
+  connectionTimeoutMillis: 10_000,
+});
+try {
+  await database.connect();
+  await database.query("NOTIFY pgrst, 'reload schema'");
+} finally {
+  await database.end().catch(() => undefined);
+}
 await new Promise((resolve) => setTimeout(resolve, 1_000));
 
 await expectRestDenied("anon", apiUrl, anonKey, "AdminUser");
@@ -71,9 +80,13 @@ await expectRestDenied("anon", apiUrl, anonKey, "IntegrationCredential");
 await expectRestDenied("service_role", apiUrl, serviceRoleKey, "AdminUser");
 await expectRestDenied("service_role", apiUrl, serviceRoleKey, "IntegrationCredential");
 
+const studioUrl = variable(status, "STUDIO_URL") ?? "http://127.0.0.1:54423";
+const mailpitUrl =
+  variable(status, "MAILPIT_URL") ?? variable(status, "INBUCKET_URL") ?? "http://127.0.0.1:54424";
+
 await expectOk("Supabase Auth", `${apiUrl}/auth/v1/health`, {
   apikey: anonKey,
   Authorization: `Bearer ${anonKey}`,
 });
-await expectOk("Supabase Studio", "http://127.0.0.1:54423");
-await expectOk("Mailpit", "http://127.0.0.1:54424");
+await expectOk("Supabase Studio", studioUrl);
+await expectOk("Mailpit", mailpitUrl);

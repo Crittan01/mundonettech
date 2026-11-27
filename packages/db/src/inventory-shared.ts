@@ -184,8 +184,14 @@ function findMatchingCode(error: unknown, codes: ReadonlySet<string>, depth = 0)
   return null;
 }
 
+const transactionConflictCodes = new Set(["P2034", "40001", "40P01"]);
+
 export function hasUniqueViolation(error: unknown): boolean {
   return findMatchingCode(error, uniqueViolationCodes) !== null;
+}
+
+export function isTransactionConflictError(error: unknown): boolean {
+  return findMatchingCode(error, transactionConflictCodes) !== null;
 }
 
 export async function inInventoryTransaction<T>(

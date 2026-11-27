@@ -57,12 +57,18 @@ export type ChannelOrderErrorCode =
   | "STALE_EVENT";
 
 export class ChannelOrderError extends Error {
+  readonly reason?: "ACTOR_UNAUTHORIZED" | "ENVIRONMENT_MISMATCH" | undefined;
+
   constructor(
     readonly code: ChannelOrderErrorCode,
     message: string,
+    options?: { readonly reason?: "ACTOR_UNAUTHORIZED" | "ENVIRONMENT_MISMATCH" },
   ) {
     super(message);
     this.name = "ChannelOrderError";
+    if (options?.reason !== undefined) {
+      this.reason = options.reason;
+    }
   }
 }
 
@@ -368,7 +374,9 @@ export class ChannelOrderService {
 
   private reveal(account: AccountWithCredential) {
     if (account.environment !== this.options.ring.environment) {
-      throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.");
+      throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.", {
+        reason: "ENVIRONMENT_MISMATCH",
+      });
     }
     if (
       account.status !== "ACTIVE" ||
@@ -406,7 +414,9 @@ export class ChannelOrderService {
     });
     if (!account) throw new ChannelOrderError("NOT_FOUND", "Channel account was not found.");
     if (account.environment !== this.options.ring.environment) {
-      throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.");
+      throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.", {
+        reason: "ENVIRONMENT_MISMATCH",
+      });
     }
     return account;
   }
@@ -495,7 +505,9 @@ export class ChannelOrderService {
     await tx.$executeRaw`SELECT "id" FROM "ChannelAccount" WHERE "id" = ${accountId}::uuid FOR SHARE`;
     const current = await tx.channelAccount.findUnique({ where: { id: accountId } });
     if (current && current.environment !== this.options.ring.environment) {
-      throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.");
+      throw new ChannelOrderError("FORBIDDEN", "The channel belongs to another environment.", {
+        reason: "ENVIRONMENT_MISMATCH",
+      });
     }
     if (
       !current ||
@@ -1879,7 +1891,9 @@ export class ChannelOrderService {
       });
       if (!order) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
       if (order.account.environment !== this.options.ring.environment) {
-        throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.");
+        throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.", {
+          reason: "ENVIRONMENT_MISMATCH",
+        });
       }
       if (!["NOT_REQUIRED", "REVIEW_REQUIRED"].includes(order.stockStatus)) {
         throw new ChannelOrderError("CONFLICT", "Reserved stock origins cannot be reassigned.");
@@ -1951,7 +1965,9 @@ export class ChannelOrderService {
     });
     if (!order) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
     if (order.account.environment !== this.options.ring.environment) {
-      throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.");
+      throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.", {
+        reason: "ENVIRONMENT_MISMATCH",
+      });
     }
     if (!order.variantId || !order.offer) return [];
     const expectedType = order.offer.logisticType === "FULFILLMENT" ? "MELI_FULL" : "LOCAL_MAIN";
@@ -2006,7 +2022,9 @@ export class ChannelOrderService {
       });
       if (!order) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
       if (order.account.environment !== this.options.ring.environment) {
-        throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.");
+        throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.", {
+          reason: "ENVIRONMENT_MISMATCH",
+        });
       }
       if (order.version !== options.expectedVersion) {
         throw new ChannelOrderError("CONFLICT", "The order changed during reconciliation.");
@@ -2088,7 +2106,9 @@ export class ChannelOrderService {
       });
       if (!order) throw new ChannelOrderError("NOT_FOUND", "Channel order was not found.");
       if (order.account.environment !== this.options.ring.environment) {
-        throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.");
+        throw new ChannelOrderError("FORBIDDEN", "The order belongs to another environment.", {
+          reason: "ENVIRONMENT_MISMATCH",
+        });
       }
       const deduplicationKey = `channel-ledger:${order.id}:MANUAL:${idempotencyKey}`;
       const hash = digest({
@@ -2334,11 +2354,21 @@ export class ChannelOrderService {
         }
         completed += 1;
       } catch (error) {
+        if (
+          error instanceof ChannelOrderError &&
+          error.code === "FORBIDDEN" &&
+          error.reason !== "ENVIRONMENT_MISMATCH"
+        ) {
+          throw error;
+        }
         const code =
-          error instanceof MercadoLibreCatalogError || error instanceof ChannelOrderError
-            ? error.code
-            : "CHANNEL_SYNC_UNCERTAIN";
-        const terminal = event.attempts >= 8 || code === "INVALID_INPUT";
+          error instanceof ChannelOrderError && error.reason === "ENVIRONMENT_MISMATCH"
+            ? "ENVIRONMENT_MISMATCH"
+            : error instanceof MercadoLibreCatalogError || error instanceof ChannelOrderError
+              ? error.code
+              : "CHANNEL_SYNC_UNCERTAIN";
+        const terminal =
+          event.attempts >= 8 || code === "INVALID_INPUT" || code === "ENVIRONMENT_MISMATCH";
         if (terminal) {
           const failedNow = await failDomainOutbox(this.db, {
             id: event.id,

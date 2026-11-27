@@ -10,11 +10,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { single } from "@/lib/admin-search-params";
 import { getDatabase } from "@/lib/db";
 import { requireAdminPage } from "@/lib/security/admin-auth";
 
 export const metadata = { title: "Auditoría administrativa" };
 const pageSize = 30;
+const maxPage = 10_000;
+const numberFormatter = new Intl.NumberFormat("es-CO");
 const formatter = new Intl.DateTimeFormat("es-CO", {
   timeZone: "America/Bogota",
   dateStyle: "short",
@@ -57,34 +60,55 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
   const canReadUsers = hasAdminPermission(session.profile.role, "users:read");
   const canReadOwnSecurity = hasAdminPermission(session.profile.role, "security:read_own");
   const params = await searchParams;
-  const actor = typeof params.actor === "string" ? params.actor.trim().slice(0, 100) : "";
-  const rawAction =
-    typeof params.action === "string" ? params.action.trim().toUpperCase().slice(0, 100) : "";
+  const actor = (single(params.actor) ?? "").trim().slice(0, 100);
+  const rawAction = (single(params.action) ?? "").trim().toUpperCase().slice(0, 100);
   const invalidAction = rawAction.length > 0 && !/^[A-Z0-9_]{1,100}$/.test(rawAction);
   const action = !invalidAction ? rawAction : "";
+  const rawTargetType = (single(params.targetType) ?? "").trim().slice(0, 100);
+  const invalidTargetType =
+    rawTargetType.length > 0 && !/^[A-Za-z0-9_]{1,100}$/.test(rawTargetType);
+  const targetType = !invalidTargetType ? rawTargetType : "";
+  const rawSelfDealing = single(params.selfDealing);
   const selfDealing =
-    params.selfDealing === "true" ? true : params.selfDealing === "false" ? false : undefined;
-  const parsedFrom = parseCalendarDate(params.from);
-  const parsedTo = parseCalendarDate(params.to, true);
+    rawSelfDealing === "true" ? true : rawSelfDealing === "false" ? false : undefined;
+  const parsedFrom = parseCalendarDate(single(params.from));
+  const parsedTo = parseCalendarDate(single(params.to), true);
   const from = parsedFrom.date;
   const to = parsedTo.date;
   const invalidDate = parsedFrom.invalid || parsedTo.invalid;
   const invalidRange = from !== undefined && to !== undefined && from > to;
-  const invalidQuery = invalidAction || invalidDate || invalidRange;
+  const validationErrors = [
+    invalidAction
+      ? "El código de acción solo admite letras, números y guion bajo (por ejemplo, ADMIN_USER_UPDATED)."
+      : null,
+    invalidTargetType
+      ? "El tipo de entidad solo admite letras, números y guion bajo (por ejemplo, AdminUser)."
+      : null,
+    invalidDate ? "Ingresa fechas de calendario válidas en formato AAAA-MM-DD." : null,
+    invalidRange ? "La fecha inicial no puede ser posterior a la final." : null,
+  ].filter((message): message is string => message !== null);
+  const invalidQuery = validationErrors.length > 0;
+  const rawPage = single(params.page)?.trim() ?? "";
+  const parsedPage = /^[1-9]\d*$/.test(rawPage) ? Number.parseInt(rawPage, 10) : 1;
   const requestedPage = Math.max(
     1,
-    Math.min(10_000, Number.parseInt(String(params.page ?? "1"), 10) || 1),
+    Math.min(maxPage, Number.isSafeInteger(parsedPage) ? parsedPage : 1),
   );
   const where = {
     ...(actor
-      ? {
-          OR: [
-            { actor: { email: { contains: actor, mode: "insensitive" as const } } },
-            { actor: { displayName: { contains: actor, mode: "insensitive" as const } } },
-          ],
-        }
+      ? canReadUsers
+        ? {
+            OR: [
+              { actor: { email: { contains: actor, mode: "insensitive" as const } } },
+              { actor: { displayName: { contains: actor, mode: "insensitive" as const } } },
+            ],
+          }
+        : {
+            actor: { displayName: { contains: actor, mode: "insensitive" as const } },
+          }
       : {}),
     ...(action ? { action } : {}),
+    ...(targetType ? { targetType } : {}),
     ...(selfDealing === undefined ? {} : { selfDealing }),
     ...(from || to
       ? { createdAt: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } }
@@ -92,7 +116,7 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
   };
   const db = getDatabase();
   const total = invalidQuery ? 0 : await db.adminActionLog.count({ where });
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const totalPages = Math.max(1, Math.min(maxPage, Math.ceil(total / pageSize)));
   const page = Math.min(requestedPage, totalPages);
   const logs = invalidQuery
     ? []
@@ -117,6 +141,7 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
   const filters: Record<string, string> = {
     ...(actor ? { actor } : {}),
     ...(action ? { action } : {}),
+    ...(targetType ? { targetType } : {}),
     ...(selfDealing !== undefined ? { selfDealing: String(selfDealing) } : {}),
     ...(from ? { from: parsedFrom.raw } : {}),
     ...(to ? { to: parsedTo.raw } : {}),
@@ -124,6 +149,7 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
   const hasFilters = Boolean(
     actor ||
     rawAction ||
+    rawTargetType ||
     selfDealing !== undefined ||
     parsedFrom.raw ||
     parsedTo.raw ||
@@ -154,13 +180,19 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
         </div>
       </div>
       <form
-        key={`${actor}|${rawAction}|${parsedFrom.raw}|${parsedTo.raw}|${selfDealing === undefined ? "" : String(selfDealing)}`}
+        key={`${actor}|${rawAction}|${rawTargetType}|${parsedFrom.raw}|${parsedTo.raw}|${selfDealing === undefined ? "" : String(selfDealing)}`}
         action="/admin/auditoria"
-        className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-5"
+        className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-6"
       >
         <div className="space-y-2">
           <Label htmlFor="audit-actor">Actor</Label>
-          <Input id="audit-actor" name="actor" defaultValue={actor} maxLength={100} />
+          <Input
+            id="audit-actor"
+            name="actor"
+            defaultValue={actor}
+            maxLength={100}
+            placeholder={canReadUsers ? "Nombre o correo" : "Nombre"}
+          />
         </div>
         <div className="space-y-2">
           <Label htmlFor="audit-action">Acción</Label>
@@ -170,6 +202,16 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
             defaultValue={rawAction}
             maxLength={100}
             placeholder="ADMIN_USER_UPDATED"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="audit-target-type">Entidad</Label>
+          <Input
+            id="audit-target-type"
+            name="targetType"
+            defaultValue={rawTargetType}
+            maxLength={100}
+            placeholder="AdminUser"
           />
         </div>
         <div className="space-y-2">
@@ -197,7 +239,7 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
             <option value="false">No</option>
           </Select>
         </div>
-        <div className="flex flex-wrap items-center gap-3 sm:col-span-2 lg:col-span-5">
+        <div className="flex flex-wrap items-center gap-3 sm:col-span-2 lg:col-span-6">
           <Button type="submit">Aplicar filtros</Button>
           {hasFilters ? (
             <Link
@@ -209,32 +251,19 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
           ) : null}
         </div>
       </form>
-      {invalidAction ? (
-        <p
+      {validationErrors.length > 0 ? (
+        <div
           role="alert"
-          className="rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
+          className="space-y-1 rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
         >
-          El código de acción solo admite letras, números y guion bajo (por ejemplo,
-          ADMIN_USER_UPDATED).
-        </p>
-      ) : invalidDate ? (
-        <p
-          role="alert"
-          className="rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
-        >
-          Ingresa fechas de calendario válidas en formato AAAA-MM-DD.
-        </p>
-      ) : invalidRange ? (
-        <p
-          role="alert"
-          className="rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
-        >
-          La fecha inicial no puede ser posterior a la final.
-        </p>
+          {validationErrors.map((message) => (
+            <p key={message}>{message}</p>
+          ))}
+        </div>
       ) : null}
       {!invalidQuery && logs.length ? (
         <div className="space-y-4">
-          {logs.map((log) => (
+          {logs.map((log, index) => (
             <article key={log.id} className="rounded-xl border border-border bg-card p-5">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
@@ -278,7 +307,7 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
                 <pre
                   tabIndex={0}
                   role="region"
-                  aria-label="Detalle del registro de auditoría"
+                  aria-label={`Detalle del registro ${index + 1}: ${log.action}`}
                   className="mt-2 max-h-72 overflow-auto rounded-md bg-secondary p-3 text-xs whitespace-pre-wrap outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {JSON.stringify(sanitizeAuditValue(log.metadata), null, 2)}
@@ -300,24 +329,19 @@ export default async function AuditPage({ searchParams }: PageProps<"/admin/audi
           aria-label="Paginación de auditoría"
         >
           <span className="text-sm text-muted-foreground">
-            Página {page} de {totalPages} · {total} registros
+            Página {page} de {totalPages} · {numberFormatter.format(total)}{" "}
+            {total === 1 ? "registro" : "registros"}
           </span>
           <div className="flex gap-2">
             {page > 1 ? (
-              <Link
-                className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
-                href={href(filters, page - 1)}
-              >
-                Anterior
-              </Link>
+              <Button asChild variant="outline" size="sm">
+                <Link href={href(filters, page - 1)}>Anterior</Link>
+              </Button>
             ) : null}
             {page < totalPages ? (
-              <Link
-                className="rounded-md border border-border px-3 py-2 text-sm hover:bg-secondary/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
-                href={href(filters, page + 1)}
-              >
-                Siguiente
-              </Link>
+              <Button asChild variant="outline" size="sm">
+                <Link href={href(filters, page + 1)}>Siguiente</Link>
+              </Button>
             ) : null}
           </div>
         </nav>

@@ -19,6 +19,10 @@ export function validateDocs({ files, readText }) {
   let totalBytes = 0;
 
   for (const document of level0Documents) {
+    if (!files.includes(document.path)) {
+      errors.push(`${document.path}: required Level 0 document is missing.`);
+      continue;
+    }
     const text = readText(document.path);
     const bytes = Buffer.byteLength(text);
     const lines = text.split(/\r\n|\r|\n/).length - (text.endsWith("\n") ? 1 : 0);
@@ -34,12 +38,14 @@ export function validateDocs({ files, readText }) {
   }
 
   for (const file of files) {
-    if (!file.startsWith("docs/") || !file.endsWith(".md")) continue;
+    if (!/\.md$/i.test(file)) continue;
 
     if (forbiddenDocPathPattern.test(file)) {
       errors.push(`${file}: dated chronicles, changelogs, and archived docs are forbidden.`);
       continue;
     }
+
+    if (!file.startsWith("docs/")) continue;
 
     const text = readText(file);
     if (datedHeadingPattern.test(text)) {

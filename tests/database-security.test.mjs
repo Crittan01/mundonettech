@@ -205,7 +205,7 @@ describe("F0.3 — PostgreSQL 17 migration and security posture", () => {
     const migrations = await admin.query(
       "SELECT migration_name FROM _prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL",
     );
-    assert.equal(migrations.rows.length, 47);
+    assert.equal(migrations.rows.length, 48);
   });
 
   it("forces RLS on every application table and denies rows even with SQL grants", async () => {
@@ -847,6 +847,28 @@ describe("F0.3 — relational integrity and immutable security records", () => {
     await expectSqlViolation(
       admin.query('DELETE FROM "SecurityEvent" WHERE "id" = $1', [inserted.rows[0].id]),
       "55000",
+    );
+
+    const adminOne = await createAdmin({ role: "SUPERADMIN" });
+    const adminTwo = await createAdmin({ role: "OPERATIONS_MANAGER" });
+    const sharedMinute = new Date("2026-01-15T14:22:10.000Z");
+    await admin.query(
+      `INSERT INTO "SecurityEvent" ("adminUserId", "eventType", "ipHash", "occurredAt")
+       VALUES ($1, 'ADMIN_MFA_VERIFIED', $2, $3)`,
+      [adminOne.id, ipHash, sharedMinute],
+    );
+    await admin.query(
+      `INSERT INTO "SecurityEvent" ("adminUserId", "eventType", "ipHash", "occurredAt")
+       VALUES ($1, 'ADMIN_MFA_VERIFIED', $2, $3)`,
+      [adminTwo.id, ipHash, new Date("2026-01-15T14:22:45.000Z")],
+    );
+    await expectSqlViolation(
+      admin.query(
+        `INSERT INTO "SecurityEvent" ("adminUserId", "eventType", "ipHash", "occurredAt")
+         VALUES ($1, 'ADMIN_MFA_VERIFIED', $2, $3)`,
+        [adminOne.id, ipHash, new Date("2026-01-15T14:22:55.000Z")],
+      ),
+      "23505",
     );
   });
 

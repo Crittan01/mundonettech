@@ -1,3 +1,7 @@
+import {
+  readValidatedGpgPassphraseFile,
+  validateGpgPassphraseValue,
+} from "./lib/recovery-config.mjs";
 import { validateReleaseConfiguration, verifyReleaseHttp } from "./lib/release-readiness.mjs";
 
 const targetEnvironment = process.env.RELEASE_ENVIRONMENT;
@@ -9,6 +13,18 @@ if (!process.env.RELEASE_TARGET_URL) {
 }
 
 const configuration = validateReleaseConfiguration(process.env);
+const passphraseFile = process.env.BACKUP_GPG_PASSPHRASE_FILE?.trim();
+if (passphraseFile) {
+  let filePassed = false;
+  try {
+    const value = await readValidatedGpgPassphraseFile(passphraseFile);
+    validateGpgPassphraseValue(value);
+    filePassed = !/^REPLACE_WITH_/i.test(value);
+  } catch {
+    filePassed = false;
+  }
+  configuration.push({ name: "release.backupGpgPassphraseFile", passed: filePassed });
+}
 const failedConfiguration = configuration.filter((check) => !check.passed);
 for (const check of configuration) {
   console.log(`${check.passed ? "PASS" : "FAIL"} ${check.name}`);

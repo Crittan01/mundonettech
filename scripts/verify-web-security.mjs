@@ -501,6 +501,9 @@ export async function verifyWebSecurity(
     ["/admin/lifecycle", "/admin/login"],
     ["/admin/analitica-rfm", "/admin/login"],
     ["/admin/salud", "/admin/login"],
+    ["/admin/usuarios", "/admin/login"],
+    ["/admin/seguridad", "/admin/login"],
+    ["/admin/auditoria", "/admin/login"],
     ["/admin/canales", "/admin/login"],
     ["/admin/integraciones", "/admin/login"],
     ["/admin/b2b", "/admin/login"],
@@ -514,11 +517,19 @@ export async function verifyWebSecurity(
   ]) {
     const response = await request(origin, routePath);
     const location = response.headers.get("location") ?? "";
+    const resolvedLocation = new URL(location, origin);
     requireCondition(
-      [302, 307, 308].includes(response.status) && location.includes(expected),
+      [302, 307, 308].includes(response.status) &&
+        resolvedLocation.origin === origin &&
+        resolvedLocation.pathname === expected,
       `${routePath}: unsafe unauthenticated response ${response.status} ${location}.`,
     );
     requireCondition(!location.includes("evil.example"), `${routePath}: open redirect detected.`);
+    requireCondition(
+      !response.headers.has("set-cookie"),
+      `${routePath}: unauthenticated redirect must not set cookies.`,
+    );
+    verifyNoStoreNoIndexNosniff(response, `GET ${routePath}`);
   }
 
   for (const unknownPath of ["/ruta-inexistente-owasp", "/ruta-inexistente-owasp.svg"]) {
@@ -643,7 +654,7 @@ export async function verifyWebSecurity(
       path.startsWith("/api/recibos/") || path.startsWith("/referido/")
         ? { expectedReferrerPolicy: "no-referrer" }
         : {};
-    for (const method of ["HEAD", "POST", "OPTIONS"]) {
+    for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
       await requestMethodNotAllowed(origin, path, method, "GET", headerOptions);
     }
   }
@@ -777,22 +788,24 @@ export async function verifyWebSecurity(
     "/api/jobs/health",
     "/api/jobs/channels",
   ]) {
-    const getMethod = await request(origin, path);
-    requireCondition(
-      getMethod.status === 405 && getMethod.headers.get("allow") === "POST",
-      `${path}: GET must return 405 with Allow: POST.`,
-    );
+    await requestMethodNotAllowed(origin, path, "GET", "POST");
     const response = await request(origin, path, { method: "POST" });
     requireCondition(response.status === 401, `${path}: anonymous scheduler was not rejected.`);
     requireCondition(
-      (response.headers.get("cache-control") ?? "").includes("no-store"),
-      `${path}: authentication failure must be no-store.`,
+      !response.headers.has("set-cookie"),
+      `${path}: anonymous scheduler 401 must not set cookies.`,
     );
+    verifyNoStoreNoIndexNosniff(response, `POST ${path} (anonymous)`);
     const forged = await request(origin, path, {
       method: "POST",
       headers: { Authorization: "Bearer definitely-invalid" },
     });
     requireCondition(forged.status === 401, `${path}: forged scheduler bearer was accepted.`);
+    requireCondition(
+      !forged.headers.has("set-cookie"),
+      `${path}: forged scheduler 401 must not set cookies.`,
+    );
+    verifyNoStoreNoIndexNosniff(forged, `POST ${path} (forged)`);
   }
 
   const oauthCallbackPath = "/api/channels/mercado-libre/oauth/callback";

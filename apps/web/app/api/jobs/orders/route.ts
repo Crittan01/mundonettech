@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { hasAdminPermission, matchesSecretTimingSafe as matchesSecret } from "@mundonettech/core";
+import { hasAdminPermission, verifyCronBearer } from "@mundonettech/core";
 import {
   OperationsService,
   OrderLifecycleService,
@@ -44,17 +44,25 @@ export const DELETE = methodNotAllowed;
 export const OPTIONS = methodNotAllowed;
 
 export async function POST(request: Request) {
-  const secret = process.env.ORDER_CRON_SECRET?.trim() ?? "";
-  const actorId = process.env.CRM_JOB_ACTOR_ID?.trim() ?? "";
-  const authorization = request.headers.get("authorization") ?? "";
-  if (secret.length < 16 || !z.uuid().safeParse(actorId).success) {
+  const auth = verifyCronBearer(
+    request.headers.get("authorization"),
+    process.env.ORDER_CRON_SECRET,
+  );
+  if (auth === "UNCONFIGURED") {
     return Response.json(
       { error: "Order scheduler is not configured." },
       { status: 503, headers: noStoreHeaders },
     );
   }
-  if (!authorization.startsWith("Bearer ") || !matchesSecret(authorization.slice(7), secret)) {
+  if (auth === "UNAUTHORIZED") {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers: noStoreHeaders });
+  }
+  const actorId = process.env.CRM_JOB_ACTOR_ID?.trim() ?? "";
+  if (!z.uuid().safeParse(actorId).success) {
+    return Response.json(
+      { error: "Order scheduler is not configured." },
+      { status: 503, headers: noStoreHeaders },
+    );
   }
   try {
     const db = getDatabase();

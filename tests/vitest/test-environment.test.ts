@@ -104,6 +104,22 @@ describe("F0.5 — production database, Supabase endpoint, and outbound email gu
         META_CAPI_API_URL: "https://graph.facebook.com/v24.0",
       }),
     ).toThrow(/META_CAPI_API_URL/);
+    expect(() =>
+      assertSafeTestEnvironment({
+        ...safeEnvironment,
+        TURNSTILE_VERIFY_ENDPOINT: "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+      }),
+    ).toThrow(/TURNSTILE_VERIFY_ENDPOINT/);
+    expect(() =>
+      assertSafeTestEnvironment(
+        {
+          ...safeEnvironment,
+          DATABASE_URL: "postgresql://user:pass@remote.supabase.co:5432/postgres",
+          TEST_DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:54428/test_db",
+        },
+        "postgresql://postgres:postgres@127.0.0.1:54428/test_db",
+      ),
+    ).toThrow(/loopback/);
     expect(
       assertSafeTestEnvironment({
         ...safeEnvironment,
@@ -120,6 +136,9 @@ describe("F0.5 — production database, Supabase endpoint, and outbound email gu
     expect(() => assertSafeTestProcess({ ...safeEnvironment, EMAIL_SEND_DISABLED: "0" })).toThrow();
     expect(() => assertSafeTestProcess({ ...safeEnvironment, VERCEL_ENV: "production" })).toThrow();
     expect(() => assertSafeTestProcess({ ...safeEnvironment, APP_ENV: "prd" })).toThrow();
+    expect(() =>
+      assertSafeTestProcess({ ...safeEnvironment, INTEGRATION_ENVIRONMENT: "PRD" }),
+    ).toThrow();
     expect(() =>
       assertSafeTestProcess({
         ...safeEnvironment,

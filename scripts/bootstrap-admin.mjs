@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -13,8 +14,18 @@ import {
 const email = normalizeEmail(process.env.BOOTSTRAP_ADMIN_EMAIL ?? "");
 const password = process.env.BOOTSTRAP_ADMIN_PASSWORD ?? "";
 const displayName = (process.env.BOOTSTRAP_ADMIN_DISPLAY_NAME ?? "").trim();
-if (displayName.length < 2 || displayName.length > 120)
-  throw new Error("BOOTSTRAP_ADMIN_DISPLAY_NAME must contain 2 to 120 characters.");
+if (
+  displayName.length < 2 ||
+  displayName.length > 120 ||
+  [...displayName].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < 32 || codePoint === 127;
+  })
+) {
+  throw new Error(
+    "BOOTSTRAP_ADMIN_DISPLAY_NAME must contain 2 to 120 characters without control characters.",
+  );
+}
 const passwordIssues = validatePasswordPolicy(password);
 if (passwordIssues.length > 0)
   throw new Error("Bootstrap password does not satisfy the security policy.");
@@ -25,7 +36,9 @@ function localAdminConfig() {
   const runtime = spawnSync("podman", ["info", "--format", "{{.Host.RemoteSocket.Path}}"], {
     encoding: "utf8",
   });
-  if (runtime.status !== 0) throw new Error("Rootless Podman is unavailable.");
+  if (runtime.status !== 0 || !runtime.stdout.trim()) {
+    throw new Error("Rootless Podman is unavailable.");
+  }
   const status = spawnSync("pnpm", ["exec", "supabase", "status", "-o", "env", "--workdir", "."], {
     encoding: "utf8",
     env: { ...process.env, DOCKER_HOST: `unix://${runtime.stdout.trim()}` },
@@ -35,19 +48,23 @@ function localAdminConfig() {
   return {
     url: read("API_URL") ?? "http://127.0.0.1:54421",
     serviceKey: read("SERVICE_ROLE_KEY") ?? read("SECRET_KEY"),
+    databaseUrl: read("DB_URL") ?? "postgresql://postgres:postgres@127.0.0.1:54422/postgres",
   };
 }
 
 const local = process.env.SUPABASE_SERVICE_ROLE_KEY ? null : localAdminConfig();
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? local?.url;
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? local?.serviceKey;
+const databaseUrl = process.env.DATABASE_URL?.trim() || local?.databaseUrl;
 if (!supabaseUrl || !serviceKey) throw new Error("Supabase admin credentials are unavailable.");
+if (!databaseUrl) {
+  throw new Error("DATABASE_URL is required when using explicit Supabase credentials.");
+}
 const admin = createClient(supabaseUrl, serviceKey, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
 const db = createDatabaseClient({
-  databaseUrl:
-    process.env.DATABASE_URL ?? "postgresql://postgres:postgres@127.0.0.1:54422/postgres",
+  databaseUrl,
   maxConnections: 2,
 });
 
@@ -80,10 +97,25 @@ try {
     });
     if (created.error || !created.data.user) {
       const existing = await findExistingAuthUser();
-      if (!existing || process.env.BOOTSTRAP_ADMIN_LINK_EXISTING !== "YES") {
+      if (!existing) {
+        throw new Error(
+          `Unable to create Supabase Auth bootstrap user: ${created.error?.message ?? "unknown error"}.`,
+        );
+      }
+      if (process.env.BOOTSTRAP_ADMIN_LINK_EXISTING !== "YES") {
         throw new Error(
           "Auth user exists; set BOOTSTRAP_ADMIN_LINK_EXISTING=YES only after verifying ownership.",
         );
+      }
+      if (!existing.email_confirmed_at) {
+        throw new Error("Existing Auth user must have a confirmed email before linking.");
+      }
+      const existingCustomer = await db.customer.findFirst({
+        where: { authUserId: existing.id },
+        select: { id: true },
+      });
+      if (existingCustomer) {
+        throw new Error("Existing Auth user is already bound to a customer account.");
       }
       authUser = existing;
     } else {
@@ -109,12 +141,22 @@ try {
             action: "ADMIN_BOOTSTRAPPED",
             targetType: "AdminUser",
             targetId: profile.id,
+            requestId: randomUUID(),
             metadata: { source: "bootstrap_cli" },
           },
         });
       });
     } catch (error) {
-      if (createdAuthUser) await admin.auth.admin.deleteUser(authUser.id);
+      if (createdAuthUser) {
+        try {
+          const rollback = await admin.auth.admin.deleteUser(authUser.id);
+          if (rollback.error) {
+            console.error("Warning: failed to roll back newly created bootstrap Auth user.");
+          }
+        } catch {
+          console.error("Warning: failed to roll back newly created bootstrap Auth user.");
+        }
+      }
       throw error;
     }
     console.log(

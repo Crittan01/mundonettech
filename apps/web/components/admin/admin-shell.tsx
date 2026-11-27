@@ -19,7 +19,7 @@ export function AdminShell({
     <div className="min-h-screen bg-secondary/30">
       <a
         href="#admin-content"
-        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:border focus:border-input focus:bg-background focus:px-4 focus:py-2.5 focus:text-sm focus:font-medium focus:text-foreground focus:shadow-md focus:ring-2 focus:ring-ring focus:outline-none"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-md focus:border focus:border-input focus:bg-background focus:px-4 focus:py-2.5 focus:text-sm focus:font-medium focus:text-foreground focus:shadow-md focus:ring-2 focus:ring-ring focus:outline-hidden"
       >
         Saltar al contenido
       </a>
@@ -29,7 +29,7 @@ export function AdminShell({
             <Link
               href="/admin"
               prefetch={false}
-              className="rounded-sm text-lg font-bold outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="rounded-sm text-lg font-bold outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             >
               Administración
             </Link>
@@ -49,7 +49,7 @@ export function AdminShell({
       <main
         id="admin-content"
         tabIndex={-1}
-        className="mx-auto max-w-7xl px-4 py-8 outline-none sm:px-6"
+        className="mx-auto max-w-7xl px-4 py-8 outline-hidden sm:px-6"
       >
         {children}
       </main>

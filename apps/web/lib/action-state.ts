@@ -3,6 +3,7 @@ export interface ActionState {
   message: string;
   fieldErrors?: Record<string, string[]>;
   values?: Record<string, string>;
+  mfaStale?: boolean;
 }
 
 export const initialActionState: ActionState = { status: "idle", message: "" };

@@ -65,6 +65,15 @@ function useStepUpDeadline({
     [router],
   );
 
+  const markStale = useCallback(() => {
+    deadlineMsRef.current = null;
+    localStepUpAtMsRef.current = null;
+    wasActiveRef.current = false;
+    setConfirmedMessage(null);
+    setExpired(true);
+    setLocalStepUpCycle((cycle) => cycle + 1);
+  }, []);
+
   useEffect(() => {
     const now = Date.now();
     const prevSync = lastSyncRef.current;
@@ -126,7 +135,16 @@ function useStepUpDeadline({
         }
       } else {
         const serverDeadlineMs = now + normalizedRemainingMs;
+        const checkedAdvanced =
+          checkedAtMs !== undefined &&
+          prevSync?.checkedAtMs !== undefined &&
+          checkedAtMs > prevSync.checkedAtMs;
         if (deadlineMsRef.current === null) {
+          deadlineMsRef.current = serverDeadlineMs;
+          wasActiveRef.current = true;
+          expiryRefreshedRef.current = false;
+          syncTimer = window.setTimeout(() => setExpired(false), 0);
+        } else if (checkedAdvanced && serverDeadlineMs > deadlineMsRef.current) {
           deadlineMsRef.current = serverDeadlineMs;
           wasActiveRef.current = true;
           expiryRefreshedRef.current = false;
@@ -175,7 +193,7 @@ function useStepUpDeadline({
     };
   }, [checkedAtMs, localStepUpCycle, normalizedRemainingMs, router]);
 
-  return { expired, confirmedMessage, markConfirmed };
+  return { expired, confirmedMessage, markConfirmed, markStale };
 }
 
 export function StepUpPrompt({
@@ -266,8 +284,10 @@ export function SecurityManager({
   initialRemainingMs?: number;
   checkedAtMs?: number;
 }) {
+  const router = useRouter();
   const codeId = useId();
-  const { expired, confirmedMessage, markConfirmed } = useStepUpDeadline({
+  const [dismissedCodes, setDismissedCodes] = useState<readonly string[] | null>(null);
+  const { expired, confirmedMessage, markConfirmed, markStale } = useStepUpDeadline({
     initialRemainingMs: initialRemainingMs ?? (recent ? STEP_UP_WINDOW_MS : 0),
     checkedAtMs,
   });
@@ -281,17 +301,28 @@ export function SecurityManager({
     },
     initialActionState,
   );
-  const [regenerated, regenerateAction, regenerating] = useActionState(
-    regenerateAdminRecoveryCodesAction,
-    initialMfaState,
-  );
-  const [revokedAll, revokeAllAction, revokingAll] = useActionState(
-    signOutAllAdminSessionsAction,
-    initialActionState,
-  );
+  const [regenerated, regenerateAction, regenerating] = useActionState(async () => {
+    const result = await regenerateAdminRecoveryCodesAction();
+    if (result.mfaStale) markStale();
+    return result;
+  }, initialMfaState);
+  const [revokedAll, revokeAllAction, revokingAll] = useActionState(async () => {
+    const result = await signOutAllAdminSessionsAction();
+    if (result.mfaStale) markStale();
+    return result;
+  }, initialActionState);
   const confirmed = !expired;
-  if (regenerated.recoveryCodes) {
-    return <RecoveryCodes codes={regenerated.recoveryCodes} returnHref="/admin/seguridad" />;
+  if (regenerated.recoveryCodes && regenerated.recoveryCodes !== dismissedCodes) {
+    return (
+      <RecoveryCodes
+        codes={regenerated.recoveryCodes}
+        returnHref="/admin/seguridad"
+        onContinue={() => {
+          setDismissedCodes(regenerated.recoveryCodes ?? null);
+          router.refresh();
+        }}
+      />
+    );
   }
   return (
     <div className="space-y-6">

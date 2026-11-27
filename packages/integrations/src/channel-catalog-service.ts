@@ -67,12 +67,18 @@ export type ChannelCatalogErrorCode =
   | "VERSION_CONFLICT";
 
 export class ChannelCatalogError extends Error {
+  readonly reason?: "ACTOR_UNAUTHORIZED" | "ENVIRONMENT_MISMATCH" | undefined;
+
   constructor(
     readonly code: ChannelCatalogErrorCode,
     message: string,
+    options?: { readonly reason?: "ACTOR_UNAUTHORIZED" | "ENVIRONMENT_MISMATCH" },
   ) {
     super(message);
     this.name = "ChannelCatalogError";
+    if (options?.reason !== undefined) {
+      this.reason = options.reason;
+    }
   }
 }
 
@@ -439,7 +445,9 @@ export class ChannelCatalogService {
 
   private assertEnvironment(environment: ChannelAccount["environment"]): void {
     if (environment !== this.options.ring.environment) {
-      throw new ChannelCatalogError("FORBIDDEN", "The channel belongs to another environment.");
+      throw new ChannelCatalogError("FORBIDDEN", "The channel belongs to another environment.", {
+        reason: "ENVIRONMENT_MISMATCH",
+      });
     }
   }
 
@@ -2239,7 +2247,7 @@ export class ChannelCatalogService {
           audit: { ...audit, requestId: randomUUID() },
         });
       } catch (error) {
-        if (error instanceof ChannelCatalogError) continue;
+        if (error instanceof ChannelCatalogError && error.code !== "FORBIDDEN") continue;
         throw error;
       }
     }
@@ -2306,6 +2314,13 @@ export class ChannelCatalogService {
         });
         if (completion !== "STALE") succeeded += 1;
       } catch (error) {
+        if (
+          error instanceof ChannelCatalogError &&
+          error.code === "FORBIDDEN" &&
+          error.reason !== "ENVIRONMENT_MISMATCH"
+        ) {
+          throw error;
+        }
         const classified = providerFailure(error);
         const retry =
           error instanceof MercadoLibreCatalogError &&

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import pg from "pg";
@@ -31,13 +31,9 @@ try {
               ('00000000-0000-4000-8000-00000000c202', $3, $4, 'Canal Scheduler E2E', 'SUPERADMIN', 'ACTIVE')
        ON CONFLICT ("id") DO UPDATE SET "role" = 'SUPERADMIN', "status" = 'ACTIVE', "deletedAt" = NULL`,
       [
-        randomBytes(16)
-          .toString("hex")
-          .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"),
+        randomUUID(),
         `scheduler-${randomBytes(8).toString("hex")}@example.test`,
-        randomBytes(16)
-          .toString("hex")
-          .replace(/(.{8})(.{4})(.{4})(.{4})(.{12})/, "$1-$2-$3-$4-$5"),
+        randomUUID(),
         `channel-scheduler-${randomBytes(8).toString("hex")}@example.test`,
       ],
     );
@@ -83,7 +79,6 @@ try {
     });
   });
 } finally {
-  if (mercadoLibreFixture) await mercadoLibreFixture.stop();
-  if (authFixture) await authFixture.stop();
+  await Promise.allSettled([mercadoLibreFixture?.stop(), authFixture?.stop()]);
   await harness.stop();
 }

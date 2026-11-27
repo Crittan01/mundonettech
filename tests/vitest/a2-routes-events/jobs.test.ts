@@ -1,4 +1,8 @@
-import { hasAdminPermission, matchesSecretTimingSafe } from "../../../packages/core/dist/index.js";
+import {
+  hasAdminPermission,
+  matchesSecretTimingSafe,
+  verifyCronBearer,
+} from "../../../packages/core/dist/index.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { expectSecurityHeaders, loadRoute, responseBody } from "./route-loader.js";
@@ -20,7 +24,7 @@ function authorized(secret: string): Request {
 }
 
 function coreMocks() {
-  return { hasAdminPermission, matchesSecretTimingSafe };
+  return { hasAdminPermission, matchesSecretTimingSafe, verifyCronBearer };
 }
 
 function createOrdersRoute() {
@@ -139,11 +143,17 @@ function createCmsRoute() {
 function createDomainRoute() {
   const runBatch = vi.fn();
   const domainEventWorker = vi.fn(() => ({ runBatch }));
+  const synchronizeNotifications = vi.fn().mockResolvedValue(undefined);
+  class OperationsService {
+    synchronizeNotifications = synchronizeNotifications;
+  }
   const route = loadRoute("jobs/domain-events", {
-    "@mundonettech/core": { matchesSecretTimingSafe },
+    "@mundonettech/core": { matchesSecretTimingSafe, verifyCronBearer },
+    "@mundonettech/db": { OperationsService },
+    "@/lib/db": { getDatabase: vi.fn(() => ({})) },
     "@/lib/domain-worker": { domainEventWorker },
   });
-  return { route, runBatch, domainEventWorker };
+  return { route, runBatch, domainEventWorker, synchronizeNotifications };
 }
 
 function createHealthRoute() {
@@ -164,7 +174,7 @@ function createHealthRoute() {
   }
   const getDatabase = vi.fn(() => ({}));
   const route = loadRoute("jobs/health", {
-    "@mundonettech/core": { matchesSecretTimingSafe },
+    "@mundonettech/core": { matchesSecretTimingSafe, verifyCronBearer },
     "@mundonettech/db": { OperationalHealthService, OperationsService },
     "@/lib/db": { getDatabase },
     "@/lib/integrations": { getIntegrationEnvironment: vi.fn(() => "LOCAL") },
@@ -277,8 +287,15 @@ describe("A2 orders scheduler", () => {
     const configured = createOrdersRoute();
     vi.stubEnv("ORDER_CRON_SECRET", "short");
     expect((await configured.route.POST(authorized(secrets.orders))).status).toBe(503);
+    vi.stubEnv("ORDER_CRON_SECRET", ` ${secrets.orders} `);
+    expect((await configured.route.POST(authorized(secrets.orders))).status).toBe(503);
     vi.stubEnv("ORDER_CRON_SECRET", secrets.orders);
     vi.stubEnv("CRM_JOB_ACTOR_ID", "not-a-uuid");
+    // Unauthenticated request must return 401 rather than leaking misconfigured actor ID via 503.
+    expect(
+      (await configured.route.POST(new Request("https://jobs.example.test", { method: "POST" })))
+        .status,
+    ).toBe(401);
     expect((await configured.route.POST(authorized(secrets.orders))).status).toBe(503);
     expect(configured.findFirst).not.toHaveBeenCalled();
     vi.stubEnv("CRM_JOB_ACTOR_ID", actorId);
@@ -408,7 +425,7 @@ describe("A2 domain event worker", () => {
     });
   });
 
-  it("stops on an empty claim and returns generic worker failures", async () => {
+  it("stops on an empty or partial lease-exhausted claim, syncs notifications on failure, and returns generic worker failures", async () => {
     const empty = createDomainRoute();
     empty.runBatch.mockResolvedValue({ claimed: 0, completed: 0, retries: 0, failed: 0 });
     expect(await responseBody(await empty.route.POST(authorized(secrets.domain)))).toEqual({
@@ -418,6 +435,18 @@ describe("A2 domain event worker", () => {
       failed: 0,
     });
     expect(empty.runBatch).toHaveBeenCalledOnce();
+    expect(empty.synchronizeNotifications).not.toHaveBeenCalled();
+
+    const partialLease = createDomainRoute();
+    partialLease.runBatch.mockResolvedValue({ claimed: 25, completed: 10, retries: 0, failed: 1 });
+    expect(await responseBody(await partialLease.route.POST(authorized(secrets.domain)))).toEqual({
+      claimed: 25,
+      completed: 10,
+      retries: 0,
+      failed: 1,
+    });
+    expect(partialLease.runBatch).toHaveBeenCalledOnce();
+    expect(partialLease.synchronizeNotifications).toHaveBeenCalledOnce();
 
     const failure = createDomainRoute();
     failure.runBatch.mockRejectedValue(new Error("provider secret and payload"));
@@ -485,14 +514,72 @@ describe("A2 channels scheduler", () => {
     expect(current.revalidateTag).toHaveBeenCalledWith("catalog:inventory", { expire: 0 });
   });
 
-  it("revalidates inventory and suppresses ingestion internals on failure", async () => {
+  it("revalidates inventory and suppresses ingestion internals and raw infrastructure error codes on failure", async () => {
     const current = createChannelsRoute();
-    current.processResourceEvents.mockRejectedValue(new Error("access-token raw response"));
+    const dbError = Object.assign(new Error("access-token raw response"), { code: "P2002" });
+    current.processResourceEvents.mockRejectedValue(dbError);
     const response = await current.route.POST(authorized(secrets.channels));
     expect(response.status).toBe(500);
     expect(current.revalidateTag).toHaveBeenCalledWith("catalog:inventory", { expire: 0 });
     expect(current.processSyncJobs).not.toHaveBeenCalled();
-    expect(await response.text()).not.toContain("access-token");
+    const raw = await response.clone().text();
+    expect(raw).not.toContain("access-token");
+    expect(raw).not.toContain("P2002");
+    expect(await responseBody(response)).toMatchObject({
+      errors: [{ stage: "processResourceEvents", code: "STAGE_FAILED" }],
+    });
+
+    const revokedMidRun = createChannelsRoute();
+    revokedMidRun.refreshDueAccounts.mockRejectedValue(
+      Object.assign(new Error("actor revoked"), { code: "FORBIDDEN" }),
+    );
+    const forbiddenResponse = await revokedMidRun.route.POST(authorized(secrets.channels));
+    expect(forbiddenResponse.status).toBe(403);
+    expect(revokedMidRun.processResourceEvents).not.toHaveBeenCalled();
+
+    const envMismatch = createChannelsRoute();
+    envMismatch.processResourceEvents.mockRejectedValue(
+      Object.assign(new Error("wrong env"), {
+        code: "FORBIDDEN",
+        reason: "ENVIRONMENT_MISMATCH",
+      }),
+    );
+    const mismatchResponse = await envMismatch.route.POST(authorized(secrets.channels));
+    expect(mismatchResponse.status).toBe(500);
+  });
+
+  it("enforces verifyCronBearer boundaries, hides actor config oracles, and syncs alerts on partial domain-event crashes", async () => {
+    const valid32 = "a".repeat(32);
+    expect(verifyCronBearer(`Bearer ${"a".repeat(31)}`, "a".repeat(31))).toBe("UNCONFIGURED");
+    expect(verifyCronBearer(`Bearer ${"a".repeat(506)}`, "a".repeat(506))).toBe("UNCONFIGURED");
+    expect(verifyCronBearer(`Bearer ${valid32}`, `${valid32}\u200b`)).toBe("UNCONFIGURED");
+    expect(verifyCronBearer(`Bearer ${valid32}`, `${valid32}\n`)).toBe("UNCONFIGURED");
+    expect(verifyCronBearer(`Bearer  ${valid32}`, valid32)).toBe("UNAUTHORIZED");
+    expect(verifyCronBearer(`Bearer ${valid32} `, valid32)).toBe("UNAUTHORIZED");
+    expect(verifyCronBearer(`Bearer ${"x".repeat(520)}`, valid32)).toBe("UNAUTHORIZED");
+    expect(verifyCronBearer(`Bearer ${valid32}`, valid32)).toBe("OK");
+
+    const previousCmsActor = process.env.CMS_JOB_ACTOR_ID;
+    const previousChannelActor = process.env.CHANNEL_JOB_ACTOR_ID;
+    process.env.CMS_JOB_ACTOR_ID = "not-a-uuid";
+    process.env.CHANNEL_JOB_ACTOR_ID = "not-a-uuid";
+    try {
+      const cms = createCmsRoute();
+      expect((await cms.route.POST(authorized("wrong-secret"))).status).toBe(401);
+      const channels = createChannelsRoute();
+      expect((await channels.route.POST(authorized("wrong-secret"))).status).toBe(401);
+    } finally {
+      process.env.CMS_JOB_ACTOR_ID = previousCmsActor;
+      process.env.CHANNEL_JOB_ACTOR_ID = previousChannelActor;
+    }
+
+    const domainEvents = createDomainRoute();
+    domainEvents.runBatch
+      .mockResolvedValueOnce({ claimed: 25, completed: 23, retries: 0, failed: 2 })
+      .mockRejectedValueOnce(new Error("transient db disconnect"));
+    const failedResponse = await domainEvents.route.POST(authorized(secrets.domain));
+    expect(failedResponse.status).toBe(500);
+    expect(domainEvents.synchronizeNotifications).toHaveBeenCalledTimes(1);
   });
 
   it("defers catalog sync when channel resource ingestion outbox still has pending events", async () => {

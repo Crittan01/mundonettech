@@ -74,7 +74,7 @@ db-migrate:
 db-validate:
 	$(PNPM) db:validate
 
-db-verify: build
+db-verify:
 	$(PNPM) db:verify
 
 clean-tmp:

@@ -3,8 +3,9 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
-      "env": ["NEXT_PUBLIC_*", "EMAIL_SEND_DISABLED"],
+      "env": ["NEXT_PUBLIC_*"],
       "passThroughEnv": [
+        "EMAIL_SEND_DISABLED",
         "DATABASE_URL",
         "DIRECT_URL",
         "SITE_URL",
@@ -28,6 +29,10 @@
         "HEALTH_CRON_SECRET",
         "CHANNEL_CRON_SECRET",
         "CHANNEL_JOB_ACTOR_ID",
+        "MERCADO_LIBRE_TOKEN_URL",
+        "MERCADO_LIBRE_API_URL",
+        "META_CAPI_API_URL",
+        "TURNSTILE_VERIFY_ENDPOINT",
         "TURNSTILE_SECRET_KEY",
         "TURNSTILE_EXPECTED_HOSTNAME",
         "INTEGRATION_ENVIRONMENT",
@@ -39,6 +44,11 @@
       ],
       "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.next/**"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
+    "@mundonettech/db#build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!src/generated/**"],
+      "outputs": ["dist/**", "src/generated/**"]
     },
     "dev": {
       "cache": false,
@@ -52,6 +62,11 @@
     "@mundonettech/media#typecheck": {
       "dependsOn": ["build"],
       "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.next/**"]
+    },
+    "@mundonettech/web#typecheck": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "!dist/**", "!.next/**"],
+      "outputs": [".next/types/**"]
     },
     "typecheck": {
       "dependsOn": ["^build"],

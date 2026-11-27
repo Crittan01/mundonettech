@@ -1,5 +1,8 @@
-import { readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { isIP } from "node:net";
+
+import pg from "pg";
 
 import { assertSafeTestEnvironment, isLoopbackHostname } from "./test-environment.mjs";
 
@@ -81,6 +84,91 @@ function endpoint(value) {
   return url.toString().replace(/\/$/, "");
 }
 
+export function createRecoveryPgClient(connectionString, applicationName) {
+  const client = new pg.Client({
+    connectionString,
+    connectionTimeoutMillis: 15_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+    application_name: applicationName,
+  });
+  client.on("error", () => undefined);
+  return client;
+}
+
+function normalizedDatabaseIdentity(url) {
+  const rawHost = url.hostname.toLowerCase();
+  const loopback = isLoopbackHostname(rawHost);
+  const host = loopback ? "127.0.0.1" : rawHost;
+  const port = url.port || "5432";
+  const database = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+  return { host, port, database, loopback };
+}
+
+function assertDrTargetIsolatedFrom(target, source, label) {
+  const targetId = normalizedDatabaseIdentity(target);
+  const sourceId = normalizedDatabaseIdentity(source);
+  if (
+    targetId.host === sourceId.host &&
+    targetId.port === sourceId.port &&
+    targetId.database === sourceId.database
+  ) {
+    throw new RecoveryError("DR_TARGET_NOT_ISOLATED", `DR_DATABASE_URL must differ from ${label}.`);
+  }
+  if (!targetId.loopback && targetId.host === sourceId.host) {
+    throw new RecoveryError(
+      "DR_TARGET_NOT_ISOLATED",
+      `A non-local DR drill requires a separate PostgreSQL host from ${label}.`,
+    );
+  }
+}
+
+export async function readValidatedGpgPassphraseFile(file) {
+  let handle;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    throw new RecoveryError(
+      "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      "The GPG passphrase file is not accessible or is a symbolic link.",
+      { cause: error },
+    );
+  }
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || (metadata.mode & 0o077) !== 0 || metadata.size > 1026) {
+      throw new RecoveryError(
+        "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+        "The GPG passphrase file must be a regular 0600 file within 1024 bytes.",
+      );
+    }
+    const raw = await handle.readFile({ encoding: "utf8" });
+    return raw.replace(/\r?\n$/, "");
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+export function validateGpgPassphraseValue(value) {
+  const byteLength = Buffer.byteLength(value ?? "", "utf8");
+  const hasControlCharacters = [...(value ?? "")].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint < 32 || codePoint === 127;
+  });
+  if (
+    byteLength < 32 ||
+    byteLength > 1024 ||
+    hasControlCharacters ||
+    /^REPLACE_WITH_/i.test(value ?? "")
+  ) {
+    throw new RecoveryError(
+      "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      "The GPG passphrase must contain between 32 and 1024 non-placeholder UTF-8 bytes on one line.",
+    );
+  }
+  return value;
+}
+
 async function passphrase(environment) {
   const fromEnvironment = environment.BACKUP_GPG_PASSPHRASE;
   const file = environment.BACKUP_GPG_PASSPHRASE_FILE?.trim();
@@ -90,65 +178,45 @@ async function passphrase(environment) {
       "Configure exactly one of BACKUP_GPG_PASSPHRASE or BACKUP_GPG_PASSPHRASE_FILE.",
     );
   }
-  let value = fromEnvironment;
-  if (file) {
-    const metadata = await stat(file).catch((error) => {
-      throw new RecoveryError(
-        "GPG_PASSPHRASE_CONFIGURATION_INVALID",
-        "The GPG passphrase file is not accessible.",
-        {
-          cause: error,
-        },
-      );
-    });
-    if (!metadata.isFile() || (metadata.mode & 0o077) !== 0) {
-      throw new RecoveryError(
-        "GPG_PASSPHRASE_CONFIGURATION_INVALID",
-        "The GPG passphrase file must be regular and have mode 0600 or stricter.",
-      );
-    }
-    value = await readFile(file, "utf8");
-    value = value.replace(/\r?\n$/, "");
-  }
-  const byteLength = Buffer.byteLength(value ?? "", "utf8");
-  const hasControlCharacters = [...(value ?? "")].some((character) => {
-    const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint < 32 || codePoint === 127;
-  });
-  if (byteLength < 32 || byteLength > 1024 || hasControlCharacters) {
-    throw new RecoveryError(
-      "GPG_PASSPHRASE_CONFIGURATION_INVALID",
-      "The GPG passphrase must contain between 32 and 1024 UTF-8 bytes on one line.",
-    );
-  }
-  return value;
+  const value = file ? await readValidatedGpgPassphraseFile(file) : fromEnvironment;
+  return validateGpgPassphraseValue(value);
 }
 
 function bucketNames(environment, backupBucket) {
-  const configured = (environment.R2_RECOVERY_BUCKETS ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-  const names = [
-    ...new Set([
-      ...configured,
-      backupBucket,
-      ...(environment.R2_BUCKET?.trim() ? [environment.R2_BUCKET.trim()] : []),
-    ]),
-  ].sort();
-  if (names.length < 1 || names.length > 32 || names.some((name) => !bucketPattern.test(name))) {
+  const raw = (environment.R2_RECOVERY_BUCKETS ?? "").trim();
+  if (!raw) {
+    throw new RecoveryError(
+      "R2_CONFIGURATION_INVALID",
+      "R2_RECOVERY_BUCKETS must explicitly list all recovery buckets.",
+    );
+  }
+  const parsed = raw.split(",").map((value) => value.trim());
+  const unique = new Set(parsed);
+  if (
+    parsed.some((name) => !name || !bucketPattern.test(name)) ||
+    unique.size !== parsed.length ||
+    parsed.length < 1 ||
+    parsed.length > 32
+  ) {
     throw new RecoveryError(
       "R2_CONFIGURATION_INVALID",
       "R2_RECOVERY_BUCKETS must contain between 1 and 32 valid unique buckets.",
     );
   }
-  if (!names.includes(backupBucket)) {
+  if (!unique.has(backupBucket)) {
     throw new RecoveryError(
       "R2_CONFIGURATION_INVALID",
       "The private backup bucket must be included in recovery coverage.",
     );
   }
-  return names;
+  const mediaBucket = environment.R2_BUCKET?.trim();
+  if (mediaBucket && !unique.has(mediaBucket)) {
+    throw new RecoveryError(
+      "R2_CONFIGURATION_INVALID",
+      "The media bucket must be included in recovery coverage.",
+    );
+  }
+  return [...unique].sort();
 }
 
 export async function loadRecoveryConfig(environment = process.env, options = {}) {
@@ -228,21 +296,10 @@ export async function loadRecoveryConfig(environment = process.env, options = {}
     const source = parseDatabaseUrl(databaseUrl);
     if (environment.NODE_ENV === "test")
       assertSafeTestEnvironment(environment, config.drDatabaseUrl);
-    if (
-      target.hostname === source.hostname &&
-      target.port === source.port &&
-      target.pathname === source.pathname
-    ) {
-      throw new RecoveryError(
-        "DR_TARGET_NOT_ISOLATED",
-        "DR_DATABASE_URL must differ from the source database URL.",
-      );
-    }
-    if (!isLoopbackHostname(target.hostname) && target.hostname === source.hostname) {
-      throw new RecoveryError(
-        "DR_TARGET_NOT_ISOLATED",
-        "A non-local DR drill requires a separate PostgreSQL host for restoration.",
-      );
+    assertDrTargetIsolatedFrom(target, source, "DATABASE_URL");
+    if (environment.DIRECT_URL?.trim()) {
+      const direct = parseDatabaseUrl(environment.DIRECT_URL, "DIRECT_URL");
+      assertDrTargetIsolatedFrom(target, direct, "DIRECT_URL");
     }
   }
   return config;

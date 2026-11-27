@@ -54,7 +54,7 @@ export default async function AdminSecurityPage({ searchParams }: PageProps<"/ad
       take: pageSize,
     }),
   ]);
-  const totalPages = Math.max(1, Math.ceil(totalEvents / pageSize));
+  const totalPages = Math.max(1, Math.min(10_000, Math.ceil(totalEvents / pageSize)));
   const page = Math.min(requestedPage, totalPages);
   const events =
     page !== requestedPage
@@ -66,7 +66,10 @@ export default async function AdminSecurityPage({ searchParams }: PageProps<"/ad
           take: pageSize,
         })
       : initialEvents;
-  const factor = factors.data?.totp.find((item) => item.status === "verified");
+  const factorsUnavailable = Boolean(factors.error);
+  const factor = factorsUnavailable
+    ? undefined
+    : factors.data?.totp.find((item) => item.status === "verified");
   const mfaAge = session.lastMfaAt ? now.getTime() - session.lastMfaAt.getTime() : null;
   const recentMfa = mfaAge !== null && mfaAge >= -30_000 && mfaAge <= 600_000;
   const initialRemainingMs =
@@ -101,7 +104,9 @@ export default async function AdminSecurityPage({ searchParams }: PageProps<"/ad
       <section className="grid gap-4 sm:grid-cols-3">
         <article className="rounded-xl border border-border bg-card p-5">
           <h2 className="text-sm text-muted-foreground">Autenticador</h2>
-          <p className="mt-2 font-semibold">{factor ? "Verificado" : "No disponible"}</p>
+          <p className="mt-2 font-semibold">
+            {factorsUnavailable ? "Error temporal" : factor ? "Verificado" : "No disponible"}
+          </p>
         </article>
         <article className="rounded-xl border border-border bg-card p-5">
           <h2 className="text-sm text-muted-foreground">Códigos vigentes</h2>
@@ -114,7 +119,15 @@ export default async function AdminSecurityPage({ searchParams }: PageProps<"/ad
           </p>
         </article>
       </section>
-      {factor ? (
+      {factorsUnavailable ? (
+        <p
+          role="alert"
+          className="rounded-xl border border-destructive bg-card p-4 text-sm text-destructive"
+        >
+          No pudimos consultar tus factores de seguridad en este momento. Recarga la página e
+          inténtalo de nuevo.
+        </p>
+      ) : factor ? (
         <SecurityManager
           factorId={factor.id}
           recent={recentMfa}

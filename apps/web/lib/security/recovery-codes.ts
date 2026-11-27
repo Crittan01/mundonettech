@@ -1,8 +1,14 @@
 import "server-only";
 
-import { createHmac, randomInt } from "node:crypto";
+import { createHmac, randomInt, randomUUID } from "node:crypto";
 
-import { consumeAdminRecoveryCode, type Prisma, type PrismaClient } from "@mundonettech/db";
+import {
+  AdminActorAuthorizationError,
+  assertAdminActorInTransaction,
+  consumeAdminRecoveryCode,
+  type Prisma,
+  type PrismaClient,
+} from "@mundonettech/db";
 
 import { getRecoveryCodePepper } from "@/lib/env";
 import type { RequestSecurityContext } from "@/lib/security/request-context";
@@ -46,10 +52,19 @@ export async function regenerateRecoveryCodesInTransaction(
   tx: Prisma.TransactionClient,
   options: RegenerateRecoveryCodesOptions,
 ): Promise<string[]> {
+  if (options.actorAdminUserId !== options.adminUserId) {
+    throw new AdminActorAuthorizationError();
+  }
+  await assertAdminActorInTransaction(tx, options.actorAdminUserId, "security:write_own", {
+    lock: "SHARE",
+  });
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`admin-recovery-code-regeneration:${options.adminUserId}`}, 0))`;
+  const clockRows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
+  const now = clockRows[0]?.now;
+  if (!now) throw new Error("Database clock is unavailable.");
   const codes = Array.from({ length: codeCount }, generateCode);
-  const expiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
-  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('admin-recovery-code-regeneration'))`;
   await tx.adminRecoveryCode.deleteMany({
     where: { adminUserId: options.adminUserId, consumedAt: null },
   });
@@ -67,6 +82,7 @@ export async function regenerateRecoveryCodesInTransaction(
       action: "ADMIN_RECOVERY_CODES_REGENERATED",
       targetType: "AdminRecoveryCode",
       targetId: options.adminUserId,
+      requestId: randomUUID(),
       ipHash: options.context.ipHash,
       userAgentHash: options.context.userAgentHash,
       metadata: { count: codeCount, expiresAt: expiresAt.toISOString() },

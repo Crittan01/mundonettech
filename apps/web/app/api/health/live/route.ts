@@ -18,7 +18,9 @@ export async function GET() {
   return Response.json({ status: "alive" }, { headers });
 }
 
-export const HEAD = methodNotAllowed;
+export async function HEAD() {
+  return new Response(null, { status: 405, headers: { ...headers, Allow: "GET" } });
+}
 export const POST = methodNotAllowed;
 export const PUT = methodNotAllowed;
 export const PATCH = methodNotAllowed;

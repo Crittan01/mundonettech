@@ -110,7 +110,7 @@ export async function createR2RecoveryFixture(bucketNames) {
       const bytes = Buffer.concat(
         [...upload.parts.entries()].sort(([left], [right]) => left - right).map(([, part]) => part),
       );
-      objects.set(objectKey, { bytes, lastModified: new Date() });
+      objects.set(objectKey, { bytes, lastModified: new Date(), etag: '"complete-etag"' });
       uploads.delete(uploadId);
       sendXml(
         200,
@@ -119,7 +119,7 @@ export async function createR2RecoveryFixture(bucketNames) {
       return;
     }
     if (request.method === "PUT" && key) {
-      objects.set(objectKey, { bytes: body, lastModified: new Date() });
+      objects.set(objectKey, { bytes: body, lastModified: new Date(), etag: '"put-etag"' });
       response.writeHead(200, { ETag: '"put-etag"' }).end();
       return;
     }
@@ -143,7 +143,7 @@ export async function createR2RecoveryFixture(bucketNames) {
         .writeHead(200, {
           "Content-Length": stored.bytes.length,
           "Last-Modified": stored.lastModified.toUTCString(),
-          ETag: '"stored-etag"',
+          ETag: stored.etag ?? '"stored-etag"',
         })
         .end();
       return;
@@ -173,7 +173,7 @@ export async function createR2RecoveryFixture(bucketNames) {
       response.writeHead(status, {
         "Content-Length": bytes.length,
         "Last-Modified": stored.lastModified.toUTCString(),
-        ETag: '"stored-etag"',
+        ETag: stored.etag ?? '"stored-etag"',
       });
       if (state.chunkByteLimit && state.chunkByteLimit > 0) {
         for (let offset = 0; offset < bytes.length; offset += state.chunkByteLimit) {

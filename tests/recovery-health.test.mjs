@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { after, before, describe, it } from "node:test";
 
@@ -428,6 +431,170 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
     assert.equal(alert.category, "health.outbox");
     assert.equal(alert.href, "/admin/salud");
     assert.equal(alert.resolvedAt, null);
+  });
+
+  it("refuses symlink, world-readable, or dual BACKUP_GPG_PASSPHRASE_FILE configurations and enforces DIRECT_URL DR isolation", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "mnt-passphrase-test-"));
+    try {
+      const validFile = path.join(dir, "passphrase.txt");
+      const looseFile = path.join(dir, "loose.txt");
+      const linkFile = path.join(dir, "link.txt");
+      await writeFile(validFile, `${passphrase}\n`, { mode: 0o600 });
+      await chmod(validFile, 0o600);
+      await writeFile(looseFile, `${passphrase}\n`, { mode: 0o644 });
+      await chmod(looseFile, 0o644);
+      await symlink(validFile, linkFile);
+
+      await assert.rejects(
+        runBackup({
+          env: { ...environment, BACKUP_GPG_PASSPHRASE_FILE: validFile },
+        }),
+        (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      );
+      await assert.rejects(
+        runBackup({
+          env: {
+            ...environment,
+            BACKUP_GPG_PASSPHRASE: undefined,
+            BACKUP_GPG_PASSPHRASE_FILE: looseFile,
+          },
+        }),
+        (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      );
+      await assert.rejects(
+        runBackup({
+          env: {
+            ...environment,
+            BACKUP_GPG_PASSPHRASE: undefined,
+            BACKUP_GPG_PASSPHRASE_FILE: linkFile,
+          },
+        }),
+        (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+      );
+      const validFileBackup = await runBackup({
+        env: {
+          ...environment,
+          BACKUP_GPG_PASSPHRASE: undefined,
+          BACKUP_GPG_PASSPHRASE_FILE: validFile,
+        },
+      });
+      assert.equal(validFileBackup.status, "SUCCEEDED");
+      await assert.rejects(
+        runDisasterRecoveryDrill({
+          env: {
+            ...environment,
+            DIRECT_URL: environment.DR_DATABASE_URL,
+          },
+          force: true,
+        }),
+        (error) => error.code === "DR_TARGET_NOT_ISOLATED",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects tampered ciphertext downloads and tolerates 0-byte bucket marker objects", async () => {
+    fixture.state.tamperNextDownload = true;
+    try {
+      await assert.rejects(
+        runDisasterRecoveryDrill({ env: environment, force: true }),
+        (error) => error.code === "GPG_DECRYPTION_FAILED" || error.code === "BACKUP_HASH_MISMATCH",
+      );
+    } finally {
+      fixture.state.tamperNextDownload = false;
+    }
+    const zeroKey = `${mediaBucket}/000-empty-marker/`;
+    fixture.objects.set(zeroKey, { bytes: Buffer.alloc(0), lastModified: new Date() });
+    try {
+      const drillWithZeroMarker = await runDisasterRecoveryDrill({ env: environment, force: true });
+      assert.equal(drillWithZeroMarker.status, "SUCCEEDED");
+    } finally {
+      fixture.objects.delete(zeroKey);
+    }
+    const emptyRun = await db.backupRun.create({ data: { environment: "LOCAL" } });
+    await assert.rejects(
+      sql.query(
+        `UPDATE "BackupRun"
+         SET "status" = 'SUCCEEDED', "completedAt" = CURRENT_TIMESTAMP,
+             "storageKey" = 'database/LOCAL/2026/11/26/no-buckets.dump.gpg',
+             "manifestKey" = 'database/LOCAL/2026/11/26/no-buckets.manifest.json',
+             "byteSize" = 128, "encryptedSha256" = decode(repeat('ab', 32), 'hex'),
+             "authSchemaVerified" = true
+         WHERE "id" = $1`,
+        [emptyRun.id],
+      ),
+      /passing bucket coverage/,
+    );
+    await db.backupRun.update({
+      where: { id: emptyRun.id },
+      data: { status: "FAILED", completedAt: new Date(), failureCode: "R2_BUCKET_ACCESS_FAILED" },
+    });
+
+    const latestGoodBackup = await db.backupRun.findFirstOrThrow({
+      where: { environment: "LOCAL", status: "SUCCEEDED" },
+      orderBy: { completedAt: "desc" },
+    });
+    const nullInventoryDrill = await db.disasterRecoveryDrill.create({
+      data: { environment: "LOCAL", backupRunId: latestGoodBackup.id },
+    });
+    await db.recoveryBucketCheck.create({
+      data: {
+        disasterRecoveryDrillId: nullInventoryDrill.id,
+        bucketName: mediaBucket,
+        accessible: true,
+        objectCount: null,
+        readVerified: false,
+      },
+    });
+    await assert.rejects(
+      sql.query(
+        `UPDATE "DisasterRecoveryDrill"
+         SET "status" = 'SUCCEEDED', "completedAt" = CURRENT_TIMESTAMP,
+             "authSchemaVerified" = true, "verifiedRelationCount" = 133,
+             "nextDueAt" = CURRENT_TIMESTAMP + interval '30 days'
+         WHERE "id" = $1`,
+        [nullInventoryDrill.id],
+      ),
+      /passing bucket inventory/,
+    );
+    await db.disasterRecoveryDrill.update({
+      where: { id: nullInventoryDrill.id },
+      data: { status: "FAILED", completedAt: new Date(), failureCode: "R2_BUCKET_READ_FAILED" },
+    });
+
+    const { validateGpgPassphraseValue } = await import("../scripts/lib/recovery-config.mjs");
+    assert.throws(
+      () => validateGpgPassphraseValue("REPLACE_WITH_RANDOM_HIGH_ENTROPY_PASSPHRASE"),
+      (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+    );
+
+    const { settleStreamingTasks } = await import("../scripts/lib/recovery-process.mjs");
+    const { RecoveryError } = await import("../scripts/lib/recovery-config.mjs");
+    const fakeProc = {
+      exitCode: null,
+      signalCode: null,
+      stdin: { destroy() {} },
+      stdout: { destroy() {} },
+      stderr: { destroy() {} },
+      kill() {
+        this.exitCode = 1;
+      },
+    };
+    const cleanupMaskedTask = new Promise((_, reject) => {
+      setTimeout(() => {
+        const err = new RecoveryError("PG_DUMP_FAILED", "cleanup exit");
+        if (fakeProc.recoveryTerminatedByCleanup) err.recoveryCleanup = true;
+        reject(err);
+      }, 20);
+    });
+    const rootCauseTask = Promise.reject(
+      new RecoveryError("R2_MULTIPART_UPLOAD_FAILED", "r2 failed first"),
+    );
+    await assert.rejects(
+      settleStreamingTasks([cleanupMaskedTask, rootCauseTask], [fakeProc]),
+      (error) => error.code === "R2_MULTIPART_UPLOAD_FAILED",
+    );
   });
 
   it("refuses to create a backup when the required auth schema is incomplete", async () => {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { RecoveryError } from "./recovery-config.mjs";
+import { createRecoveryPgClient, RecoveryError } from "./recovery-config.mjs";
 
 export async function acquireRecoveryLock(client, name) {
   await client.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [name]);
@@ -65,6 +65,25 @@ export async function failRun(client, kind, id, failureCode) {
   );
 }
 
+export async function failRunWithFallback(primaryClient, connectionString, kind, id, failureCode) {
+  if (!id) return;
+  try {
+    await failRun(primaryClient, kind, id, failureCode);
+    return;
+  } catch {
+    // Primary client may have disconnected mid-stream; open a short-lived connection to seal FAILED.
+  }
+  const fallback = createRecoveryPgClient(connectionString, `mundonettech-${kind}-fail`);
+  try {
+    await fallback.connect();
+    await failRun(fallback, kind, id, failureCode);
+  } catch {
+    // Preserve the primary failure without masking it.
+  } finally {
+    await fallback.end().catch(() => undefined);
+  }
+}
+
 export async function completeBackupRun(client, input) {
   const result = await client.query(
     `UPDATE "BackupRun" SET
@@ -105,6 +124,17 @@ export async function sourceSchemaEvidence(client) {
       current_setting('server_version_num')::int AS "serverVersion",
       EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'auth') AS "authSchema",
       to_regclass('auth.users') IS NOT NULL AS "authUsers",
+      EXISTS (
+        SELECT 1 FROM pg_event_trigger
+        WHERE evtname = 'enforce_rls_on_new_table' AND evtenabled IN ('O', 'A')
+      ) AS "rlsTriggerEnabled",
+      CASE
+        WHEN to_regclass('public."_prisma_migrations"') IS NOT NULL THEN (
+          SELECT count(*)::int FROM "_prisma_migrations"
+          WHERE "finished_at" IS NOT NULL AND "rolled_back_at" IS NULL
+        )
+        ELSE 0
+      END AS "appliedMigrations",
       ARRAY(
         SELECT n.nspname || '.' || c.relname
         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -113,11 +143,8 @@ export async function sourceSchemaEvidence(client) {
       ) AS relations`,
   );
   const evidence = result.rows[0];
-  if (!evidence || evidence.serverVersion < 170000) {
-    throw new RecoveryError(
-      "DATABASE_VERSION_UNSUPPORTED",
-      "Backups require PostgreSQL 17 or newer.",
-    );
+  if (!evidence || evidence.serverVersion < 170000 || evidence.serverVersion >= 180000) {
+    throw new RecoveryError("DATABASE_VERSION_UNSUPPORTED", "Backups require PostgreSQL 17.");
   }
   if (!evidence.authSchema || !evidence.authUsers) {
     throw new RecoveryError(

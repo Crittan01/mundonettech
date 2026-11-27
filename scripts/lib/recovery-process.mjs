@@ -55,6 +55,15 @@ export function spawnPostgresRecoveryProcess(command, args, options) {
 }
 
 export function waitForSuccessfulExit(child, failureCode) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    if (child.exitCode === 0) return Promise.resolve();
+    const failure = new RecoveryError(
+      failureCode,
+      `A recovery process exited unsuccessfully (${child.exitCode ?? child.signalCode ?? "unknown"}).`,
+    );
+    if (child.recoveryTerminatedByCleanup) failure.recoveryCleanup = true;
+    return Promise.reject(failure);
+  }
   return new Promise((resolve, reject) => {
     child.once("error", (error) => {
       reject(
@@ -96,9 +105,18 @@ export function encryptedMeter() {
 
 export function terminateRecoveryProcesses(processes) {
   for (const child of processes) {
+    child.stdin?.destroy();
+    child.stdout?.destroy();
+    child.stderr?.destroy();
     if (child.exitCode === null && child.signalCode === null) {
       child.recoveryTerminatedByCleanup = true;
       child.kill("SIGTERM");
+      const killTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, 5_000);
+      killTimer.unref?.();
     }
     if (child.recoveryContainerName) {
       spawnSync(child.recoveryContainerRuntime, ["rm", "--force", child.recoveryContainerName], {
@@ -110,12 +128,37 @@ export function terminateRecoveryProcesses(processes) {
 }
 
 export async function settleStreamingTasks(tasks, processes, onFailure) {
+  let firstRecoveryError = null;
+  const observedTasks = tasks.map((task) =>
+    Promise.resolve(task).catch((taskError) => {
+      if (!firstRecoveryError && taskError instanceof RecoveryError && !taskError.recoveryCleanup) {
+        firstRecoveryError = taskError;
+      }
+      throw taskError;
+    }),
+  );
   try {
-    await Promise.all(tasks);
+    await Promise.all(observedTasks);
   } catch (error) {
     onFailure?.();
+    if (error instanceof RecoveryError && !error.recoveryCleanup) {
+      terminateRecoveryProcesses(processes);
+      await Promise.allSettled(observedTasks);
+      throw error;
+    }
+    if (!firstRecoveryError) {
+      await Promise.race([
+        Promise.allSettled(observedTasks),
+        new Promise((resolve) => {
+          const timer = setTimeout(resolve, 250);
+          timer.unref?.();
+        }),
+      ]);
+    }
+    const preCleanupFailure = firstRecoveryError;
     terminateRecoveryProcesses(processes);
-    const results = await Promise.allSettled(tasks);
+    const results = await Promise.allSettled(observedTasks);
+    if (preCleanupFailure) throw preCleanupFailure;
     const processFailure = results.find(
       (result) =>
         result.status === "rejected" &&

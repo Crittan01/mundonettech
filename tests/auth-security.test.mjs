@@ -201,6 +201,37 @@ describe("F0.4 — PII minimization and password policy", () => {
     ]) {
       assert.equal(sanitized[key], expected, key);
     }
+    const withOperationalDocAndValues = sanitizeAuditValue({
+      documentId: "00000000-0000-4000-8000-000000000001",
+      assetUrl: "https://cdn.example.com/photo@2x.webp",
+      bearerMsg: "Failed with Bearer secret-token-123",
+      basicMsg: "Auth Basic dXNlcjpwYXNzMTIzNA==",
+      jwtMsg:
+        "Invalid eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      urlMsg: "Failed https://user:pass@internal.local:5432/db?access_token=abc123&ok=1",
+      emailMsg: "Bounce for buyer@example.co rejected",
+      pemMsg:
+        "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQ==\n-----END PRIVATE KEY-----",
+      documentNumber: "1010101010",
+    });
+    assert.equal(withOperationalDocAndValues.documentId, "00000000-0000-4000-8000-000000000001");
+    assert.equal(withOperationalDocAndValues.assetUrl, "https://cdn.example.com/photo@2x.webp");
+    assert.equal(withOperationalDocAndValues.documentNumber, "[redactado]");
+    for (const secret of [
+      "secret-token-123",
+      "dXNlcjpwYXNzMTIzNA==",
+      "eyJhbGciOiJIUzI1NiJ9",
+      "user:pass",
+      "abc123",
+      "buyer@example.co",
+      "MIIEvAIBADANBgkqhkiG9w0BAQ==",
+    ]) {
+      assert.equal(
+        JSON.stringify(withOperationalDocAndValues).includes(secret),
+        false,
+        `leaked ${secret}`,
+      );
+    }
     assert.deepEqual(sanitized.nested, {
       unit_price_cents: "100000",
       ShippingCents: "20000",

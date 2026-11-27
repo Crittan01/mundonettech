@@ -644,7 +644,7 @@ export class AccountService {
       await tx.$executeRaw`
         INSERT INTO "SecurityEvent" ("customerId", "eventType", "ipHash", "userAgentHash", "metadata", "dedupMinute")
         VALUES (${customerId}::uuid, 'CUSTOMER_PROFILE_UPDATED', ${audit.ipHash}, ${audit.userAgentHash}, ${JSON.stringify({ marketingEmail: values.marketingEmail, advertising: values.advertising })}::jsonb, date_trunc('minute', CURRENT_TIMESTAMP))
-        ON CONFLICT ("eventType", "ipHash", "dedupMinute") DO NOTHING
+        ON CONFLICT ("eventType", "ipHash", "dedupMinute") WHERE "adminUserId" IS NULL DO NOTHING
       `;
       return updated;
     });
@@ -1234,7 +1234,7 @@ export class AccountService {
     await tx.$executeRaw`
         INSERT INTO "SecurityEvent" ("customerId", "eventType", "ipHash", "userAgentHash", "metadata", "dedupMinute")
         VALUES (${customerId}::uuid, 'CUSTOMER_ACCOUNT_ANONYMIZED', ${audit.ipHash}, ${audit.userAgentHash}, '{"retention":"financial-history-only"}'::jsonb, date_trunc('minute', CURRENT_TIMESTAMP))
-        ON CONFLICT ("eventType", "ipHash", "dedupMinute") DO NOTHING
+        ON CONFLICT ("eventType", "ipHash", "dedupMinute") WHERE "adminUserId" IS NULL DO NOTHING
       `;
     if (customer.authUserId) {
       await tx.domainOutbox.create({

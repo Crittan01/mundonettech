@@ -51,10 +51,12 @@ export interface OperationalHealthSnapshotView {
 export interface HealthCaptureResult {
   readonly snapshot: OperationalHealthSnapshotView;
   readonly activeAlerts: number;
+  readonly nextDrillDueAt: string | null;
 }
 
 export interface HealthDashboard {
   readonly snapshot: OperationalHealthSnapshotView;
+  readonly nextDrillDueAt: string | null;
   readonly recentSnapshots: readonly OperationalHealthSnapshotView[];
   readonly backups: readonly BackupRunView[];
   readonly drills: readonly DisasterRecoveryDrillView[];
