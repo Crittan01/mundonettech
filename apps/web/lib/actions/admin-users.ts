@@ -75,7 +75,10 @@ async function hasPriorActivation(
   if (target.mfaEnrolledAt !== null || target.lastSignInAt !== null) return true;
   if (typeof tx.adminActionLog?.findFirst !== "function") return false;
   const accepted = await tx.adminActionLog.findFirst({
-    where: { targetAdminUserId: target.id, action: "ADMIN_INVITATION_ACCEPTED" },
+    where: {
+      targetAdminUserId: target.id,
+      action: { in: ["ADMIN_INVITATION_ACCEPTED", "ADMIN_BOOTSTRAPPED"] },
+    },
     select: { id: true },
   });
   return Boolean(accepted);
@@ -87,10 +90,12 @@ async function revokeAuthSessionsInDatabase(
 ): Promise<void> {
   if (typeof tx.$queryRaw !== "function") return;
   const check = await tx.$queryRaw<Array<{ canRevoke: boolean }>>`
-    SELECT (
-      to_regclass('auth.sessions') IS NOT NULL
-      AND has_table_privilege('auth.sessions', 'DELETE')
-    ) AS "canRevoke"
+    SELECT CASE
+      WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'auth')
+        AND pg_catalog.has_schema_privilege('auth', 'USAGE')
+      THEN COALESCE(pg_catalog.has_table_privilege(pg_catalog.to_regclass('auth.sessions'), 'DELETE'), false)
+      ELSE false
+    END AS "canRevoke"
   `;
   if (!check[0]?.canRevoke) return;
   await tx.$executeRaw`DELETE FROM auth.sessions WHERE user_id = ${authUserId}::uuid`;
@@ -336,8 +341,9 @@ export async function updateAdministratorAction(
       authStateMutated = "unbanned";
     }
 
+    let appliedChange = true;
     try {
-      await db.$transaction(async (tx) => {
+      appliedChange = await db.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('admin-role-membership', 0))`;
         const freshActor = await assertAdminActorInTransaction(
           tx,
@@ -356,6 +362,21 @@ export async function updateAdministratorAction(
           throw new OperationFailure(
             "No puedes administrar una cuenta de tu mismo anillo o superior.",
           );
+        if (
+          target.status !== preflight.previousStatus ||
+          target.authUserId !== preflight.authUserId
+        ) {
+          throw new OperationFailure(
+            "El estado de la cuenta cambió durante la operación. Recarga e inténtalo de nuevo.",
+          );
+        }
+        if (
+          authStateMutated === null &&
+          target.role === parsed.data.role &&
+          target.status === parsed.data.status
+        ) {
+          return false;
+        }
         if (target.status === "INVITED" && parsed.data.status === "ACTIVE") {
           throw new OperationFailure(
             "Una cuenta invitada solo puede activarse al aceptar su invitación.",
@@ -416,21 +437,51 @@ export async function updateAdministratorAction(
             },
           },
         });
+        return true;
       });
     } catch (error) {
       if (authStateMutated !== null) {
+        let shouldRevert = true;
         try {
-          const admin = createSupabaseAdminClient();
-          await admin.auth.admin.updateUserById(preflight.authUserId, {
-            ban_duration: authStateMutated === "banned" ? "none" : "876000h",
-          });
+          const currentTarget =
+            typeof db.adminUser?.findUnique === "function"
+              ? await db.adminUser.findUnique({
+                  where: { id: parsed.data.targetId },
+                  select: { status: true, deletedAt: true },
+                })
+              : null;
+          if (currentTarget && !currentTarget.deletedAt) {
+            shouldRevert =
+              (authStateMutated === "banned" && currentTarget.status !== "SUSPENDED") ||
+              (authStateMutated === "unbanned" && currentTarget.status === "SUSPENDED");
+          }
         } catch {
-          // Do not mask the primary transaction error during best-effort rollback.
+          shouldRevert = true;
+        }
+        if (shouldRevert) {
+          let rollbackFailed = false;
+          try {
+            const admin = createSupabaseAdminClient();
+            const compensated = await admin.auth.admin.updateUserById(preflight.authUserId, {
+              ban_duration: authStateMutated === "banned" ? "none" : "876000h",
+            });
+            rollbackFailed = Boolean(compensated.error);
+          } catch {
+            rollbackFailed = true;
+          }
+          if (rollbackFailed) {
+            return actionError(
+              "No pudimos completar el cambio ni revertir el bloqueo de autenticación. Revisa el estado de la cuenta o contacta soporte.",
+            );
+          }
         }
       }
       throw error;
     }
 
+    if (!appliedChange) {
+      return actionSuccess("No hubo cambios que aplicar en la cuenta administrativa.");
+    }
     revalidatePath("/admin/usuarios");
     return actionSuccess("Administrador actualizado y cambio registrado en auditoría.");
   } catch (error) {

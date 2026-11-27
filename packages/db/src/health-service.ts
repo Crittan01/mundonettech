@@ -404,7 +404,11 @@ export class OperationalHealthService {
           (
             latest_success."nextDueAt" IS NOT NULL
             AND s."capturedAt" <= latest_success."nextDueAt"
-            AND COALESCE(latest_any."status"::text, '') <> 'FAILED'
+            AND NOT (
+              latest_any."status" = 'FAILED'
+              AND latest_any."completedAt" IS NOT NULL
+              AND latest_any."completedAt" <= s."capturedAt"
+            )
           ) AS "drillCurrent"
         FROM "OperationalHealthSnapshot" s
         LEFT JOIN LATERAL (
@@ -417,7 +421,7 @@ export class OperationalHealthService {
           LIMIT 1
         ) latest_success ON TRUE
         LEFT JOIN LATERAL (
-          SELECT d."status"
+          SELECT d."status", d."completedAt"
           FROM "DisasterRecoveryDrill" d
           WHERE d."environment" = s."environment"
             AND d."startedAt" <= s."capturedAt"

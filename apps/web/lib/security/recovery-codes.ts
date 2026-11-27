@@ -3,6 +3,7 @@ import "server-only";
 import { createHmac, randomInt, randomUUID } from "node:crypto";
 
 import {
+  AdminActorAuthorizationError,
   assertAdminActorInTransaction,
   consumeAdminRecoveryCode,
   type Prisma,
@@ -51,6 +52,9 @@ export async function regenerateRecoveryCodesInTransaction(
   tx: Prisma.TransactionClient,
   options: RegenerateRecoveryCodesOptions,
 ): Promise<string[]> {
+  if (options.actorAdminUserId !== options.adminUserId) {
+    throw new AdminActorAuthorizationError();
+  }
   await assertAdminActorInTransaction(tx, options.actorAdminUserId, "security:write_own", {
     lock: "SHARE",
   });

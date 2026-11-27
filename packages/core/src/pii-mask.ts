@@ -100,7 +100,7 @@ const sensitiveAuditKeyWords = new Set([
   "accesstoken",
   "refreshtoken",
 ]);
-const safeOperationalAuditKeys = new Set(["statuscode", "httpstatus"]);
+const safeOperationalAuditKeys = new Set(["statuscode", "httpstatus", "documentid"]);
 const safeSha256AuditKeys = new Set([
   "titlehash",
   "seotitlehash",
@@ -108,16 +108,26 @@ const safeSha256AuditKeys = new Set([
   "contenthash",
 ]);
 const sha256HexPattern = /^[0-9a-f]{64}$/i;
+const maxRawAuditStringScanLength = 4096;
 const sensitiveStringPatterns = [
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
   /\bBearer\s+[^\s,;]+/gi,
+  /\bBasic\s+[A-Za-z0-9+/=]{8,}/gi,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g,
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]*:[^\s/@]+@[^\s]+/gi,
   /\bpostgres(?:ql)?:\/\/[^\s]+/gi,
-  /\b[^\s@]+@[^\s@]+\.[^\s@]{2,}\b/g,
+  /([?&](?:access_token|refresh_token|api_key|apikey|token|secret|password|passphrase|key|signature|code)=)[^&\s#]+/gi,
+  /(?<![A-Za-z0-9._%+-/])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b/g,
 ];
 
 function redactSensitiveStringValue(raw: string): string {
-  let sanitized = raw;
+  let sanitized =
+    raw.length > maxRawAuditStringScanLength ? raw.slice(0, maxRawAuditStringScanLength) : raw;
   for (const pattern of sensitiveStringPatterns) {
-    sanitized = sanitized.replace(pattern, "[redactado]");
+    sanitized = sanitized.replace(pattern, (...args) => {
+      const capturedPrefix = typeof args[1] === "string" ? args[1] : "";
+      return `${capturedPrefix}[redactado]`;
+    });
   }
   return sanitized.length > 300 ? `${sanitized.slice(0, 297)}...` : sanitized;
 }

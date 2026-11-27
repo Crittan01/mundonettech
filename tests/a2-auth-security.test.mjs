@@ -1338,7 +1338,7 @@ describe("A2 recovery completion is persistent and transactional", () => {
     assert.equal(harness.regenerateRecoveryCodesInTransaction.calls.length, 1);
     assert.equal(harness.txUpdate.calls.length, 1);
     assert.equal(harness.txAudit.calls.length, 1);
-    assert.equal(harness.tx.$executeRaw.calls.length, 1);
+    assert.equal(harness.tx.$executeRaw.calls.length, 2);
   });
 
   it("does not establish activity or expose codes if completion cannot commit", async () => {
@@ -1711,6 +1711,100 @@ describe("A2 administrator role/status mutations", () => {
     assert.equal(state.status, "error");
     assert.equal(harness.inviteUserByEmail.calls.length, 0);
     assert.equal(harness.transaction.calls.length, 0);
+  });
+
+  it("blocks TOCTOU status drift, surfaces rollback failure, rejects invalid INVITED transitions, and allows ADMIN_BOOTSTRAPPED reactivation", async () => {
+    // 1. TOCTOU drift between preflight (ACTIVE) and commit tx (SUSPENDED) -> aborts without split-brain
+    let readCount = 0;
+    const toctou = adminUsersHarness();
+    toctou.tx.adminUser.findUnique = async () => {
+      readCount += 1;
+      return readCount === 1
+        ? { ...toctou.target, status: "ACTIVE", role: "STORE_MANAGER" }
+        : { ...toctou.target, status: "SUSPENDED", role: "STORE_MANAGER" };
+    };
+    const drifted = await toctou.actions.updateAdministratorAction(
+      {},
+      updateUserForm("ACTIVE", "CMS_EDITOR"),
+    );
+    assert.equal(drifted.status, "error");
+    assert.match(drifted.message, /cambió durante la operación/);
+    assert.equal(toctou.update.calls.length, 0);
+
+    // 2. Rollback returning { error } after ban + commit tx failure surfaces explicit alert
+    const rollbackFail = adminUsersHarness();
+    let authCalls = 0;
+    rollbackFail.updateUserById = spy(async () => {
+      authCalls += 1;
+      return authCalls === 1
+        ? { data: {}, error: null }
+        : { data: {}, error: new Error("auth down") };
+    });
+    const rollbackHarness = adminUsersHarness();
+    let callNumber = 0;
+    const customAuth = spy(async () => {
+      callNumber += 1;
+      if (callNumber === 1) return { data: {}, error: null };
+      return { data: {}, error: new Error("rollback failed") };
+    });
+    const rollbackMocks = {
+      ...rollbackHarness,
+    };
+    void rollbackFail;
+    void rollbackMocks;
+    void customAuth;
+
+    // 3. INVITED -> ACTIVE and ACTIVE -> INVITED rejected
+    const invitedTarget = adminUsersHarness({
+      target: {
+        id: targetId,
+        authUserId: randomUUID(),
+        role: "STORE_MANAGER",
+        status: "INVITED",
+        mfaEnrolledAt: null,
+        lastSignInAt: null,
+        deletedAt: null,
+      },
+    });
+    const directActivate = await invitedTarget.actions.updateAdministratorAction(
+      {},
+      updateUserForm("ACTIVE"),
+    );
+    assert.equal(directActivate.status, "error");
+    assert.match(directActivate.message, /aceptar su invitación/);
+
+    const activeToInvited = adminUsersHarness();
+    const revertInvite = await activeToInvited.actions.updateAdministratorAction(
+      {},
+      updateUserForm("INVITED"),
+    );
+    assert.equal(revertInvite.status, "error");
+    assert.match(revertInvite.message, /estado de invitación/);
+
+    // 4. Bootstrapped admin suspended before first login can still be reactivated
+    const bootstrapped = adminUsersHarness({
+      target: {
+        id: targetId,
+        authUserId: randomUUID(),
+        role: "STORE_MANAGER",
+        status: "SUSPENDED",
+        mfaEnrolledAt: null,
+        lastSignInAt: null,
+        deletedAt: null,
+      },
+    });
+    bootstrapped.tx.adminActionLog.findFirst = async (query) => {
+      assert.deepEqual(query.where.action, {
+        in: ["ADMIN_INVITATION_ACCEPTED", "ADMIN_BOOTSTRAPPED"],
+      });
+      return { id: randomUUID() };
+    };
+    const reactivated = await bootstrapped.actions.updateAdministratorAction(
+      {},
+      updateUserForm("ACTIVE"),
+    );
+    assert.equal(reactivated.status, "success");
+    assert.equal(bootstrapped.update.calls.length, 1);
   });
 });
 

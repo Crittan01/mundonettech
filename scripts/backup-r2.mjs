@@ -152,7 +152,9 @@ export async function runBackup(options = {}) {
       if (
         head.ContentLength === undefined ||
         BigInt(head.ContentLength) !== meter.byteSize() ||
-        (uploaded?.etag && head.ETag && normalizedEtag(head.ETag) !== normalizedEtag(uploaded.etag))
+        !uploaded?.etag ||
+        !head.ETag ||
+        normalizedEtag(head.ETag) !== normalizedEtag(uploaded.etag)
       ) {
         throw new RecoveryError(
           "BACKUP_SIZE_MISMATCH",

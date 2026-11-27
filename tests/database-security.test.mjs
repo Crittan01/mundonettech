@@ -848,6 +848,28 @@ describe("F0.3 — relational integrity and immutable security records", () => {
       admin.query('DELETE FROM "SecurityEvent" WHERE "id" = $1', [inserted.rows[0].id]),
       "55000",
     );
+
+    const adminOne = await createAdmin({ role: "SUPERADMIN" });
+    const adminTwo = await createAdmin({ role: "OPERATIONS_MANAGER" });
+    const sharedMinute = new Date("2026-01-15T14:22:10.000Z");
+    await admin.query(
+      `INSERT INTO "SecurityEvent" ("adminUserId", "eventType", "ipHash", "occurredAt")
+       VALUES ($1, 'ADMIN_MFA_VERIFIED', $2, $3)`,
+      [adminOne.id, ipHash, sharedMinute],
+    );
+    await admin.query(
+      `INSERT INTO "SecurityEvent" ("adminUserId", "eventType", "ipHash", "occurredAt")
+       VALUES ($1, 'ADMIN_MFA_VERIFIED', $2, $3)`,
+      [adminTwo.id, ipHash, new Date("2026-01-15T14:22:45.000Z")],
+    );
+    await expectSqlViolation(
+      admin.query(
+        `INSERT INTO "SecurityEvent" ("adminUserId", "eventType", "ipHash", "occurredAt")
+         VALUES ($1, 'ADMIN_MFA_VERIFIED', $2, $3)`,
+        [adminOne.id, ipHash, new Date("2026-01-15T14:22:55.000Z")],
+      ),
+      "23505",
+    );
   });
 
   it("stores consent grants and revocations as an append-only chain", async () => {

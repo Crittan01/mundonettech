@@ -67,7 +67,7 @@ BEGIN
       ) OR EXISTS (
         SELECT 1 FROM "RecoveryBucketCheck"
         WHERE "disasterRecoveryDrillId" = NEW."id"
-          AND (NOT "accessible" OR (COALESCE("objectCount", 0) > 0 AND NOT "readVerified"))
+          AND (NOT "accessible" OR "objectCount" IS NULL OR ("objectCount" > 0 AND NOT "readVerified"))
       ) THEN
         RAISE EXCEPTION 'Disaster recovery drill requires passing bucket inventory and read verification before succeeding' USING ERRCODE = '55000';
       END IF;
@@ -78,3 +78,27 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION "enforce_recovery_run_state"() FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION "validate_recovery_bucket_check"() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' OR TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Recovery bucket evidence is append-only' USING ERRCODE = '55000';
+  END IF;
+  IF NEW."backupRunId" IS NOT NULL THEN
+    PERFORM 1 FROM "BackupRun" WHERE "id" = NEW."backupRunId" AND "status" = 'RUNNING' FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Backup bucket evidence requires a running backup' USING ERRCODE = '55000';
+    END IF;
+  END IF;
+  IF NEW."disasterRecoveryDrillId" IS NOT NULL THEN
+    PERFORM 1 FROM "DisasterRecoveryDrill" WHERE "id" = NEW."disasterRecoveryDrillId" AND "status" = 'RUNNING' FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'DR bucket evidence requires a running drill' USING ERRCODE = '55000';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION "validate_recovery_bucket_check"() FROM PUBLIC, anon, authenticated, service_role;

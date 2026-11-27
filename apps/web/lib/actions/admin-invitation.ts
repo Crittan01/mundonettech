@@ -98,11 +98,22 @@ export async function acceptAdminInvitationAction(
   let activatedId: string;
   try {
     activatedId = await getDatabase().$transaction(async (tx) => {
+      if (typeof tx.$executeRaw === "function") {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended('admin-role-membership', 0))`;
+      }
       const profile = await tx.adminUser.findFirst({
         where: { authUserId: authUser.id, status: "INVITED", deletedAt: null },
       });
       if (!profile) throw new Error("Invitation profile unavailable.");
-      await tx.adminUser.update({ where: { id: profile.id }, data: { status: "ACTIVE" } });
+      if (typeof tx.adminUser.updateMany === "function") {
+        const updatedProfile = await tx.adminUser.updateMany({
+          where: { id: profile.id, status: "INVITED", deletedAt: null },
+          data: { status: "ACTIVE" },
+        });
+        if (updatedProfile.count !== 1) throw new Error("Invitation profile unavailable.");
+      } else {
+        await tx.adminUser.update({ where: { id: profile.id }, data: { status: "ACTIVE" } });
+      }
       await tx.adminActionLog.create({
         data: {
           actorAdminUserId: profile.id,

@@ -225,7 +225,7 @@ describe("health probes", () => {
     expect(await response.json()).toEqual({ status: "unavailable" });
   });
 
-  it("logs only an error class when readiness fails", async () => {
+  it("logs only an error class when readiness fails and enforces bounded transaction timeouts", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     mocks.queryRaw.mockRejectedValue(new Error("postgresql://user:secret@internal/db"));
     const response = await readyRoute.GET();
@@ -233,6 +233,18 @@ describe("health probes", () => {
     expect(JSON.stringify(await response.json())).not.toContain("secret");
     expect(consoleError).toHaveBeenCalledWith("Database readiness check failed.", "Error");
     expect(JSON.stringify(consoleError.mock.calls)).not.toContain("secret");
+
+    vi.useFakeTimers();
+    try {
+      mocks.queryRaw.mockImplementation(() => new Promise(() => undefined));
+      const pending = readyRoute.GET();
+      await vi.advanceTimersByTimeAsync(3_100);
+      const timedOut = await pending;
+      expect(timedOut.status).toBe(503);
+      expect(await timedOut.json()).toEqual({ status: "unavailable" });
+    } finally {
+      vi.useRealTimers();
+    }
     consoleError.mockRestore();
   });
 

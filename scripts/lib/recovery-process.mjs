@@ -61,8 +61,7 @@ export function waitForSuccessfulExit(child, failureCode) {
       failureCode,
       `A recovery process exited unsuccessfully (${child.exitCode ?? child.signalCode ?? "unknown"}).`,
     );
-    if (child.recoveryTerminatedByCleanup && child.exitCode === null)
-      failure.recoveryCleanup = true;
+    if (child.recoveryTerminatedByCleanup) failure.recoveryCleanup = true;
     return Promise.reject(failure);
   }
   return new Promise((resolve, reject) => {
@@ -80,7 +79,7 @@ export function waitForSuccessfulExit(child, failureCode) {
           failureCode,
           `A recovery process exited unsuccessfully (${code ?? signal ?? "unknown"}).`,
         );
-        if (child.recoveryTerminatedByCleanup && code === null) failure.recoveryCleanup = true;
+        if (child.recoveryTerminatedByCleanup) failure.recoveryCleanup = true;
         reject(failure);
       }
     });
@@ -129,21 +128,37 @@ export function terminateRecoveryProcesses(processes) {
 }
 
 export async function settleStreamingTasks(tasks, processes, onFailure) {
+  let firstRecoveryError = null;
+  const observedTasks = tasks.map((task) =>
+    Promise.resolve(task).catch((taskError) => {
+      if (!firstRecoveryError && taskError instanceof RecoveryError && !taskError.recoveryCleanup) {
+        firstRecoveryError = taskError;
+      }
+      throw taskError;
+    }),
+  );
   try {
-    await Promise.all(tasks);
+    await Promise.all(observedTasks);
   } catch (error) {
     onFailure?.();
-    if (!(error instanceof RecoveryError)) {
+    if (error instanceof RecoveryError && !error.recoveryCleanup) {
+      terminateRecoveryProcesses(processes);
+      await Promise.allSettled(observedTasks);
+      throw error;
+    }
+    if (!firstRecoveryError) {
       await Promise.race([
-        Promise.allSettled(tasks),
+        Promise.allSettled(observedTasks),
         new Promise((resolve) => {
           const timer = setTimeout(resolve, 250);
           timer.unref?.();
         }),
       ]);
     }
+    const preCleanupFailure = firstRecoveryError;
     terminateRecoveryProcesses(processes);
-    const results = await Promise.allSettled(tasks);
+    const results = await Promise.allSettled(observedTasks);
+    if (preCleanupFailure) throw preCleanupFailure;
     const processFailure = results.find(
       (result) =>
         result.status === "rejected" &&

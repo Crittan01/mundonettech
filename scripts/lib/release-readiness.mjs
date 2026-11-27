@@ -181,12 +181,19 @@ export function validateReleaseConfiguration(environment) {
   }
   const bankTransfer = environment.BANK_TRANSFER_INSTRUCTIONS?.trim();
   if (bankTransfer) {
+    const hasDisallowedBankTransferControl = [...bankTransfer].some((char) => {
+      const codePoint = char.codePointAt(0) ?? 0;
+      return (
+        (codePoint < 32 && codePoint !== 9 && codePoint !== 10 && codePoint !== 13) ||
+        codePoint === 127
+      );
+    });
     check(
       "release.bankTransferInstructions",
       bankTransfer.length >= 20 &&
         bankTransfer.length <= 2000 &&
         !placeholderValuePattern.test(bankTransfer) &&
-        !hasControlChars(bankTransfer),
+        !hasDisallowedBankTransferControl,
     );
   }
   check("release.targetHttps", validHttpsOrigin(environment.RELEASE_TARGET_URL, targetEnvironment));
@@ -222,15 +229,18 @@ export function validateReleaseConfiguration(environment) {
   );
   check(
     "release.supabaseServerOverride",
-    (!environment.SUPABASE_URL ||
-      environment.SUPABASE_URL.replace(/\/$/, "") ===
-        environment.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, "")) &&
-      (!environment.SUPABASE_PUBLISHABLE_KEY ||
-        environment.SUPABASE_PUBLISHABLE_KEY ===
-          environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY) &&
-      (!environment.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ||
-        environment.NEXT_PUBLIC_SUPABASE_ANON_KEY ===
-          environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY),
+    (environment.SUPABASE_URL === undefined ||
+      (environment.SUPABASE_URL.trim().length > 0 &&
+        environment.SUPABASE_URL.replace(/\/$/, "") ===
+          environment.NEXT_PUBLIC_SUPABASE_URL?.replace(/\/$/, ""))) &&
+      (environment.SUPABASE_PUBLISHABLE_KEY === undefined ||
+        (environment.SUPABASE_PUBLISHABLE_KEY.trim().length > 0 &&
+          environment.SUPABASE_PUBLISHABLE_KEY ===
+            environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)) &&
+      (environment.NEXT_PUBLIC_SUPABASE_ANON_KEY === undefined ||
+        (environment.NEXT_PUBLIC_SUPABASE_ANON_KEY.trim().length > 0 &&
+          environment.NEXT_PUBLIC_SUPABASE_ANON_KEY ===
+            environment.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)),
   );
   check(
     "release.supabasePublishableKey",
@@ -418,9 +428,10 @@ export function validateReleaseConfiguration(environment) {
   );
   check(
     "release.mediaServerOverride",
-    !environment.MEDIA_BASE_URL ||
-      environment.MEDIA_BASE_URL.replace(/\/$/, "") ===
-        environment.NEXT_PUBLIC_MEDIA_BASE_URL?.replace(/\/$/, ""),
+    environment.MEDIA_BASE_URL === undefined ||
+      (environment.MEDIA_BASE_URL.trim().length > 0 &&
+        environment.MEDIA_BASE_URL.replace(/\/$/, "") ===
+          environment.NEXT_PUBLIC_MEDIA_BASE_URL?.replace(/\/$/, "")),
   );
   for (const name of [
     ...commonApprovals,

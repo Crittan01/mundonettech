@@ -126,7 +126,7 @@ function assertDrTargetIsolatedFrom(target, source, label) {
 export async function readValidatedGpgPassphraseFile(file) {
   let handle;
   try {
-    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     throw new RecoveryError(
       "GPG_PASSPHRASE_CONFIGURATION_INVALID",
@@ -155,10 +155,15 @@ export function validateGpgPassphraseValue(value) {
     const codePoint = character.codePointAt(0) ?? 0;
     return codePoint < 32 || codePoint === 127;
   });
-  if (byteLength < 32 || byteLength > 1024 || hasControlCharacters) {
+  if (
+    byteLength < 32 ||
+    byteLength > 1024 ||
+    hasControlCharacters ||
+    /^REPLACE_WITH_/i.test(value ?? "")
+  ) {
     throw new RecoveryError(
       "GPG_PASSPHRASE_CONFIGURATION_INVALID",
-      "The GPG passphrase must contain between 32 and 1024 UTF-8 bytes on one line.",
+      "The GPG passphrase must contain between 32 and 1024 non-placeholder UTF-8 bytes on one line.",
     );
   }
   return value;

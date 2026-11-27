@@ -41,6 +41,7 @@ export const OPTIONS = methodNotAllowed;
 
 const closedStageErrorCodes = new Set([
   "FORBIDDEN",
+  "ENVIRONMENT_MISMATCH",
   "CONFLICT",
   "NOT_FOUND",
   "INVALID_INPUT",
@@ -56,7 +57,11 @@ const closedStageErrorCodes = new Set([
 
 function isForbiddenDomainError(error: unknown): boolean {
   return (
-    typeof error === "object" && error !== null && "code" in error && error.code === "FORBIDDEN"
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "FORBIDDEN" &&
+    (!("reason" in error) || error.reason !== "ENVIRONMENT_MISMATCH")
   );
 }
 

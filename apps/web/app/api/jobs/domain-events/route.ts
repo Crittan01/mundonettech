@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 import { verifyCronBearer } from "@mundonettech/core";
 import { OperationsService } from "@mundonettech/db";
 
@@ -44,10 +46,10 @@ export async function POST(request: Request) {
   if (auth === "UNAUTHORIZED") {
     return Response.json({ error: "Unauthorized." }, { status: 401, headers });
   }
+  const total = { claimed: 0, completed: 0, retries: 0, failed: 0 };
   try {
     const worker = domainEventWorker();
-    const total = { claimed: 0, completed: 0, retries: 0, failed: 0 };
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     for (let batch = 0; batch < maxBatches; batch += 1) {
       const result = await worker.runBatch(batchLimit);
       total.claimed += result.claimed;
@@ -56,13 +58,14 @@ export async function POST(request: Request) {
       total.failed += result.failed;
       const settled = result.completed + result.retries + result.failed;
       if (result.claimed < batchLimit || settled < result.claimed) break;
-      if (Date.now() - startedAt >= maxExecutionMs) break;
-    }
-    if (total.failed > 0) {
-      await new OperationsService(getDatabase()).synchronizeNotifications().catch(() => undefined);
+      if (performance.now() - startedAt >= maxExecutionMs) break;
     }
     return Response.json(total, { headers });
   } catch {
     return Response.json({ error: "Domain worker execution failed." }, { status: 500, headers });
+  } finally {
+    if (total.failed > 0) {
+      await new OperationsService(getDatabase()).synchronizeNotifications().catch(() => undefined);
+    }
   }
 }

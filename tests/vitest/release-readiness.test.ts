@@ -258,6 +258,24 @@ describe("release configuration gate", () => {
     expect(
       multilinePassphrase.find((check) => check.name === "release.backupGpgPassphrase")?.passed,
     ).toBe(false);
+
+    const emptyOverrides = validateReleaseConfiguration(
+      environment({
+        SUPABASE_URL: "",
+        SUPABASE_PUBLISHABLE_KEY: "",
+        MEDIA_BASE_URL: "",
+        BANK_TRANSFER_INSTRUCTIONS: "Banco Ejemplo\nCuenta corriente 1234567890\nNIT 900000000-1",
+      }),
+    );
+    expect(
+      emptyOverrides.find((check) => check.name === "release.supabaseServerOverride")?.passed,
+    ).toBe(false);
+    expect(
+      emptyOverrides.find((check) => check.name === "release.mediaServerOverride")?.passed,
+    ).toBe(false);
+    expect(
+      emptyOverrides.find((check) => check.name === "release.bankTransferInstructions")?.passed,
+    ).toBe(true);
   });
 
   it("enforces secret uniqueness, exact 32-byte base64 keys, non-placeholder values, sslmode, DIRECT_URL DR isolation, and R2 endpoint isolation", () => {

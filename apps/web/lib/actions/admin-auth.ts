@@ -261,11 +261,15 @@ export async function recoverAdminFactorAction(
         metadata: { removedFactors: totpFactors.length },
       },
     });
-    await recordSecurityEvent(db, {
-      context,
-      eventType: "ADMIN_RECOVERY_CODE_USED",
-      adminUserId: session.profile.id,
-    });
+    try {
+      await recordSecurityEvent(db, {
+        context,
+        eventType: "ADMIN_RECOVERY_CODE_USED",
+        adminUserId: session.profile.id,
+      });
+    } catch {
+      // Non-blocking after durable recovery code consumption and AdminActionLog persistence.
+    }
     return enrollTotp();
   } catch (error) {
     if (error instanceof AdminOperationRateLimitError) {
@@ -348,7 +352,10 @@ export async function verifyAdminMfaAction(
     }
     const context = await getRequestSecurityContext();
     const recoveryCodes = await db.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`admin-mfa-completion:${session.profile.id}`}))`;
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`admin-mfa-completion:${session.profile.id}`}, 0))`;
+      if (typeof tx.$executeRaw === "function") {
+        await tx.$executeRaw`SELECT "id" FROM "AdminUser" WHERE "id" = ${session.profile.id}::uuid FOR UPDATE`;
+      }
       const rows = await tx.$queryRaw<Array<{ now: Date }>>`SELECT CURRENT_TIMESTAMP AS now`;
       const now = rows[0]?.now;
       if (!now) throw new Error("Database clock is unavailable.");
@@ -415,11 +422,15 @@ export async function verifyAdminMfaAction(
       });
       return generated;
     });
-    await recordSecurityEvent(db, {
-      context,
-      eventType: "ADMIN_MFA_VERIFIED",
-      adminUserId: session.profile.id,
-    });
+    try {
+      await recordSecurityEvent(db, {
+        context,
+        eventType: "ADMIN_MFA_VERIFIED",
+        adminUserId: session.profile.id,
+      });
+    } catch {
+      // Non-blocking after durable MFA verification commit and AdminActionLog persistence.
+    }
     await establishAdminActivity(session.user.id);
     return {
       status: "success",
@@ -493,11 +504,15 @@ export async function stepUpAdminAction(
         metadata: { factorId: factor.id },
       },
     });
-    await recordSecurityEvent(db, {
-      context,
-      eventType: "ADMIN_STEP_UP_VERIFIED",
-      adminUserId: steppedUpSession.profile.id,
-    });
+    try {
+      await recordSecurityEvent(db, {
+        context,
+        eventType: "ADMIN_STEP_UP_VERIFIED",
+        adminUserId: steppedUpSession.profile.id,
+      });
+    } catch {
+      // Non-blocking after durable step-up audit log persistence.
+    }
     await refreshAdminActivity(steppedUpSession.user.id);
     revalidatePath("/admin/seguridad");
     revalidatePath("/admin/usuarios");
@@ -546,11 +561,15 @@ export async function regenerateAdminRecoveryCodesAction(): Promise<MfaState> {
       actorAdminUserId: session.profile.id,
       context,
     });
-    await recordSecurityEvent(db, {
-      context,
-      eventType: "ADMIN_RECOVERY_CODES_REGENERATED",
-      adminUserId: session.profile.id,
-    });
+    try {
+      await recordSecurityEvent(db, {
+        context,
+        eventType: "ADMIN_RECOVERY_CODES_REGENERATED",
+        adminUserId: session.profile.id,
+      });
+    } catch {
+      // Non-blocking after durable recovery code regeneration and AdminActionLog persistence.
+    }
     revalidatePath("/admin/seguridad");
     revalidatePath("/admin");
     return {

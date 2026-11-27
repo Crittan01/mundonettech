@@ -37,6 +37,7 @@ import {
   assertUuid,
   inInventoryTransaction,
   isSellableVariant,
+  isTransactionConflictError,
 } from "./inventory-shared.js";
 import { acquireIdempotencyKey, completeIdempotencyKey } from "./primitives.js";
 import type { CheckoutDefaults } from "./order-types.js";
@@ -1594,10 +1595,7 @@ export class B2bService {
         } catch (error) {
           if (
             (error instanceof B2bError && error.code === "CONFLICT") ||
-            (typeof error === "object" &&
-              error !== null &&
-              "code" in error &&
-              error.code === "40001")
+            isTransactionConflictError(error)
           ) {
             continue;
           }

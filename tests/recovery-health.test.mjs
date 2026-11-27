@@ -530,6 +530,71 @@ describe("F5.3 — streaming encrypted backups, real DR and actionable health", 
       where: { id: emptyRun.id },
       data: { status: "FAILED", completedAt: new Date(), failureCode: "R2_BUCKET_ACCESS_FAILED" },
     });
+
+    const latestGoodBackup = await db.backupRun.findFirstOrThrow({
+      where: { environment: "LOCAL", status: "SUCCEEDED" },
+      orderBy: { completedAt: "desc" },
+    });
+    const nullInventoryDrill = await db.disasterRecoveryDrill.create({
+      data: { environment: "LOCAL", backupRunId: latestGoodBackup.id },
+    });
+    await db.recoveryBucketCheck.create({
+      data: {
+        disasterRecoveryDrillId: nullInventoryDrill.id,
+        bucketName: mediaBucket,
+        accessible: true,
+        objectCount: null,
+        readVerified: false,
+      },
+    });
+    await assert.rejects(
+      sql.query(
+        `UPDATE "DisasterRecoveryDrill"
+         SET "status" = 'SUCCEEDED', "completedAt" = CURRENT_TIMESTAMP,
+             "authSchemaVerified" = true, "verifiedRelationCount" = 133,
+             "nextDueAt" = CURRENT_TIMESTAMP + interval '30 days'
+         WHERE "id" = $1`,
+        [nullInventoryDrill.id],
+      ),
+      /passing bucket inventory/,
+    );
+    await db.disasterRecoveryDrill.update({
+      where: { id: nullInventoryDrill.id },
+      data: { status: "FAILED", completedAt: new Date(), failureCode: "R2_BUCKET_READ_FAILED" },
+    });
+
+    const { validateGpgPassphraseValue } = await import("../scripts/lib/recovery-config.mjs");
+    assert.throws(
+      () => validateGpgPassphraseValue("REPLACE_WITH_RANDOM_HIGH_ENTROPY_PASSPHRASE"),
+      (error) => error.code === "GPG_PASSPHRASE_CONFIGURATION_INVALID",
+    );
+
+    const { settleStreamingTasks } = await import("../scripts/lib/recovery-process.mjs");
+    const { RecoveryError } = await import("../scripts/lib/recovery-config.mjs");
+    const fakeProc = {
+      exitCode: null,
+      signalCode: null,
+      stdin: { destroy() {} },
+      stdout: { destroy() {} },
+      stderr: { destroy() {} },
+      kill() {
+        this.exitCode = 1;
+      },
+    };
+    const cleanupMaskedTask = new Promise((_, reject) => {
+      setTimeout(() => {
+        const err = new RecoveryError("PG_DUMP_FAILED", "cleanup exit");
+        if (fakeProc.recoveryTerminatedByCleanup) err.recoveryCleanup = true;
+        reject(err);
+      }, 20);
+    });
+    const rootCauseTask = Promise.reject(
+      new RecoveryError("R2_MULTIPART_UPLOAD_FAILED", "r2 failed first"),
+    );
+    await assert.rejects(
+      settleStreamingTasks([cleanupMaskedTask, rootCauseTask], [fakeProc]),
+      (error) => error.code === "R2_MULTIPART_UPLOAD_FAILED",
+    );
   });
 
   it("refuses to create a backup when the required auth schema is incomplete", async () => {

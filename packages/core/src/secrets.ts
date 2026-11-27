@@ -1,8 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
-const forbiddenSecretChars = /[\s\u0000-\u001f\u007f]/;
+const printableAsciiSecret = /^[\x21-\x7e]+$/;
 const minCronSecretLength = 32;
 const maxAuthorizationHeaderLength = 512;
+const maxCronSecretLength = maxAuthorizationHeaderLength - "Bearer ".length;
 
 export function matchesSecretTimingSafe(provided: string, expected: string): boolean {
   if (!expected) return false;
@@ -15,7 +16,8 @@ function isValidCronSecret(rawSecret: string | undefined): rawSecret is string {
   return (
     typeof rawSecret === "string" &&
     rawSecret.length >= minCronSecretLength &&
-    !forbiddenSecretChars.test(rawSecret)
+    rawSecret.length <= maxCronSecretLength &&
+    printableAsciiSecret.test(rawSecret)
   );
 }
 

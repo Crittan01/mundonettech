@@ -70,7 +70,7 @@ export default async function AdministratorsPage({ searchParams }: PageProps<"/a
       ? await db.adminActionLog.findMany({
           where: {
             targetAdminUserId: { in: suspendedWithoutActivityIds },
-            action: "ADMIN_INVITATION_ACCEPTED",
+            action: { in: ["ADMIN_INVITATION_ACCEPTED", "ADMIN_BOOTSTRAPPED"] },
           },
           select: { targetAdminUserId: true },
           distinct: ["targetAdminUserId"],
