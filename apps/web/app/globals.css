@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   --color-*: initial;
@@ -30,6 +31,15 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-brand-surface: var(--brand-surface);
+  --color-brand-surface-elevated: var(--brand-surface-elevated);
+  --color-brand-surface-foreground: var(--brand-surface-foreground);
+  --color-brand-surface-muted: var(--brand-surface-muted);
+  --color-brand-surface-border: var(--brand-surface-border);
+  --color-brand-surface-input: var(--brand-surface-input);
+  --color-brand-cyan: var(--brand-cyan);
+  --color-brand-cyan-foreground: var(--brand-cyan-foreground);
+  --color-brand-cyan-muted: var(--brand-cyan-muted);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
 }
@@ -45,6 +55,38 @@
 
   body {
     @apply bg-background font-sans text-foreground antialiased;
+    font-feature-settings:
+      "rlig" 1,
+      "calt" 1;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    letter-spacing: -0.015em;
+  }
+
+  td,
+  dd {
+    font-variant-numeric: tabular-nums;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  label[for],
+  summary,
+  select:not(:disabled),
+  a[href] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [role="button"][aria-disabled="true"],
+  [aria-disabled="true"] {
+    cursor: not-allowed;
   }
 
   p,
@@ -80,4 +122,17 @@
       transition-duration: 0.01ms !important;
     }
   }
+}
+
+.mnt-card-hover {
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.mnt-card-hover:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+  box-shadow: 0 10px 24px -12px color-mix(in oklch, var(--brand-surface) 22%, transparent);
 }

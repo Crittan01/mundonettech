@@ -55,6 +55,18 @@ function buildCompareHref(
   return parts.length > 0 ? `/comparar?${parts.join("&")}` : "/comparar";
 }
 
+function computeDiscountPercent(
+  priceCents: string,
+  compareAtPriceCents: string | null,
+): number | null {
+  if (!compareAtPriceCents) return null;
+  const price = BigInt(priceCents);
+  const compare = BigInt(compareAtPriceCents);
+  if (compare <= price || compare <= 0n) return null;
+  const percent = Number(((compare - price) * 100n + compare / 2n) / compare);
+  return percent >= 1 && percent <= 99 ? percent : null;
+}
+
 export function ProductCard({
   product,
   mediaOrigin,
@@ -75,39 +87,81 @@ export function ProductCard({
     ? compareSlugs.filter((slug) => slug !== product.slug)
     : [...compareSlugs, product.slug];
   const compareHref = buildCompareHref(nextSlugs, compareExtraParams);
+  const discountPct = computeDiscountPercent(product.priceCents, product.compareAtPriceCents);
+  const inStock = product.available > 0;
+
   return (
-    <article className="flex h-full flex-col overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-sm">
-      <Link
-        href={`/producto/${product.slug}`}
-        prefetch={false}
-        className="relative block aspect-[4/3] bg-secondary outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-        aria-label={`${image ? "" : "Imagen no disponible. "}Ver ${product.name}`}
-      >
-        {image ? (
-          <Image
-            src={image.src}
-            alt={image.alt}
-            fill
-            sizes="(min-width: 1024px) 30vw, (min-width: 640px) 45vw, 100vw"
-            className="object-contain p-4"
-            unoptimized
-          />
-        ) : (
-          <span className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
-            Imagen no disponible
+    <article className="mnt-card-hover group flex h-full flex-col overflow-hidden rounded-2xl border border-border bg-card text-card-foreground shadow-xs">
+      <div className="relative aspect-[4/3] overflow-hidden bg-secondary/75">
+        <Link
+          href={`/producto/${product.slug}`}
+          prefetch={false}
+          className="relative block h-full w-full outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+          aria-label={`${image ? "" : "Imagen no disponible. "}Ver ${product.name}`}
+        >
+          {image ? (
+            <Image
+              src={image.src}
+              alt={image.alt}
+              fill
+              sizes="(min-width: 1024px) 25vw, (min-width: 640px) 45vw, 100vw"
+              className={`object-contain p-4 transition-transform duration-300 group-hover:scale-105 ${inStock ? "" : "opacity-65 grayscale"}`}
+              unoptimized
+            />
+          ) : (
+            <span
+              aria-hidden="true"
+              className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-xs font-medium text-muted-foreground"
+            >
+              <svg
+                width="28"
+                height="28"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                className="opacity-60"
+              >
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+                <rect x="9" y="9" width="6" height="6" />
+                <path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2" />
+              </svg>
+              <span>Imagen no disponible</span>
+            </span>
+          )}
+        </Link>
+        <span
+          aria-hidden="true"
+          className={`pointer-events-none absolute top-3 left-3 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+            inStock
+              ? "bg-success text-success-foreground"
+              : "border border-border bg-background text-muted-foreground"
+          }`}
+        >
+          {inStock ? "Disponible" : "Sin unidades"}
+        </span>
+        {discountPct ? (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute top-3 right-3 rounded-full bg-brand-surface px-2.5 py-0.5 font-mono text-[11px] font-bold text-brand-cyan tabular-nums"
+          >
+            -{discountPct}%
           </span>
-        )}
-      </Link>
+        ) : null}
+      </div>
       <div className="flex flex-1 flex-col gap-3 p-5">
         <div>
           <Link
             href={`/marca/${product.brand.slug}`}
             prefetch={false}
-            className="inline-flex min-h-7 items-center rounded-sm py-1 text-xs font-semibold tracking-wide text-muted-foreground uppercase outline-hidden hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            className="inline-flex min-h-7 items-center rounded-sm py-1 text-xs font-semibold tracking-wider text-primary uppercase outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
           >
             {product.brand.name}
           </Link>
-          <Heading className="mt-1 text-lg leading-snug font-semibold">
+          <Heading className="mt-1 line-clamp-2 text-base leading-snug font-semibold text-foreground">
             <Link
               href={`/producto/${product.slug}`}
               className="rounded-sm outline-hidden hover:text-primary focus-visible:ring-2 focus-visible:ring-ring"
@@ -117,36 +171,38 @@ export function ProductCard({
           </Heading>
         </div>
         {product.shortDescription ? (
-          <p className="line-clamp-3 text-sm leading-6 text-muted-foreground">
+          <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">
             {product.shortDescription}
           </p>
         ) : null}
-        <div className="mt-auto space-y-2 pt-2">
-          <p className="text-xl font-bold">
-            {product.priceCents === product.maxPriceCents
-              ? formatCopCents(product.priceCents)
-              : `Desde ${formatCopCents(product.priceCents)}`}
-          </p>
-          {product.compareAtPriceCents &&
-          BigInt(product.compareAtPriceCents) > BigInt(product.priceCents) ? (
-            <p className="text-sm text-muted-foreground">
-              Antes <s>{formatCopCents(product.compareAtPriceCents)}</s>
+        <div className="mt-auto space-y-2 border-t border-border/70 pt-3.5">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <p className="text-xl font-bold tracking-tight text-foreground tabular-nums">
+              {product.priceCents === product.maxPriceCents
+                ? formatCopCents(product.priceCents)
+                : `Desde ${formatCopCents(product.priceCents)}`}
             </p>
-          ) : null}
+            {product.compareAtPriceCents &&
+            BigInt(product.compareAtPriceCents) > BigInt(product.priceCents) ? (
+              <p className="text-xs text-muted-foreground tabular-nums">
+                Antes <s>{formatCopCents(product.compareAtPriceCents)}</s>
+              </p>
+            ) : null}
+          </div>
           <p
             className={
-              product.available > 0
-                ? "text-sm font-medium text-success"
-                : "text-sm font-medium text-muted-foreground"
+              inStock
+                ? "text-xs font-semibold text-success"
+                : "text-xs font-medium text-muted-foreground"
             }
           >
-            {product.available > 0 ? "Disponible" : "Sin unidades disponibles"}
+            {inStock ? "Disponible" : "Sin unidades disponibles"}
           </p>
           {compareSlugs.length < 4 || compared ? (
             <Link
               href={compareHref}
               prefetch={false}
-              className="inline-flex min-h-11 items-center rounded-sm text-sm font-medium text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+              className="inline-flex min-h-10 items-center rounded-sm text-xs font-semibold text-primary underline-offset-4 outline-hidden hover:underline focus-visible:ring-2 focus-visible:ring-ring"
             >
               {compared ? "Quitar del comparador" : "Añadir al comparador"}
               <span className="sr-only">: {product.name}</span>

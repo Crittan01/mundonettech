@@ -719,6 +719,15 @@ test("all 29 customer routes pass WCAG 2.1 AA axe, navigation completeness and z
     }
 
     if (route === "/") {
+      for (const brandAsset of [
+        "/icon.svg",
+        "/apple-icon.png",
+        "/opengraph-image.png",
+        "/manifest.webmanifest",
+      ]) {
+        const assetRes = await page.request.get(brandAsset);
+        expect(assetRes.status(), `Brand asset ${brandAsset}`).toBe(200);
+      }
       await expect(
         page.getByRole("navigation", { name: "Navegación principal" }).getByRole("link", {
           name: "Empresas",
@@ -913,6 +922,19 @@ test("all 43 admin routes pass WCAG 2.1 AA axe, RBAC/PII/filter contracts and ze
   await authenticateAdmin(page, storeManager);
   await page.goto(`/admin/b2b/${fixtureIds.opportunityId}`, { waitUntil: "domcontentloaded" });
   await expect(page.locator('a[href="/admin/integraciones"]')).toHaveCount(0);
+  await page.getByRole("button", { name: "Ir a módulo" }).click();
+  const paletteDialog = page.getByRole("dialog", {
+    name: "Paleta rápida de módulos administrativos",
+  });
+  await expect(paletteDialog).toBeVisible();
+  await paletteDialog.getByLabel("Buscar módulo administrativo").fill("integraciones");
+  await expect(paletteDialog.getByText(/No hay módulos autorizados que coincidan/)).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(paletteDialog).toHaveCount(0);
+  await page.keyboard.press("Control+k");
+  await expect(paletteDialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(paletteDialog).toHaveCount(0);
   await expectWcagAndNoOverflow(page, "Desktop STORE_MANAGER /admin/b2b/[id]");
 
   await authenticateAdmin(page, superAdmin);

@@ -203,6 +203,31 @@ describe("A9 UX, accessibility tokens, language guards and navigation contracts"
       ["info with infoForeground", tokens.info, tokens.infoForeground],
       ["info on background", tokens.info, tokens.background],
       ["info on secondary", tokens.info, tokens.secondary],
+      [
+        "brandSurfaceForeground on brandSurface",
+        tokens.brandSurfaceForeground,
+        tokens.brandSurface,
+      ],
+      [
+        "brandSurfaceForeground on brandSurfaceElevated",
+        tokens.brandSurfaceForeground,
+        tokens.brandSurfaceElevated,
+      ],
+      [
+        "brandSurfaceForeground on brandCyanMuted",
+        tokens.brandSurfaceForeground,
+        tokens.brandCyanMuted,
+      ],
+      ["brandSurfaceMuted on brandSurface", tokens.brandSurfaceMuted, tokens.brandSurface],
+      [
+        "brandSurfaceMuted on brandSurfaceElevated",
+        tokens.brandSurfaceMuted,
+        tokens.brandSurfaceElevated,
+      ],
+      ["brandCyan on brandSurface", tokens.brandCyan, tokens.brandSurface],
+      ["brandCyan on brandSurfaceElevated", tokens.brandCyan, tokens.brandSurfaceElevated],
+      ["brandCyan on brandCyanMuted", tokens.brandCyan, tokens.brandCyanMuted],
+      ["brandCyanForeground on brandCyan", tokens.brandCyanForeground, tokens.brandCyan],
     ];
 
     for (const [label, fg, bg] of textPairs) {
@@ -216,6 +241,13 @@ describe("A9 UX, accessibility tokens, language guards and navigation contracts"
       ["ring on background", tokens.ring, tokens.background],
       ["ring on card", tokens.ring, tokens.card],
       ["ring on secondary", tokens.ring, tokens.secondary],
+      ["brandSurfaceInput on brandSurface", tokens.brandSurfaceInput, tokens.brandSurface],
+      [
+        "brandSurfaceInput on brandSurfaceElevated",
+        tokens.brandSurfaceInput,
+        tokens.brandSurfaceElevated,
+      ],
+      ["brandCyan ring on brandSurface", tokens.brandCyan, tokens.brandSurface],
     ];
 
     for (const [label, fg, bg] of uiPairs) {
