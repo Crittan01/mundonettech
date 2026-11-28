@@ -268,17 +268,17 @@ export default async function HomePage() {
               </dl>
             </div>
 
-            <div className="relative mx-auto w-full max-w-xl">
+            <div className="relative mx-auto hidden w-full max-w-xl sm:block">
               <div className="relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-brand-surface-border/80 bg-brand-surface-elevated shadow-2xl">
                 <Image
                   src="/brand/hero-hardware.webp"
                   alt="Selección de tecnología MundoNetTech: audífonos inalámbricos ANC, cargador GaN de alta potencia y reloj inteligente de titanio"
-                  fill
+                  width={720}
+                  height={450}
                   priority
                   fetchPriority="high"
                   unoptimized
-                  sizes="(min-width: 1024px) 46vw, 100vw"
-                  className="object-cover"
+                  className="h-full w-full object-cover"
                 />
               </div>
             </div>
@@ -308,43 +308,41 @@ export default async function HomePage() {
           <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {resolvedVisualCategories.map((category) => (
               <li key={category.id}>
-                <SpotlightCard className="mnt-card-hover h-full rounded-2xl border border-border bg-secondary">
-                  <Link
-                    href={category.href}
-                    className="group flex h-full flex-col justify-between p-4 outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="text-base font-bold tracking-tight text-foreground">
-                          {category.title}
-                        </p>
-                        <p className="mt-0.5 text-xs text-muted-foreground">{category.subtitle}</p>
-                      </div>
-                      {category.count !== null ? (
-                        <span className="shrink-0 rounded-full border border-border bg-card px-2 py-0.5 font-mono text-[11px] font-semibold text-foreground tabular-nums">
-                          {category.count}
-                        </span>
-                      ) : null}
+                <Link
+                  href={category.href}
+                  className="mnt-card-hover group flex h-full flex-col justify-between overflow-hidden rounded-2xl border border-border bg-secondary p-4 outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-base font-bold tracking-tight text-foreground">
+                        {category.title}
+                      </p>
+                      <p className="mt-0.5 text-xs text-muted-foreground">{category.subtitle}</p>
                     </div>
-                    <div className="relative mt-3 aspect-[4/3] w-full overflow-hidden rounded-xl bg-secondary">
-                      <Image
-                        src={category.image}
-                        alt={category.alt}
-                        fill
-                        unoptimized
-                        sizes="(min-width: 1024px) 22vw, (min-width: 640px) 44vw, 90vw"
-                        className="object-cover transition-transform duration-300 group-hover:scale-105"
-                      />
-                    </div>
-                    <span className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary">
-                      <span>Explorar</span>
-                      <ArrowRight
-                        className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5"
-                        aria-hidden="true"
-                      />
-                    </span>
-                  </Link>
-                </SpotlightCard>
+                    {category.count !== null ? (
+                      <span className="shrink-0 rounded-full border border-border bg-card px-2 py-0.5 font-mono text-[11px] font-semibold text-foreground tabular-nums">
+                        {category.count}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="relative mt-3 aspect-[4/3] w-full overflow-hidden rounded-xl bg-secondary">
+                    <Image
+                      src={category.image}
+                      alt={category.alt}
+                      width={480}
+                      height={360}
+                      unoptimized
+                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    />
+                  </div>
+                  <span className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-primary">
+                    <span>Explorar</span>
+                    <ArrowRight
+                      className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5"
+                      aria-hidden="true"
+                    />
+                  </span>
+                </Link>
               </li>
             ))}
           </ul>
@@ -480,20 +478,18 @@ export default async function HomePage() {
             {trustHighlights.map((item) => {
               const Icon = item.icon;
               return (
-                <SpotlightCard
+                <article
                   key={item.title}
-                  className="rounded-2xl border border-border bg-card p-5 text-card-foreground shadow-xs"
+                  className="mnt-card-hover h-full rounded-2xl border border-border bg-card p-5 text-card-foreground shadow-xs"
                 >
-                  <article className="h-full">
-                    <span className="inline-flex size-10 items-center justify-center rounded-xl bg-accent text-accent-foreground">
-                      <Icon className="size-5" strokeWidth={1.8} aria-hidden="true" />
-                    </span>
-                    <h3 className="mt-4 text-base font-semibold text-foreground">{item.title}</h3>
-                    <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
-                      {item.description}
-                    </p>
-                  </article>
-                </SpotlightCard>
+                  <span className="inline-flex size-10 items-center justify-center rounded-xl bg-accent text-accent-foreground">
+                    <Icon className="size-5" strokeWidth={1.8} aria-hidden="true" />
+                  </span>
+                  <h3 className="mt-4 text-base font-semibold text-foreground">{item.title}</h3>
+                  <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
+                    {item.description}
+                  </p>
+                </article>
               );
             })}
           </div>

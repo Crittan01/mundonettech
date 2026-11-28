@@ -1,7 +1,7 @@
 "use client";
 
 import type { MouseEvent, ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -14,34 +14,10 @@ export function FadeIn({
   className?: string;
   delay?: number;
 }>) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(true);
-
-  useEffect(() => {
-    const node = ref.current;
-    if (!node || typeof IntersectionObserver === "undefined") return;
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const rect = node.getBoundingClientRect();
-    if (rect.top < window.innerHeight * 1.05) return;
-    setVisible(false);
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisible(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: "0px 0px -40px 0px", threshold: 0.05 },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-
   return (
     <div
-      ref={ref}
-      style={delay > 0 ? { transitionDelay: `${Math.round(delay * 1000)}ms` } : undefined}
-      className={cn("mnt-reveal", visible ? "mnt-reveal-visible" : "mnt-reveal-hidden", className)}
+      style={delay > 0 ? { animationDelay: `${Math.round(delay * 1000)}ms` } : undefined}
+      className={cn("mnt-reveal", className)}
     >
       {children}
     </div>
