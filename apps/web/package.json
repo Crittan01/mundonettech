@@ -11,8 +11,8 @@
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
-    "@mundonettech/config": "workspace:*",
     "@mundonettech/cms": "workspace:*",
+    "@mundonettech/config": "workspace:*",
     "@mundonettech/core": "workspace:*",
     "@mundonettech/db": "workspace:*",
     "@mundonettech/integrations": "workspace:*",
@@ -24,6 +24,7 @@
     "@vercel/functions": "^3.11.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "lucide-react": "^1.82.0",
     "next": "16.4.6",
     "qrcode": "^1.5.4",
     "react": "19.3.1",

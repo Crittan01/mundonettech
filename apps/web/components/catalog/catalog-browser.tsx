@@ -78,7 +78,7 @@ export function CatalogBrowser({
         action={basePath}
         role="search"
         aria-label="Filtros del catálogo"
-        className="grid gap-4 rounded-2xl border border-border bg-card p-5"
+        className="grid gap-4 rounded-2xl border border-border bg-secondary/60 p-5 shadow-xs"
       >
         {compareSlugs.length > 0 ? (
           <input type="hidden" name="comparar" value={compareSlugs.join(",")} />

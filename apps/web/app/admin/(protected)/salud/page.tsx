@@ -1,7 +1,16 @@
 import { hasAdminPermission } from "@mundonettech/core";
 import { OperationalHealthService } from "@mundonettech/db";
+import {
+  Activity,
+  AlertTriangle,
+  Database,
+  HardDriveDownload,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
 import Link from "next/link";
 
+import { HealthUptimeStrip } from "@/components/admin/charts/health-uptime-strip";
 import { EmptyState as Empty } from "@/components/admin/empty-state";
 import { getDatabase } from "@/lib/db";
 import { getIntegrationEnvironment } from "@/lib/integrations";
@@ -78,79 +87,172 @@ export default async function HealthPage() {
   const { snapshot } = dashboard;
   const latestBackup = dashboard.backups[0];
   const cards = [
-    ["Base de datos", snapshot.databaseReady ? "Apta" : "No apta"],
-    ["Eventos pendientes", numberFormatter.format(snapshot.pendingOutbox)],
-    ["Eventos fallidos", numberFormatter.format(snapshot.failedOutbox)],
-    ["Respaldo ≤ 36 h", snapshot.backupFresh ? "Vigente" : "Requiere acción"],
-    ["DR mensual", snapshot.drillCurrent ? "Vigente" : "Requiere acción"],
+    {
+      label: "Base de datos",
+      value: snapshot.databaseReady ? "Apta" : "No apta",
+      ok: snapshot.databaseReady,
+      icon: Database,
+    },
+    {
+      label: "Eventos pendientes",
+      value: numberFormatter.format(snapshot.pendingOutbox),
+      ok: snapshot.pendingOutbox === 0,
+      icon: Activity,
+    },
+    {
+      label: "Eventos fallidos",
+      value: numberFormatter.format(snapshot.failedOutbox),
+      ok: snapshot.failedOutbox === 0,
+      icon: AlertTriangle,
+    },
+    {
+      label: "Respaldo ≤ 36 h",
+      value: snapshot.backupFresh ? "Vigente" : "Requiere acción",
+      ok: snapshot.backupFresh,
+      icon: HardDriveDownload,
+    },
+    {
+      label: "DR mensual",
+      value: snapshot.drillCurrent ? "Vigente" : "Requiere acción",
+      ok: snapshot.drillCurrent,
+      icon: RefreshCw,
+    },
   ] as const;
   const canReadUsers = hasAdminPermission(session.profile.role, "users:read");
   const canReadOwnSecurity = hasAdminPermission(session.profile.role, "security:read_own");
+
+  const timelineEntries = dashboard.recentSnapshots.map((record) => ({
+    id: record.id,
+    capturedLabel: date(record.capturedAt),
+    status: record.status,
+    statusLabel: statusLabels[record.status],
+    pendingOutbox: record.pendingOutbox,
+    failedOutbox: record.failedOutbox,
+    backupFresh: record.backupFresh,
+    drillCurrent: record.drillCurrent,
+  }));
+
   return (
-    <div className="space-y-10">
+    <div className="space-y-8">
       <div>
-        <p className="text-sm font-semibold text-primary">
+        <p className="text-xs font-semibold tracking-wider text-primary uppercase">
           Observabilidad sin telemetría por visita cruda
         </p>
-        <h1 className="mt-2 text-3xl font-bold">Salud operativa y recuperación</h1>
-        <p className="mt-2 max-w-3xl text-muted-foreground">
+        <h1 className="mt-1 text-3xl font-bold tracking-tight">Salud operativa y recuperación</h1>
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
           Sondas, contadores agregados y evidencia inmutable de respaldos cifrados y restauraciones.
           Las alertas operativas se gestionan desde la bandeja de hoy con permisos de auditoría.
         </p>
-        <div className="mt-4 flex flex-wrap gap-4 text-sm">
-          <Link className="text-primary underline" href="/admin/auditoria">
+        <div className="mt-4 flex flex-wrap gap-2 text-xs">
+          <Link
+            className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+            href="/admin/auditoria"
+          >
             Consultar registros de auditoría
           </Link>
           {canReadUsers ? (
-            <Link className="text-primary underline" href="/admin/usuarios">
+            <Link
+              className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+              href="/admin/usuarios"
+            >
               Administrar usuarios
             </Link>
           ) : null}
           {canReadOwnSecurity ? (
-            <Link className="text-primary underline" href="/admin/seguridad">
+            <Link
+              className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+              href="/admin/seguridad"
+            >
               Configurar mi seguridad y MFA
             </Link>
           ) : null}
         </div>
       </div>
+
       <section
         role={snapshot.status === "HEALTHY" ? "status" : "alert"}
-        className={`rounded-xl border bg-card p-5 ${
+        className={`rounded-2xl border bg-card p-6 shadow-xs ${
           snapshot.status === "HEALTHY" ? "border-border" : "border-destructive"
         }`}
       >
-        <h2 className="text-xl font-semibold">Estado: {statusLabels[snapshot.status]}</h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Captura {date(snapshot.capturedAt)} · latencia de consulta {snapshot.databaseLatencyMs}{" "}
-          ms.
-          {snapshot.status === "HEALTHY"
-            ? " Todas las comprobaciones vigentes están dentro de sus umbrales."
-            : " Revisa las secciones siguientes y ejecuta el procedimiento indicado antes de promover cambios."}
-        </p>
-        <Link href="/admin/hoy" className="mt-4 inline-block font-semibold underline">
-          Revisar alertas accionables
-        </Link>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <span
+              className={`inline-flex size-10 items-center justify-center rounded-xl ${
+                snapshot.status === "HEALTHY"
+                  ? "bg-success text-success-foreground"
+                  : snapshot.status === "DEGRADED"
+                    ? "bg-warning text-warning-foreground"
+                    : "bg-destructive text-destructive-foreground"
+              }`}
+            >
+              <ShieldCheck className="size-5" aria-hidden="true" />
+            </span>
+            <div>
+              <h2 className="text-xl font-semibold tracking-tight">
+                Estado: {statusLabels[snapshot.status]}
+              </h2>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                Captura {date(snapshot.capturedAt)} · latencia de consulta{" "}
+                <span className="font-mono font-semibold text-foreground tabular-nums">
+                  {snapshot.databaseLatencyMs} ms
+                </span>
+                .
+                {snapshot.status === "HEALTHY"
+                  ? " Todas las comprobaciones vigentes están dentro de sus umbrales."
+                  : " Revisa las secciones siguientes y ejecuta el procedimiento indicado antes de promover cambios."}
+              </p>
+            </div>
+          </div>
+          <Link
+            href="/admin/hoy"
+            className="inline-flex min-h-10 items-center rounded-full border border-border bg-secondary px-4 text-sm font-semibold text-foreground transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+          >
+            Revisar alertas accionables
+          </Link>
+        </div>
       </section>
+
       <section aria-label="Resumen de salud" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        {cards.map(([label, value]) => (
-          <article key={label} className="rounded-xl border border-border bg-card p-5">
-            <h2 className="text-sm text-muted-foreground">{label}</h2>
-            <p className="mt-3 text-2xl font-bold">{value}</p>
-          </article>
-        ))}
+        {cards.map((card) => {
+          const Icon = card.icon;
+          return (
+            <article
+              key={card.label}
+              className="rounded-2xl border border-border bg-card p-5 shadow-xs"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
+                  {card.label}
+                </h2>
+                <Icon
+                  className={`size-4 shrink-0 ${card.ok ? "text-success" : "text-warning"}`}
+                  strokeWidth={2}
+                  aria-hidden="true"
+                />
+              </div>
+              <p className="mt-3 font-mono text-xl font-bold text-foreground tabular-nums">
+                {card.value}
+              </p>
+            </article>
+          );
+        })}
       </section>
+
+      {timelineEntries.length > 0 ? <HealthUptimeStrip entries={timelineEntries} /> : null}
+
       <section
         aria-labelledby="recovery-runbook"
-        className="rounded-xl border border-border bg-card p-6"
+        className="rounded-2xl border border-border bg-card p-6 shadow-xs"
       >
-        <h2 id="recovery-runbook" className="text-xl font-semibold">
+        <h2 id="recovery-runbook" className="text-xl font-semibold tracking-tight">
           Procedimiento operativo
         </h2>
         <ol className="mt-4 list-decimal space-y-3 pl-6 text-sm leading-6 text-muted-foreground">
           <li>
-            Programa <code className="text-foreground">pnpm backup:create</code> al menos cada 24
-            horas y <code className="text-foreground">pnpm dr:drill</code> mensualmente en el
-            ambiente aislado correspondiente.
+            Programa <code className="font-mono text-foreground">pnpm backup:create</code> al menos
+            cada 24 horas y <code className="font-mono text-foreground">pnpm dr:drill</code>{" "}
+            mensualmente en el ambiente aislado correspondiente.
           </li>
           <li>
             Si una corrida falla, conserva su código, valida credenciales y conectividad sin
@@ -158,14 +260,15 @@ export default async function HealthPage() {
           </li>
           <li>
             Una ejecución exitosa no sustituye las aprobaciones de lanzamiento. Verifica también las
-            sondas <code className="text-foreground">/api/health/live</code> y{" "}
-            <code className="text-foreground">/api/health/ready</code>.
+            sondas <code className="font-mono text-foreground">/api/health/live</code> y{" "}
+            <code className="font-mono text-foreground">/api/health/ready</code>.
           </li>
         </ol>
       </section>
+
       <section aria-labelledby="backup-history" className="space-y-4">
         <div>
-          <h2 id="backup-history" className="text-xl font-semibold">
+          <h2 id="backup-history" className="text-xl font-semibold tracking-tight">
             Respaldos recientes
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -183,7 +286,10 @@ export default async function HealthPage() {
         ) : (
           <div className="space-y-4">
             {dashboard.backups.map((backup) => (
-              <article key={backup.id} className="rounded-xl border border-border bg-card p-5">
+              <article
+                key={backup.id}
+                className="rounded-2xl border border-border bg-card p-5 shadow-xs"
+              >
                 <div className="flex flex-wrap justify-between gap-3">
                   <h3 className="font-semibold">{statusLabels[backup.status]}</h3>
                   <p className="text-sm text-muted-foreground">{date(backup.startedAt)}</p>
@@ -195,7 +301,7 @@ export default async function HealthPage() {
                   </div>
                   <div>
                     <dt className="text-muted-foreground">Bytes cifrados</dt>
-                    <dd className="mt-1">
+                    <dd className="mt-1 font-mono tabular-nums">
                       {backup.byteSize ? numberFormatter.format(BigInt(backup.byteSize)) : "—"}
                     </dd>
                   </div>
@@ -217,7 +323,7 @@ export default async function HealthPage() {
                     className="mt-4 flex flex-wrap gap-2 text-xs"
                   >
                     {backup.buckets.map((bucket) => (
-                      <li key={bucket.bucketName} className="rounded-md bg-secondary px-3 py-2">
+                      <li key={bucket.bucketName} className="rounded-full bg-secondary px-3 py-1.5">
                         {bucket.bucketName}: {bucket.accessible ? "accesible" : "sin acceso"}
                       </li>
                     ))}
@@ -232,9 +338,10 @@ export default async function HealthPage() {
           </div>
         )}
       </section>
+
       <section aria-labelledby="dr-history" className="space-y-4">
         <div>
-          <h2 id="dr-history" className="text-xl font-semibold">
+          <h2 id="dr-history" className="text-xl font-semibold tracking-tight">
             Simulacros de recuperación
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -248,7 +355,10 @@ export default async function HealthPage() {
         ) : (
           <div className="space-y-4">
             {dashboard.drills.map((drill, index) => (
-              <article key={drill.id} className="rounded-xl border border-border bg-card p-5">
+              <article
+                key={drill.id}
+                className="rounded-2xl border border-border bg-card p-5 shadow-xs"
+              >
                 <div className="flex flex-wrap justify-between gap-3">
                   <h3 className="font-semibold">{statusLabels[drill.status]}</h3>
                   <p className="text-sm text-muted-foreground">{date(drill.startedAt)}</p>
@@ -268,39 +378,41 @@ export default async function HealthPage() {
                     role="region"
                     aria-label={`Verificación de buckets del simulacro ${index + 1}`}
                     tabIndex={0}
-                    className="mt-4 overflow-x-auto rounded-lg outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                    className="mt-4 overflow-x-auto rounded-xl border border-border outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                   >
                     <table className="w-full min-w-[560px] text-left text-sm">
                       <caption className="sr-only">Verificación del 100 % de los buckets</caption>
-                      <thead className="bg-secondary">
+                      <thead className="bg-secondary/80 text-xs font-semibold tracking-wider text-muted-foreground uppercase">
                         <tr>
-                          <th scope="col" className="p-3">
+                          <th scope="col" className="px-4 py-3">
                             Bucket
                           </th>
-                          <th scope="col" className="p-3">
+                          <th scope="col" className="px-4 py-3">
                             Acceso
                           </th>
-                          <th scope="col" className="p-3">
+                          <th scope="col" className="px-4 py-3">
                             Objetos
                           </th>
-                          <th scope="col" className="p-3">
+                          <th scope="col" className="px-4 py-3">
                             Lectura
                           </th>
                         </tr>
                       </thead>
                       <tbody>
                         {drill.buckets.map((bucket) => (
-                          <tr key={bucket.bucketName} className="border-t border-border">
-                            <th scope="row" className="p-3">
+                          <tr key={bucket.bucketName} className="border-t border-border/80">
+                            <th scope="row" className="px-4 py-3">
                               {bucket.bucketName}
                             </th>
-                            <td className="p-3">{bucket.accessible ? "Verificado" : "Fallido"}</td>
-                            <td className="p-3">
+                            <td className="px-4 py-3">
+                              {bucket.accessible ? "Verificado" : "Fallido"}
+                            </td>
+                            <td className="px-4 py-3 font-mono tabular-nums">
                               {bucket.objectCount
                                 ? numberFormatter.format(BigInt(bucket.objectCount))
                                 : "—"}
                             </td>
-                            <td className="p-3">
+                            <td className="px-4 py-3">
                               {bucket.objectCount === "0"
                                 ? "Vacío; no aplica"
                                 : bucket.readVerified
@@ -322,9 +434,10 @@ export default async function HealthPage() {
           </div>
         )}
       </section>
+
       <section aria-labelledby="health-history" className="space-y-4">
         <div>
-          <h2 id="health-history" className="text-xl font-semibold">
+          <h2 id="health-history" className="text-xl font-semibold tracking-tight">
             Capturas agregadas recientes
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -339,17 +452,17 @@ export default async function HealthPage() {
             role="region"
             aria-label="Tabla de capturas agregadas de salud"
             tabIndex={0}
-            className="overflow-x-auto rounded-xl border border-border bg-card outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            className="overflow-x-auto rounded-2xl border border-border bg-card shadow-xs outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           >
             <table className="w-full min-w-[720px] text-left text-sm">
               <caption className="sr-only">
                 Historial de salud sin eventos individuales ni PII
               </caption>
-              <thead className="bg-secondary">
+              <thead className="bg-secondary/80 text-xs font-semibold tracking-wider text-muted-foreground uppercase">
                 <tr>
                   {(["Captura", "Estado", "Pendientes", "Fallidos", "Respaldo", "DR"] as const).map(
                     (heading) => (
-                      <th key={heading} scope="col" className="p-3">
+                      <th key={heading} scope="col" className="px-4 py-3">
                         {heading}
                       </th>
                     ),
@@ -358,15 +471,22 @@ export default async function HealthPage() {
               </thead>
               <tbody>
                 {dashboard.recentSnapshots.map((record) => (
-                  <tr key={record.id} className="border-t border-border">
-                    <th scope="row" className="p-3">
+                  <tr
+                    key={record.id}
+                    className="border-t border-border/80 transition-colors hover:bg-secondary/40"
+                  >
+                    <th scope="row" className="px-4 py-3 font-medium">
                       {date(record.capturedAt)}
                     </th>
-                    <td className="p-3">{statusLabels[record.status]}</td>
-                    <td className="p-3">{numberFormatter.format(record.pendingOutbox)}</td>
-                    <td className="p-3">{numberFormatter.format(record.failedOutbox)}</td>
-                    <td className="p-3">{record.backupFresh ? "Vigente" : "Vencido"}</td>
-                    <td className="p-3">{record.drillCurrent ? "Vigente" : "Pendiente"}</td>
+                    <td className="px-4 py-3">{statusLabels[record.status]}</td>
+                    <td className="px-4 py-3 font-mono tabular-nums">
+                      {numberFormatter.format(record.pendingOutbox)}
+                    </td>
+                    <td className="px-4 py-3 font-mono tabular-nums">
+                      {numberFormatter.format(record.failedOutbox)}
+                    </td>
+                    <td className="px-4 py-3">{record.backupFresh ? "Vigente" : "Vencido"}</td>
+                    <td className="px-4 py-3">{record.drillCurrent ? "Vigente" : "Pendiente"}</td>
                   </tr>
                 ))}
               </tbody>

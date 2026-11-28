@@ -63,14 +63,14 @@ export default async function CartPage({ searchParams }: PageProps<"/carrito">) 
         </p>
       ) : null}
       {!cart || cart.items.length === 0 ? (
-        <section className="rounded-2xl border border-border bg-card p-10 text-center">
-          <h2 className="text-xl font-semibold">Tu carrito está vacío</h2>
-          <p className="mt-3 text-muted-foreground">
+        <section className="rounded-3xl border border-border bg-secondary/70 p-10 text-center">
+          <h2 className="text-xl font-bold tracking-tight">Tu carrito está vacío</h2>
+          <p className="mx-auto mt-2.5 max-w-md text-sm leading-6 text-muted-foreground">
             Explora el catálogo y añade variantes o paquetes para ver el detalle de tu compra.
           </p>
           <Link
             href="/productos"
-            className="mt-6 inline-flex font-medium text-primary hover:underline"
+            className="mt-6 inline-flex min-h-11 items-center justify-center rounded-full bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-xs outline-hidden transition-colors hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           >
             Explorar productos
           </Link>

@@ -63,8 +63,8 @@ describe("F0.2 — Store and Theme Configuration Contracts", () => {
     assert.equal(storeConfig.modules.wholesale, true);
   });
 
-  it("maps Midnight Cyan tokens into semantic CSS custom properties", () => {
-    assert.equal(themeConfig.name, "Midnight Cyan");
+  it("maps Titanium & Electric Sky tokens into semantic CSS custom properties", () => {
+    assert.equal(themeConfig.name, "Titanium & Electric Sky");
 
     const requiredCssVars = [
       "--background",

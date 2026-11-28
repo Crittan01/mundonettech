@@ -296,6 +296,7 @@ export function PasswordResetForm({ siteKey, nonce }: SecurityProps) {
             onChange={(event) => setCode(event.target.value)}
             aria-invalid={codeErrors?.length ? true : undefined}
             aria-describedby={codeErrors?.length ? "reset-code-error" : undefined}
+            className="text-center font-mono text-2xl tracking-[0.4em]"
           />
           <FieldErrors id="reset-code-error" messages={codeErrors} />
         </div>

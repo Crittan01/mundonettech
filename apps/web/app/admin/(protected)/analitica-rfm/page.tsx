@@ -9,6 +9,7 @@ import { RfmAnalyticsError } from "@mundonettech/db";
 import Link from "next/link";
 import { z } from "zod";
 
+import { SegmentBarChart } from "@/components/admin/charts/segment-bar-chart";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -95,49 +96,87 @@ export default async function RfmAnalyticsPage({
 
   const hasActiveFilters =
     Boolean(validRfmClass) || Boolean(validMinLtvCop) || Boolean(rawCursor) || invalidQuery;
+
+  const chartRows = summary.map((row) => ({
+    key: row.rfmClass,
+    label: rfmClassLabels[row.rfmClass],
+    customers: row.customers,
+    ltvNumber: Number(row.ltvCents) / 100,
+    formattedLtv: formatSignedCopCents(row.ltvCents),
+  }));
+
   return (
-    <div className="space-y-10">
+    <div className="space-y-8">
       <div>
-        <h1 className="text-3xl font-bold">Analítica RFM y LTV</h1>
-        <p className="mt-2 max-w-3xl text-muted-foreground">
+        <p className="text-xs font-semibold tracking-wider text-primary uppercase">
+          Inteligencia de clientes
+        </p>
+        <h1 className="mt-1 text-3xl font-bold tracking-tight">Analítica RFM y LTV</h1>
+        <p className="mt-2 max-w-3xl text-sm leading-6 text-muted-foreground">
           Recencia desde la primera captura de cada pedido, frecuencia de pedidos con recaudo y LTV
           neto de anulaciones y reembolsos completados. Los importes se calculan con precisión
           entera en centavos COP.
         </p>
-        <div className="mt-4 flex flex-wrap gap-4 text-sm">
-          <Link className="text-primary underline" href="/admin/finanzas">
+        <div className="mt-4 flex flex-wrap gap-2 text-xs">
+          <Link
+            className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+            href="/admin/finanzas"
+          >
             Abrir informe financiero
           </Link>
           {canReadCrm ? (
             <>
-              <Link className="text-primary underline" href="/admin/crm">
+              <Link
+                className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+                href="/admin/crm"
+              >
                 Abrir consola CRM 360°
               </Link>
-              <Link className="text-primary underline" href="/admin/fidelizacion">
+              <Link
+                className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+                href="/admin/fidelizacion"
+              >
                 Ver fidelización y referidos
               </Link>
-              <Link className="text-primary underline" href="/admin/segmentos">
+              <Link
+                className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+                href="/admin/segmentos"
+              >
                 Administrar segmentos
               </Link>
-              <Link className="text-primary underline" href="/admin/lifecycle">
+              <Link
+                className="inline-flex min-h-9 items-center rounded-full border border-border bg-card px-3.5 font-semibold text-primary transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground"
+                href="/admin/lifecycle"
+              >
                 Administrar recorridos de ciclo de vida
               </Link>
             </>
           ) : null}
         </div>
       </div>
-      <section aria-labelledby="rfm-summary" className="space-y-4">
-        <h2 id="rfm-summary" className="text-2xl font-semibold">
+
+      <section aria-labelledby="rfm-summary" className="space-y-5">
+        <h2 id="rfm-summary" className="text-xl font-semibold tracking-tight">
           Distribución actual
         </h2>
+        <SegmentBarChart rows={chartRows} />
         <dl className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {summary.map((row) => (
-            <div key={row.rfmClass} className="rounded-xl border border-border bg-card p-4">
-              <dt className="text-sm text-muted-foreground">{rfmClassLabels[row.rfmClass]}</dt>
-              <dd className="mt-2 text-xl font-bold">{row.customers}</dd>
-              <dd className="mt-1 text-sm">LTV {formatSignedCopCents(row.ltvCents)}</dd>
+            <div
+              key={row.rfmClass}
+              className="rounded-2xl border border-border bg-card p-5 shadow-xs"
+            >
+              <dt className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">
+                {rfmClassLabels[row.rfmClass]}
+              </dt>
+              <dd className="mt-2 font-mono text-2xl font-bold text-foreground tabular-nums">
+                {row.customers}
+              </dd>
+              <dd className="mt-1 font-mono text-sm font-medium text-primary tabular-nums">
+                LTV {formatSignedCopCents(row.ltvCents)}
+              </dd>
               {BigInt(row.refundExcessCents) > 0n ? (
-                <dd className="mt-1 text-xs text-muted-foreground">
+                <dd className="mt-1 text-xs text-muted-foreground tabular-nums">
                   Exceso de reembolsos {formatSignedCopCents(row.refundExcessCents)}
                 </dd>
               ) : null}
@@ -145,13 +184,14 @@ export default async function RfmAnalyticsPage({
           ))}
         </dl>
       </section>
+
       <section aria-labelledby="rfm-customers" className="space-y-4">
-        <h2 id="rfm-customers" className="text-2xl font-semibold">
+        <h2 id="rfm-customers" className="text-xl font-semibold tracking-tight">
           Clientes por LTV
         </h2>
         <form
           key={`${validRfmClass ?? ""}|${validMinLtvCop ?? ""}`}
-          className="flex flex-wrap items-end gap-3"
+          className="flex flex-wrap items-end gap-3 rounded-2xl border border-border bg-card p-5 shadow-xs"
           action="/admin/analitica-rfm"
         >
           <div className="space-y-2">
@@ -188,7 +228,7 @@ export default async function RfmAnalyticsPage({
           {hasActiveFilters ? (
             <Link
               href="/admin/analitica-rfm"
-              className="inline-flex h-11 items-center px-2 text-sm text-primary underline"
+              className="inline-flex h-11 items-center px-2 text-sm font-medium text-primary underline"
             >
               Limpiar filtros
             </Link>
@@ -199,7 +239,7 @@ export default async function RfmAnalyticsPage({
             Los filtros o el cursor no son válidos.
           </p>
         ) : report.items.length === 0 ? (
-          <p className="rounded-xl border border-border bg-card p-5 text-sm text-muted-foreground">
+          <p className="rounded-2xl border border-border bg-card p-5 text-sm text-muted-foreground shadow-xs">
             No hay clientes que coincidan con estos filtros.
           </p>
         ) : (
@@ -207,49 +247,54 @@ export default async function RfmAnalyticsPage({
             role="region"
             aria-label="Tabla de analítica RFM y valor de vida por cliente"
             tabIndex={0}
-            className="overflow-x-auto rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            className="overflow-x-auto rounded-2xl border border-border bg-card shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           >
             <table className="w-full min-w-[72rem] text-left text-sm">
               <caption className="sr-only">Métricas RFM y valor de vida neto por cliente</caption>
-              <thead className="border-b border-border">
+              <thead className="border-b border-border bg-secondary/80 text-xs font-semibold tracking-wider text-muted-foreground uppercase">
                 <tr>
-                  <th scope="col" className="p-3">
+                  <th scope="col" className="px-4 py-3">
                     Cliente
                   </th>
-                  <th scope="col" className="p-3">
+                  <th scope="col" className="px-4 py-3">
                     Clase
                   </th>
-                  <th scope="col" className="p-3 text-right">
+                  <th scope="col" className="px-4 py-3 text-right">
                     R / F / M
                   </th>
-                  <th scope="col" className="p-3 text-right">
+                  <th scope="col" className="px-4 py-3 text-right">
                     Recencia
                   </th>
-                  <th scope="col" className="p-3 text-right">
+                  <th scope="col" className="px-4 py-3 text-right">
                     Pedidos
                   </th>
-                  <th scope="col" className="p-3 text-right">
+                  <th scope="col" className="px-4 py-3 text-right">
                     LTV neto
                   </th>
-                  <th scope="col" className="p-3">
+                  <th scope="col" className="px-4 py-3">
                     Última captura
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {report.items.map((row) => (
-                  <tr key={row.customerId} className="border-b border-border last:border-0">
-                    <td className="p-3">{row.customerEmail}</td>
-                    <td className="p-3">{rfmClassLabels[row.rfmClass]}</td>
-                    <td className="p-3 text-right">
+                  <tr
+                    key={row.customerId}
+                    className="border-b border-border/80 transition-colors last:border-0 hover:bg-secondary/40"
+                  >
+                    <td className="px-4 py-3 font-medium">{row.customerEmail}</td>
+                    <td className="px-4 py-3">{rfmClassLabels[row.rfmClass]}</td>
+                    <td className="px-4 py-3 text-right font-mono tabular-nums">
                       {row.scores.recency} / {row.scores.frequency} / {row.scores.monetary}
                     </td>
-                    <td className="p-3 text-right">
+                    <td className="px-4 py-3 text-right font-mono tabular-nums">
                       {row.recencyDays === null ? "Sin compra" : `${row.recencyDays} días`}
                     </td>
-                    <td className="p-3 text-right">{row.frequency}</td>
-                    <td className="p-3 text-right">{formatSignedCopCents(row.ltvCents)}</td>
-                    <td className="p-3">
+                    <td className="px-4 py-3 text-right font-mono tabular-nums">{row.frequency}</td>
+                    <td className="px-4 py-3 text-right font-mono font-semibold tabular-nums">
+                      {formatSignedCopCents(row.ltvCents)}
+                    </td>
+                    <td className="px-4 py-3">
                       {row.lastCapturedAt ? dateFormatter.format(row.lastCapturedAt) : "—"}
                     </td>
                   </tr>
@@ -264,13 +309,13 @@ export default async function RfmAnalyticsPage({
             className="flex flex-wrap items-center gap-4"
           >
             {rawCursor ? (
-              <Link className="text-sm text-primary underline" href={firstPageHref}>
+              <Link className="text-sm font-medium text-primary underline" href={firstPageHref}>
                 Primera página
               </Link>
             ) : null}
             {report.nextCursor ? (
               <Link
-                className="text-sm text-primary underline"
+                className="text-sm font-medium text-primary underline"
                 href={`/admin/analitica-rfm?${nextParams.toString()}`}
               >
                 Página siguiente

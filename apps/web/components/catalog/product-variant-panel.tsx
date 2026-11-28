@@ -126,7 +126,7 @@ function ProductVariantPanel({
     BigInt(selected.compareAtPriceCents) > BigInt(selected.priceCents);
 
   return (
-    <div className="space-y-5 rounded-xl border border-border bg-card p-5">
+    <div className="space-y-5 rounded-2xl border border-border bg-card p-6 shadow-xs">
       {!onSelectVariant ? (
         <Suspense fallback={null}>
           <VariantQueryInitializer variants={variants} onSelect={setSelectedId} />
@@ -138,7 +138,7 @@ function ProductVariantPanel({
             const activeValue = selected.options.find((opt) => opt.key === axis.key)?.value;
             return (
               <div key={axis.key} className="space-y-2">
-                <p className="text-sm font-medium">
+                <p className="text-sm font-semibold text-foreground">
                   {axis.name}
                   {activeValue ? (
                     <span className="ml-2 font-normal text-muted-foreground">
@@ -155,10 +155,10 @@ function ProductVariantPanel({
                         type="button"
                         aria-pressed={isSelected}
                         onClick={() => selectOptionValue(axis.key, choice.value)}
-                        className={`inline-flex min-h-11 items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium outline-hidden transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                        className={`inline-flex min-h-11 items-center gap-2 rounded-full border px-4 py-1.5 text-sm font-medium outline-hidden transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                           isSelected
-                            ? "border-primary bg-primary text-primary-foreground"
-                            : "border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground"
+                            ? "border-primary bg-primary text-primary-foreground shadow-xs"
+                            : "border-input bg-secondary/60 text-foreground hover:border-primary hover:bg-accent hover:text-accent-foreground"
                         }`}
                       >
                         {axis.displayType === "SWATCH" &&
@@ -182,7 +182,7 @@ function ProductVariantPanel({
       ) : null}
       {showSkuFallback ? (
         <div className="space-y-2">
-          <p className="text-sm font-medium">Selecciona una variante</p>
+          <p className="text-sm font-semibold text-foreground">Selecciona una variante</p>
           <div className="flex flex-wrap gap-2" role="group" aria-label="Variantes del producto">
             {variants.map((variant) => {
               const isSelected = variant.id === selected.id;
@@ -192,10 +192,10 @@ function ProductVariantPanel({
                   type="button"
                   aria-pressed={isSelected}
                   onClick={() => setSelectedId(variant.id)}
-                  className={`inline-flex min-h-11 items-center rounded-md border px-3 py-1.5 font-mono text-xs outline-hidden transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
+                  className={`inline-flex min-h-11 items-center rounded-full border px-3.5 py-1.5 font-mono text-xs outline-hidden transition focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background ${
                     isSelected
-                      ? "border-primary bg-primary text-primary-foreground"
-                      : "border-input bg-background text-foreground hover:bg-accent hover:text-accent-foreground"
+                      ? "border-primary bg-primary text-primary-foreground shadow-xs"
+                      : "border-input bg-secondary/60 text-foreground hover:border-primary hover:bg-accent hover:text-accent-foreground"
                   }`}
                 >
                   {variant.sku}
@@ -206,18 +206,24 @@ function ProductVariantPanel({
         </div>
       ) : null}
 
-      <div aria-live="polite" aria-atomic="true">
-        <p className="text-3xl font-bold tabular-nums">{formatCopCents(selected.priceCents)}</p>
+      <div aria-live="polite" aria-atomic="true" className="rounded-xl bg-secondary/75 p-4">
+        <p className="text-3xl font-bold tracking-tight tabular-nums">
+          {formatCopCents(selected.priceCents)}
+        </p>
         {hasStrikethrough && selected.compareAtPriceCents ? (
           <p className="mt-1 text-sm text-muted-foreground tabular-nums">
             Antes <s>{formatCopCents(selected.compareAtPriceCents)}</s>
           </p>
         ) : null}
         <p
-          className={`mt-2 font-medium ${
+          className={`mt-2 inline-flex items-center gap-2 text-sm font-semibold ${
             selected.available > 0 ? "text-success" : "text-muted-foreground"
           }`}
         >
+          <span
+            aria-hidden="true"
+            className={`size-2 rounded-full ${selected.available > 0 ? "bg-success" : "bg-muted-foreground"}`}
+          />
           {selected.available > 0
             ? `${selected.available} ${selected.available === 1 ? "unidad disponible" : "unidades disponibles"} para compra`
             : "Sin unidades disponibles"}

@@ -1,3 +1,4 @@
+import { ShieldCheck } from "lucide-react";
 import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 
@@ -14,20 +15,25 @@ export async function StoreFooter() {
   const linkClass = "mnt-footer-link";
 
   return (
-    <footer className="border-t border-brand-surface-border bg-brand-surface text-brand-surface-foreground">
-      <div className="mx-auto w-full max-w-6xl px-4 py-12 text-sm sm:px-6 lg:px-8">
+    <footer className="relative overflow-hidden border-t border-brand-surface-border bg-brand-surface text-brand-surface-foreground">
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand-cyan/60 to-transparent"
+      />
+      <div className="mx-auto w-full max-w-6xl px-4 py-14 text-sm sm:px-6 lg:px-8">
         <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-4">
           <div className="space-y-4">
             <Link
               href="/"
-              className="inline-flex rounded-lg outline-hidden focus-visible:ring-2 focus-visible:ring-brand-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-brand-surface"
+              className="inline-flex rounded-xl outline-hidden transition-opacity hover:opacity-90 focus-visible:ring-2 focus-visible:ring-brand-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-brand-surface"
             >
               <BrandWordmark variant="on-dark" size={34} subtitle={storeConfig.domain} />
               <span className="sr-only">, inicio</span>
             </Link>
             <p className="leading-6 text-brand-surface-muted">{storeConfig.description}</p>
-            <p className="text-xs font-medium text-brand-cyan">
-              Comercio electrónico de tecnología en Colombia · Precios en COP
+            <p className="inline-flex items-center gap-2 rounded-full border border-brand-surface-border bg-brand-surface-elevated px-3 py-1.5 text-xs font-medium text-brand-cyan">
+              <ShieldCheck className="size-3.5 shrink-0" aria-hidden="true" />
+              <span>Tecnología en Colombia · Precios en COP</span>
             </p>
           </div>
 
@@ -158,7 +164,7 @@ export async function StoreFooter() {
           </nav>
         </div>
 
-        <div className="mt-10 flex flex-col gap-2 border-t border-brand-surface-border pt-6 text-xs text-brand-surface-muted sm:flex-row sm:items-center sm:justify-between">
+        <div className="mt-12 flex flex-col gap-2 border-t border-brand-surface-border pt-6 text-xs text-brand-surface-muted sm:flex-row sm:items-center sm:justify-between">
           <p>
             {storeConfig.name} · {storeConfig.domain} · Colombia
           </p>
