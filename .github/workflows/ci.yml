@@ -60,7 +60,7 @@ jobs:
       - name: Audit production dependency vulnerabilities
         run: pnpm audit:dependencies
       - name: Cache Turborepo workspace outputs
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo
           key: turbo-domain-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
@@ -114,7 +114,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Cache Next.js build cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apps/web/.next/cache
           key: next-cache-e2e-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/next.config.ts') }}-${{ github.sha }}
@@ -131,7 +131,7 @@ jobs:
         run: pnpm build
       - name: Cache Playwright Chromium browser
         id: playwright-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
@@ -189,7 +189,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Cache Next.js build cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apps/web/.next/cache
           key: next-cache-owasp-and-k6-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/next.config.ts') }}-${{ github.sha }}
@@ -255,7 +255,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Cache Next.js build cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apps/web/.next/cache
           key: next-cache-lighthouse-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'apps/web/next.config.ts') }}-${{ github.sha }}
@@ -268,7 +268,7 @@ jobs:
           echo "RECOVERY_CODE_PEPPER=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
       - name: Cache Playwright Chromium browser
         id: playwright-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
