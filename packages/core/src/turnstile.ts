@@ -2,6 +2,7 @@ export interface TurnstileVerificationOptions {
   secretKey: string;
   expectedAction: string;
   expectedHostname?: string;
+  allowTestingKeyWithoutAction?: boolean;
   fetchImpl?: typeof fetch;
   endpoint?: string;
   timeoutMs?: number;
@@ -11,6 +12,7 @@ interface TurnstileResponse {
   success?: unknown;
   hostname?: unknown;
   action?: unknown;
+  metadata?: { result_with_testing_key?: unknown };
   "error-codes"?: unknown;
 }
 
@@ -39,9 +41,13 @@ export async function verifyTurnstile(
   if (!response.ok) throw new Error("Security challenge verification unavailable.");
   const parsed = (await response.json()) as TurnstileResponse;
   const errorCodes = Array.isArray(parsed["error-codes"]) ? parsed["error-codes"] : [];
+  const isTestingKeyWithoutAction =
+    options.allowTestingKeyWithoutAction === true &&
+    parsed.action === undefined &&
+    parsed.metadata?.result_with_testing_key === true;
   if (
     parsed.success !== true ||
-    parsed.action !== options.expectedAction ||
+    (!isTestingKeyWithoutAction && parsed.action !== options.expectedAction) ||
     (options.expectedHostname !== undefined && parsed.hostname !== options.expectedHostname) ||
     errorCodes.length > 0
   ) {

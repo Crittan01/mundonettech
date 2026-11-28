@@ -503,22 +503,20 @@ export class OrderRefundService {
         throw new RefundConflictError("Refund approval requires a paid, non-cancelled order.");
       }
       if (!allowLinkedPostSale && (targetStatus === "REJECTED" || targetStatus === "CANCELLED")) {
-        const [linkedReturn, linkedWarranty] = await Promise.all([
-          tx.returnRequest.findFirst({
-            where: {
-              refundId: existing.id,
-              status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
-            },
-            select: { id: true },
-          }),
-          tx.warrantyClaim.findFirst({
-            where: {
-              refundId: existing.id,
-              status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
-            },
-            select: { id: true },
-          }),
-        ]);
+        const linkedReturn = await tx.returnRequest.findFirst({
+          where: {
+            refundId: existing.id,
+            status: { in: ["REQUESTED", "AWAITING_RETURN", "RECEIVED"] },
+          },
+          select: { id: true },
+        });
+        const linkedWarranty = await tx.warrantyClaim.findFirst({
+          where: {
+            refundId: existing.id,
+            status: { in: ["REQUESTED", "UNDER_REVIEW", "APPROVED"] },
+          },
+          select: { id: true },
+        });
         if (linkedReturn || linkedWarranty) {
           throw new RefundConflictError(
             "Cancel the linked post-sale return or warranty from /admin/posventa instead.",

@@ -1,6 +1,6 @@
 import { hasAdminPermission, type MetaCatalogIssueCode } from "@mundonettech/core";
 import type { MetaCapiEventStatus } from "@mundonettech/db";
-import { CredentialCursorError } from "@mundonettech/integrations";
+import { CredentialCursorError, CredentialKeyRingError } from "@mundonettech/integrations";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 
@@ -135,7 +135,39 @@ export default async function IntegrationsPage({
     : "ALL";
   const requestedCapiPage = parsePositivePage(single(params.capiPagina));
 
-  const vault = getIntegrationCredentialVault();
+  let vault: ReturnType<typeof getIntegrationCredentialVault>;
+  try {
+    vault = getIntegrationCredentialVault();
+  } catch (error) {
+    if (error instanceof CredentialKeyRingError) {
+      return (
+        <div className="space-y-6">
+          <div>
+            <h1 className="text-3xl font-bold">Integraciones y bóveda</h1>
+            <p className="mt-2 max-w-3xl text-muted-foreground">
+              Ambiente activo: <span className="font-mono">{environment}</span>.
+            </p>
+          </div>
+          <section
+            role="alert"
+            className="rounded-xl border border-warning bg-card p-6 text-card-foreground"
+          >
+            <h2 className="text-lg font-semibold">Llavero de bóveda pendiente de configuración</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Configura las variables{" "}
+              <code className="font-mono">INTEGRATION_CREDENTIAL_KEYS_{environment}</code> y{" "}
+              <code className="font-mono">
+                INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_{environment}
+              </code>{" "}
+              (en local basta ejecutar <code className="font-mono">make db-start</code>) para
+              gestionar credenciales cifradas y eventos de Meta CAPI.
+            </p>
+          </section>
+        </div>
+      );
+    }
+    throw error;
+  }
   const loadCredentials = async () => {
     try {
       const result = await vault.list(recentSession.profile.id, {

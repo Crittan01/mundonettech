@@ -43,10 +43,14 @@ export async function verifyTurnstileToken(
         ? process.env.TURNSTILE_EXPECTED_HOSTNAME?.trim() || storeConfig.domain
         : undefined);
     const endpoint = options.endpoint ?? testVerificationEndpoint();
+    const environment = process.env.INTEGRATION_ENVIRONMENT?.trim().toUpperCase();
+    const allowTestingKeyWithoutAction =
+      process.env.NODE_ENV !== "production" && environment !== "STG" && environment !== "PRD";
     await verifyTurnstile(token, {
       ...options,
       ...(expectedHostname ? { expectedHostname } : {}),
       ...(endpoint ? { endpoint } : {}),
+      ...(allowTestingKeyWithoutAction ? { allowTestingKeyWithoutAction: true } : {}),
       secretKey: getTurnstileKeys().secretKey,
     });
   } catch {

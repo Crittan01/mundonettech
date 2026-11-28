@@ -516,6 +516,45 @@ describe("F0.4 — real HTTP HIBP and Turnstile adapters", () => {
       verifyTurnstile("valid_token", { ...options, expectedHostname: "other.test" }),
     );
     await assert.rejects(verifyTurnstile("", options));
+
+    const testingKeyFetch = async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          hostname: "example.com",
+          metadata: { result_with_testing_key: true },
+          "error-codes": [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    await assert.rejects(
+      verifyTurnstile("dummy_token", {
+        secretKey: "test-secret",
+        expectedAction: "admin_login",
+        fetchImpl: testingKeyFetch,
+      }),
+    );
+    await verifyTurnstile("dummy_token", {
+      secretKey: "test-secret",
+      expectedAction: "admin_login",
+      allowTestingKeyWithoutAction: true,
+      fetchImpl: testingKeyFetch,
+    });
+    await assert.rejects(
+      verifyTurnstile("dummy_token", {
+        secretKey: "test-secret",
+        expectedAction: "admin_login",
+        allowTestingKeyWithoutAction: true,
+        fetchImpl: async () =>
+          new Response(
+            JSON.stringify({ success: true, hostname: "example.com", "error-codes": [] }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+      }),
+    );
+
+    const turnstileWidget = readFileSync("apps/web/components/auth/turnstile-field.tsx", "utf8");
+    assert.match(turnstileWidget, /"response-field":\s*false/);
   });
 });
 

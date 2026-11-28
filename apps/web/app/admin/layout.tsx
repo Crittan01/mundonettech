@@ -1,5 +1,7 @@
 import { Suspense, type ReactNode } from "react";
 
+export const instant = false;
+
 export default function AdminRootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
     <Suspense

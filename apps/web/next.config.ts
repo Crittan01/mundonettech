@@ -3,6 +3,7 @@ import path from "node:path";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  agentRules: false,
   cacheComponents: true,
   experimental: {
     serverActions: { bodySizeLimit: "5mb" },
