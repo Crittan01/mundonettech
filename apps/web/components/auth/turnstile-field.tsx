@@ -11,6 +11,7 @@ interface TurnstileApi {
     options: {
       sitekey: string;
       action: string;
+      "response-field": boolean;
       callback: (token: string) => void;
       "expired-callback": () => void;
       "error-callback": () => void;
@@ -47,6 +48,7 @@ export function TurnstileField({
     widget.current = window.turnstile.render(container.current, {
       sitekey: siteKey,
       action,
+      "response-field": false,
       callback: (value) => {
         if (input.current) input.current.value = value;
         setError("");

@@ -1,4 +1,5 @@
 import { formatCopCents, hasAdminPermission } from "@mundonettech/core";
+import { CredentialKeyRingError } from "@mundonettech/integrations";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -168,15 +169,50 @@ export default async function ChannelsPage({ searchParams }: PageProps<"/admin/c
   const estado = (allowedListingStatuses as readonly string[]).includes(rawEstado) ? rawEstado : "";
   const rawCuenta = single(params.cuenta)?.trim() ?? "";
   const cuenta = z.string().uuid().safeParse(rawCuenta).success ? rawCuenta : "";
-  const catalog = channelCatalogService();
-  const channelOrders = channelOrderService();
-  const [accounts, listings, variants, jobs, orderDashboard, environment] = await Promise.all([
-    channelAccountService().listAccounts(session.profile.id),
+  const environment = getIntegrationEnvironment();
+  let catalog: ReturnType<typeof channelCatalogService>;
+  let channelOrders: ReturnType<typeof channelOrderService>;
+  let accountService: ReturnType<typeof channelAccountService>;
+  try {
+    accountService = channelAccountService();
+    catalog = channelCatalogService();
+    channelOrders = channelOrderService();
+  } catch (error) {
+    const isMissingMedia =
+      error instanceof Error && error.message.includes("MEDIA_BASE_URL is required");
+    if (isMissingMedia || error instanceof CredentialKeyRingError) {
+      return (
+        <div className="space-y-6">
+          <div>
+            <h1 className="text-3xl font-bold">Canales de venta</h1>
+            <p className="mt-2 max-w-3xl text-muted-foreground">
+              Ambiente activo: <span className="font-mono">{environment}</span>.
+            </p>
+          </div>
+          <section
+            role="alert"
+            className="rounded-xl border border-warning bg-card p-6 text-card-foreground"
+          >
+            <h2 className="text-lg font-semibold">
+              Configuración previa requerida para canales externos
+            </h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              {isMissingMedia
+                ? "Define NEXT_PUBLIC_MEDIA_BASE_URL (origen público de medios) para habilitar la gestión de publicaciones e imágenes de Mercado Libre."
+                : `Configura INTEGRATION_CREDENTIAL_KEYS_${environment} e INTEGRATION_CREDENTIAL_ACTIVE_KEY_VERSION_${environment} para habilitar la bóveda de canales.`}
+            </p>
+          </section>
+        </div>
+      );
+    }
+    throw error;
+  }
+  const [accounts, listings, variants, jobs, orderDashboard] = await Promise.all([
+    accountService.listAccounts(session.profile.id),
     catalog.listListings(session.profile.id, cuenta || undefined),
     canWrite ? catalog.listPublishableVariants(session.profile.id) : Promise.resolve([]),
     catalog.listSyncJobs(session.profile.id),
     channelOrders.dashboard(session.profile.id),
-    Promise.resolve(getIntegrationEnvironment()),
   ]);
   const normalizedQ = q.toLowerCase();
   const filteredListings = listings.filter((listing) => {

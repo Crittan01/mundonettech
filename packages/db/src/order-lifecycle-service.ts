@@ -379,19 +379,19 @@ export class OrderLifecycleService {
             if (order.reservationKey !== peek.reservationKey || order.couponId !== peek.couponId) {
               retryLockDivergence();
             }
-            const [items, shipments, fulfillments, paymentAttempts] = await Promise.all([
-              tx.orderItem.findMany({
-                where: { orderId: order.id },
-                include: { reservations: true },
-              }),
-              tx.shipment.findMany({ where: { orderId: order.id } }),
-              tx.orderFulfillment.findMany({ where: { orderId: order.id } }),
-              tx.paymentAttempt.findMany({
-                where: { orderId: order.id },
-                include: { transactions: true, codReconciliation: true },
-                orderBy: { id: "asc" },
-              }),
-            ]);
+            const items = await tx.orderItem.findMany({
+              where: { orderId: order.id },
+              include: { reservations: true },
+            });
+            const shipments = await tx.shipment.findMany({ where: { orderId: order.id } });
+            const fulfillments = await tx.orderFulfillment.findMany({
+              where: { orderId: order.id },
+            });
+            const paymentAttempts = await tx.paymentAttempt.findMany({
+              where: { orderId: order.id },
+              include: { transactions: true, codReconciliation: true },
+              orderBy: { id: "asc" },
+            });
             const hasConfirmedPayment = paymentAttempts.some(
               (attempt) =>
                 attempt.status === "SUCCEEDED" ||
@@ -599,21 +599,19 @@ export class OrderLifecycleService {
             const order = await lockOrder(tx, peek.id);
             if (!order) return { candidateId: peek.id, reviewed: false };
             if (order.reservationKey !== peek.reservationKey) retryLockDivergence();
-            const [paymentAttempts, activeFulfillment, activeShipment] = await Promise.all([
-              tx.paymentAttempt.findMany({
-                where: { orderId: order.id },
-                include: { transactions: true, codReconciliation: true },
-                orderBy: { id: "asc" },
-              }),
-              tx.orderFulfillment.findFirst({
-                where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
-                select: { id: true },
-              }),
-              tx.shipment.findFirst({
-                where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
-                select: { id: true },
-              }),
-            ]);
+            const paymentAttempts = await tx.paymentAttempt.findMany({
+              where: { orderId: order.id },
+              include: { transactions: true, codReconciliation: true },
+              orderBy: { id: "asc" },
+            });
+            const activeFulfillment = await tx.orderFulfillment.findFirst({
+              where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
+              select: { id: true },
+            });
+            const activeShipment = await tx.shipment.findFirst({
+              where: { orderId: order.id, status: { notIn: ["PENDING", "CANCELLED"] } },
+              select: { id: true },
+            });
             const codSealedByLogistics = activeFulfillment !== null || activeShipment !== null;
             const capturedCents = paymentAttempts.reduce(
               (total, attempt) =>

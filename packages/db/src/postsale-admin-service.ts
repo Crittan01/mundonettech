@@ -168,33 +168,31 @@ export class PostSaleAdminService {
     const { where, skip, take } = this.parseReviewQueueOptions(options);
     return inInventoryTransaction(this.db, async (tx) => {
       await this.actor(tx, actorAdminUserId, "reviews:read");
-      const [items, total] = await Promise.all([
-        tx.review.findMany({
-          ...(where ? { where } : {}),
-          select: {
-            id: true,
-            rating: true,
-            title: true,
-            body: true,
-            authorDisplayName: true,
-            status: true,
-            moderationNote: true,
-            createdAt: true,
-            updatedAt: true,
-            product: { select: { id: true, name: true, slug: true, status: true } },
-            orderItem: {
-              select: {
-                titleSnapshot: true,
-                order: { select: { id: true, orderNumber: true } },
-              },
+      const items = await tx.review.findMany({
+        ...(where ? { where } : {}),
+        select: {
+          id: true,
+          rating: true,
+          title: true,
+          body: true,
+          authorDisplayName: true,
+          status: true,
+          moderationNote: true,
+          createdAt: true,
+          updatedAt: true,
+          product: { select: { id: true, name: true, slug: true, status: true } },
+          orderItem: {
+            select: {
+              titleSnapshot: true,
+              order: { select: { id: true, orderNumber: true } },
             },
           },
-          orderBy: [{ status: "asc" }, { createdAt: "desc" }, { id: "desc" }],
-          ...(skip > 0 ? { skip } : {}),
-          take,
-        }),
-        tx.review.count(where ? { where } : undefined),
-      ]);
+        },
+        orderBy: [{ status: "asc" }, { createdAt: "desc" }, { id: "desc" }],
+        ...(skip > 0 ? { skip } : {}),
+        take,
+      });
+      const total = await tx.review.count(where ? { where } : undefined);
       return { items, total };
     });
   }
@@ -313,95 +311,101 @@ export class PostSaleAdminService {
 
     return inInventoryTransaction(this.db, async (tx) => {
       await this.actor(tx, actorAdminUserId, "postsale:read");
-      const [returns, warranties, tickets, returnsTotal, warrantiesTotal, ticketsTotal] =
-        await Promise.all([
-          kind === "ALL" || kind === "RETURNS"
-            ? tx.returnRequest.findMany({
-                ...(returnWhere ? { where: returnWhere } : {}),
-                select: {
-                  id: true,
-                  kind: true,
-                  status: true,
-                  reason: true,
-                  retractRefundDueAt: true,
-                  version: true,
-                  createdAt: true,
-                  order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
-                  items: {
-                    select: {
-                      id: true,
-                      quantity: true,
-                      deliveredAt: true,
-                      orderItem: {
-                        select: {
-                          titleSnapshot: true,
-                          skuSnapshot: true,
-                          variant: { select: { product: { select: { retractPolicy: true } } } },
-                        },
+      const returns =
+        kind === "ALL" || kind === "RETURNS"
+          ? await tx.returnRequest.findMany({
+              ...(returnWhere ? { where: returnWhere } : {}),
+              select: {
+                id: true,
+                kind: true,
+                status: true,
+                reason: true,
+                retractRefundDueAt: true,
+                version: true,
+                createdAt: true,
+                order: { select: { id: true, orderNumber: true, emailSnapshot: true } },
+                items: {
+                  select: {
+                    id: true,
+                    quantity: true,
+                    deliveredAt: true,
+                    orderItem: {
+                      select: {
+                        titleSnapshot: true,
+                        skuSnapshot: true,
+                        variant: { select: { product: { select: { retractPolicy: true } } } },
                       },
-                      replacementVariant: { select: { sku: true } },
-                      units: {
-                        select: {
-                          serializedUnit: { select: { id: true, serial: true, imei: true } },
-                        },
+                    },
+                    replacementVariant: { select: { sku: true } },
+                    units: {
+                      select: {
+                        serializedUnit: { select: { id: true, serial: true, imei: true } },
                       },
                     },
                   },
-                  refund: { select: { id: true, status: true, totalCents: true } },
                 },
-                orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-                ...(skip > 0 ? { skip } : {}),
-                take,
-              })
-            : Promise.resolve([]),
-          kind === "ALL" || kind === "WARRANTIES"
-            ? tx.warrantyClaim.findMany({
-                ...(warrantyWhere ? { where: warrantyWhere } : {}),
-                select: {
-                  id: true,
-                  remedy: true,
-                  status: true,
-                  issueDescription: true,
-                  warrantyDueAt: true,
-                  version: true,
-                  createdAt: true,
-                  order: { select: { id: true, orderNumber: true } },
-                  orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
-                  serializedUnit: { select: { serial: true, imei: true } },
-                  refund: { select: { id: true, status: true, totalCents: true } },
+                refund: { select: { id: true, status: true, totalCents: true } },
+              },
+              orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+              ...(skip > 0 ? { skip } : {}),
+              take,
+            })
+          : [];
+      const warranties =
+        kind === "ALL" || kind === "WARRANTIES"
+          ? await tx.warrantyClaim.findMany({
+              ...(warrantyWhere ? { where: warrantyWhere } : {}),
+              select: {
+                id: true,
+                remedy: true,
+                status: true,
+                issueDescription: true,
+                warrantyDueAt: true,
+                version: true,
+                createdAt: true,
+                order: { select: { id: true, orderNumber: true } },
+                orderItem: { select: { titleSnapshot: true, skuSnapshot: true } },
+                serializedUnit: { select: { serial: true, imei: true } },
+                refund: { select: { id: true, status: true, totalCents: true } },
+              },
+              orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+              ...(skip > 0 ? { skip } : {}),
+              take,
+            })
+          : [];
+      const tickets =
+        kind === "ALL" || kind === "TICKETS"
+          ? await tx.supportTicket.findMany({
+              ...(ticketWhere ? { where: ticketWhere } : {}),
+              select: {
+                id: true,
+                ticketNumber: true,
+                status: true,
+                subject: true,
+                contactEmailSnapshot: true,
+                slaDueAt: true,
+                version: true,
+                order: { select: { id: true, orderNumber: true } },
+                messages: {
+                  select: { id: true, authorType: true, body: true, createdAt: true },
+                  orderBy: { createdAt: "asc" },
                 },
-                orderBy: [{ status: "asc" }, { createdAt: "asc" }, { id: "asc" }],
-                ...(skip > 0 ? { skip } : {}),
-                take,
-              })
-            : Promise.resolve([]),
-          kind === "ALL" || kind === "TICKETS"
-            ? tx.supportTicket.findMany({
-                ...(ticketWhere ? { where: ticketWhere } : {}),
-                select: {
-                  id: true,
-                  ticketNumber: true,
-                  status: true,
-                  subject: true,
-                  contactEmailSnapshot: true,
-                  slaDueAt: true,
-                  version: true,
-                  order: { select: { id: true, orderNumber: true } },
-                  messages: {
-                    select: { id: true, authorType: true, body: true, createdAt: true },
-                    orderBy: { createdAt: "asc" },
-                  },
-                  assignedTo: { select: { displayName: true } },
-                },
-                orderBy: [{ status: "asc" }, { slaDueAt: "asc" }, { id: "asc" }],
-                ...(skip > 0 ? { skip } : {}),
-                take,
-              })
-            : Promise.resolve([]),
-          tx.returnRequest.count(returnWhere ? { where: returnWhere } : undefined),
-          tx.warrantyClaim.count(warrantyWhere ? { where: warrantyWhere } : undefined),
-          tx.supportTicket.count(ticketWhere ? { where: ticketWhere } : undefined),
-        ]);
+                assignedTo: { select: { displayName: true } },
+              },
+              orderBy: [{ status: "asc" }, { slaDueAt: "asc" }, { id: "asc" }],
+              ...(skip > 0 ? { skip } : {}),
+              take,
+            })
+          : [];
+      const returnsTotal = await tx.returnRequest.count(
+        returnWhere ? { where: returnWhere } : undefined,
+      );
+      const warrantiesTotal = await tx.warrantyClaim.count(
+        warrantyWhere ? { where: warrantyWhere } : undefined,
+      );
+      const ticketsTotal = await tx.supportTicket.count(
+        ticketWhere ? { where: ticketWhere } : undefined,
+      );
       return {
         returns: returns.map((item) => ({
           ...item,

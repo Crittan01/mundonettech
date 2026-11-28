@@ -49,6 +49,7 @@ const nextSegmentConfigExports = [
   "preferredRegion",
   "maxDuration",
   "experimental_ppr",
+  "instant",
 ];
 const nextCommonExports = new Set([
   "default",
