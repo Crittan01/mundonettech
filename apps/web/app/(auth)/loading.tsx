@@ -1,9 +1,13 @@
 export default function AuthLoading() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-6 py-12">
-      <div role="status" aria-live="polite">
+    <main className="relative flex min-h-screen w-full flex-col items-center justify-center overflow-hidden bg-brand-surface px-6 py-12">
+      <div
+        aria-hidden="true"
+        className="mnt-auth-grid pointer-events-none absolute inset-0 opacity-45"
+      />
+      <div role="status" aria-live="polite" className="relative z-10 w-full max-w-md">
         <span className="sr-only">Cargando acceso seguro…</span>
-        <div className="h-96 animate-pulse rounded-2xl border border-border bg-card" />
+        <div className="h-[26rem] animate-pulse rounded-3xl border border-brand-surface-border bg-brand-surface-elevated" />
       </div>
     </main>
   );

@@ -1,5 +1,15 @@
 "use client";
 
+import {
+  ExternalLink,
+  LayoutGrid,
+  Search,
+  Shield,
+  ShoppingBag,
+  TrendingUp,
+  Truck,
+  Users,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -46,68 +56,20 @@ const focusableSelector =
   'a[href], button:not([disabled]):not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
 
 function GroupIcon({ groupId }: { readonly groupId: string }) {
-  const props = {
-    width: 14,
-    height: 14,
-    viewBox: "0 0 24 24",
-    fill: "none",
-    stroke: "currentColor",
-    strokeWidth: 2,
-    strokeLinecap: "round" as const,
-    strokeLinejoin: "round" as const,
-    "aria-hidden": true,
-    className: "shrink-0 text-brand-cyan/80",
-  };
+  const iconClass = "size-3.5 shrink-0 text-brand-cyan/85";
   switch (groupId) {
     case "operacion":
-      return (
-        <svg {...props}>
-          <rect x="3" y="3" width="7" height="7" rx="1" />
-          <rect x="14" y="3" width="7" height="7" rx="1" />
-          <rect x="3" y="14" width="7" height="7" rx="1" />
-          <rect x="14" y="14" width="7" height="7" rx="1" />
-        </svg>
-      );
+      return <LayoutGrid className={iconClass} strokeWidth={2} aria-hidden="true" />;
     case "comercial":
-      return (
-        <svg {...props}>
-          <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z" />
-          <path d="M3 6h18" />
-          <path d="M16 10a4 4 0 0 1-8 0" />
-        </svg>
-      );
+      return <ShoppingBag className={iconClass} strokeWidth={2} aria-hidden="true" />;
     case "pedidos":
-      return (
-        <svg {...props}>
-          <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2" />
-          <path d="M15 18H9" />
-          <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14" />
-          <circle cx="17" cy="18" r="2" />
-          <circle cx="7" cy="18" r="2" />
-        </svg>
-      );
+      return <Truck className={iconClass} strokeWidth={2} aria-hidden="true" />;
     case "clientes":
-      return (
-        <svg {...props}>
-          <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-          <circle cx="9" cy="7" r="4" />
-          <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-          <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-        </svg>
-      );
+      return <Users className={iconClass} strokeWidth={2} aria-hidden="true" />;
     case "finanzas":
-      return (
-        <svg {...props}>
-          <path d="M3 3v18h18" />
-          <path d="m19 9-5 5-4-4-3 3" />
-        </svg>
-      );
+      return <TrendingUp className={iconClass} strokeWidth={2} aria-hidden="true" />;
     default:
-      return (
-        <svg {...props}>
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
-        </svg>
-      );
+      return <Shield className={iconClass} strokeWidth={2} aria-hidden="true" />;
   }
 }
 
@@ -141,12 +103,18 @@ function SidebarNavList({
                     prefetch={false}
                     aria-current={active ? "page" : undefined}
                     {...(onNavigate ? { onClick: onNavigate } : {})}
-                    className={`flex min-h-10 items-center justify-between rounded-lg px-2.5 py-2 text-sm font-medium outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-brand-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-brand-surface ${
+                    className={`relative flex min-h-10 items-center justify-between rounded-lg px-2.5 py-2 text-sm font-medium outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-brand-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-brand-surface ${
                       active
                         ? "bg-brand-cyan-muted text-brand-cyan ring-1 ring-brand-cyan/35"
-                        : "text-brand-surface-foreground/90 hover:bg-brand-surface-elevated hover:text-brand-surface-foreground"
+                        : "text-brand-surface-foreground/85 hover:bg-brand-surface-elevated hover:text-brand-surface-foreground"
                     }`}
                   >
+                    {active ? (
+                      <span
+                        aria-hidden="true"
+                        className="absolute inset-y-2 left-0 w-0.5 rounded-r-full bg-brand-cyan"
+                      />
+                    ) : null}
                     <span className="truncate">{item.label}</span>
                     {active ? (
                       <span
@@ -410,21 +378,11 @@ function AdminCommandPaletteContent({
         className="w-full max-w-xl overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-2xl"
       >
         <div className="flex items-center gap-3 border-b border-border px-4 py-3">
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+          <Search
+            className="size-4 shrink-0 text-muted-foreground"
+            strokeWidth={2}
             aria-hidden="true"
-            className="shrink-0 text-muted-foreground"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
+          />
           <h2 id={titleId} className="sr-only">
             Paleta rápida de módulos administrativos
           </h2>
@@ -617,12 +575,12 @@ export function AdminShellClient({
   }, [mobileOpen, paletteOpen, openPalette, closePalette, closeMobile]);
 
   return (
-    <div className="flex min-h-screen flex-col bg-secondary/35 lg:flex-row">
+    <div className="flex min-h-screen flex-col bg-secondary/75 lg:flex-row">
       <Suspense fallback={null}>
         <RouteChangeCloser onRouteChange={handleRouteChange} />
       </Suspense>
 
-      {/* Desktop Midnight Cyan Sidebar */}
+      {/* Desktop Obsidian & Electric Sky Sidebar */}
       <aside className="hidden border-r border-brand-surface-border bg-brand-surface text-brand-surface-foreground lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-64 lg:shrink-0 lg:flex-col">
         <div className="flex h-16 shrink-0 items-center border-b border-brand-surface-border px-4">
           <Link
@@ -637,24 +595,14 @@ export function AdminShellClient({
           <button
             type="button"
             onClick={openPalette}
-            className="flex min-h-10 w-full items-center justify-between gap-2 rounded-lg border border-brand-surface-input bg-brand-surface-elevated px-3 text-left text-xs font-medium text-brand-surface-muted outline-hidden transition-colors hover:border-brand-cyan hover:text-brand-surface-foreground focus-visible:ring-2 focus-visible:ring-brand-cyan"
+            className="flex min-h-10 w-full items-center justify-between gap-2 rounded-xl border border-brand-surface-input bg-brand-surface-elevated px-3 text-left text-xs font-medium text-brand-surface-muted outline-hidden transition-colors hover:border-brand-cyan hover:text-brand-surface-foreground focus-visible:ring-2 focus-visible:ring-brand-cyan"
           >
             <span className="flex items-center gap-2 truncate">
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+              <Search
+                className="size-3.5 shrink-0 text-brand-cyan"
+                strokeWidth={2}
                 aria-hidden="true"
-                className="shrink-0 text-brand-cyan"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.3-4.3" />
-              </svg>
+              />
               <span>Buscar módulo…</span>
             </span>
             <kbd
@@ -710,50 +658,23 @@ export function AdminShellClient({
               <button
                 type="button"
                 onClick={openPalette}
-                className="inline-flex min-h-10 items-center gap-2 rounded-md border border-input bg-background px-2.5 text-xs font-medium text-foreground outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:px-3"
+                className="inline-flex min-h-10 items-center gap-2 rounded-full border border-input bg-secondary/70 px-3 text-xs font-medium text-foreground outline-hidden transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:px-3.5"
               >
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <circle cx="11" cy="11" r="8" />
-                  <path d="m21 21-4.3-4.3" />
-                </svg>
+                <Search className="size-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
                 <span className="sr-only sm:not-sr-only">Ir a módulo</span>
                 <kbd
                   aria-hidden="true"
-                  className="hidden rounded border border-border bg-secondary px-1.5 py-0.5 font-mono text-[10px] text-secondary-foreground after:content-['⌘K'] sm:inline"
+                  className="hidden rounded-full border border-border bg-card px-1.5 py-0.5 font-mono text-[10px] text-secondary-foreground after:content-['⌘K'] sm:inline"
                 />
               </button>
               <Link
                 href="/"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="hidden min-h-10 items-center gap-1.5 rounded-md border border-input bg-background px-3 text-xs font-medium text-foreground outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:inline-flex"
+                className="hidden min-h-10 items-center gap-1.5 rounded-full border border-input bg-card px-3.5 text-xs font-medium text-foreground outline-hidden transition-colors hover:border-primary hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:inline-flex"
               >
                 <span>Ver tienda</span>
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M15 3h6v6" />
-                  <path d="M10 14 21 3" />
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                </svg>
+                <ExternalLink className="size-3.5 shrink-0" strokeWidth={2} aria-hidden="true" />
                 <span className="sr-only"> (se abre en una nueva pestaña)</span>
               </Link>
               <div className="hidden sm:block">{signOutSlot}</div>

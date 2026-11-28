@@ -275,6 +275,8 @@ export default async function HomePage() {
                   alt="Selección de tecnología MundoNetTech: audífonos inalámbricos ANC, cargador GaN de alta potencia y reloj inteligente de titanio"
                   fill
                   priority
+                  fetchPriority="high"
+                  unoptimized
                   sizes="(min-width: 1024px) 46vw, 100vw"
                   className="object-cover"
                 />
@@ -329,6 +331,7 @@ export default async function HomePage() {
                         src={category.image}
                         alt={category.alt}
                         fill
+                        unoptimized
                         sizes="(min-width: 1024px) 22vw, (min-width: 640px) 44vw, 90vw"
                         className="object-cover transition-transform duration-300 group-hover:scale-105"
                       />

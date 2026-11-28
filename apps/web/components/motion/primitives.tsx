@@ -1,41 +1,50 @@
 "use client";
 
-import { domAnimation, LazyMotion, MotionConfig } from "motion/react";
-import * as m from "motion/react-m";
 import type { MouseEvent, ReactNode } from "react";
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
-
-export function MotionProvider({ children }: Readonly<{ children: ReactNode }>) {
-  return (
-    <LazyMotion features={domAnimation} strict>
-      <MotionConfig reducedMotion="user">{children}</MotionConfig>
-    </LazyMotion>
-  );
-}
 
 export function FadeIn({
   children,
   className,
   delay = 0,
-  y = 14,
 }: Readonly<{
   children: ReactNode;
   className?: string;
   delay?: number;
-  y?: number;
 }>) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(true);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const rect = node.getBoundingClientRect();
+    if (rect.top < window.innerHeight * 1.05) return;
+    setVisible(false);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "0px 0px -40px 0px", threshold: 0.05 },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <m.div
-      initial={{ y }}
-      whileInView={{ y: 0 }}
-      viewport={{ once: true, amount: "some" }}
-      transition={{ duration: 0.45, delay, ease: [0.22, 1, 0.36, 1] }}
-      className={className}
+    <div
+      ref={ref}
+      style={delay > 0 ? { transitionDelay: `${Math.round(delay * 1000)}ms` } : undefined}
+      className={cn("mnt-reveal", visible ? "mnt-reveal-visible" : "mnt-reveal-hidden", className)}
     >
       {children}
-    </m.div>
+    </div>
   );
 }
 
