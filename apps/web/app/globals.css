@@ -135,19 +135,85 @@
 
 .mnt-card-hover {
   transition:
-    transform 180ms ease,
-    border-color 180ms ease,
-    box-shadow 180ms ease;
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 200ms ease,
+    box-shadow 200ms ease;
 }
 
 .mnt-card-hover:hover {
-  transform: translateY(-2px);
-  border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
-  box-shadow: 0 10px 24px -12px color-mix(in oklch, var(--brand-surface) 22%, transparent);
+  transform: translateY(-3px);
+  border-color: color-mix(in oklch, var(--brand-cyan) 50%, var(--border));
+  box-shadow: 0 14px 30px -16px color-mix(in oklch, var(--brand-surface) 24%, transparent);
+}
+
+.mnt-hero-glow {
+  background: radial-gradient(
+    52% 68% at 72% 48%,
+    color-mix(in oklch, var(--brand-cyan) 36%, transparent) 0%,
+    color-mix(in oklch, var(--brand-cyan) 12%, transparent) 42%,
+    transparent 74%
+  );
+}
+
+.mnt-glass-bar {
+  background: color-mix(in oklch, var(--brand-surface-elevated) 78%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.mnt-spotlight::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 220ms ease;
+}
+
+.mnt-spotlight:hover::before {
+  opacity: 1;
+}
+
+.mnt-spotlight-light::before {
+  background: radial-gradient(
+    360px circle at var(--spotlight-x, 50%) var(--spotlight-y, 50%),
+    color-mix(in oklch, var(--brand-cyan) 12%, transparent),
+    transparent 65%
+  );
+}
+
+.mnt-spotlight-dark::before {
+  background: radial-gradient(
+    420px circle at var(--spotlight-x, 50%) var(--spotlight-y, 50%),
+    color-mix(in oklch, var(--brand-cyan) 18%, transparent),
+    transparent 65%
+  );
+}
+
+@keyframes mnt-marquee-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.mnt-marquee-track {
+  display: flex;
+  width: max-content;
+  animation: mnt-marquee-scroll 30s linear infinite;
+}
+
+.mnt-marquee:hover .mnt-marquee-track {
+  animation-play-state: paused;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .mnt-card-hover:hover {
     transform: none;
+  }
+
+  .mnt-marquee-track {
+    animation: none;
   }
 }

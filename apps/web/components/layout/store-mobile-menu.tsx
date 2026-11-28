@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronRight, Menu, Search, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -147,23 +148,9 @@ export function StoreMobileMenu({ showWholesale }: StoreMobileMenuProps) {
         aria-controls={open ? "store-mobile-drawer" : undefined}
         aria-label={open ? "Cerrar menú de tienda" : "Abrir menú de tienda"}
         onClick={() => (open ? closeDrawer(true) : openDrawer())}
-        className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-input bg-background px-2.5 text-foreground outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-input bg-secondary/70 px-2.5 text-foreground outline-hidden transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       >
-        <svg
-          width="20"
-          height="20"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
-        >
-          <line x1="4" x2="20" y1="6" y2="6" />
-          <line x1="4" x2="20" y1="12" y2="12" />
-          <line x1="4" x2="20" y1="18" y2="18" />
-        </svg>
+        <Menu className="size-5" strokeWidth={2} aria-hidden="true" />
       </button>
 
       {open && isClient
@@ -176,7 +163,7 @@ export function StoreMobileMenu({ showWholesale }: StoreMobileMenuProps) {
                 aria-modal="true"
                 aria-labelledby={titleId}
                 onKeyDown={handleDialogKeyDown}
-                className="max-h-[90vh] overflow-y-auto border-b border-border bg-background shadow-2xl"
+                className="max-h-[90vh] overflow-y-auto rounded-b-3xl border-b border-border bg-background shadow-2xl"
               >
                 <div className="flex min-h-16 items-center justify-between gap-3 border-b border-border px-4 py-2.5">
                   <div className="min-w-0">
@@ -196,22 +183,9 @@ export function StoreMobileMenu({ showWholesale }: StoreMobileMenuProps) {
                     type="button"
                     aria-label="Cerrar menú de tienda"
                     onClick={() => closeDrawer(true)}
-                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-input bg-background text-foreground outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                    className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-full border border-input bg-secondary/70 text-foreground outline-hidden hover:bg-accent hover:text-accent-foreground focus-visible:ring-2 focus-visible:ring-ring"
                   >
-                    <svg
-                      width="20"
-                      height="20"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M18 6 6 18" />
-                      <path d="m6 6 12 12" />
-                    </svg>
+                    <X className="size-5" strokeWidth={2} aria-hidden="true" />
                   </button>
                 </div>
 
@@ -227,25 +201,31 @@ export function StoreMobileMenu({ showWholesale }: StoreMobileMenuProps) {
                     <label htmlFor="mobile-store-search" className="sr-only">
                       Buscar en la tienda
                     </label>
-                    <input
-                      ref={searchInputRef}
-                      id="mobile-store-search"
-                      type="search"
-                      name="q"
-                      maxLength={100}
-                      placeholder="Buscar en la tienda…"
-                      className="flex h-11 min-w-0 flex-1 rounded-lg border border-input bg-card px-3.5 text-base text-foreground outline-hidden placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                    />
+                    <div className="relative flex min-w-0 flex-1 items-center">
+                      <Search
+                        className="pointer-events-none absolute left-3.5 size-4 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <input
+                        ref={searchInputRef}
+                        id="mobile-store-search"
+                        type="search"
+                        name="q"
+                        maxLength={100}
+                        placeholder="Buscar en la tienda…"
+                        className="flex h-11 min-w-0 flex-1 rounded-full border border-input bg-secondary/70 pr-4 pl-10 text-base text-foreground outline-hidden placeholder:text-muted-foreground focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-ring"
+                      />
+                    </div>
                     <button
                       type="submit"
-                      className="inline-flex h-11 shrink-0 items-center justify-center rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground outline-hidden hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                      className="inline-flex h-11 shrink-0 items-center justify-center rounded-full bg-primary px-5 text-sm font-semibold text-primary-foreground outline-hidden hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                     >
                       Buscar
                     </button>
                   </form>
 
                   <nav aria-label="Menú móvil de la tienda" className="mt-4">
-                    <ul className="divide-y divide-border/70">
+                    <ul className="space-y-1">
                       {links.map((item) => {
                         const active = matchesPath(activePath, item);
                         return (
@@ -255,16 +235,22 @@ export function StoreMobileMenu({ showWholesale }: StoreMobileMenuProps) {
                               prefetch={false}
                               aria-current={active ? "page" : undefined}
                               onClick={() => closeDrawer(false)}
-                              className={`flex min-h-12 flex-col justify-center rounded-lg px-3 py-2.5 outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring ${
+                              className={`flex min-h-12 items-center justify-between gap-3 rounded-xl px-3.5 py-2.5 outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring ${
                                 active
                                   ? "bg-accent text-accent-foreground"
-                                  : "text-foreground hover:bg-secondary/70"
+                                  : "text-foreground hover:bg-secondary/80"
                               }`}
                             >
-                              <span className="text-sm font-semibold">{item.label}</span>
-                              <span className="text-xs text-muted-foreground">
-                                {item.description}
+                              <span className="flex flex-col">
+                                <span className="text-sm font-semibold">{item.label}</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {item.description}
+                                </span>
                               </span>
+                              <ChevronRight
+                                className="size-4 shrink-0 text-muted-foreground"
+                                aria-hidden="true"
+                              />
                             </Link>
                           </li>
                         );

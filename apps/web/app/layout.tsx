@@ -5,6 +5,7 @@ import type { CSSProperties, ReactNode } from "react";
 
 import { storeConfig } from "@mundonettech/config/store";
 import { themeConfig } from "@mundonettech/config/theme";
+import { MotionProvider } from "@/components/motion/primitives";
 import { JsonLd } from "@/components/seo/json-ld";
 
 import "./globals.css";
@@ -64,7 +65,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
     >
       <body>
         <JsonLd data={structuredData} />
-        {children}
+        <MotionProvider>{children}</MotionProvider>
       </body>
     </html>
   );
